@@ -1,0 +1,24 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Schedule
+metadata:
+  name: network-partition-dm-worker-master
+  labels:
+    app: network-partition-dm-worker-master
+spec:
+  schedule: 2-59/3 * * * *
+  type: NetworkChaos
+  historyLimit: 5
+  concurrencyPolicy: Forbid
+  networkChaos:
+    action: partition
+    mode: one
+    selector:
+      labelSelectors:
+        app: dm-worker
+    direction: both
+    target:
+      selector:
+        labelSelectors:
+          app: dm-master
+      mode: one
+    duration: 30s

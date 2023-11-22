@@ -1,0 +1,24 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Schedule
+metadata:
+  name: network-partition-dataflow-master-executor
+  labels:
+    app: network-partition-dataflow-master-executor
+spec:
+  schedule: 2-59/4 * * * *
+  type: NetworkChaos
+  historyLimit: 5
+  concurrencyPolicy: Forbid
+  networkChaos:
+    action: partition
+    mode: one
+    selector:
+      labelSelectors:
+        app: chaos-server-master
+    direction: both
+    target:
+      selector:
+        labelSelectors:
+          app: chaos-executor
+      mode: one
+    duration: 20s

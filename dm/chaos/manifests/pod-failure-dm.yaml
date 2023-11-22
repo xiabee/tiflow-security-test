@@ -1,0 +1,25 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Schedule
+metadata:
+  name: pod-failure-dm
+  labels:
+    app: pod-failure-dm
+spec:
+  schedule: '@every 2m'
+  type: PodChaos
+  historyLimit: 5
+  concurrencyPolicy: Forbid
+  podChaos:
+    action: pod-failure
+    mode: one
+    duration: 30s
+    selector:
+      pods:
+        default:
+        - dm-master-0
+        - dm-master-1
+        - dm-master-2
+        - dm-worker-0
+        - dm-worker-1
+        - dm-worker-2
+        - dm-worker-3

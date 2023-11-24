@@ -191,6 +191,7 @@ type ReplicaConfig struct {
 	Consistent *ConsistentConfig `json:"consistent"`
 
 	ChangefeedErrorStuckDuration *JSONDuration `json:"changefeed_error_stuck_duration,omitempty" swaggertype:"string"`
+	SQLMode                      string        `json:"sql_mode,omitempty"`
 }
 
 // ToInternalReplicaConfig coverts *v2.ReplicaConfig into *config.ReplicaConfig
@@ -208,6 +209,7 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 	res.ForceReplicate = c.ForceReplicate
 	res.CheckGCSafePoint = c.CheckGCSafePoint
 	res.EnableSyncPoint = c.EnableSyncPoint
+	res.SQLMode = c.SQLMode
 	if c.SyncPointInterval != nil {
 		res.SyncPointInterval = c.SyncPointInterval.duration
 	}
@@ -265,6 +267,8 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 			MaxLogSize:            c.Consistent.MaxLogSize,
 			FlushIntervalInMs:     c.Consistent.FlushIntervalInMs,
 			MetaFlushIntervalInMs: c.Consistent.MetaFlushIntervalInMs,
+			EncodingWorkerNum:     c.Consistent.EncodingWorkerNum,
+			FlushWorkerNum:        c.Consistent.FlushWorkerNum,
 			Storage:               c.Consistent.Storage,
 			UseFileBackend:        c.Consistent.UseFileBackend,
 		}
@@ -356,6 +360,7 @@ func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 		SyncPointRetention:           &JSONDuration{cloned.SyncPointRetention},
 		BDRMode:                      cloned.BDRMode,
 		ChangefeedErrorStuckDuration: &JSONDuration{cloned.ChangefeedErrorStuckDuration},
+		SQLMode:                      cloned.SQLMode,
 	}
 
 	if cloned.Filter != nil {
@@ -467,6 +472,8 @@ func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 			MaxLogSize:            cloned.Consistent.MaxLogSize,
 			FlushIntervalInMs:     cloned.Consistent.FlushIntervalInMs,
 			MetaFlushIntervalInMs: cloned.Consistent.MetaFlushIntervalInMs,
+			EncodingWorkerNum:     c.Consistent.EncodingWorkerNum,
+			FlushWorkerNum:        c.Consistent.FlushWorkerNum,
 			Storage:               cloned.Consistent.Storage,
 			UseFileBackend:        cloned.Consistent.UseFileBackend,
 		}
@@ -640,6 +647,8 @@ type ConsistentConfig struct {
 	MaxLogSize            int64  `json:"max_log_size"`
 	FlushIntervalInMs     int64  `json:"flush_interval"`
 	MetaFlushIntervalInMs int64  `json:"meta_flush_interval"`
+	EncodingWorkerNum     int    `json:"encoding_worker_num"`
+	FlushWorkerNum        int    `json:"flush_worker_num"`
 	Storage               string `json:"storage,omitempty"`
 	UseFileBackend        bool   `json:"use_file_backend"`
 }

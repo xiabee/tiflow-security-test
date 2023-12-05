@@ -1,4 +1,4 @@
-// Copyright 2022 PingCAP, Inc.
+// Copyright 2021 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,31 +13,30 @@
 
 package pipeline
 
-import "github.com/prometheus/client_golang/prometheus"
-
-var (
-	// SorterBatchReadSize record each batch read size
-	SorterBatchReadSize = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "ticdc",
-			Subsystem: "processor",
-			Name:      "sorter_batch_read",
-			Help:      "Bucketed histogram of sorter batch read event counts",
-			Buckets:   prometheus.ExponentialBuckets(16, 2, 6),
-		}, []string{"namespace", "changefeed"})
-	// SorterBatchReadDuration record each batch read duration
-	SorterBatchReadDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "ticdc",
-			Subsystem: "processor",
-			Name:      "sorter_batch_read_duration",
-			Help:      "Bucketed histogram of sorter batch read duration",
-			Buckets:   prometheus.ExponentialBuckets(0.0001 /* 0.1 ms */, 2, 18),
-		}, []string{"namespace", "changefeed"})
+import (
+	"github.com/prometheus/client_golang/prometheus"
 )
 
-// InitMetrics registers metrics the pipeline.
+var (
+	txnCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "ticdc",
+			Subsystem: "processor",
+			Name:      "txn_count",
+			Help:      "txn count received/executed by this processor",
+		}, []string{"type", "changefeed", "capture"})
+	tableMemoryHistogram = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "ticdc",
+			Subsystem: "processor",
+			Name:      "table_memory_consumption",
+			Help:      "estimated memory consumption for a table after the sorter",
+			Buckets:   prometheus.ExponentialBuckets(1*1024*1024 /* mb */, 2, 10),
+		}, []string{"changefeed", "capture"})
+)
+
+// InitMetrics registers all metrics used in processor
 func InitMetrics(registry *prometheus.Registry) {
-	registry.MustRegister(SorterBatchReadSize)
-	registry.MustRegister(SorterBatchReadDuration)
+	registry.MustRegister(txnCounter)
+	registry.MustRegister(tableMemoryHistogram)
 }

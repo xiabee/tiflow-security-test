@@ -20,9 +20,6 @@ import (
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
 
-// CaptureID is the type for capture ID
-type CaptureID = string
-
 // CaptureInfo store in etcd.
 type CaptureInfo struct {
 	ID            CaptureID `json:"id"`

@@ -16,65 +16,79 @@ package util
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestEtcdKey(t *testing.T) {
+func Test(t *testing.T) { check.TestingT(t) }
+
+var _ = check.Suite(&keyUtilsSuite{})
+
+type keyUtilsSuite struct {
+}
+
+func (s *keyUtilsSuite) TestEtcdKey(c *check.C) {
+	defer testleak.AfterTest(c)()
 	key := NewEtcdKey("/a/b/c")
-	require.Equal(t, NewEtcdKeyFromBytes([]byte("/a/b/c")), key)
-	require.Equal(t, "/a/b/c", key.String())
-	require.Equal(t, []byte("/a/b/c"), key.Bytes())
-	require.Equal(t, "/a", key.Head().String())
-	require.Equal(t, "/b/c", key.Tail().String())
-	require.Equal(t, "/c", key.RemovePrefix(&EtcdPrefix{"/a/b"}).String())
-	require.Equal(t, "/a/b/c", key.AsRelKey().String())
+	c.Assert(key, check.Equals, NewEtcdKeyFromBytes([]byte("/a/b/c")))
+	c.Assert(key.String(), check.Equals, "/a/b/c")
+	c.Assert(key.Bytes(), check.BytesEquals, []byte("/a/b/c"))
+	c.Assert(key.Head().String(), check.Equals, "/a")
+	c.Assert(key.Tail().String(), check.Equals, "/b/c")
+	c.Assert(key.RemovePrefix(&EtcdPrefix{"/a/b"}).String(), check.Equals, "/c")
+	c.Assert(key.AsRelKey().String(), check.Equals, "/a/b/c")
 }
 
-func TestEtcdRelKey(t *testing.T) {
+func (s *keyUtilsSuite) TestEtcdRelKey(c *check.C) {
+	defer testleak.AfterTest(c)()
 	key := NewEtcdRelKey("/a/b/c")
-	require.Equal(t, NewEtcdRelKeyFromBytes([]byte("/a/b/c")), key)
-	require.Equal(t, "/a/b/c", key.String())
-	require.Equal(t, []byte("/a/b/c"), key.Bytes())
-	require.Equal(t, "/a", key.Head().String())
-	require.Equal(t, "/b/c", key.Tail().String())
-	require.Equal(t, "/c", key.RemovePrefix(&EtcdRelPrefix{EtcdPrefix{"/a/b"}}).String())
-	require.Equal(t, "/a/b/c", key.AsPrefix().String())
+	c.Assert(key, check.Equals, NewEtcdRelKeyFromBytes([]byte("/a/b/c")))
+	c.Assert(key.String(), check.Equals, "/a/b/c")
+	c.Assert(key.Bytes(), check.BytesEquals, []byte("/a/b/c"))
+	c.Assert(key.Head().String(), check.Equals, "/a")
+	c.Assert(key.Tail().String(), check.Equals, "/b/c")
+	c.Assert(key.RemovePrefix(&EtcdRelPrefix{EtcdPrefix{"/a/b"}}).String(), check.Equals, "/c")
+	c.Assert(key.AsPrefix().String(), check.Equals, "/a/b/c")
 }
 
-func TestEtcdPrefix(t *testing.T) {
+func (s *keyUtilsSuite) TestEtcdPrefix(c *check.C) {
+	defer testleak.AfterTest(c)()
 	prefix := NewEtcdPrefix("/aa/bb/cc")
-	require.Equal(t, NewEtcdPrefixFromBytes([]byte("/aa/bb/cc")), prefix)
-	require.Equal(t, "/aa/bb/cc", prefix.String())
-	require.Equal(t, []byte("/aa/bb/cc"), prefix.Bytes())
-	require.Equal(t, "/bb/cc", prefix.Tail().String())
-	require.Equal(t, "/aa", prefix.Head().String())
-	require.Equal(t, "/aa/bb/cc/dd", prefix.FullKey(NewEtcdRelKey("/dd")).String())
+	c.Assert(prefix, check.Equals, NewEtcdPrefixFromBytes([]byte("/aa/bb/cc")))
+	c.Assert(prefix.String(), check.Equals, "/aa/bb/cc")
+	c.Assert(prefix.Bytes(), check.BytesEquals, []byte("/aa/bb/cc"))
+	c.Assert(prefix.Tail().String(), check.Equals, "/bb/cc")
+	c.Assert(prefix.Head().String(), check.Equals, "/aa")
+	c.Assert(prefix.FullKey(NewEtcdRelKey("/dd")).String(), check.Equals, "/aa/bb/cc/dd")
 }
 
-func TestEtcdRelPrefix(t *testing.T) {
+func (s *keyUtilsSuite) TestEtcdRelPrefix(c *check.C) {
+	defer testleak.AfterTest(c)()
 	prefix := NewEtcdRelPrefix("/aa/bb/cc")
-	require.Equal(t, NewEtcdRelPrefixFromBytes([]byte("/aa/bb/cc")), prefix)
-	require.Equal(t, "/aa/bb/cc", prefix.String())
-	require.Equal(t, []byte("/aa/bb/cc"), prefix.Bytes())
-	require.Equal(t, "/bb/cc", prefix.Tail().String())
-	require.Equal(t, "/aa", prefix.Head().String())
+	c.Assert(prefix, check.Equals, NewEtcdRelPrefixFromBytes([]byte("/aa/bb/cc")))
+	c.Assert(prefix.String(), check.Equals, "/aa/bb/cc")
+	c.Assert(prefix.Bytes(), check.BytesEquals, []byte("/aa/bb/cc"))
+	c.Assert(prefix.Tail().String(), check.Equals, "/bb/cc")
+	c.Assert(prefix.Head().String(), check.Equals, "/aa")
 }
 
-func TestNormalizePrefix(t *testing.T) {
-	require.Equal(t, NewEtcdPrefix("/aaa"), NormalizePrefix("aaa"))
-	require.Equal(t, NewEtcdPrefix("/aaa"), NormalizePrefix("aaa/"))
-	require.Equal(t, NewEtcdPrefix("/aaa"), NormalizePrefix("/aaa"))
-	require.Equal(t, NewEtcdPrefix("/aaa"), NormalizePrefix("/aaa/"))
+func (s *keyUtilsSuite) TestNormalizePrefix(c *check.C) {
+	defer testleak.AfterTest(c)()
+	c.Assert(NormalizePrefix("aaa"), check.Equals, NewEtcdPrefix("/aaa"))
+	c.Assert(NormalizePrefix("aaa/"), check.Equals, NewEtcdPrefix("/aaa"))
+	c.Assert(NormalizePrefix("/aaa"), check.Equals, NewEtcdPrefix("/aaa"))
+	c.Assert(NormalizePrefix("/aaa/"), check.Equals, NewEtcdPrefix("/aaa"))
 }
 
-func TestCornerCases(t *testing.T) {
-	require.Panics(t, func() { NewEtcdPrefix("").Head() }, "Empty EtcdPrefix")
-	require.Panics(t, func() { NewEtcdPrefix("").Tail() }, "Empty EtcdPrefix")
-	require.Equal(t, NewEtcdPrefix(""), NewEtcdPrefix("aaa").Head())
-	require.Equal(t, NewEtcdRelPrefix("aaa"), NewEtcdPrefix("aaa").Tail())
+func (s *keyUtilsSuite) TestCornerCases(c *check.C) {
+	defer testleak.AfterTest(c)()
+	c.Assert(func() { NewEtcdPrefix("").Head() }, check.Panics, "Empty EtcdPrefix")
+	c.Assert(func() { NewEtcdPrefix("").Tail() }, check.Panics, "Empty EtcdPrefix")
+	c.Assert(NewEtcdPrefix("aaa").Head(), check.Equals, NewEtcdPrefix(""))
+	c.Assert(NewEtcdPrefix("aaa").Tail(), check.Equals, NewEtcdRelPrefix("aaa"))
 
-	require.Panics(t, func() { NewEtcdKey("").Head() }, "Empty EtcdKey")
-	require.Panics(t, func() { NewEtcdKey("").Tail() }, "Empty EtcdKey")
-	require.Equal(t, NewEtcdPrefix(""), NewEtcdKey("aaa").Head())
-	require.Equal(t, NewEtcdRelKey("aaa"), NewEtcdKey("aaa").Tail())
+	c.Assert(func() { NewEtcdKey("").Head() }, check.Panics, "Empty EtcdKey")
+	c.Assert(func() { NewEtcdKey("").Tail() }, check.Panics, "Empty EtcdKey")
+	c.Assert(NewEtcdKey("aaa").Head(), check.Equals, NewEtcdPrefix(""))
+	c.Assert(NewEtcdKey("aaa").Tail(), check.Equals, NewEtcdRelKey("aaa"))
 }

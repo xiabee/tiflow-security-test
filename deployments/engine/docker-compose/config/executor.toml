@@ -1,5 +1,0 @@
-keepalive-ttl = "20s"
-keepalive-interval = "500ms"
-
-[log] 
-level = "debug"

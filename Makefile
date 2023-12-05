@@ -1,39 +1,17 @@
-### Makefile for tiflow
-.PHONY: build test check clean fmt cdc kafka_consumer storage_consumer coverage \
-	integration_test_build integration_test integration_test_mysql integration_test_kafka bank \
-	kafka_docker_integration_test kafka_docker_integration_test_with_build \
-	clean_integration_test_containers \
-	mysql_docker_integration_test mysql_docker_integration_test_with_build \
-	build_mysql_integration_test_images clean_integration_test_images \
-	dm dm-master dm-worker dmctl dm-syncer dm_coverage \
-	engine tiflow tiflow-demo tiflow-chaos-case engine_image help \
-	format-makefiles check-makefiles
-
-.DEFAULT_GOAL := default
-
-# Adapted from https://www.thapaliya.com/en/writings/well-documented-makefiles/
-help: ## Display this help and any documented user-facing targets. Other undocumented targets may be present in the Makefile.
-help:
-	@awk 'BEGIN {FS = ": ##"; printf "Usage:\n  make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_\.\-\/%]+: ##/ { printf "  %-45s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
-
-# Support gsed on OSX (installed via brew), falling back to sed. On Linux
-# systems gsed won't be installed, so will use sed as expected.
-SED ?= $(shell which gsed 2>/dev/null || which sed)
+### Makefile for ticdc
+.PHONY: build test check clean fmt cdc kafka_consumer coverage \
+	integration_test_build integration_test integration_test_mysql integration_test_kafka
 
 PROJECT=tiflow
-P=3
 
-FAIL_ON_STDOUT := awk '{ print } END { if (NR > 0) { exit 1  }  }'
+FAIL_ON_STDOUT := awk '{ print  } END { if (NR > 0) { exit 1  }  }'
 
 CURDIR := $(shell pwd)
 path_to_add := $(addsuffix /bin,$(subst :,/bin:,$(GOPATH)))
-export PATH := $(CURDIR)/bin:$(CURDIR)/tools/bin:$(path_to_add):$(PATH)
-
-SHELL := /usr/bin/env bash
+export PATH := $(path_to_add):$(PATH)
 
 TEST_DIR := /tmp/tidb_cdc_test
-DM_TEST_DIR := /tmp/dm_test
-ENGINE_TEST_DIR := /tmp/engine_test
+SHELL	 := /usr/bin/env bash
 
 GO       := GO111MODULE=on go
 ifeq (${CDC_ENABLE_VENDOR}, 1)
@@ -42,47 +20,36 @@ endif
 
 GOBUILD  := CGO_ENABLED=0 $(GO) build $(BUILD_FLAG) -trimpath $(GOVENDORFLAG)
 GOBUILDNOVENDOR  := CGO_ENABLED=0 $(GO) build $(BUILD_FLAG) -trimpath
-GOTEST   := CGO_ENABLED=1 $(GO) test -p $(P) --race
-GOTESTNORACE := CGO_ENABLED=1 $(GO) test -p $(P)
+ifeq ($(GOVERSION114), 1)
+GOTEST   := CGO_ENABLED=1 $(GO) test -p 3 --race -gcflags=all=-d=checkptr=0
+else
+GOTEST   := CGO_ENABLED=1 $(GO) test -p 3 --race
+endif
+GOVERSIONGE116 := $(shell expr $$(go version|cut -f3 -d' '|tr -d "go"|cut -f2 -d.) \>= 16)
 
-ARCH  := "$(shell uname -s)"
+ARCH  := "`uname -s`"
 LINUX := "Linux"
 MAC   := "Darwin"
-CDC_PKG := github.com/pingcap/tiflow
-DM_PKG := github.com/pingcap/tiflow/dm
-ENGINE_PKG := github.com/pingcap/tiflow/engine
-PACKAGE_LIST := go list ./... | grep -vE 'vendor|proto|tiflow/tests|integration|testing_utils|pb|pbmock|tiflow/bin'
-PACKAGE_LIST_WITHOUT_DM_ENGINE := $(PACKAGE_LIST) | grep -vE 'github.com/pingcap/tiflow/cmd|github.com/pingcap/tiflow/dm|github.com/pingcap/tiflow/engine'
-DM_PACKAGE_LIST := go list github.com/pingcap/tiflow/dm/... | grep -vE 'pb|pbmock'
-PACKAGES := $$($(PACKAGE_LIST))
-PACKAGES_TICDC := $$($(PACKAGE_LIST_WITHOUT_DM_ENGINE))
-DM_PACKAGES := $$($(DM_PACKAGE_LIST))
-ENGINE_PACKAGE_LIST := go list github.com/pingcap/tiflow/engine/... | grep -vE 'pb|proto|engine/test/e2e'
-ENGINE_PACKAGES := $$($(ENGINE_PACKAGE_LIST))
-FILES := $$(find . -name '*.go' -type f | grep -vE 'vendor|kv_gen|proto|pb\.go|pb\.gw\.go')
+PACKAGE_LIST := go list ./...| grep -vE 'vendor|proto|ticdc\/tests|integration|testing_utils'
+PACKAGES  := $$($(PACKAGE_LIST))
+PACKAGE_DIRECTORIES := $(PACKAGE_LIST) | sed 's|github.com/pingcap/$(PROJECT)/||'
+FILES := $$(find . -name '*.go' -type f | grep -vE 'vendor|kv_gen|proto')
 TEST_FILES := $$(find . -name '*_test.go' -type f | grep -vE 'vendor|kv_gen|integration|testing_utils')
-TEST_FILES_WITHOUT_DM := $$(find . -name '*_test.go' -type f | grep -vE 'vendor|kv_gen|integration|testing_utils|^\./dm')
+CDC_PKG := github.com/pingcap/tiflow
 FAILPOINT_DIR := $$(for p in $(PACKAGES); do echo $${p\#"github.com/pingcap/$(PROJECT)/"}|grep -v "github.com/pingcap/$(PROJECT)"; done)
-FAILPOINT := tools/bin/failpoint-ctl
+FAILPOINT := bin/failpoint-ctl
 
 FAILPOINT_ENABLE  := $$(echo $(FAILPOINT_DIR) | xargs $(FAILPOINT) enable >/dev/null)
-FAILPOINT_DISABLE := $$(echo $(FAILPOINT_DIR) | xargs $(FAILPOINT) disable >/dev/null)
-
-TICDC_DOCKER_DEPLOYMENTS_DIR := deployments/ticdc/docker-compose/
-
-# MAKE_FILES is a list of make files to lint.
-# We purposefully avoid MAKEFILES as a variable name as it influences
-# the files included in recursive invocations of make
-MAKE_FILES = $(shell find . \( -name 'Makefile' -o -name '*.mk' \) -print)
+FAILPOINT_DISABLE := $$(find $(FAILPOINT_DIR) | xargs $(FAILPOINT) disable >/dev/null)
 
 RELEASE_VERSION =
 ifeq ($(RELEASE_VERSION),)
-	RELEASE_VERSION := v6.5.0-master
-	release_version_regex := ^v[0-9]\..*$$
+	RELEASE_VERSION := v5.0.0-master
+	release_version_regex := ^v5\..*$$
 	release_branch_regex := "^release-[0-9]\.[0-9].*$$|^HEAD$$|^.*/*tags/v[0-9]\.[0-9]\..*$$"
-	ifneq ($(shell git rev-parse --abbrev-ref HEAD | grep -E $(release_branch_regex)),)
+	ifneq ($(shell git rev-parse --abbrev-ref HEAD | egrep $(release_branch_regex)),)
 		# If we are in release branch, try to use tag version.
-		ifneq ($(shell git describe --tags --dirty | grep -E $(release_version_regex)),)
+		ifneq ($(shell git describe --tags --dirty | egrep $(release_version_regex)),)
 			RELEASE_VERSION := $(shell git describe --tags --dirty)
 		endif
 	else ifneq ($(shell git status --porcelain),)
@@ -91,20 +58,11 @@ ifeq ($(RELEASE_VERSION),)
 	endif
 endif
 
-BUILDTS := $(shell date -u '+%Y-%m-%d %H:%M:%S')
-GITHASH := $(shell git rev-parse HEAD)
-GITBRANCH := $(shell git rev-parse --abbrev-ref HEAD)
-GOVERSION := $(shell go version)
-
-# Version LDFLAGS.
 LDFLAGS += -X "$(CDC_PKG)/pkg/version.ReleaseVersion=$(RELEASE_VERSION)"
-LDFLAGS += -X "$(CDC_PKG)/pkg/version.BuildTS=$(BUILDTS)"
-LDFLAGS += -X "$(CDC_PKG)/pkg/version.GitHash=$(GITHASH)"
-LDFLAGS += -X "$(CDC_PKG)/pkg/version.GitBranch=$(GITBRANCH)"
-LDFLAGS += -X "$(CDC_PKG)/pkg/version.GoVersion=$(GOVERSION)"
-
-include tools/Makefile
-include Makefile.engine
+LDFLAGS += -X "$(CDC_PKG)/pkg/version.BuildTS=$(shell date -u '+%Y-%m-%d %H:%M:%S')"
+LDFLAGS += -X "$(CDC_PKG)/pkg/version.GitHash=$(shell git rev-parse HEAD)"
+LDFLAGS += -X "$(CDC_PKG)/pkg/version.GitBranch=$(shell git rev-parse --abbrev-ref HEAD)"
+LDFLAGS += -X "$(CDC_PKG)/pkg/version.GoVersion=$(shell go version)"
 
 default: build buildsucc
 
@@ -115,22 +73,11 @@ all: dev install
 
 dev: check test
 
-test: unit_test dm_unit_test engine_unit_test
+test: unit_test
 
-build: cdc dm engine
+build: cdc
 
-check-makefiles: ## Check the makefiles format. Please run this target after the changes are committed.
-check-makefiles: format-makefiles
-	@git diff --exit-code -- $(MAKE_FILES) || (echo "Please format Makefiles by running 'make format-makefiles'" && false)
-
-format-makefiles: ## Format all Makefiles.
-format-makefiles: $(MAKE_FILES)
-	$(SED) -i -e 's/^\(\t*\)  /\1\t/g' -e 's/^\(\t*\) /\1/' -- $?
-
-bank:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/bank ./tests/bank/bank.go ./tests/bank/case.go
-
-build-failpoint: check_failpoint_ctl
+build-failpoint:
 	$(FAILPOINT_ENABLE)
 	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/cdc ./cmd/cdc/main.go
 	$(FAILPOINT_DISABLE)
@@ -141,48 +88,33 @@ cdc:
 kafka_consumer:
 	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/cdc_kafka_consumer ./cmd/kafka-consumer/main.go
 
-storage_consumer:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/cdc_storage_consumer ./cmd/storage-consumer/main.go
-
-cdc_test_image: 
-	@which docker || (echo "docker not found in ${PATH}"; exit 1)
-	docker build --platform linux/amd64 -f deployments/ticdc/docker/test.Dockerfile -t cdc:test ./ 
-
-kafka_consumer_image: 
-	@which docker || (echo "docker not found in ${PATH}"; exit 1)
-	DOCKER_BUILDKIT=1 docker build -f ./deployments/ticdc/docker/kafka-consumer.Dockerfile . -t ticdc:kafka-consumer  --platform linux/amd64
-
-storage_consumer_image: 
-	@which docker || (echo "docker not found in ${PATH}"; exit 1)
-	DOCKER_BUILDKIT=1 docker build -f ./deployments/ticdc/docker/storage-consumer.Dockerfile . -t ticdc:storage-consumer  --platform linux/amd64
-
 install:
 	go install ./...
 
-unit_test: check_failpoint_ctl generate_mock go-generate generate-protobuf
+unit_test: check_failpoint_ctl
+	./scripts/fix_lib_zstd.sh
 	mkdir -p "$(TEST_DIR)"
 	$(FAILPOINT_ENABLE)
 	@export log_level=error;\
-	$(GOTEST) -cover -covermode=atomic -coverprofile="$(TEST_DIR)/cov.unit.out" $(PACKAGES_TICDC) \
+	$(GOTEST) -cover -covermode=atomic -coverprofile="$(TEST_DIR)/cov.unit.out" $(PACKAGES) \
 	|| { $(FAILPOINT_DISABLE); exit 1; }
 	$(FAILPOINT_DISABLE)
-
-unit_test_in_verify_ci: check_failpoint_ctl tools/bin/gotestsum tools/bin/gocov tools/bin/gocov-xml
-	mkdir -p "$(TEST_DIR)"
-	$(FAILPOINT_ENABLE)
-	@export log_level=error;\
-	CGO_ENABLED=1 tools/bin/gotestsum --junitfile cdc-junit-report.xml -- -v -timeout 5m -p $(P) --race \
-	-covermode=atomic -coverprofile="$(TEST_DIR)/cov.unit.out" $(PACKAGES_TICDC) \
-	|| { $(FAILPOINT_DISABLE); exit 1; }
-	tools/bin/gocov convert "$(TEST_DIR)/cov.unit.out" | tools/bin/gocov-xml > cdc-coverage.xml
-	$(FAILPOINT_DISABLE)
-	@bash <(curl -s https://codecov.io/bash) -F cdc -f $(TEST_DIR)/cov.unit.out -t $(TICDC_CODECOV_TOKEN)
 
 leak_test: check_failpoint_ctl
+	./scripts/fix_lib_zstd.sh
 	$(FAILPOINT_ENABLE)
 	@export log_level=error;\
-	$(GOTEST) -count=1 --tags leak $(PACKAGES_TICDC) || { $(FAILPOINT_DISABLE); exit 1; }
+	$(GOTEST) -count=1 --tags leak $(PACKAGES) || { $(FAILPOINT_DISABLE); exit 1; }
 	$(FAILPOINT_DISABLE)
+
+check_failpoint_ctl:
+ifeq "$(GOVERSIONGE116)" "1"
+	# use -mod=mod to avoid error: missing go.sum entry for module providing package
+	# ref: https://github.com/golang/go/issues/44129
+	which $(FAILPOINT) >/dev/null 2>&1 || $(GOBUILDNOVENDOR) -mod=mod -o $(FAILPOINT) github.com/pingcap/failpoint/failpoint-ctl && go mod tidy
+else
+	which $(FAILPOINT) >/dev/null 2>&1 || $(GOBUILDNOVENDOR) -o $(FAILPOINT) github.com/pingcap/failpoint/failpoint-ctl
+endif
 
 check_third_party_binary:
 	@which bin/tidb-server
@@ -196,7 +128,8 @@ check_third_party_binary:
 	@which bin/jq
 	@which bin/minio
 
-integration_test_build: check_failpoint_ctl storage_consumer kafka_consumer
+integration_test_build: check_failpoint_ctl
+	./scripts/fix_lib_zstd.sh
 	$(FAILPOINT_ENABLE)
 	$(GOTEST) -ldflags '$(LDFLAGS)' -c -cover -covermode=atomic \
 		-coverpkg=github.com/pingcap/tiflow/... \
@@ -209,72 +142,24 @@ integration_test_build: check_failpoint_ctl storage_consumer kafka_consumer
 integration_test: integration_test_mysql
 
 integration_test_mysql:
-	tests/integration_tests/run.sh mysql "$(CASE)" "$(START_AT)"
-
-mysql_docker_integration_test: ## Run TiCDC MySQL all integration tests in Docker.
-mysql_docker_integration_test: clean_integration_test_containers
-	docker-compose -f $(TICDC_DOCKER_DEPLOYMENTS_DIR)/docker-compose-mysql-integration.yml up
-
-mysql_docker_integration_test_with_build: ## Build images and run TiCDC MySQL all integration tests in Docker. Please use only after modifying the TiCDC non-test code.
-mysql_docker_integration_test_with_build: clean_integration_test_containers
-	docker-compose -f $(TICDC_DOCKER_DEPLOYMENTS_DIR)/docker-compose-mysql-integration.yml up --build
-
-build_mysql_integration_test_images: ## Build MySQL integration test images without cache.
-build_mysql_integration_test_images: clean_integration_test_containers
-	docker-compose -f $(TICDC_DOCKER_DEPLOYMENTS_DIR)/docker-compose-mysql-integration.yml build --no-cache
+	tests/integration_tests/run.sh mysql "$(CASE)"
 
 integration_test_kafka: check_third_party_binary
-	tests/integration_tests/run.sh kafka "$(CASE)" "$(START_AT)"
+	tests/integration_tests/run.sh kafka "$(CASE)"
 
-integration_test_storage:
-	tests/integration_tests/run.sh storage "$(CASE)" "$(START_AT)"
-
-kafka_docker_integration_test: ## Run TiCDC Kafka all integration tests in Docker.
-kafka_docker_integration_test: clean_integration_test_containers
-	docker-compose -f $(TICDC_DOCKER_DEPLOYMENTS_DIR)/docker-compose-kafka-integration.yml up
-
-kafka_docker_integration_test_with_build: ## Build images and run TiCDC Kafka all integration tests in Docker. Please use only after modifying the TiCDC non-test code.
-kafka_docker_integration_test_with_build: clean_integration_test_containers
-	docker-compose -f $(TICDC_DOCKER_DEPLOYMENTS_DIR)/docker-compose-kafka-integration.yml up --build
-
-build_kafka_integration_test_images: ## Build Kafka integration test images without cache.
-build_kafka_integration_test_images: clean_integration_test_containers
-	docker-compose -f $(TICDC_DOCKER_DEPLOYMENTS_DIR)/docker-compose-kafka-integration.yml build --no-cache
-
-clean_integration_test_containers: ## Clean MySQL and Kafka integration test containers.
-	docker-compose -f $(TICDC_DOCKER_DEPLOYMENTS_DIR)/docker-compose-mysql-integration.yml down -v
-	docker-compose -f $(TICDC_DOCKER_DEPLOYMENTS_DIR)/docker-compose-kafka-integration.yml down -v
-
-fmt: tools/bin/gofumports tools/bin/shfmt tools/bin/gci #generate_mock go-generate
-	@echo "run gci (format imports)"
-	tools/bin/gci write $(FILES) 2>&1 | $(FAIL_ON_STDOUT)
-	@echo "run gofumports"
-	tools/bin/gofumports -l -w $(FILES) 2>&1 | $(FAIL_ON_STDOUT)
+fmt: tools/bin/gofumports tools/bin/shfmt
+	@echo "gofmt (simplify)"
+	tools/bin/gofumports -s -l -w $(FILES) 2>&1 | $(FAIL_ON_STDOUT)
 	@echo "run shfmt"
 	tools/bin/shfmt -d -w .
-	@echo "check log style"
-	scripts/check-log-style.sh
 
-fast_fmt: tools/bin/gofumports tools/bin/shfmt tools/bin/gci
-	@echo "run gci (format imports)"
-	tools/bin/gci write $(FILES) 2>&1 | $(FAIL_ON_STDOUT)
-	@echo "run gofumports"
-	tools/bin/gofumports -l -w $(FILES) 2>&1 | $(FAIL_ON_STDOUT)
-	@echo "run shfmt"
-	tools/bin/shfmt -d -w .
-	@echo "check log style"
-	scripts/check-log-style.sh
+lint: tools/bin/revive
+	@echo "linting"
+	@tools/bin/revive -formatter friendly -config tools/check/revive.toml $(FILES)
 
 errdoc: tools/bin/errdoc-gen
 	@echo "generator errors.toml"
-	# check-errdoc will skip DM directory.
 	./tools/check/check-errdoc.sh
-
-# terror_check is only used for DM errors.
-# TODO: unified the error framework of CDC and DM.
-terror_check:
-	@echo "check terror conflict"
-	@cd dm && _utils/terror_gen/check.sh
 
 check-copyright:
 	@echo "check-copyright"
@@ -284,28 +169,9 @@ check-merge-conflicts:
 	@echo "check-merge-conflicts"
 	@./scripts/check-merge-conflicts.sh
 
-check-ticdc-dashboard:
-	@echo "check-ticdc-dashboard"
-	@./scripts/check-ticdc-dashboard.sh
-
-check-diff-line-width:
-ifneq ($(shell echo $(RELEASE_VERSION) | grep master),)
-	@echo "check-file-width"
-	@./scripts/check-diff-line-width.sh
-endif
-
-go-generate: ## Run go generate on all packages.
-go-generate: tools/bin/msgp tools/bin/stringer tools/bin/mockery
-	@echo "go generate"
-	@go generate ./...
-
-generate-protobuf: ## Generate code from protobuf files.
-generate-protobuf: tools/bin/protoc tools/bin/protoc-gen-gogofaster \
-	tools/bin/protoc-gen-go tools/bin/protoc-gen-go-grpc \
-	tools/bin/protoc-gen-grpc-gateway tools/bin/protoc-gen-grpc-gateway-v2 \
-	tools/bin/protoc-gen-openapiv2
-	@echo "generate-protobuf"
-	./scripts/generate-protobuf.sh
+check-leaktest-added: tools/bin/gofumports
+	@echo "check leak test added in all unit tests"
+	./scripts/add-leaktest.sh $(TEST_FILES)
 
 vet:
 	@echo "vet"
@@ -315,252 +181,61 @@ tidy:
 	@echo "go mod tidy"
 	./tools/check/check-tidy.sh
 
-# TODO: Unified cdc and dm config.
-check-static: tools/bin/golangci-lint
-	tools/bin/golangci-lint run --timeout 10m0s --skip-dirs "^dm/","^tests/"
-	#cd dm && ../tools/bin/golangci-lint run --timeout 10m0s
+check: check-copyright fmt lint check-static tidy errdoc check-leaktest-added check-merge-conflicts
 
-check: check-copyright fmt check-static tidy terror_check errdoc \
-	check-merge-conflicts check-ticdc-dashboard check-diff-line-width \
-	check-makefiles check_engine_integration_test
-	@git --no-pager diff --exit-code || (echo "Please add changed files!" && false)
-
-fast_check: check-copyright fmt check-static tidy terror_check errdoc \
-	check-merge-conflicts check-ticdc-dashboard check-diff-line-width check-makefiles \
-	check_cdc_integration_test check_dm_integration_test check_engine_integration_test 
-	@git --no-pager diff --exit-code || (echo "Please add changed files!" && false)
-
-integration_test_coverage: tools/bin/gocovmerge tools/bin/goveralls
-	tools/bin/gocovmerge "$(TEST_DIR)"/cov.* | grep -vE ".*.pb.go|$(CDC_PKG)/testing_utils/.*|$(CDC_PKG)/cdc/entry/schema_test_helper.go|$(CDC_PKG)/cdc/sink/simple_mysql_tester.go|.*.__failpoint_binding__.go" > "$(TEST_DIR)/all_cov.out"
+integration_test_coverage:
+	GO111MODULE=off go get github.com/wadey/gocovmerge
+	gocovmerge "$(TEST_DIR)"/cov.* | grep -vE ".*.pb.go|$(CDC_PKG)/testing_utils/.*|$(CDC_PKG)/cdc/kv/testing.go|$(CDC_PKG)/cdc/entry/schema_test_helper.go|$(CDC_PKG)/cdc/sink/simple_mysql_tester.go|.*.__failpoint_binding__.go" > "$(TEST_DIR)/all_cov.out"
 ifeq ("$(JenkinsCI)", "1")
 	GO111MODULE=off go get github.com/mattn/goveralls
-	tools/bin/goveralls -parallel -coverprofile=$(TEST_DIR)/all_cov.out -service=jenkins-ci -repotoken $(COVERALLS_TOKEN)
+	@goveralls -coverprofile=$(TEST_DIR)/all_cov.out -service=jenkins-ci -repotoken $(COVERALLS_TOKEN)
 else
 	go tool cover -html "$(TEST_DIR)/all_cov.out" -o "$(TEST_DIR)/all_cov.html"
 endif
 
 unit_test_coverage:
-	grep -vE ".*.pb.go|$(CDC_PKG)/testing_utils/.*|$(CDC_PKG)/cdc/sink/simple_mysql_tester.go|.*.__failpoint_binding__.go" "$(TEST_DIR)/cov.unit.out" > "$(TEST_DIR)/unit_cov.out"
+	grep -vE ".*.pb.go|$(CDC_PKG)/testing_utils/.*|$(CDC_PKG)/cdc/kv/testing.go|$(CDC_PKG)/cdc/sink/simple_mysql_tester.go|.*.__failpoint_binding__.go" "$(TEST_DIR)/cov.unit.out" > "$(TEST_DIR)/unit_cov.out"
+ifeq ("$(JenkinsCI)", "1")
+	@bash <(curl -s https://codecov.io/bash) -f $(TEST_DIR)/unit_cov.out -t $(CODECOV_TOKEN)
+else
 	go tool cover -html "$(TEST_DIR)/unit_cov.out" -o "$(TEST_DIR)/unit_cov.html"
 	go tool cover -func="$(TEST_DIR)/unit_cov.out"
+endif
+
+check-static: tools/bin/golangci-lint
+	tools/bin/golangci-lint run --timeout 10m0s --skip-files kv_gen
 
 data-flow-diagram: docs/data-flow.dot
 	dot -Tsvg docs/data-flow.dot > docs/data-flow.svg
-	
-generate_mock: ## Generate mock code.
-generate_mock: tools/bin/mockgen
-	scripts/generate-mock.sh
 
 clean:
 	go clean -i ./...
 	rm -rf *.out
-	rm -rf bin
-	rm -rf tools/bin
-	rm -rf tools/include
+	rm -f bin/cdc
+	rm -f bin/cdc_kafka_consumer
 
-dm: dm-master dm-worker dmctl dm-syncer
+tools/bin/gofumports: tools/check/go.mod
+	cd tools/check; test -e ../bin/gofumports || \
+	$(GO) build -o ../bin/gofumports mvdan.cc/gofumpt
 
-dm-master:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/dm-master ./cmd/dm-master
+tools/bin/revive: tools/check/go.mod
+	cd tools/check; test -e ../bin/revive || \
+	$(GO) build -o ../bin/revive github.com/mgechev/revive
 
-dm-master-with-webui:
-	@echo "build webui first"
-	cd dm/ui && yarn --ignore-scripts && yarn build
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -tags dm_webui -o bin/dm-master ./cmd/dm-master
+tools/bin/errdoc-gen: tools/check/go.mod
+	cd tools/check; test -e ../bin/errdoc-gen || \
+	$(GO) build -o ../bin/errdoc-gen github.com/pingcap/errors/errdoc-gen
 
-dm-worker:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/dm-worker ./cmd/dm-worker
+tools/bin/golangci-lint:
+	cd tools/check; test -e ../bin/golangci-lint || \
+	curl -sfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh| sh -s -- -b ../bin v1.30.0
 
-dmctl:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/dmctl ./cmd/dm-ctl
-
-dm-syncer:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/dm-syncer ./cmd/dm-syncer
-
-dm-chaos-case:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/dm-chaos-case ./dm/chaos/cases
-
-dm_debug-tools:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/binlog-event-blackhole ./dm/debug-tools/binlog-event-blackhole
-
-dm_generate_openapi: tools/bin/oapi-codegen
-	@echo "generate_openapi"
-	cd dm && ../tools/bin/oapi-codegen --config=openapi/spec/server-gen-cfg.yaml openapi/spec/dm.yaml
-	cd dm && ../tools/bin/oapi-codegen --config=openapi/spec/types-gen-cfg.yaml openapi/spec/dm.yaml
-	cd dm && ../tools/bin/oapi-codegen --config=openapi/spec/client-gen-cfg.yaml openapi/spec/dm.yaml
-
-define run_dm_unit_test
-	@echo "running unit test for packages:" $(1)
-	mkdir -p $(DM_TEST_DIR)
-	$(FAILPOINT_ENABLE)
-	@export log_level=error; \
-	$(GOTEST) -timeout 10m -covermode=atomic -coverprofile="$(DM_TEST_DIR)/cov.unit_test.out" $(1) \
-	|| { $(FAILPOINT_DISABLE); exit 1; }
-	$(FAILPOINT_DISABLE)
-endef
-
-dm_unit_test: check_failpoint_ctl
-	$(call run_dm_unit_test,$(DM_PACKAGES))
-
-# run unit test for the specified pkg only, like `make dm_unit_test_pkg PKG=github.com/pingcap/tiflow/dm/master`
-dm_unit_test_pkg: check_failpoint_ctl
-	$(call run_dm_unit_test,$(PKG))
-
-dm_unit_test_in_verify_ci: check_failpoint_ctl tools/bin/gotestsum tools/bin/gocov tools/bin/gocov-xml
-	mkdir -p $(DM_TEST_DIR)
-	$(FAILPOINT_ENABLE)
-	@export log_level=error; \
-	CGO_ENABLED=1 tools/bin/gotestsum --junitfile dm-junit-report.xml -- -v -timeout 10m -p $(P) --race \
-	-covermode=atomic -coverprofile="$(DM_TEST_DIR)/cov.unit_test.out" $(DM_PACKAGES) \
-	|| { $(FAILPOINT_DISABLE); exit 1; }
-	tools/bin/gocov convert "$(DM_TEST_DIR)/cov.unit_test.out" | tools/bin/gocov-xml > dm-coverage.xml
-	$(FAILPOINT_DISABLE)
-	@bash <(curl -s https://codecov.io/bash) -F dm -f $(DM_TEST_DIR)/cov.unit_test.out -t $(TICDC_CODECOV_TOKEN)
-
-dm_integration_test_build: check_failpoint_ctl
-	$(FAILPOINT_ENABLE)
-	$(GOTEST) -ldflags '$(LDFLAGS)' -c -cover -covermode=atomic \
-		-coverpkg=github.com/pingcap/tiflow/dm/... \
-		-o bin/dm-worker.test github.com/pingcap/tiflow/cmd/dm-worker \
-		|| { $(FAILPOINT_DISABLE); exit 1; }
-	$(GOTEST) -ldflags '$(LDFLAGS)' -c -cover -covermode=atomic \
-		-coverpkg=github.com/pingcap/tiflow/dm/... \
-		-o bin/dm-master.test github.com/pingcap/tiflow/cmd/dm-master \
-		|| { $(FAILPOINT_DISABLE); exit 1; }
-	$(GOTESTNORACE) -ldflags '$(LDFLAGS)' -c -cover -covermode=count \
-		-coverpkg=github.com/pingcap/tiflow/dm/... \
-		-o bin/dmctl.test github.com/pingcap/tiflow/cmd/dm-ctl \
-		|| { $(FAILPOINT_DISABLE); exit 1; }
-	$(GOTEST) -ldflags '$(LDFLAGS)' -c -cover -covermode=atomic \
-		-coverpkg=github.com/pingcap/tiflow/dm/... \
-		-o bin/dm-syncer.test github.com/pingcap/tiflow/cmd/dm-syncer \
-		|| { $(FAILPOINT_DISABLE); exit 1; }
-	$(FAILPOINT_DISABLE)
-	./dm/tests/prepare_tools.sh
-
-dm_integration_test_build_worker: check_failpoint_ctl
-	$(FAILPOINT_ENABLE)
-	$(GOTEST) -ldflags '$(LDFLAGS)' -c -cover -covermode=atomic \
-		-coverpkg=github.com/pingcap/tiflow/dm/... \
-		-o bin/dm-worker.test github.com/pingcap/tiflow/cmd/dm-worker \
-		|| { $(FAILPOINT_DISABLE); exit 1; }
-	$(FAILPOINT_DISABLE)
-	./dm/tests/prepare_tools.sh
-
-dm_integration_test_build_master: check_failpoint_ctl
-	$(FAILPOINT_ENABLE)
-	$(GOTEST) -ldflags '$(LDFLAGS)' -c -cover -covermode=atomic \
-		-coverpkg=github.com/pingcap/tiflow/dm/... \
-		-o bin/dm-master.test github.com/pingcap/tiflow/cmd/dm-master \
-		|| { $(FAILPOINT_DISABLE); exit 1; }
-	$(FAILPOINT_DISABLE)
-	./dm/tests/prepare_tools.sh
-
-dm_integration_test_build_ctl: check_failpoint_ctl
-	$(FAILPOINT_ENABLE)
-	$(GOTESTNORACE) -ldflags '$(LDFLAGS)' -c -cover -covermode=count \
-		-coverpkg=github.com/pingcap/tiflow/dm/... \
-		-o bin/dmctl.test github.com/pingcap/tiflow/cmd/dm-ctl \
-		|| { $(FAILPOINT_DISABLE); exit 1; }
-	$(FAILPOINT_DISABLE)
-	./dm/tests/prepare_tools.sh
-
-install_test_python_dep:
-	@echo "install python requirments for test"
-	pip install --user -q -r ./dm/tests/requirements.txt
-
-check_third_party_binary_for_dm:
-	@which bin/tidb-server
-	@which bin/sync_diff_inspector
-	@which mysql
-	@which bin/minio
-
-dm_integration_test: check_third_party_binary_for_dm install_test_python_dep
-	@which bin/dm-master.test
-	@which bin/dm-worker.test
-	@which bin/dm-syncer.test
-	cd dm && ln -sf ../bin .
-	cd dm && ./tests/run.sh $(CASE)
-
-dm_compatibility_test: check_third_party_binary_for_dm
-	@which bin/dm-master.test.current
-	@which bin/dm-worker.test.current
-	@which bin/dm-master.test.previous
-	@which bin/dm-worker.test.previous
-	cd dm && ln -sf ../bin .
-	cd dm && ./tests/compatibility_run.sh ${CASE}
-
-dm_coverage: tools/bin/gocovmerge tools/bin/goveralls
-	# unify cover mode in coverage files, more details refer to dm/tests/_utils/run_dm_ctl
-	find "$(DM_TEST_DIR)" -type f -name "cov.*.dmctl.*.out" -exec $(SED) -i "s/mode: count/mode: atomic/g" {} \;
-	tools/bin/gocovmerge "$(DM_TEST_DIR)"/cov.* | grep -vE ".*.pb.go|.*.pb.gw.go|.*.__failpoint_binding__.go|.*debug-tools.*|.*chaos.*" > "$(DM_TEST_DIR)/all_cov.out"
-	tools/bin/gocovmerge "$(DM_TEST_DIR)"/cov.unit_test*.out | grep -vE ".*.pb.go|.*.pb.gw.go|.*.__failpoint_binding__.go|.*debug-tools.*|.*chaos.*" > $(DM_TEST_DIR)/unit_test.out
-	go tool cover -html "$(DM_TEST_DIR)/all_cov.out" -o "$(DM_TEST_DIR)/all_cov.html"
-	go tool cover -html "$(DM_TEST_DIR)/unit_test.out" -o "$(DM_TEST_DIR)/unit_test_cov.html"
-
-
-check_failpoint_ctl: tools/bin/failpoint-ctl
+tools/bin/shfmt: tools/check/go.mod
+	cd tools/check; test -e ../bin/shfmt || \
+	$(GO) build -o ../bin/shfmt mvdan.cc/sh/v3/cmd/shfmt
 
 failpoint-enable: check_failpoint_ctl
 	$(FAILPOINT_ENABLE)
 
 failpoint-disable: check_failpoint_ctl
 	$(FAILPOINT_DISABLE)
-
-engine: tiflow
-
-tiflow:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/tiflow ./cmd/tiflow/main.go
-
-tiflow-demo:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/tiflow-demoserver ./cmd/tiflow-demoserver
-
-tiflow-chaos-case:
-	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/tiflow-chaos-case ./engine/chaos/cases
-
-engine_unit_test: check_failpoint_ctl
-	$(call run_engine_unit_test,$(ENGINE_PACKAGES))
-
-engine_integration_test: check_third_party_binary_for_engine
-	mkdir -p /tmp/tiflow_engine_test || true
-	./engine/test/integration_tests/run.sh "$(CASE)" "$(START_AT)" 2>&1 | tee /tmp/tiflow_engine_test/engine_it.log
-	./engine/test/utils/check_log.sh
-
-check_third_party_binary_for_engine:
-	@which bash || (echo "bash not found in ${PATH}"; exit 1)
-	@which docker || (echo "docker not found in ${PATH}"; exit 1)
-	@which go || (echo "go not found in ${PATH}"; exit 1)
-	@which mysql || (echo "mysql not found in ${PATH}"; exit 1)
-	@which jq || (echo "jq not found in ${PATH}"; exit 1)
-	@which mc || (echo "mc not found in ${PATH}, you can use 'make bin/mc' and move bin/mc to ${PATH}"; exit 1)
-	@which bin/sync_diff_inspector || (echo "run 'make bin/sync_diff_inspector' to download it if you need")
-
-check_engine_integration_test:
-	./engine/test/utils/check_case.sh
-
-bin/mc:
-	./scripts/download-mc.sh
-
-bin/sync_diff_inspector:
-	./scripts/download-sync-diff.sh
-
-define run_engine_unit_test
-	@echo "running unit test for packages:" $(1)
-	mkdir -p $(ENGINE_TEST_DIR)
-	$(FAILPOINT_ENABLE)
-	@export log_level=error; \
-	$(GOTEST) -timeout 5m -covermode=atomic -coverprofile="$(ENGINE_TEST_DIR)/cov.unit_test.out" $(1) \
-	|| { $(FAILPOINT_DISABLE); exit 1; }
-	$(FAILPOINT_DISABLE)
-endef
-
-engine_unit_test_in_verify_ci: check_failpoint_ctl tools/bin/gotestsum tools/bin/gocov tools/bin/gocov-xml
-	mkdir -p $(ENGINE_TEST_DIR)
-	$(FAILPOINT_ENABLE)
-	@export log_level=error; \
-	CGO_ENABLED=1 tools/bin/gotestsum --junitfile engine-junit-report.xml -- -v -timeout 5m -p $(P) --race \
-	-covermode=atomic -coverprofile="$(ENGINE_TEST_DIR)/cov.unit_test.out" $(ENGINE_PACKAGES) \
-	|| { $(FAILPOINT_DISABLE); exit 1; }
-	tools/bin/gocov convert "$(ENGINE_TEST_DIR)/cov.unit_test.out" | tools/bin/gocov-xml > engine-coverage.xml
-	$(FAILPOINT_DISABLE)
-	@bash <(curl -s https://codecov.io/bash) -F engine -f $(ENGINE_TEST_DIR)/cov.unit_test.out -t $(TICDC_CODECOV_TOKEN)

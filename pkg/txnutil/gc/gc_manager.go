@@ -17,15 +17,21 @@ import (
 	"context"
 	"time"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/store/tikv/oracle"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
+	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/pdutil"
-	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
+)
+
+const (
+	// CDCServiceSafePointID is the ID of CDC service in pd.UpdateServiceGCSafePoint.
+	CDCServiceSafePointID = "ticdc"
 )
 
 // gcSafepointUpdateInterval is the minimum interval that CDC can update gc safepoint
@@ -41,10 +47,8 @@ type Manager interface {
 }
 
 type gcManager struct {
-	gcServiceID string
-	pdClient    pd.Client
-	pdClock     pdutil.Clock
-	gcTTL       int64
+	pdClient pd.Client
+	gcTTL    int64
 
 	lastUpdatedTime   time.Time
 	lastSucceededTime time.Time
@@ -53,15 +57,13 @@ type gcManager struct {
 }
 
 // NewManager creates a new Manager.
-func NewManager(gcServiceID string, pdClient pd.Client, pdClock pdutil.Clock) Manager {
+func NewManager(pdClient pd.Client) Manager {
 	serverConfig := config.GetGlobalServerConfig()
 	failpoint.Inject("InjectGcSafepointUpdateInterval", func(val failpoint.Value) {
 		gcSafepointUpdateInterval = time.Duration(val.(int) * int(time.Millisecond))
 	})
 	return &gcManager{
-		gcServiceID:       gcServiceID,
 		pdClient:          pdClient,
-		pdClock:           pdClock,
 		lastSucceededTime: time.Now(),
 		gcTTL:             serverConfig.GcTTL,
 	}
@@ -75,8 +77,8 @@ func (m *gcManager) TryUpdateGCSafePoint(
 	}
 	m.lastUpdatedTime = time.Now()
 
-	actual, err := SetServiceGCSafepoint(
-		ctx, m.pdClient, m.gcServiceID, m.gcTTL, checkpointTs)
+	actual, err := setServiceGCSafepoint(
+		ctx, m.pdClient, CDCServiceSafePointID, m.gcTTL, checkpointTs)
 	if err != nil {
 		log.Warn("updateGCSafePoint failed",
 			zap.Uint64("safePointTs", checkpointTs),
@@ -96,9 +98,8 @@ func (m *gcManager) TryUpdateGCSafePoint(
 		log.Warn("update gc safe point failed, the gc safe point is larger than checkpointTs",
 			zap.Uint64("actual", actual), zap.Uint64("checkpointTs", checkpointTs))
 	}
-	// if the min checkpoint ts is equal to the current gc safe point, it
-	// means that the service gc safe point set by TiCDC is the min service
-	// gc safe point
+	// if the min checkpoint ts is equal to the current gc safe point,
+	// it means that the service gc safe point set by TiCDC is the min service gc safe point
 	m.isTiCDCBlockGC = actual == checkpointTs
 	m.lastSafePointTs = actual
 	m.lastSucceededTime = time.Now()
@@ -110,25 +111,22 @@ func (m *gcManager) CheckStaleCheckpointTs(
 ) error {
 	gcSafepointUpperBound := checkpointTs - 1
 	if m.isTiCDCBlockGC {
-		pdTime := m.pdClock.CurrentTime()
-		if pdTime.Sub(
-			oracle.GetTimeFromTS(gcSafepointUpperBound),
-		) > time.Duration(m.gcTTL)*time.Second {
-			return cerror.ErrGCTTLExceeded.
-				GenWithStackByArgs(
-					checkpointTs,
-					changefeedID,
-				)
+		cctx, ok := ctx.(cdcContext.Context)
+		if !ok {
+			return cerror.ErrOwnerUnknown.GenWithStack("ctx not an cdcContext.Context, it should be")
+		}
+		pdTime, err := cctx.GlobalVars().TimeAcquirer.CurrentTimeFromCached()
+		// TODO: should we return err here, or just log it?
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if pdTime.Sub(oracle.GetTimeFromTS(gcSafepointUpperBound)) > time.Duration(m.gcTTL)*time.Second {
+			return cerror.ErrGCTTLExceeded.GenWithStackByArgs(checkpointTs, changefeedID)
 		}
 	} else {
-		// if `isTiCDCBlockGC` is false, it means there is another service gc
-		// point less than the min checkpoint ts.
+		// if `isTiCDCBlockGC` is false, it means there is another service gc point less than the min checkpoint ts.
 		if gcSafepointUpperBound < m.lastSafePointTs {
-			return cerror.ErrSnapshotLostByGC.
-				GenWithStackByArgs(
-					checkpointTs,
-					m.lastSafePointTs,
-				)
+			return cerror.ErrSnapshotLostByGC.GenWithStackByArgs(checkpointTs, m.lastSafePointTs)
 		}
 	}
 	return nil

@@ -16,12 +16,18 @@ package quotes
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestQuoteSchema(t *testing.T) {
-	t.Parallel()
+func Test(t *testing.T) { check.TestingT(t) }
 
+type quotesSuite struct{}
+
+var _ = check.Suite(&quotesSuite{})
+
+func (s *quotesSuite) TestQuoteSchema(c *check.C) {
+	defer testleak.AfterTest(c)()
 	cases := []struct {
 		schema   string
 		table    string
@@ -32,13 +38,12 @@ func TestQuoteSchema(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		name := QuoteSchema(testCase.schema, testCase.table)
-		require.Equal(t, testCase.expected, name)
+		c.Assert(name, check.Equals, testCase.expected)
 	}
 }
 
-func TestQuoteName(t *testing.T) {
-	t.Parallel()
-
+func (s *quotesSuite) TestQuoteName(c *check.C) {
+	defer testleak.AfterTest(c)()
 	cases := []struct {
 		name     string
 		expected string
@@ -50,13 +55,12 @@ func TestQuoteName(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		escaped := QuoteName(testCase.name)
-		require.Equal(t, testCase.expected, escaped)
+		c.Assert(escaped, check.Equals, testCase.expected)
 	}
 }
 
-func TestEscapeName(t *testing.T) {
-	t.Parallel()
-
+func (s *quotesSuite) TestEscapeName(c *check.C) {
+	defer testleak.AfterTest(c)()
 	cases := []struct {
 		name     string
 		expected string
@@ -69,6 +73,6 @@ func TestEscapeName(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		escaped := EscapeName(testCase.name)
-		require.Equal(t, testCase.expected, escaped)
+		c.Assert(escaped, check.Equals, testCase.expected)
 	}
 }

@@ -15,16 +15,14 @@ package retry
 
 import (
 	"math"
-	"time"
 )
 
 const (
 	// defaultBackoffBaseInMs is the initial duration, in Millisecond
 	defaultBackoffBaseInMs = 10.0
 	// defaultBackoffCapInMs is the max amount of duration, in Millisecond
-	defaultBackoffCapInMs   = 100.0
-	defaultMaxTries         = math.MaxUint64
-	defaultMaxRetryDuration = time.Duration(0)
+	defaultBackoffCapInMs = 100.0
+	defaultMaxTries       = 3
 )
 
 // Option ...
@@ -34,20 +32,18 @@ type Option func(*retryOptions)
 type IsRetryable func(error) bool
 
 type retryOptions struct {
-	totalRetryDuration time.Duration
-	maxTries           uint64
-	backoffBaseInMs    float64
-	backoffCapInMs     float64
-	isRetryable        IsRetryable
+	maxTries        int64
+	backoffBaseInMs float64
+	backoffCapInMs  float64
+	isRetryable     IsRetryable
 }
 
 func newRetryOptions() *retryOptions {
 	return &retryOptions{
-		totalRetryDuration: defaultMaxRetryDuration,
-		maxTries:           defaultMaxTries,
-		backoffBaseInMs:    defaultBackoffBaseInMs,
-		backoffCapInMs:     defaultBackoffCapInMs,
-		isRetryable:        func(err error) bool { return true },
+		maxTries:        defaultMaxTries,
+		backoffBaseInMs: defaultBackoffBaseInMs,
+		backoffCapInMs:  defaultBackoffCapInMs,
+		isRetryable:     func(err error) bool { return true },
 	}
 }
 
@@ -69,20 +65,19 @@ func WithBackoffMaxDelay(delayInMs int64) Option {
 	}
 }
 
-// WithMaxTries configures maximum tries, if tries is 0, 1 will be used
-func WithMaxTries(tries uint64) Option {
+// WithMaxTries configures maximum tries, if tries <= 0 "defaultMaxTries" will be used
+func WithMaxTries(tries int64) Option {
 	return func(o *retryOptions) {
-		if tries == 0 {
-			tries = 1
+		if tries > 0 {
+			o.maxTries = tries
 		}
-		o.maxTries = tries
 	}
 }
 
-// WithTotalRetryDuratoin configures the total retry duration.
-func WithTotalRetryDuratoin(retryDuration time.Duration) Option {
+// WithInfiniteTries configures to retry forever (math.MaxInt64 times) till success or got canceled
+func WithInfiniteTries() Option {
 	return func(o *retryOptions) {
-		o.totalRetryDuration = retryDuration
+		o.maxTries = math.MaxInt64
 	}
 }
 

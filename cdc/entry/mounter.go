@@ -19,23 +19,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"time"
-	"unsafe"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	timodel "github.com/pingcap/parser/model"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/kv"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	pfilter "github.com/pingcap/tiflow/pkg/filter"
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+)
+
+const (
+	defaultOutputChanSize = 128000
 )
 
 type baseKVEntry struct {
@@ -62,58 +65,112 @@ type rowKVEntry struct {
 
 // Mounter is used to parse SQL events from KV events
 type Mounter interface {
-	// DecodeEvent accepts `model.PolymorphicEvent` with `RawKVEntry` filled and
-	// decodes `RawKVEntry` into `RowChangedEvent`.
-	// If a `model.PolymorphicEvent` should be ignored, it will returns (false, nil).
-	DecodeEvent(ctx context.Context, event *model.PolymorphicEvent) error
+	Run(ctx context.Context) error
+	Input() chan<- *model.PolymorphicEvent
 }
 
-type mounter struct {
-	schemaStorage                SchemaStorage
-	tz                           *time.Location
-	changefeedID                 model.ChangeFeedID
-	filter                       pfilter.Filter
-	metricTotalRows              prometheus.Gauge
-	metricIgnoredDMLEventCounter prometheus.Counter
+type mounterImpl struct {
+	schemaStorage    SchemaStorage
+	rawRowChangedChs []chan *model.PolymorphicEvent
+	tz               *time.Location
+	workerNum        int
+	enableOldValue   bool
 }
 
 // NewMounter creates a mounter
-func NewMounter(schemaStorage SchemaStorage,
-	changefeedID model.ChangeFeedID,
-	tz *time.Location,
-	filter pfilter.Filter,
-) Mounter {
-	return &mounter{
-		schemaStorage: schemaStorage,
-		changefeedID:  changefeedID,
-		filter:        filter,
-		metricTotalRows: totalRowsCountGauge.
-			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
-		metricIgnoredDMLEventCounter: ignoredDMLEventCounter.
-			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
-		tz: tz,
+func NewMounter(schemaStorage SchemaStorage, workerNum int, enableOldValue bool) Mounter {
+	if workerNum <= 0 {
+		workerNum = defaultMounterWorkerNum
+	}
+	chs := make([]chan *model.PolymorphicEvent, workerNum)
+	for i := 0; i < workerNum; i++ {
+		chs[i] = make(chan *model.PolymorphicEvent, defaultOutputChanSize)
+	}
+	return &mounterImpl{
+		schemaStorage:    schemaStorage,
+		rawRowChangedChs: chs,
+		workerNum:        workerNum,
+		enableOldValue:   enableOldValue,
 	}
 }
 
-// DecodeEvent decode kv events using ddl puller's schemaStorage
-// this method could block indefinitely if the DDL puller is lagging.
-func (m *mounter) DecodeEvent(ctx context.Context, event *model.PolymorphicEvent) error {
-	m.metricTotalRows.Inc()
-	if event.IsResolved() {
+const defaultMounterWorkerNum = 32
+
+func (m *mounterImpl) Run(ctx context.Context) error {
+	m.tz = util.TimezoneFromCtx(ctx)
+	errg, ctx := errgroup.WithContext(ctx)
+	errg.Go(func() error {
+		m.collectMetrics(ctx)
 		return nil
+	})
+	for i := 0; i < m.workerNum; i++ {
+		index := i
+		errg.Go(func() error {
+			return m.codecWorker(ctx, index)
+		})
 	}
-	row, err := m.unmarshalAndMountRowChanged(ctx, event.RawKV)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	event.Row = row
-	event.RawKV.Value = nil
-	event.RawKV.OldValue = nil
-	return nil
+	return errg.Wait()
 }
 
-func (m *mounter) unmarshalAndMountRowChanged(ctx context.Context, raw *model.RawKVEntry) (*model.RowChangedEvent, error) {
+func (m *mounterImpl) codecWorker(ctx context.Context, index int) error {
+	captureAddr := util.CaptureAddrFromCtx(ctx)
+	changefeedID := util.ChangefeedIDFromCtx(ctx)
+	metricMountDuration := mountDuration.WithLabelValues(captureAddr, changefeedID)
+	metricTotalRows := totalRowsCountGauge.WithLabelValues(captureAddr, changefeedID)
+	defer func() {
+		mountDuration.DeleteLabelValues(captureAddr, changefeedID)
+		totalRowsCountGauge.DeleteLabelValues(captureAddr, changefeedID)
+	}()
+
+	for {
+		var pEvent *model.PolymorphicEvent
+		select {
+		case <-ctx.Done():
+			return errors.Trace(ctx.Err())
+		case pEvent = <-m.rawRowChangedChs[index]:
+		}
+		if pEvent.RawKV.OpType == model.OpTypeResolved {
+			pEvent.PrepareFinished()
+			continue
+		}
+		startTime := time.Now()
+		rowEvent, err := m.unmarshalAndMountRowChanged(ctx, pEvent.RawKV)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		pEvent.Row = rowEvent
+		pEvent.RawKV.Value = nil
+		pEvent.RawKV.OldValue = nil
+		pEvent.PrepareFinished()
+		metricMountDuration.Observe(time.Since(startTime).Seconds())
+		metricTotalRows.Inc()
+	}
+}
+
+func (m *mounterImpl) Input() chan<- *model.PolymorphicEvent {
+	return m.rawRowChangedChs[rand.Intn(m.workerNum)]
+}
+
+func (m *mounterImpl) collectMetrics(ctx context.Context) {
+	captureAddr := util.CaptureAddrFromCtx(ctx)
+	changefeedID := util.ChangefeedIDFromCtx(ctx)
+	metricMounterInputChanSize := mounterInputChanSizeGauge.WithLabelValues(captureAddr, changefeedID)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second * 15):
+			chSize := 0
+			for _, ch := range m.rawRowChangedChs {
+				chSize += len(ch)
+			}
+			metricMounterInputChanSize.Set(float64(chSize))
+		}
+	}
+}
+
+func (m *mounterImpl) unmarshalAndMountRowChanged(ctx context.Context, raw *model.RawKVEntry) (*model.RowChangedEvent, error) {
 	if !bytes.HasPrefix(raw.Key, tablePrefix) {
 		return nil, nil
 	}
@@ -122,10 +179,7 @@ func (m *mounter) unmarshalAndMountRowChanged(ctx context.Context, raw *model.Ra
 		return nil, err
 	}
 	if len(raw.OldValue) == 0 && len(raw.Value) == 0 {
-		log.Warn("empty value and old value",
-			zap.String("namespace", m.changefeedID.Namespace),
-			zap.String("changefeed", m.changefeedID.ID),
-			zap.Any("row", raw))
+		log.Warn("empty value and old value", zap.Any("row", raw))
 	}
 	baseInfo := baseKVEntry{
 		StartTs:         raw.StartTs,
@@ -133,8 +187,8 @@ func (m *mounter) unmarshalAndMountRowChanged(ctx context.Context, raw *model.Ra
 		PhysicalTableID: physicalTableID,
 		Delete:          raw.OpType == model.OpTypeDelete,
 	}
-	// When async commit is enabled, the commitTs of DMLs may be equals with DDL finishedTs.
-	// A DML whose commitTs is equal to a DDL finishedTs should use the schema info before the DDL.
+	// when async commit is enabled, the commitTs of DMLs may be equals with DDL finishedTs
+	// a DML whose commitTs is equal to a DDL finishedTs using the schema info before the DDL
 	snap, err := m.schemaStorage.GetSnapshot(ctx, raw.CRTs-1)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -160,33 +214,18 @@ func (m *mounter) unmarshalAndMountRowChanged(ctx context.Context, raw *model.Ra
 			if rowKV == nil {
 				return nil, nil
 			}
-			row, rawRow, err := m.mountRowKVEntry(tableInfo, rowKV, raw.ApproximateDataSize())
-			if err != nil {
-				return nil, err
-			}
-			// We need to filter a row here because we need its tableInfo.
-			ignore, err := m.filter.ShouldIgnoreDMLEvent(row, rawRow, tableInfo)
-			if err != nil {
-				return nil, err
-			}
-			// TODO(dongmen): try to find better way to indicate this row has been filtered.
-			// Return a nil RowChangedEvent if this row should be ignored.
-			if ignore {
-				m.metricIgnoredDMLEventCounter.Inc()
-				return nil, nil
-			}
-			return row, nil
+			return m.mountRowKVEntry(tableInfo, rowKV, raw.ApproximateSize())
 		}
 		return nil, nil
 	}()
-	if err != nil && !cerror.ShouldFailChangefeed(err) {
+	if err != nil {
 		log.Error("failed to mount and unmarshals entry, start to print debug info", zap.Error(err))
 		snap.PrintStatus(log.Error)
 	}
 	return row, err
 }
 
-func (m *mounter) unmarshalRowKVEntry(tableInfo *model.TableInfo, rawKey []byte, rawValue []byte, rawOldValue []byte, base baseKVEntry) (*rowKVEntry, error) {
+func (m *mounterImpl) unmarshalRowKVEntry(tableInfo *model.TableInfo, rawKey []byte, rawValue []byte, rawOldValue []byte, base baseKVEntry) (*rowKVEntry, error) {
 	recordID, err := tablecodec.DecodeRowKey(rawKey)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -211,6 +250,15 @@ func (m *mounter) unmarshalRowKVEntry(tableInfo *model.TableInfo, rawKey []byte,
 		return nil, errors.Trace(err)
 	}
 
+	if base.Delete && !m.enableOldValue && (tableInfo.PKIsHandle || tableInfo.IsCommonHandle) {
+		handleColIDs, fieldTps, _ := tableInfo.GetRowColInfos()
+		preRow, err = tablecodec.DecodeHandleToDatumMap(recordID, handleColIDs, fieldTps, m.tz, nil)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		preRowExist = true
+	}
+
 	base.RecordID = recordID
 	return &rowKVEntry{
 		baseKVEntry: base,
@@ -221,38 +269,29 @@ func (m *mounter) unmarshalRowKVEntry(tableInfo *model.TableInfo, rawKey []byte,
 	}, nil
 }
 
-// IsLegacyFormatJob returns true if the job is from the legacy DDL list key.
-func IsLegacyFormatJob(rawKV *model.RawKVEntry) bool {
-	return bytes.HasPrefix(rawKV.Key, metaPrefix)
-}
+const (
+	ddlJobListKey         = "DDLJobList"
+	ddlAddIndexJobListKey = "DDLJobAddIdxList"
+)
 
-// ParseDDLJob parses the job from the raw KV entry. id is the column id of `job_meta`.
-func ParseDDLJob(tblInfo *model.TableInfo, rawKV *model.RawKVEntry, id int64) (*timodel.Job, error) {
-	var v []byte
-	if bytes.HasPrefix(rawKV.Key, metaPrefix) {
-		// old queue base job.
-		v = rawKV.Value
-	} else {
-		// DDL job comes from `tidb_ddl_job` table after we support concurrent DDL. We should decode the job from the column.
-		recordID, err := tablecodec.DecodeRowKey(rawKV.Key)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		row, err := decodeRow(rawKV.Value, recordID, tblInfo, time.UTC)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		datum := row[id]
-		v = datum.GetBytes()
+// UnmarshalDDL unmarshals the ddl job from RawKVEntry
+func UnmarshalDDL(raw *model.RawKVEntry) (*timodel.Job, error) {
+	if raw.OpType != model.OpTypePut || !bytes.HasPrefix(raw.Key, metaPrefix) {
+		return nil, nil
 	}
-
-	return parseJob(v, rawKV.StartTs, rawKV.CRTs)
-}
-
-// parseJob unmarshal the job from "v".
-func parseJob(v []byte, startTs, CRTs uint64) (*timodel.Job, error) {
+	meta, err := decodeMetaKey(raw.Key)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if meta.getType() != ListData {
+		return nil, nil
+	}
+	k := meta.(metaListData)
+	if k.key != ddlJobListKey && k.key != ddlAddIndexJobListKey {
+		return nil, nil
+	}
 	job := &timodel.Job{}
-	err := json.Unmarshal(v, job)
+	err = json.Unmarshal(raw.Value, job)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -262,75 +301,52 @@ func parseJob(v []byte, startTs, CRTs uint64) (*timodel.Job, error) {
 	}
 	// FinishedTS is only set when the job is synced,
 	// but we can use the entry's ts here
-	job.StartTS = startTs
-	job.BinlogInfo.FinishedTS = CRTs
+	job.StartTS = raw.StartTs
+	job.BinlogInfo.FinishedTS = raw.CRTs
 	return job, nil
 }
 
-func datum2Column(
-	tableInfo *model.TableInfo, datums map[int64]types.Datum,
-) ([]*model.Column, []types.Datum, []rowcodec.ColInfo, error) {
+func datum2Column(tableInfo *model.TableInfo, datums map[int64]types.Datum, fillWithDefaultValue bool) ([]*model.Column, error) {
 	cols := make([]*model.Column, len(tableInfo.RowColumnsOffset))
-	rawCols := make([]types.Datum, len(tableInfo.RowColumnsOffset))
-
-	// columnInfos and rowColumnInfos hold different column metadata,
-	// they should have the same length and order.
-	rowColumnInfos := make([]rowcodec.ColInfo, len(tableInfo.RowColumnsOffset))
-	_, _, extendColumnInfos := tableInfo.GetRowColInfos()
-
-	for idx, colInfo := range tableInfo.Columns {
+	for _, colInfo := range tableInfo.Columns {
 		if !model.IsColCDCVisible(colInfo) {
-			log.Debug("skip the column which is not visible",
-				zap.String("table", tableInfo.Name.O), zap.String("column", colInfo.Name.O))
 			continue
 		}
 		colName := colInfo.Name.O
-		colID := colInfo.ID
-		colDatums, exist := datums[colID]
-
-		var (
-			colValue interface{}
-			size     int
-			warn     string
-			err      error
-		)
+		colDatums, exist := datums[colInfo.ID]
+		var colValue interface{}
+		if !exist && !fillWithDefaultValue {
+			continue
+		}
+		var err error
+		var warn string
 		if exist {
-			colValue, size, warn, err = formatColVal(colDatums, colInfo)
-		} else {
-			colDatums, colValue, size, warn, err = getDefaultOrZeroValue(colInfo)
+			colValue, warn, err = formatColVal(colDatums, colInfo.Tp)
+		} else if fillWithDefaultValue {
+			colValue, warn, err = getDefaultOrZeroValue(colInfo)
 		}
 		if err != nil {
-			return nil, nil, nil, errors.Trace(err)
+			return nil, errors.Trace(err)
 		}
 		if warn != "" {
 			log.Warn(warn, zap.String("table", tableInfo.TableName.String()), zap.String("column", colInfo.Name.String()))
 		}
-		defaultValue := GetDDLDefaultDefinition(colInfo)
-		offset := tableInfo.RowColumnsOffset[colInfo.ID]
-		rawCols[offset] = colDatums
-		cols[offset] = &model.Column{
-			Name:      colName,
-			Type:      colInfo.GetType(),
-			Charset:   colInfo.GetCharset(),
-			Collation: colInfo.GetCollate(),
-			Value:     colValue,
-			Default:   defaultValue,
-			Flag:      tableInfo.ColumnsFlag[colInfo.ID],
-			// ApproximateBytes = column data size + column struct size
-			ApproximateBytes: size + sizeOfEmptyColumn,
+		cols[tableInfo.RowColumnsOffset[colInfo.ID]] = &model.Column{
+			Name:  colName,
+			Type:  colInfo.Tp,
+			Value: colValue,
+			Flag:  tableInfo.ColumnsFlag[colInfo.ID],
 		}
-		rowColumnInfos[offset] = extendColumnInfos[idx]
 	}
-	return cols, rawCols, rowColumnInfos, nil
+	return cols, nil
 }
 
-func (m *mounter) mountRowKVEntry(tableInfo *model.TableInfo, row *rowKVEntry, dataSize int64) (*model.RowChangedEvent, model.RowChangedDatums, error) {
+var emptyBytes = make([]byte, 0)
+
+func (m *mounterImpl) mountRowKVEntry(tableInfo *model.TableInfo, row *rowKVEntry, dataSize int64) (*model.RowChangedEvent, error) {
 	var err error
 	// Decode previous columns.
 	var preCols []*model.Column
-	var preRawCols []types.Datum
-	var rawRow model.RowChangedDatums
-	var extendColumnInfos []rowcodec.ColInfo
 	// Since we now always use old value internally,
 	// we need to control the output(sink will use the PreColumns field to determine whether to output old value).
 	// Normally old value is output when only enableOldValue is on,
@@ -339,18 +355,28 @@ func (m *mounter) mountRowKVEntry(tableInfo *model.TableInfo, row *rowKVEntry, d
 	if row.PreRowExist {
 		// FIXME(leoppro): using pre table info to mounter pre column datum
 		// the pre column and current column in one event may using different table info
-		preCols, preRawCols, extendColumnInfos, err = datum2Column(tableInfo, row.PreRow)
+		preCols, err = datum2Column(tableInfo, row.PreRow, m.enableOldValue)
 		if err != nil {
-			return nil, rawRow, errors.Trace(err)
+			return nil, errors.Trace(err)
+		}
+
+		// NOTICE: When the old Value feature is off,
+		// the Delete event only needs to keep the handle key column.
+		if row.Delete && !m.enableOldValue {
+			for i := range preCols {
+				col := preCols[i]
+				if col != nil && !col.Flag.IsHandleKey() {
+					preCols[i] = nil
+				}
+			}
 		}
 	}
 
 	var cols []*model.Column
-	var rawCols []types.Datum
 	if row.RowExist {
-		cols, rawCols, extendColumnInfos, err = datum2Column(tableInfo, row.Row)
+		cols, err = datum2Column(tableInfo, row.Row, true)
 		if err != nil {
-			return nil, rawRow, errors.Trace(err)
+			return nil, errors.Trace(err)
 		}
 	}
 
@@ -361,116 +387,76 @@ func (m *mounter) mountRowKVEntry(tableInfo *model.TableInfo, row *rowKVEntry, d
 		intRowID = row.RecordID.IntValue()
 	}
 
-	rawRow.PreRowDatums = preRawCols
-	rawRow.RowDatums = rawCols
+	var tableInfoVersion uint64
+	// Align with the old format if old value disabled.
+	if row.Delete && !m.enableOldValue {
+		tableInfoVersion = 0
+	} else {
+		tableInfoVersion = tableInfo.TableInfoVersion
+	}
+
 	return &model.RowChangedEvent{
-		StartTs:  row.StartTs,
-		CommitTs: row.CRTs,
-		RowID:    intRowID,
+		StartTs:          row.StartTs,
+		CommitTs:         row.CRTs,
+		RowID:            intRowID,
+		TableInfoVersion: tableInfoVersion,
 		Table: &model.TableName{
 			Schema:      schemaName,
 			Table:       tableName,
 			TableID:     row.PhysicalTableID,
 			IsPartition: tableInfo.GetPartitionInfo() != nil,
 		},
-		ColInfos:            extendColumnInfos,
-		TableInfo:           tableInfo,
-		Columns:             cols,
-		PreColumns:          preCols,
-		IndexColumns:        tableInfo.IndexColumnsOffset,
-		ApproximateDataSize: dataSize,
-	}, rawRow, nil
+		Columns:         cols,
+		PreColumns:      preCols,
+		IndexColumns:    tableInfo.IndexColumnsOffset,
+		ApproximateSize: dataSize,
+	}, nil
 }
 
-var emptyBytes = make([]byte, 0)
-
-const (
-	sizeOfEmptyColumn = int(unsafe.Sizeof(model.Column{}))
-	sizeOfEmptyBytes  = int(unsafe.Sizeof(emptyBytes))
-	sizeOfEmptyString = int(unsafe.Sizeof(""))
-)
-
-func sizeOfDatum(d types.Datum) int {
-	array := [...]types.Datum{d}
-	return int(types.EstimatedMemUsage(array[:], 1))
-}
-
-func sizeOfString(s string) int {
-	// string data size + string struct size.
-	return len(s) + sizeOfEmptyString
-}
-
-func sizeOfBytes(b []byte) int {
-	// bytes data size + bytes struct size.
-	return len(b) + sizeOfEmptyBytes
-}
-
-// formatColVal return interface{} need to meet the same requirement as getDefaultOrZeroValue
-func formatColVal(datum types.Datum, col *timodel.ColumnInfo) (
-	value interface{}, size int, warn string, err error,
-) {
+func formatColVal(datum types.Datum, tp byte) (value interface{}, warn string, err error) {
 	if datum.IsNull() {
-		return nil, 0, "", nil
+		return nil, "", nil
 	}
-	switch col.GetType() {
+	switch tp {
 	case mysql.TypeDate, mysql.TypeDatetime, mysql.TypeNewDate, mysql.TypeTimestamp:
-		v := datum.GetMysqlTime().String()
-		return v, sizeOfString(v), "", nil
+		return datum.GetMysqlTime().String(), "", nil
 	case mysql.TypeDuration:
-		v := datum.GetMysqlDuration().String()
-		return v, sizeOfString(v), "", nil
+		return datum.GetMysqlDuration().String(), "", nil
 	case mysql.TypeJSON:
-		v := datum.GetMysqlJSON().String()
-		return v, sizeOfString(v), "", nil
+		return datum.GetMysqlJSON().String(), "", nil
 	case mysql.TypeNewDecimal:
-		d := datum.GetMysqlDecimal()
-		if d == nil {
-			// nil takes 0 byte.
-			return nil, 0, "", nil
+		v := datum.GetMysqlDecimal()
+		if v == nil {
+			return nil, "", nil
 		}
-		v := d.String()
-		return v, sizeOfString(v), "", nil
+		return v.String(), "", nil
 	case mysql.TypeEnum:
-		v := datum.GetMysqlEnum().Value
-		const sizeOfV = unsafe.Sizeof(v)
-		return v, int(sizeOfV), "", nil
+		return datum.GetMysqlEnum().Value, "", nil
 	case mysql.TypeSet:
-		v := datum.GetMysqlSet().Value
-		const sizeOfV = unsafe.Sizeof(v)
-		return v, int(sizeOfV), "", nil
+		return datum.GetMysqlSet().Value, "", nil
 	case mysql.TypeBit:
 		// Encode bits as integers to avoid pingcap/tidb#10988 (which also affects MySQL itself)
 		v, err := datum.GetBinaryLiteral().ToInt(nil)
-		const sizeOfV = unsafe.Sizeof(v)
-		return v, int(sizeOfV), "", err
+		return v, "", err
 	case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar,
 		mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob:
 		b := datum.GetBytes()
 		if b == nil {
 			b = emptyBytes
 		}
-		return b, sizeOfBytes(b), "", nil
-	case mysql.TypeFloat:
-		v := datum.GetFloat32()
-		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 1) || math.IsInf(float64(v), -1) {
-			warn = fmt.Sprintf("the value is invalid in column: %f", v)
-			v = 0
-		}
-		const sizeOfV = unsafe.Sizeof(v)
-		return v, int(sizeOfV), warn, nil
-	case mysql.TypeDouble:
+		return b, "", nil
+	case mysql.TypeFloat, mysql.TypeDouble:
 		v := datum.GetFloat64()
 		if math.IsNaN(v) || math.IsInf(v, 1) || math.IsInf(v, -1) {
 			warn = fmt.Sprintf("the value is invalid in column: %f", v)
 			v = 0
 		}
-		const sizeOfV = unsafe.Sizeof(v)
-		return v, int(sizeOfV), warn, nil
+		return v, warn, nil
 	default:
 		// NOTICE: GetValue() may return some types that go sql not support, which will cause sink DML fail
 		// Make specified convert upper if you need
 		// Go sql support type ref to: https://github.com/golang/go/blob/go1.17.4/src/database/sql/driver/types.go#L236
-		return datum.GetValue(), sizeOfDatum(datum), "", nil
+		return datum.GetValue(), "", nil
 	}
 }
 
@@ -483,8 +469,7 @@ func formatColVal(datum types.Datum, col *timodel.ColumnInfo) (
 // getDefaultOrZeroValue return interface{} need to meet to require type in
 // https://github.com/golang/go/blob/go1.17.4/src/database/sql/driver/types.go#L236
 // Supported type is: nil, basic type(Int, Int8,..., Float32, Float64, String), Slice(uint8), other types not support
-// TODO: Check default expr support
-func getDefaultOrZeroValue(col *timodel.ColumnInfo) (types.Datum, any, int, string, error) {
+func getDefaultOrZeroValue(col *timodel.ColumnInfo) (interface{}, string, error) {
 	var d types.Datum
 	// NOTICE: SHOULD use OriginDefaultValue here, more info pls ref to
 	// https://github.com/pingcap/tiflow/issues/4048
@@ -494,47 +479,32 @@ func getDefaultOrZeroValue(col *timodel.ColumnInfo) (types.Datum, any, int, stri
 	// Ref: https://github.com/pingcap/tidb/blob/d2c352980a43bb593db81fd1db996f47af596d91/table/column.go#L489
 	if col.GetOriginDefaultValue() != nil {
 		d = types.NewDatum(col.GetOriginDefaultValue())
-		return d, d.GetValue(), sizeOfDatum(d), "", nil
+		return d.GetValue(), "", nil
 	}
 
-	if !mysql.HasNotNullFlag(col.GetFlag()) {
+	if !mysql.HasNotNullFlag(col.Flag) {
 		// NOTICE: NotNullCheck need do after OriginDefaultValue check, as when TiDB meet "amend + add column default xxx",
 		// ref: https://github.com/pingcap/ticdc/issues/3929
 		// must use null if TiDB not write the column value when default value is null
 		// and the value is null, see https://github.com/pingcap/tidb/issues/9304
 		d = types.NewDatum(nil)
 	} else {
-		switch col.GetType() {
+		switch col.Tp {
 		case mysql.TypeEnum:
 			// For enum type, if no default value and not null is set,
 			// the default value is the first element of the enum list
-			name := col.FieldType.GetElem(0)
-			enumValue, err := types.ParseEnumName(col.FieldType.GetElems(), name, col.GetCollate())
-			if err != nil {
-				return d, nil, 0, "", errors.Trace(err)
-			}
-			d = types.NewMysqlEnumDatum(enumValue)
+			d = types.NewDatum(col.FieldType.Elems[0])
 		case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar:
-			return d, emptyBytes, sizeOfEmptyBytes, "", nil
+			return emptyBytes, "", nil
 		default:
 			d = table.GetZeroValue(col)
 			if d.IsNull() {
-				log.Error("meet unsupported column type", zap.String("columnInfo", col.FieldType.String()))
+				log.Error("meet unsupported column type", zap.String("column info", col.String()))
 			}
 		}
 	}
-	v, size, warn, err := formatColVal(d, col)
-	return d, v, size, warn, err
-}
 
-// GetDDLDefaultDefinition returns the default definition of a column.
-func GetDDLDefaultDefinition(col *timodel.ColumnInfo) interface{} {
-	defaultValue := col.GetDefaultValue()
-	if defaultValue == nil {
-		defaultValue = col.GetOriginDefaultValue()
-	}
-	defaultDatum := types.NewDatum(defaultValue)
-	return defaultDatum.GetValue()
+	return formatColVal(d, col.Tp)
 }
 
 // DecodeTableID decodes the raw key to a table ID

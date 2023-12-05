@@ -16,19 +16,23 @@ package frontier
 import (
 	"bytes"
 	"math/rand"
-	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func insertIntoList(l *skipList, keys ...[]byte) {
+type spanListSuite struct{}
+
+var _ = check.Suite(&spanListSuite{})
+
+func (s *spanListSuite) insertIntoList(l *skipList, keys ...[]byte) {
 	for _, k := range keys {
 		l.Insert(k, nil)
 	}
 }
 
-func TestInsertAndRemove(t *testing.T) {
-	t.Parallel()
+func (s *spanListSuite) TestInsertAndRemove(c *check.C) {
+	defer testleak.AfterTest(c)()
 	list := newSpanList()
 	var keys [][]byte
 	for i := 0; i < 100000; i++ {
@@ -40,15 +44,15 @@ func TestInsertAndRemove(t *testing.T) {
 
 	// check all the keys are exist in list
 	for _, k := range keys {
-		a := list.Seek(k, make(seekResult, maxHeight)).Node().Key()
+		a := list.Seek(k).Node().Key()
 		cmp := bytes.Compare(a, k)
-		require.Equal(t, 0, cmp)
+		c.Assert(cmp, check.Equals, 0)
 	}
-	checkList(t, list)
+	checkList(c, list)
 
 	for i := 0; i < 10000; i++ {
 		indexToRemove := rand.Intn(10000)
-		seekRes := list.Seek(keys[indexToRemove], make(seekResult, maxHeight))
+		seekRes := list.Seek(keys[indexToRemove])
 		if seekRes.Node().Next() == nil {
 			break
 		}
@@ -56,21 +60,21 @@ func TestInsertAndRemove(t *testing.T) {
 		list.Remove(seekRes, seekRes.Node().Next())
 
 		// check the node is already removed
-		a := list.Seek(removedKey, make(seekResult, maxHeight)).Node().Key()
+		a := list.Seek(removedKey).Node().Key()
 		cmp := bytes.Compare(a, removedKey)
-		require.LessOrEqual(t, cmp, 0)
+		c.Assert(cmp, check.LessEqual, 0)
 	}
-	checkList(t, list)
+	checkList(c, list)
 }
 
-func checkList(t *testing.T, list *skipList) {
+func checkList(c *check.C, list *skipList) {
 	// check the order of the keys in list
 	var lastKey []byte
 	var nodeNum int
 	for node := list.First(); node != nil; node = node.Next() {
 		if len(lastKey) != 0 {
 			cmp := bytes.Compare(lastKey, node.Key())
-			require.LessOrEqual(t, cmp, 0)
+			c.Assert(cmp, check.LessEqual, 0)
 		}
 		lastKey = node.Key()
 		nodeNum++
@@ -84,14 +88,14 @@ func checkList(t *testing.T, list *skipList) {
 
 	for node := list.First(); node != nil; node = node.Next() {
 		for i := 0; i < len(node.nexts); i++ {
-			require.Equal(t, node, prevs[i])
+			c.Assert(prevs[i], check.Equals, node)
 			prevs[i] = node.nexts[i]
 		}
 	}
 }
 
-func TestSeek(t *testing.T) {
-	t.Parallel()
+func (s *spanListSuite) TestSeek(c *check.C) {
+	defer testleak.AfterTest(c)()
 	key1 := []byte("15")
 	keyA := []byte("a5")
 	keyB := []byte("b5")
@@ -105,54 +109,54 @@ func TestSeek(t *testing.T) {
 
 	list := newSpanList()
 
-	require.Nil(t, list.Seek(keyA, make(seekResult, maxHeight)).Node())
+	c.Assert(list.Seek(keyA).Node(), check.IsNil)
 
 	// insert keyA to keyH
-	insertIntoList(list, keyC, keyF, keyE, keyH, keyG, keyD, keyA, keyB)
+	s.insertIntoList(list, keyC, keyF, keyE, keyH, keyG, keyD, keyA, keyB)
 
 	// Point to the first node, if seek key is smaller than the first key in list.
-	require.Nil(t, list.Seek(key1, make(seekResult, maxHeight)).Node().Key())
+	c.Assert(list.Seek(key1).Node().Key(), check.IsNil)
 
 	// Point to the last node with key smaller than seek key.
-	require.Equal(t, keyH, list.Seek(keyH, make(seekResult, maxHeight)).Node().key)
+	c.Assert(list.Seek(keyH).Node().key, check.BytesEquals, keyH)
 
 	// Point to itself.
-	require.Equal(t, keyG, list.Seek(keyG, make(seekResult, maxHeight)).Node().key)
+	c.Assert(list.Seek(keyG).Node().key, check.BytesEquals, keyG)
 
 	// Ensure there is no problem to seek a larger key.
-	require.Equal(t, keyH, list.Seek(keyZ, make(seekResult, maxHeight)).Node().key)
+	c.Assert(list.Seek(keyZ).Node().key, check.BytesEquals, keyH)
 
-	require.Equal(t, keyA, list.Seek([]byte("b0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyB, list.Seek([]byte("c0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyC, list.Seek([]byte("d0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyD, list.Seek([]byte("e0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyE, list.Seek([]byte("f0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyF, list.Seek([]byte("g0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyG, list.Seek([]byte("h0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyH, list.Seek([]byte("i0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, "[a5] [b5] [c5] [d5] [e5] [f5] [g5] [h5] ", list.String())
-	checkList(t, list)
+	c.Assert(list.Seek([]byte("b0")).Node().key, check.BytesEquals, keyA)
+	c.Assert(list.Seek([]byte("c0")).Node().key, check.BytesEquals, keyB)
+	c.Assert(list.Seek([]byte("d0")).Node().key, check.BytesEquals, keyC)
+	c.Assert(list.Seek([]byte("e0")).Node().key, check.BytesEquals, keyD)
+	c.Assert(list.Seek([]byte("f0")).Node().key, check.BytesEquals, keyE)
+	c.Assert(list.Seek([]byte("g0")).Node().key, check.BytesEquals, keyF)
+	c.Assert(list.Seek([]byte("h0")).Node().key, check.BytesEquals, keyG)
+	c.Assert(list.Seek([]byte("i0")).Node().key, check.BytesEquals, keyH)
+	c.Assert(list.String(), check.Equals, "[a5] [b5] [c5] [d5] [e5] [f5] [g5] [h5] ")
+	checkList(c, list)
 
 	// remove c5
-	seekRes := list.Seek([]byte("c0"), make(seekResult, maxHeight))
+	seekRes := list.Seek([]byte("c0"))
 	list.Remove(seekRes, seekRes.Node().Next())
-	require.Equal(t, keyB, list.Seek([]byte("c0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyB, list.Seek([]byte("d0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyD, list.Seek([]byte("e0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, "[a5] [b5] [d5] [e5] [f5] [g5] [h5] ", list.String())
-	checkList(t, list)
+	c.Assert(list.Seek([]byte("c0")).Node().key, check.BytesEquals, keyB)
+	c.Assert(list.Seek([]byte("d0")).Node().key, check.BytesEquals, keyB)
+	c.Assert(list.Seek([]byte("e0")).Node().key, check.BytesEquals, keyD)
+	c.Assert(list.String(), check.Equals, "[a5] [b5] [d5] [e5] [f5] [g5] [h5] ")
+	checkList(c, list)
 
 	// remove d5
 	list.Remove(seekRes, seekRes.Node().Next())
-	require.Equal(t, keyB, list.Seek([]byte("d0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyB, list.Seek([]byte("e0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, keyE, list.Seek([]byte("f0"), make(seekResult, maxHeight)).Node().key)
-	require.Equal(t, "[a5] [b5] [e5] [f5] [g5] [h5] ", list.String())
-	checkList(t, list)
+	c.Assert(list.Seek([]byte("d0")).Node().key, check.BytesEquals, keyB)
+	c.Assert(list.Seek([]byte("e0")).Node().key, check.BytesEquals, keyB)
+	c.Assert(list.Seek([]byte("f0")).Node().key, check.BytesEquals, keyE)
+	c.Assert(list.String(), check.Equals, "[a5] [b5] [e5] [f5] [g5] [h5] ")
+	checkList(c, list)
 
 	// remove the first node
-	seekRes = list.Seek([]byte("10"), make(seekResult, maxHeight))
+	seekRes = list.Seek([]byte("10"))
 	list.Remove(seekRes, seekRes.Node().Next())
-	require.Equal(t, "[b5] [e5] [f5] [g5] [h5] ", list.String())
-	checkList(t, list)
+	c.Assert(list.String(), check.Equals, "[b5] [e5] [f5] [g5] [h5] ")
+	checkList(c, list)
 }

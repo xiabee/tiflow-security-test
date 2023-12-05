@@ -26,21 +26,21 @@ type OpType int
 
 // OpType for kv
 const (
-	OpTypeUnknown OpType = iota
+	OpTypeUnknow OpType = iota
 	OpTypePut
 	OpTypeDelete
 	OpTypeResolved
 )
 
 // RegionFeedEvent from the kv layer.
-// Only one of the event will be set.
+// Only one of the event will be setted.
 //
 //msgp:ignore RegionFeedEvent
 type RegionFeedEvent struct {
 	Val      *RawKVEntry
-	Resolved *ResolvedSpans
+	Resolved *ResolvedSpan
 
-	// Additional debug info, not used
+	// Additonal debug info
 	RegionID uint64
 }
 
@@ -55,26 +55,18 @@ func (e *RegionFeedEvent) GetValue() interface{} {
 	}
 }
 
-// ResolvedSpans guarantees all the KV value event
+// ResolvedSpan guarantees all the KV value event
 // with commit ts less than ResolvedTs has been emitted.
 //
-//msgp:ignore ResolvedSpans
-type ResolvedSpans struct {
-	Spans      []RegionComparableSpan
+//msgp:ignore ResolvedSpan
+type ResolvedSpan struct {
+	Span       regionspan.ComparableSpan
 	ResolvedTs uint64
 }
 
 // String implements fmt.Stringer interface.
-func (rs *ResolvedSpans) String() string {
-	return fmt.Sprintf("span: %v, resolved-ts: %d", rs.Spans, rs.ResolvedTs)
-}
-
-// RegionComparableSpan contains a comparable span and a region id of that span
-//
-//msgp:ignore RegionComparableSpan
-type RegionComparableSpan struct {
-	Span   regionspan.ComparableSpan
-	Region uint64
+func (rs *ResolvedSpan) String() string {
+	return fmt.Sprintf("span: %s, resolved-ts: %d", rs.Span, rs.ResolvedTs)
 }
 
 // RawKVEntry notify the KV operator
@@ -89,7 +81,7 @@ type RawKVEntry struct {
 	// Commit or resolved TS
 	CRTs uint64 `msg:"crts"`
 
-	// Additional debug info
+	// Additonal debug info
 	RegionID uint64 `msg:"region_id"`
 }
 
@@ -100,8 +92,7 @@ func (v *RawKVEntry) String() string {
 		v.OpType, string(v.Key), string(v.Value), string(v.OldValue), v.StartTs, v.CRTs, v.RegionID)
 }
 
-// ApproximateDataSize calculate the approximate size of protobuf binary
-// representation of this event.
-func (v *RawKVEntry) ApproximateDataSize() int64 {
+// ApproximateSize calculate the approximate size of this event
+func (v *RawKVEntry) ApproximateSize() int64 {
 	return int64(len(v.Key) + len(v.Value) + len(v.OldValue))
 }

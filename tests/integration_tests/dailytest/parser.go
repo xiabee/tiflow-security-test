@@ -20,10 +20,12 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/parser"
+	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/tidb/types"
-	_ "github.com/pingcap/tidb/types/parser_driver" // import parser_driver to avoid panic
+
+	// import parser_drive to avoid panic
+	_ "github.com/pingcap/tidb/types/parser_driver"
 )
 
 type column struct {

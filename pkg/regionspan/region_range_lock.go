@@ -21,7 +21,6 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/google/btree"
 	"github.com/pingcap/log"
@@ -41,32 +40,32 @@ func rangeTsEntryWithKey(key []byte) *rangeTsEntry {
 	}
 }
 
-func rangeTsEntryLess(a, b *rangeTsEntry) bool {
-	return bytes.Compare(a.startKey, b.startKey) < 0
+func (e *rangeTsEntry) Less(than btree.Item) bool {
+	return bytes.Compare(e.startKey, than.(*rangeTsEntry).startKey) < 0
 }
 
-// rangeTsMap represents a map from key range to a timestamp. It supports
-// range set and calculating min value among a specified range.
-type rangeTsMap struct {
-	m *btree.BTreeG[*rangeTsEntry]
+// RangeTsMap represents a map from key range to a timestamp. It supports range set and calculating min value among a
+// a specified range.
+type RangeTsMap struct {
+	m *btree.BTree
 }
 
-// newRangeTsMap creates a RangeTsMap.
-func newRangeTsMap(startKey, endKey []byte, startTs uint64) *rangeTsMap {
-	m := &rangeTsMap{
-		m: btree.NewG(16, rangeTsEntryLess),
+// NewRangeTsMap creates a RangeTsMap.
+func NewRangeTsMap(startKey, endKey []byte, startTs uint64) *RangeTsMap {
+	m := &RangeTsMap{
+		m: btree.New(16),
 	}
 	m.Set(startKey, endKey, startTs)
 	return m
 }
 
 // Set sets the corresponding ts of the given range to the specified value.
-func (m *rangeTsMap) Set(startKey, endKey []byte, ts uint64) {
-	if _, ok := m.m.Get(rangeTsEntryWithKey(endKey)); !ok {
+func (m *RangeTsMap) Set(startKey, endKey []byte, ts uint64) {
+	if m.m.Get(rangeTsEntryWithKey(endKey)) == nil {
 		// To calculate the minimal ts, the default value is math.MaxUint64
 		tailTs := uint64(math.MaxUint64)
-		m.m.DescendLessOrEqual(rangeTsEntryWithKey(endKey), func(i *rangeTsEntry) bool {
-			tailTs = i.ts
+		m.m.DescendLessOrEqual(rangeTsEntryWithKey(endKey), func(i btree.Item) bool {
+			tailTs = i.(*rangeTsEntry).ts
 			return false
 		})
 		m.m.ReplaceOrInsert(&rangeTsEntry{
@@ -76,11 +75,10 @@ func (m *rangeTsMap) Set(startKey, endKey []byte, ts uint64) {
 	}
 
 	entriesToDelete := make([]*rangeTsEntry, 0)
-	m.m.AscendRange(rangeTsEntryWithKey(startKey), rangeTsEntryWithKey(endKey),
-		func(i *rangeTsEntry) bool {
-			entriesToDelete = append(entriesToDelete, i)
-			return true
-		})
+	m.m.AscendRange(rangeTsEntryWithKey(startKey), rangeTsEntryWithKey(endKey), func(i btree.Item) bool {
+		entriesToDelete = append(entriesToDelete, i.(*rangeTsEntry))
+		return true
+	})
 
 	for _, e := range entriesToDelete {
 		m.m.Delete(e)
@@ -93,20 +91,19 @@ func (m *rangeTsMap) Set(startKey, endKey []byte, ts uint64) {
 }
 
 // GetMin gets the min ts value among the given range. endKey must be greater than startKey.
-func (m *rangeTsMap) GetMin(startKey, endKey []byte) uint64 {
+func (m *RangeTsMap) GetMin(startKey, endKey []byte) uint64 {
 	var ts uint64 = math.MaxUint64
-	m.m.DescendLessOrEqual(rangeTsEntryWithKey(startKey), func(i *rangeTsEntry) bool {
-		ts = i.ts
+	m.m.DescendLessOrEqual(rangeTsEntryWithKey(startKey), func(i btree.Item) bool {
+		ts = i.(*rangeTsEntry).ts
 		return false
 	})
-	m.m.AscendRange(rangeTsEntryWithKey(startKey), rangeTsEntryWithKey(endKey),
-		func(i *rangeTsEntry) bool {
-			thisTs := i.ts
-			if ts > thisTs {
-				ts = thisTs
-			}
-			return true
-		})
+	m.m.AscendRange(rangeTsEntryWithKey(startKey), rangeTsEntryWithKey(endKey), func(i btree.Item) bool {
+		thisTs := i.(*rangeTsEntry).ts
+		if ts > thisTs {
+			ts = thisTs
+		}
+		return true
+	})
 	return ts
 }
 
@@ -116,7 +113,6 @@ type rangeLockEntry struct {
 	regionID uint64
 	version  uint64
 	waiters  []chan<- interface{}
-	state    LockedRange
 }
 
 func rangeLockEntryWithKey(key []byte) *rangeLockEntry {
@@ -125,8 +121,8 @@ func rangeLockEntryWithKey(key []byte) *rangeLockEntry {
 	}
 }
 
-func rangeLockEntryLess(a, b *rangeLockEntry) bool {
-	return bytes.Compare(a.startKey, b.startKey) < 0
+func (e *rangeLockEntry) Less(than btree.Item) bool {
+	return bytes.Compare(e.startKey, than.(*rangeLockEntry).startKey) < 0
 }
 
 func (e *rangeLockEntry) String() string {
@@ -138,36 +134,36 @@ func (e *rangeLockEntry) String() string {
 		len(e.waiters))
 }
 
+var currentID uint64 = 0
+
+func allocID() uint64 {
+	return atomic.AddUint64(&currentID, 1)
+}
+
 // RegionRangeLock is specifically used for kv client to manage exclusive region ranges. Acquiring lock will be blocked
 // if part of its range is already locked. It also manages checkpoint ts of all ranges. The ranges are marked by a
 // version number, which should comes from the Region's Epoch version. The version is used to compare which range is
 // new and which is old if two ranges are overlapping.
 type RegionRangeLock struct {
-	// ID to identify different RegionRangeLock instances, so logs of different instances can be distinguished.
-	id                uint64
-	totalSpan         ComparableSpan
-	changefeedLogInfo string
-
+	changefeed        string
 	mu                sync.Mutex
-	rangeCheckpointTs *rangeTsMap
-	rangeLock         *btree.BTreeG[*rangeLockEntry]
+	rangeCheckpointTs *RangeTsMap
+	rangeLock         *btree.BTree
 	regionIDLock      map[uint64]*rangeLockEntry
-	stopped           bool
-	refCount          uint64
+	// ID to identify different RegionRangeLock instances, so logs of different instances can be distinguished.
+	id uint64
 }
 
 // NewRegionRangeLock creates a new RegionRangeLock.
 func NewRegionRangeLock(
-	id uint64,
-	startKey, endKey []byte, startTs uint64, changefeedLogInfo string,
+	startKey, endKey []byte, startTs uint64, changefeed string,
 ) *RegionRangeLock {
 	return &RegionRangeLock{
-		id:                id,
-		totalSpan:         ComparableSpan{Start: startKey, End: endKey},
-		changefeedLogInfo: changefeedLogInfo,
-		rangeCheckpointTs: newRangeTsMap(startKey, endKey, startTs),
-		rangeLock:         btree.NewG[*rangeLockEntry](16, rangeLockEntryLess),
+		changefeed:        changefeed,
+		rangeCheckpointTs: NewRangeTsMap(startKey, endKey, startTs),
+		rangeLock:         btree.New(16),
 		regionIDLock:      make(map[uint64]*rangeLockEntry),
+		id:                allocID(),
 	}
 }
 
@@ -175,25 +171,25 @@ func (l *RegionRangeLock) getOverlappedEntries(startKey, endKey []byte, regionID
 	regionIDFound := false
 
 	overlappingRanges := make([]*rangeLockEntry, 0)
-	l.rangeLock.DescendLessOrEqual(rangeLockEntryWithKey(startKey),
-		func(entry *rangeLockEntry) bool {
-			if bytes.Compare(entry.startKey, startKey) < 0 &&
-				bytes.Compare(startKey, entry.endKey) < 0 {
-				overlappingRanges = append(overlappingRanges, entry)
-				if entry.regionID == regionID {
-					regionIDFound = true
-				}
-			}
-			return false
-		})
-	l.rangeLock.AscendRange(rangeLockEntryWithKey(startKey), rangeLockEntryWithKey(endKey),
-		func(entry *rangeLockEntry) bool {
+	l.rangeLock.DescendLessOrEqual(rangeLockEntryWithKey(startKey), func(i btree.Item) bool {
+		entry := i.(*rangeLockEntry)
+		if bytes.Compare(entry.startKey, startKey) < 0 &&
+			bytes.Compare(startKey, entry.endKey) < 0 {
 			overlappingRanges = append(overlappingRanges, entry)
 			if entry.regionID == regionID {
 				regionIDFound = true
 			}
-			return true
-		})
+		}
+		return false
+	})
+	l.rangeLock.AscendRange(rangeLockEntryWithKey(startKey), rangeLockEntryWithKey(endKey), func(i btree.Item) bool {
+		entry := i.(*rangeLockEntry)
+		overlappingRanges = append(overlappingRanges, entry)
+		if entry.regionID == regionID {
+			regionIDFound = true
+		}
+		return true
+	})
 
 	// The entry with the same regionID should also be checked.
 	if !regionIDFound {
@@ -209,9 +205,6 @@ func (l *RegionRangeLock) getOverlappedEntries(startKey, endKey []byte, regionID
 func (l *RegionRangeLock) tryLockRange(startKey, endKey []byte, regionID, version uint64) (LockRangeResult, []<-chan interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.stopped {
-		return LockRangeResult{Status: LockRangeStatusCancel}, nil
-	}
 
 	overlappingEntries := l.getOverlappedEntries(startKey, endKey, regionID)
 
@@ -223,24 +216,18 @@ func (l *RegionRangeLock) tryLockRange(startKey, endKey []byte, regionID, versio
 			regionID: regionID,
 			version:  version,
 		}
-		newEntry.state.CheckpointTs.Store(checkpointTs)
-		newEntry.state.Created = time.Now()
 		l.rangeLock.ReplaceOrInsert(newEntry)
 		l.regionIDLock[regionID] = newEntry
 
-		log.Debug("range locked",
-			zap.String("changefeed", l.changefeedLogInfo),
+		log.Info("range locked",
+			zap.String("changefeed", l.changefeed),
 			zap.Uint64("lockID", l.id), zap.Uint64("regionID", regionID),
-			zap.Uint64("version", version),
-			zap.Uint64("checkpointTs", checkpointTs),
-			zap.String("startKey", hex.EncodeToString(startKey)),
-			zap.String("endKey", hex.EncodeToString(endKey)))
+			zap.String("startKey", hex.EncodeToString(startKey)), zap.String("endKey", hex.EncodeToString(endKey)),
+			zap.Uint64("checkpointTs", checkpointTs))
 
-		l.refCount += 1
 		return LockRangeResult{
 			Status:       LockRangeStatusSuccess,
 			CheckpointTs: checkpointTs,
-			LockedRange:  &newEntry.state,
 		}, nil
 	}
 
@@ -262,12 +249,10 @@ func (l *RegionRangeLock) tryLockRange(startKey, endKey []byte, regionID, versio
 		retryRanges := make([]ComparableSpan, 0)
 		currentRangeStartKey := startKey
 
-		log.Info("try lock range staled",
-			zap.String("changefeed", l.changefeedLogInfo),
+		log.Info("tryLockRange stale",
+			zap.String("changefeed", l.changefeed),
 			zap.Uint64("lockID", l.id), zap.Uint64("regionID", regionID),
-			zap.String("startKey", hex.EncodeToString(startKey)),
-			zap.String("endKey", hex.EncodeToString(endKey)),
-			zap.Strings("allOverlapping", overlapStr)) // DEBUG
+			zap.String("startKey", hex.EncodeToString(startKey)), zap.String("endKey", hex.EncodeToString(endKey)), zap.Strings("allOverlapping", overlapStr)) // DEBUG
 
 		for _, r := range overlappingEntries {
 			// Ignore the totally-disjointed range which may be added to the list because of
@@ -302,11 +287,9 @@ func (l *RegionRangeLock) tryLockRange(startKey, endKey []byte, regionID, versio
 	}
 
 	log.Info("lock range blocked",
-		zap.String("changefeed", l.changefeedLogInfo),
+		zap.String("changefeed", l.changefeed),
 		zap.Uint64("lockID", l.id), zap.Uint64("regionID", regionID),
-		zap.String("startKey", hex.EncodeToString(startKey)),
-		zap.String("endKey", hex.EncodeToString(endKey)),
-		zap.Strings("blockedBy", overlapStr)) // DEBUG
+		zap.String("startKey", hex.EncodeToString(startKey)), zap.String("endKey", hex.EncodeToString(endKey)), zap.Strings("blockedBy", overlapStr)) // DEBUG
 
 	return LockRangeResult{
 		Status: LockRangeStatusWait,
@@ -314,9 +297,7 @@ func (l *RegionRangeLock) tryLockRange(startKey, endKey []byte, regionID, versio
 }
 
 // LockRange locks a range with specified version.
-func (l *RegionRangeLock) LockRange(
-	ctx context.Context, startKey, endKey []byte, regionID, version uint64,
-) LockRangeResult {
+func (l *RegionRangeLock) LockRange(ctx context.Context, startKey, endKey []byte, regionID, version uint64) LockRangeResult {
 	res, signalChs := l.tryLockRange(startKey, endKey, regionID, version)
 
 	if res.Status != LockRangeStatusWait {
@@ -344,27 +325,27 @@ func (l *RegionRangeLock) LockRange(
 	return res
 }
 
-// UnlockRange unlocks a range and update checkpointTs of the range to specified value.
-// If it returns true it means it is stopped and all ranges are unlocked correctly.
-func (l *RegionRangeLock) UnlockRange(
-	startKey, endKey []byte, regionID, version uint64,
-	checkpointTs ...uint64,
-) (drained bool) {
+// UnlockRange unlocks a range and update checkpointTs of the range to specivied value.
+func (l *RegionRangeLock) UnlockRange(startKey, endKey []byte, regionID, version uint64, checkpointTs uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	entry, ok := l.rangeLock.Get(rangeLockEntryWithKey(startKey))
-	if !ok {
+	item := l.rangeLock.Get(rangeLockEntryWithKey(startKey))
+
+	if item == nil {
 		log.Panic("unlocking a not locked range",
-			zap.String("changefeed", l.changefeedLogInfo),
+			zap.String("changefeed", l.changefeed),
 			zap.Uint64("regionID", regionID),
 			zap.String("startKey", hex.EncodeToString(startKey)),
 			zap.String("endKey", hex.EncodeToString(endKey)),
-			zap.Uint64("version", version))
+			zap.Uint64("version", version),
+			zap.Uint64("checkpointTs", checkpointTs))
 	}
+
+	entry := item.(*rangeLockEntry)
 	if entry.regionID != regionID {
 		log.Panic("unlocked a range but regionID mismatch",
-			zap.String("changefeed", l.changefeedLogInfo),
+			zap.String("changefeed", l.changefeed),
 			zap.Uint64("expectedRegionID", regionID),
 			zap.Uint64("foundRegionID", entry.regionID),
 			zap.String("startKey", hex.EncodeToString(startKey)),
@@ -372,22 +353,21 @@ func (l *RegionRangeLock) UnlockRange(
 	}
 	if entry != l.regionIDLock[regionID] {
 		log.Panic("range lock and region id lock mismatch when trying to unlock",
-			zap.String("changefeed", l.changefeedLogInfo),
+			zap.String("changefeed", l.changefeed),
 			zap.Uint64("unlockingRegionID", regionID),
 			zap.String("rangeLockEntry", entry.String()),
 			zap.String("regionIDLockEntry", l.regionIDLock[regionID].String()))
 	}
 	delete(l.regionIDLock, regionID)
-	l.refCount -= 1
-	drained = l.stopped && l.refCount == 0
 
 	if entry.version != version || !bytes.Equal(entry.endKey, endKey) {
 		log.Panic("unlocking region doesn't match the locked region",
-			zap.String("changefeed", l.changefeedLogInfo),
+			zap.String("changefeed", l.changefeed),
 			zap.Uint64("regionID", regionID),
 			zap.String("startKey", hex.EncodeToString(startKey)),
 			zap.String("endKey", hex.EncodeToString(endKey)),
 			zap.Uint64("version", version),
+			zap.Uint64("checkpointTs", checkpointTs),
 			zap.String("foundLockEntry", entry.String()))
 	}
 
@@ -395,40 +375,16 @@ func (l *RegionRangeLock) UnlockRange(
 		ch <- nil
 	}
 
-	if entry, ok = l.rangeLock.Delete(entry); !ok {
+	i := l.rangeLock.Delete(entry)
+	if i == nil {
 		panic("unreachable")
 	}
-
-	var newCheckpointTs uint64
-	if len(checkpointTs) > 0 {
-		newCheckpointTs = checkpointTs[0]
-	} else {
-		newCheckpointTs = entry.state.CheckpointTs.Load()
-	}
-
-	l.rangeCheckpointTs.Set(startKey, endKey, newCheckpointTs)
-	log.Debug("unlocked range",
-		zap.String("changefeed", l.changefeedLogInfo),
+	l.rangeCheckpointTs.Set(startKey, endKey, checkpointTs)
+	log.Info("unlocked range",
+		zap.String("changefeed", l.changefeed),
 		zap.Uint64("lockID", l.id), zap.Uint64("regionID", entry.regionID),
-		zap.Uint64("checkpointTs", newCheckpointTs),
-		zap.String("startKey", hex.EncodeToString(startKey)),
-		zap.String("endKey", hex.EncodeToString(endKey)))
-	return
-}
-
-// RefCount returns how many ranges are locked.
-func (l *RegionRangeLock) RefCount() uint64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.refCount
-}
-
-// Stop stops the instance.
-func (l *RegionRangeLock) Stop() (drained bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.stopped = true
-	return l.stopped && l.refCount == 0
+		zap.String("startKey", hex.EncodeToString(startKey)), zap.String("endKey", hex.EncodeToString(endKey)),
+		zap.Uint64("checkpointTs", checkpointTs))
 }
 
 const (
@@ -443,82 +399,15 @@ const (
 )
 
 // LockRangeResult represents the result of LockRange method of RegionRangeLock.
-// If Status is LockRangeStatusSuccess:
-//   - CheckpointTs will be the minimal checkpoint ts among the locked range;
-//   - LockedRange is for recording real-time state changes;
-//
+// If Status is LockRangeStatusSuccess, the CheckpointTs field will be the minimal checkpoint ts among the locked
+// range.
 // If Status is LockRangeStatusWait, it means the lock cannot be acquired immediately. WaitFn must be invoked to
 // continue waiting and acquiring the lock.
-//
 // If Status is LockRangeStatusStale, it means the LockRange request is stale because there's already a overlapping
 // locked range, whose version is greater or equals to the requested one.
 type LockRangeResult struct {
 	Status       int
 	CheckpointTs uint64
-	LockedRange  *LockedRange
 	WaitFn       func() LockRangeResult
 	RetryRanges  []ComparableSpan
-}
-
-// LockedRange is returned by `RegionRangeLock.LockRange`, which can be used to
-// collect informations for the range. And collected informations can be accessed
-// by iterating `RegionRangeLock`.
-type LockedRange struct {
-	CheckpointTs atomic.Uint64
-	Initialzied  atomic.Bool
-	Created      time.Time
-}
-
-// CollectLockedRangeAttrs collects locked range attributes.
-func (l *RegionRangeLock) CollectLockedRangeAttrs(
-	action func(regionID uint64, state *LockedRange),
-) (r CollectedLockedRangeAttrs) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	r.FastestRegion.CheckpointTs = 0
-	r.SlowestRegion.CheckpointTs = math.MaxUint64
-
-	lastEnd := l.totalSpan.Start
-	l.rangeLock.Ascend(func(item *rangeLockEntry) bool {
-		if action != nil {
-			action(item.regionID, &item.state)
-		}
-		if EndCompare(lastEnd, item.startKey) < 0 {
-			r.Holes = append(r.Holes, ComparableSpan{Start: lastEnd, End: item.startKey})
-		}
-		ckpt := item.state.CheckpointTs.Load()
-		if ckpt > r.FastestRegion.CheckpointTs {
-			r.FastestRegion.RegionID = item.regionID
-			r.FastestRegion.CheckpointTs = ckpt
-			r.FastestRegion.Initialized = item.state.Initialzied.Load()
-			r.FastestRegion.Created = item.state.Created
-		}
-		if ckpt < r.SlowestRegion.CheckpointTs {
-			r.SlowestRegion.RegionID = item.regionID
-			r.SlowestRegion.CheckpointTs = ckpt
-			r.SlowestRegion.Initialized = item.state.Initialzied.Load()
-			r.SlowestRegion.Created = item.state.Created
-		}
-		lastEnd = item.endKey
-		return true
-	})
-	if EndCompare(lastEnd, l.totalSpan.End) < 0 {
-		r.Holes = append(r.Holes, ComparableSpan{Start: lastEnd, End: l.totalSpan.End})
-	}
-	return
-}
-
-// CollectedLockedRangeAttrs returns by `RegionRangeLock.CollectedLockedRangeAttrs`.
-type CollectedLockedRangeAttrs struct {
-	Holes         []ComparableSpan
-	FastestRegion LockedRangeAttrs
-	SlowestRegion LockedRangeAttrs
-}
-
-// LockedRangeAttrs is like `LockedRange`, but only contains some read-only attributes.
-type LockedRangeAttrs struct {
-	RegionID     uint64
-	CheckpointTs uint64
-	Initialized  bool
-	Created      time.Time
 }

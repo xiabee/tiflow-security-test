@@ -14,14 +14,19 @@
 package model
 
 import (
-	"math/rand"
-	"testing"
+	"context"
+	"sync"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestPolymorphicEvent(t *testing.T) {
-	t.Parallel()
+type mounterSuite struct{}
+
+var _ = check.Suite(&mounterSuite{})
+
+func (s *mounterSuite) TestPolymorphicEvent(c *check.C) {
+	defer testleak.AfterTest(c)()
 	raw := &RawKVEntry{
 		StartTs:  99,
 		CRTs:     100,
@@ -34,97 +39,40 @@ func TestPolymorphicEvent(t *testing.T) {
 	}
 
 	polyEvent := NewPolymorphicEvent(raw)
-	require.Equal(t, raw, polyEvent.RawKV)
-	require.Equal(t, raw.CRTs, polyEvent.CRTs)
-	require.Equal(t, raw.StartTs, polyEvent.StartTs)
-	require.Equal(t, raw.RegionID, polyEvent.RegionID())
+	c.Assert(polyEvent.RawKV, check.DeepEquals, raw)
+	c.Assert(polyEvent.CRTs, check.Equals, raw.CRTs)
+	c.Assert(polyEvent.StartTs, check.Equals, raw.StartTs)
+	c.Assert(polyEvent.RegionID(), check.Equals, raw.RegionID)
 
 	rawResolved := &RawKVEntry{CRTs: resolved.CRTs, OpType: OpTypeResolved}
 	polyEvent = NewPolymorphicEvent(resolved)
-	require.Equal(t, rawResolved, polyEvent.RawKV)
-	require.Equal(t, resolved.CRTs, polyEvent.CRTs)
-	require.Equal(t, uint64(0), polyEvent.StartTs)
+	c.Assert(polyEvent.RawKV, check.DeepEquals, rawResolved)
+	c.Assert(polyEvent.CRTs, check.Equals, resolved.CRTs)
+	c.Assert(polyEvent.StartTs, check.Equals, uint64(0))
 }
 
-func TestResolvedTs(t *testing.T) {
-	t.Parallel()
+func (s *mounterSuite) TestPolymorphicEventPrepare(c *check.C) {
+	defer testleak.AfterTest(c)()
+	ctx := context.Background()
+	polyEvent := NewPolymorphicEvent(&RawKVEntry{OpType: OpTypeResolved})
+	c.Assert(polyEvent.WaitPrepare(ctx), check.IsNil)
 
-	invalidResolvedTs := ResolvedTs{Mode: -1, Ts: 1}
-	require.Equal(t, uint64(0), invalidResolvedTs.ResolvedMark())
+	polyEvent = NewPolymorphicEvent(&RawKVEntry{OpType: OpTypePut})
+	polyEvent.SetUpFinishedChan()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := polyEvent.WaitPrepare(ctx)
+		c.Assert(err, check.IsNil)
+	}()
+	polyEvent.PrepareFinished()
+	wg.Wait()
 
-	ts := rand.Uint64()%10 + 1
-	batchID := rand.Uint64()%10 + 1
-	normalResolvedTs := NewResolvedTs(ts)
-	batchResolvedTs1 := ResolvedTs{Mode: BatchResolvedMode, Ts: ts, BatchID: batchID}
-	require.True(t, normalResolvedTs.EqualOrGreater(batchResolvedTs1))
-	require.False(t, batchResolvedTs1.EqualOrGreater(normalResolvedTs))
-	require.False(t, normalResolvedTs.Less(batchResolvedTs1))
-	require.True(t, batchResolvedTs1.Less(normalResolvedTs))
-
-	batchResolvedTs2 := ResolvedTs{Mode: BatchResolvedMode, Ts: ts, BatchID: batchID + 1}
-	require.True(t, normalResolvedTs.EqualOrGreater(batchResolvedTs2))
-	require.True(t, batchResolvedTs2.EqualOrGreater(batchResolvedTs1))
-	require.True(t, batchResolvedTs2.Less(normalResolvedTs))
-	require.True(t, batchResolvedTs1.Less(batchResolvedTs2))
-
-	largerTs := ts + rand.Uint64()%10 + 1
-	largerResolvedTs := NewResolvedTs(largerTs)
-	require.True(t, largerResolvedTs.EqualOrGreater(normalResolvedTs))
-	largerBatchResolvedTs := ResolvedTs{
-		Mode:    BatchResolvedMode,
-		Ts:      largerTs,
-		BatchID: batchID,
-	}
-	require.True(t, largerBatchResolvedTs.EqualOrGreater(normalResolvedTs),
-		"largerBatchResolvedTs:%+v\nnormalResolvedTs:%+v", largerBatchResolvedTs, normalResolvedTs)
-
-	smallerResolvedTs := NewResolvedTs(0)
-	require.True(t, normalResolvedTs.EqualOrGreater(smallerResolvedTs))
-	smallerBatchResolvedTs := ResolvedTs{Mode: BatchResolvedMode, Ts: 0, BatchID: batchID}
-	require.True(t, batchResolvedTs1.EqualOrGreater(smallerBatchResolvedTs))
-}
-
-func TestComparePolymorphicEvents(t *testing.T) {
-	cases := []struct {
-		a *PolymorphicEvent
-		b *PolymorphicEvent
-	}{
-		{
-			a: NewPolymorphicEvent(&RawKVEntry{
-				OpType: OpTypeDelete,
-			}),
-			b: NewPolymorphicEvent(&RawKVEntry{
-				OpType: OpTypePut,
-			}),
-		},
-		{
-			a: NewPolymorphicEvent(&RawKVEntry{
-				OpType:   OpTypePut,
-				OldValue: []byte{0},
-				Value:    []byte{0},
-			}),
-			b: NewPolymorphicEvent(&RawKVEntry{
-				OpType: OpTypePut,
-				Value:  []byte{0},
-			}),
-		},
-	}
-	for _, item := range cases {
-		require.True(t, ComparePolymorphicEvents(item.a, item.b))
-	}
-}
-
-func TestResolvedTsEqual(t *testing.T) {
-	t1 := ResolvedTs{Mode: BatchResolvedMode, Ts: 1, BatchID: 1}
-	t2 := ResolvedTs{Mode: BatchResolvedMode, Ts: 1, BatchID: 1}
-	require.True(t, t1.Equal(t2))
-
-	t3 := NewResolvedTs(1)
-	require.False(t, t1.Equal(t3))
-
-	t4 := ResolvedTs{Mode: BatchResolvedMode, Ts: 1, BatchID: 2}
-	require.False(t, t1.Equal(t4))
-
-	t5 := ResolvedTs{Mode: BatchResolvedMode, Ts: 2, BatchID: 1}
-	require.False(t, t1.Equal(t5))
+	cctx, cancel := context.WithCancel(ctx)
+	polyEvent = NewPolymorphicEvent(&RawKVEntry{OpType: OpTypePut})
+	polyEvent.SetUpFinishedChan()
+	cancel()
+	err := polyEvent.WaitPrepare(cctx)
+	c.Assert(err, check.Equals, context.Canceled)
 }

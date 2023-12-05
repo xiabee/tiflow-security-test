@@ -35,9 +35,6 @@ type ReactorState interface {
 	// Update is called by EtcdWorker to notify the Reactor of a latest change to the Etcd state.
 	Update(key util.EtcdKey, value []byte, isInit bool) error
 
-	// UpdatePendingChange is called by EtcdWorker to notify the Reactor to apply the pending changes.
-	UpdatePendingChange()
-
 	// GetPatches is called by EtcdWorker, and should return many slices of data patches that represents the changes
 	// that a Reactor wants to apply to Etcd.
 	// a slice of DataPatch will be committed as one ETCD txn
@@ -69,4 +66,12 @@ func (s *SingleDataPatch) Patch(valueMap map[util.EtcdKey][]byte, changedSet map
 		valueMap[s.Key] = newValue
 	}
 	return nil
+}
+
+// MultiDataPatch represents an update to many keys
+type MultiDataPatch func(valueMap map[util.EtcdKey][]byte, changedSet map[util.EtcdKey]struct{}) error
+
+// Patch implements the DataPatch interface
+func (m MultiDataPatch) Patch(valueMap map[util.EtcdKey][]byte, changedSet map[util.EtcdKey]struct{}) error {
+	return m(valueMap, changedSet)
 }

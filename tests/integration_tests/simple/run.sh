@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -eu
+set -e
 
 CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source $CUR/../_utils/test_prepare
@@ -25,12 +25,12 @@ function prepare() {
 
 	TOPIC_NAME="ticdc-simple-test-$RANDOM"
 	case $SINK_TYPE in
-	kafka) SINK_URI="kafka+ssl://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&kafka-client-id=cdc_test_simple&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
+	kafka) SINK_URI="kafka+ssl://127.0.0.1:9092/$TOPIC_NAME?partition-num=4&kafka-client-id=cdc_test_simple&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
 	*) SINK_URI="mysql+ssl://normal:123456@127.0.0.1:3306/" ;;
 	esac
 	run_cdc_cli changefeed create --start-ts=$start_ts --sink-uri="$SINK_URI"
 	if [ "$SINK_TYPE" == "kafka" ]; then
-		run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760"
+		run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760"
 	fi
 }
 
@@ -97,22 +97,8 @@ function sql_test() {
 	cleanup_process $CDC_BINARY
 }
 
-function region_label_test() {
-	i=0
-	while [ -z "$(curl -X GET http://127.0.0.1:2379/pd/api/v1/config/region-label/rules 2>/dev/null | grep 'meta')" ]; do
-		i=$((i + 1))
-		if [ "$i" -gt 5 ]; then
-			echo 'Failed to verify meta region labels'
-			exit 1
-		fi
-		sleep 1
-	done
-	echo 'succeed to verify meta placement rules'
-}
-
 trap stop_tidb_cluster EXIT
 prepare $*
-region_label_test $*
 sql_test $*
 check_logs $WORK_DIR
 echo "[$(date)] <<<<<< run test case $TEST_NAME success! >>>>>>"

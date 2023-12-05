@@ -18,89 +18,104 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pingcap/tiflow/pkg/pdtime"
+
+	"github.com/pingcap/check"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tidb/store/tikv/oracle"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/etcd"
-	"github.com/pingcap/tiflow/pkg/pdutil"
-	"github.com/stretchr/testify/require"
-	"github.com/tikv/client-go/v2/oracle"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestUpdateGCSafePoint(t *testing.T) {
-	t.Parallel()
+func Test(t *testing.T) {
+	check.TestingT(t)
+}
 
+var _ = check.Suite(&gcManagerSuite{})
+
+type gcManagerSuite struct {
+}
+
+func (s *gcManagerSuite) TestUpdateGCSafePoint(c *check.C) {
+	defer testleak.AfterTest(c)()
 	mockPDClient := &MockPDClient{}
-	pdClock := pdutil.NewClock4Test()
-	gcManager := NewManager(etcd.GcServiceIDForTest(),
-		mockPDClient, pdClock).(*gcManager)
+	gcManager := NewManager(mockPDClient).(*gcManager)
 	ctx := cdcContext.NewBackendContext4Test(true)
 
 	startTs := oracle.GoTimeToTS(time.Now())
 	mockPDClient.UpdateServiceGCSafePointFunc = func(ctx context.Context, serviceID string, ttl int64, safePoint uint64) (uint64, error) {
-		require.Equal(t, startTs, safePoint)
-		require.Equal(t, gcManager.gcTTL, ttl)
-		require.Equal(t, etcd.GcServiceIDForTest(), serviceID)
+		c.Assert(safePoint, check.Equals, startTs)
+		c.Assert(ttl, check.Equals, gcManager.gcTTL)
+		c.Assert(serviceID, check.Equals, CDCServiceSafePointID)
 		return 0, nil
 	}
 	err := gcManager.TryUpdateGCSafePoint(ctx, startTs, false /* forceUpdate */)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 
 	// gcManager must not update frequent.
 	gcManager.lastUpdatedTime = time.Now()
 	startTs++
 	err = gcManager.TryUpdateGCSafePoint(ctx, startTs, false /* forceUpdate */)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 
 	// Assume that the gc safe point updated gcSafepointUpdateInterval ago.
 	gcManager.lastUpdatedTime = time.Now().Add(-gcSafepointUpdateInterval)
 	startTs++
 	mockPDClient.UpdateServiceGCSafePointFunc = func(ctx context.Context, serviceID string, ttl int64, safePoint uint64) (uint64, error) {
-		require.Equal(t, startTs, safePoint)
-		require.Equal(t, gcManager.gcTTL, ttl)
-		require.Equal(t, etcd.GcServiceIDForTest(), serviceID)
+		c.Assert(safePoint, check.Equals, startTs)
+		c.Assert(ttl, check.Equals, gcManager.gcTTL)
+		c.Assert(serviceID, check.Equals, CDCServiceSafePointID)
 		return 0, nil
 	}
 	err = gcManager.TryUpdateGCSafePoint(ctx, startTs, false /* forceUpdate */)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 
 	// Force update
 	startTs++
 	ch := make(chan struct{}, 1)
 	mockPDClient.UpdateServiceGCSafePointFunc = func(ctx context.Context, serviceID string, ttl int64, safePoint uint64) (uint64, error) {
-		require.Equal(t, startTs, safePoint)
-		require.Equal(t, gcManager.gcTTL, ttl)
-		require.Equal(t, etcd.GcServiceIDForTest(), serviceID)
+		c.Assert(safePoint, check.Equals, startTs)
+		c.Assert(ttl, check.Equals, gcManager.gcTTL)
+		c.Assert(serviceID, check.Equals, CDCServiceSafePointID)
 		ch <- struct{}{}
 		return 0, nil
 	}
 	err = gcManager.TryUpdateGCSafePoint(ctx, startTs, true /* forceUpdate */)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	select {
 	case <-time.After(5 * time.Second):
-		t.Fatal("timeout")
+		c.Fatal("timeout")
 	case <-ch:
 	}
 }
 
-func TestCheckStaleCheckpointTs(t *testing.T) {
-	t.Parallel()
-
+func (s *gcManagerSuite) TestCheckStaleCheckpointTs(c *check.C) {
+	defer testleak.AfterTest(c)()
 	mockPDClient := &MockPDClient{}
-	pdClock := pdutil.NewClock4Test()
-	gcManager := NewManager(etcd.GcServiceIDForTest(),
-		mockPDClient, pdClock).(*gcManager)
+	gcManager := NewManager(mockPDClient).(*gcManager)
+	gcManager.isTiCDCBlockGC = true
 	ctx := context.Background()
 
+	TimeAcquirer := pdtime.NewTimeAcquirer(mockPDClient)
+	go TimeAcquirer.Run(ctx)
 	time.Sleep(1 * time.Second)
+	defer TimeAcquirer.Stop()
 
-	cfID := model.DefaultChangeFeedID("cfID")
-	err := gcManager.CheckStaleCheckpointTs(ctx, cfID, oracle.GoTimeToTS(time.Now()))
-	require.Nil(t, err)
+	cCtx := cdcContext.NewContext(ctx, &cdcContext.GlobalVars{
+		TimeAcquirer: TimeAcquirer,
+	})
 
+	err := gcManager.CheckStaleCheckpointTs(cCtx, "cfID", 10)
+	c.Assert(cerror.ErrGCTTLExceeded.Equal(errors.Cause(err)), check.IsTrue)
+	c.Assert(cerror.ChangefeedFastFailError(err), check.IsTrue)
+
+	err = gcManager.CheckStaleCheckpointTs(cCtx, "cfID", oracle.GoTimeToTS(time.Now()))
+	c.Assert(err, check.IsNil)
+
+	gcManager.isTiCDCBlockGC = false
 	gcManager.lastSafePointTs = 20
-	err = gcManager.CheckStaleCheckpointTs(ctx, cfID, 10)
-	require.True(t, cerror.ErrSnapshotLostByGC.Equal(errors.Cause(err)))
-	require.True(t, cerror.IsChangefeedGCFastFailError(err))
+	err = gcManager.CheckStaleCheckpointTs(cCtx, "cfID", 10)
+	c.Assert(cerror.ErrSnapshotLostByGC.Equal(errors.Cause(err)), check.IsTrue)
+	c.Assert(cerror.ChangefeedFastFailError(err), check.IsTrue)
 }

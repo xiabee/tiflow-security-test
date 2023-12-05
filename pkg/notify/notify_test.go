@@ -15,25 +15,31 @@ package notify
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/pingcap/check"
 	"github.com/pingcap/tiflow/pkg/errors"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/atomic"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestNotifyHub(t *testing.T) {
-	t.Parallel()
+func Test(t *testing.T) {
+	check.TestingT(t)
+}
 
+type notifySuite struct{}
+
+var _ = check.Suite(&notifySuite{})
+
+func (s *notifySuite) TestNotifyHub(c *check.C) {
+	defer testleak.AfterTest(c)()
 	notifier := new(Notifier)
 	r1, err := notifier.NewReceiver(-1)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	r2, err := notifier.NewReceiver(-1)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	r3, err := notifier.NewReceiver(-1)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	finishedCh := make(chan struct{})
 	go func() {
 		for i := 0; i < 5; i++ {
@@ -49,23 +55,22 @@ func TestNotifyHub(t *testing.T) {
 
 	r2.Stop()
 	r3.Stop()
-	require.Equal(t, 0, len(notifier.receivers))
+	c.Assert(len(notifier.receivers), check.Equals, 0)
 	r4, err := notifier.NewReceiver(-1)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	<-r4.C
 	r4.Stop()
 
 	notifier2 := new(Notifier)
 	r5, err := notifier2.NewReceiver(10 * time.Millisecond)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	<-r5.C
 	r5.Stop()
 	<-finishedCh // To make the leak checker happy
 }
 
-func TestContinusStop(t *testing.T) {
-	t.Parallel()
-
+func (s *notifySuite) TestContinusStop(c *check.C) {
+	defer testleak.AfterTest(c)()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	notifier := new(Notifier)
@@ -84,7 +89,7 @@ func TestContinusStop(t *testing.T) {
 	var err error
 	for i := 0; i < n; i++ {
 		receivers[i], err = notifier.NewReceiver(10 * time.Millisecond)
-		require.Nil(t, err)
+		c.Assert(err, check.IsNil)
 	}
 	for i := 0; i < n; i++ {
 		i := i
@@ -104,60 +109,10 @@ func TestContinusStop(t *testing.T) {
 	<-ctx.Done()
 }
 
-func TestNewReceiverWithClosedNotifier(t *testing.T) {
-	t.Parallel()
-
+func (s *notifySuite) TestNewReceiverWithClosedNotifier(c *check.C) {
+	defer testleak.AfterTest(c)()
 	notifier := new(Notifier)
 	notifier.Close()
 	_, err := notifier.NewReceiver(50 * time.Millisecond)
-	require.True(t, errors.ErrOperateOnClosedNotifier.Equal(err))
-}
-
-func TestNotifierMultiple(t *testing.T) {
-	t.Parallel()
-	notifier := new(Notifier)
-
-	receiver, err := notifier.NewReceiver(-1)
-	require.NoError(t, err)
-	counter := atomic.NewInt32(0)
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			_, ok := <-receiver.C
-			if !ok {
-				return
-			}
-			counter.Add(1)
-		}
-	}()
-
-	receiver1, err := notifier.NewReceiver(time.Minute)
-	require.NoError(t, err)
-	counter1 := atomic.NewInt32(0)
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			_, ok := <-receiver1.C
-			if !ok {
-				return
-			}
-			counter1.Add(1)
-		}
-	}()
-
-	N := 5
-	for i := 0; i < N; i++ {
-		notifier.Notify()
-		time.Sleep(time.Millisecond * 100)
-	}
-
-	notifier.Close()
-	wg.Wait()
-	require.LessOrEqual(t, counter.Load(), int32(N))
-	require.LessOrEqual(t, counter1.Load(), int32(N))
+	c.Assert(errors.ErrOperateOnClosedNotifier.Equal(err), check.IsTrue)
 }

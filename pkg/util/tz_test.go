@@ -14,12 +14,16 @@
 package util
 
 import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestGetTimezoneFromZonefile(t *testing.T) {
+type tzSuite struct{}
+
+var _ = check.Suite(&tzSuite{})
+
+func (s *tzSuite) TestGetTimezoneFromZonefile(c *check.C) {
+	defer testleak.AfterTest(c)()
 	testCases := []struct {
 		hasErr   bool
 		zonefile string
@@ -32,19 +36,12 @@ func TestGetTimezoneFromZonefile(t *testing.T) {
 		{false, "/usr/share/zoneinfo/Asia/Shanghai", "Asia/Shanghai"},
 	}
 	for _, tc := range testCases {
-		loc, err := GetTimezoneFromZonefile(tc.zonefile)
+		loc, err := getTimezoneFromZonefile(tc.zonefile)
 		if tc.hasErr {
-			require.NotNil(t, err)
+			c.Assert(err, check.NotNil)
 		} else {
-			require.Nil(t, err)
-			require.Equal(t, tc.name, loc.String())
+			c.Assert(err, check.IsNil)
+			c.Assert(loc.String(), check.Equals, tc.name)
 		}
 	}
-}
-
-func TestGetTimezoneName(t *testing.T) {
-	tz, err := GetTimezone("")
-	require.NoError(t, err)
-	require.True(t, len(GetTimeZoneName(tz)) != 0)
-	require.True(t, len(GetTimeZoneName(nil)) == 0)
 }

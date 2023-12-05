@@ -34,7 +34,7 @@ var (
 // ReleaseSemver returns a valid Semantic Versions or an empty if the
 // ReleaseVersion is not set at compile time.
 func ReleaseSemver() string {
-	s := SanitizeVersion(ReleaseVersion)
+	s := removeVAndHash(ReleaseVersion)
 	v, err := semver.NewVersion(s)
 	if err != nil {
 		return ""
@@ -43,8 +43,8 @@ func ReleaseSemver() string {
 }
 
 // LogVersionInfo prints the CDC version information.
-func LogVersionInfo(app string) {
-	log.Info("Welcome to "+app,
+func LogVersionInfo() {
+	log.Info("Welcome to Change Data Capture (CDC)",
 		zap.String("release-version", ReleaseVersion),
 		zap.String("git-hash", GitHash),
 		zap.String("git-branch", GitBranch),

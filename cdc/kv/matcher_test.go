@@ -16,12 +16,18 @@ package kv
 import (
 	"testing"
 
+	"github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/cdcpb"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 	"github.com/stretchr/testify/require"
 )
 
-func TestMatchRow(t *testing.T) {
-	t.Parallel()
+type matcherSuite struct{}
+
+var _ = check.Suite(&matcherSuite{})
+
+func (s *matcherSuite) TestMatchRow(c *check.C) {
+	defer testleak.AfterTest(c)()
 	matcher := newMatcher()
 	matcher.putPrewriteRow(&cdcpb.Event_Row{
 		StartTs: 1,
@@ -45,11 +51,11 @@ func TestMatchRow(t *testing.T) {
 		Key:     []byte("k1"),
 	}
 	ok := matcher.matchRow(commitRow1, true)
-	require.False(t, ok)
-	require.Equal(t, &cdcpb.Event_Row{
+	c.Assert(ok, check.IsFalse)
+	c.Assert(commitRow1, check.DeepEquals, &cdcpb.Event_Row{
 		StartTs: 1,
 		Key:     []byte("k1"),
-	}, commitRow1)
+	})
 
 	// test match commit
 	commitRow2 := &cdcpb.Event_Row{
@@ -58,18 +64,18 @@ func TestMatchRow(t *testing.T) {
 		Key:      []byte("k1"),
 	}
 	ok = matcher.matchRow(commitRow2, true)
-	require.True(t, ok)
-	require.Equal(t, &cdcpb.Event_Row{
+	c.Assert(ok, check.IsTrue)
+	c.Assert(commitRow2, check.DeepEquals, &cdcpb.Event_Row{
 		StartTs:  2,
 		CommitTs: 3,
 		Key:      []byte("k1"),
 		Value:    []byte("v2"),
 		OldValue: []byte("v3"),
-	}, commitRow2)
+	})
 }
 
-func TestMatchFakePrewrite(t *testing.T) {
-	t.Parallel()
+func (s *matcherSuite) TestMatchFakePrewrite(c *check.C) {
+	defer testleak.AfterTest(c)()
 	matcher := newMatcher()
 	matcher.putPrewriteRow(&cdcpb.Event_Row{
 		StartTs:  1,
@@ -90,14 +96,85 @@ func TestMatchFakePrewrite(t *testing.T) {
 		Key:      []byte("k1"),
 	}
 	ok := matcher.matchRow(commitRow1, true)
-	require.Equal(t, &cdcpb.Event_Row{
+	c.Assert(commitRow1, check.DeepEquals, &cdcpb.Event_Row{
 		StartTs:  1,
 		CommitTs: 2,
 		Key:      []byte("k1"),
 		Value:    []byte("v1"),
 		OldValue: []byte("v3"),
-	}, commitRow1)
-	require.True(t, ok)
+	})
+	c.Assert(ok, check.IsTrue)
+}
+
+func (s *matcherSuite) TestMatchMatchCachedRow(c *check.C) {
+	defer testleak.AfterTest(c)()
+	matcher := newMatcher()
+	c.Assert(len(matcher.matchCachedRow(true)), check.Equals, 0)
+	matcher.cacheCommitRow(&cdcpb.Event_Row{
+		StartTs:  1,
+		CommitTs: 2,
+		Key:      []byte("k1"),
+	})
+	matcher.cacheCommitRow(&cdcpb.Event_Row{
+		StartTs:  3,
+		CommitTs: 4,
+		Key:      []byte("k2"),
+	})
+	matcher.cacheCommitRow(&cdcpb.Event_Row{
+		StartTs:  4,
+		CommitTs: 5,
+		Key:      []byte("k3"),
+	})
+	c.Assert(len(matcher.matchCachedRow(true)), check.Equals, 0)
+
+	matcher.cacheCommitRow(&cdcpb.Event_Row{
+		StartTs:  1,
+		CommitTs: 2,
+		Key:      []byte("k1"),
+	})
+	matcher.cacheCommitRow(&cdcpb.Event_Row{
+		StartTs:  3,
+		CommitTs: 4,
+		Key:      []byte("k2"),
+	})
+	matcher.cacheCommitRow(&cdcpb.Event_Row{
+		StartTs:  4,
+		CommitTs: 5,
+		Key:      []byte("k3"),
+	})
+
+	matcher.putPrewriteRow(&cdcpb.Event_Row{
+		StartTs:  1,
+		Key:      []byte("k1"),
+		Value:    []byte("v1"),
+		OldValue: []byte("ov1"),
+	})
+	matcher.putPrewriteRow(&cdcpb.Event_Row{
+		StartTs:  3,
+		Key:      []byte("k2"),
+		Value:    []byte("v2"),
+		OldValue: []byte("ov2"),
+	})
+	matcher.putPrewriteRow(&cdcpb.Event_Row{
+		StartTs:  4,
+		Key:      []byte("k2"),
+		Value:    []byte("v3"),
+		OldValue: []byte("ov3"),
+	})
+
+	c.Assert(matcher.matchCachedRow(true), check.DeepEquals, []*cdcpb.Event_Row{{
+		StartTs:  1,
+		CommitTs: 2,
+		Key:      []byte("k1"),
+		Value:    []byte("v1"),
+		OldValue: []byte("ov1"),
+	}, {
+		StartTs:  3,
+		CommitTs: 4,
+		Key:      []byte("k2"),
+		Value:    []byte("v2"),
+		OldValue: []byte("ov2"),
+	}})
 }
 
 func TestMatchRowUninitialized(t *testing.T) {
@@ -164,77 +241,6 @@ func TestMatchRowUninitialized(t *testing.T) {
 		Value:    []byte("v3"),
 		OldValue: []byte("v4"),
 	}, rows[0])
-}
-
-func TestMatchMatchCachedRow(t *testing.T) {
-	t.Parallel()
-	matcher := newMatcher()
-	require.Equal(t, 0, len(matcher.matchCachedRow(true)))
-	matcher.cacheCommitRow(&cdcpb.Event_Row{
-		StartTs:  1,
-		CommitTs: 2,
-		Key:      []byte("k1"),
-	})
-	matcher.cacheCommitRow(&cdcpb.Event_Row{
-		StartTs:  3,
-		CommitTs: 4,
-		Key:      []byte("k2"),
-	})
-	matcher.cacheCommitRow(&cdcpb.Event_Row{
-		StartTs:  4,
-		CommitTs: 5,
-		Key:      []byte("k3"),
-	})
-	require.Equal(t, 0, len(matcher.matchCachedRow(true)))
-
-	matcher.cacheCommitRow(&cdcpb.Event_Row{
-		StartTs:  1,
-		CommitTs: 2,
-		Key:      []byte("k1"),
-	})
-	matcher.cacheCommitRow(&cdcpb.Event_Row{
-		StartTs:  3,
-		CommitTs: 4,
-		Key:      []byte("k2"),
-	})
-	matcher.cacheCommitRow(&cdcpb.Event_Row{
-		StartTs:  4,
-		CommitTs: 5,
-		Key:      []byte("k3"),
-	})
-
-	matcher.putPrewriteRow(&cdcpb.Event_Row{
-		StartTs:  1,
-		Key:      []byte("k1"),
-		Value:    []byte("v1"),
-		OldValue: []byte("ov1"),
-	})
-	matcher.putPrewriteRow(&cdcpb.Event_Row{
-		StartTs:  3,
-		Key:      []byte("k2"),
-		Value:    []byte("v2"),
-		OldValue: []byte("ov2"),
-	})
-	matcher.putPrewriteRow(&cdcpb.Event_Row{
-		StartTs:  4,
-		Key:      []byte("k2"),
-		Value:    []byte("v3"),
-		OldValue: []byte("ov3"),
-	})
-
-	require.Equal(t, []*cdcpb.Event_Row{{
-		StartTs:  1,
-		CommitTs: 2,
-		Key:      []byte("k1"),
-		Value:    []byte("v1"),
-		OldValue: []byte("ov1"),
-	}, {
-		StartTs:  3,
-		CommitTs: 4,
-		Key:      []byte("k2"),
-		Value:    []byte("v2"),
-		OldValue: []byte("ov2"),
-	}}, matcher.matchCachedRow(true))
 }
 
 func TestMatchMatchCachedRollbackRow(t *testing.T) {

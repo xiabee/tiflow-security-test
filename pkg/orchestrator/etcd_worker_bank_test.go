@@ -20,21 +20,19 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
+	"github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/etcd"
-	"github.com/pingcap/tiflow/pkg/migrate"
+	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/orchestrator/util"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 	"go.uber.org/zap"
 )
 
 type bankReactorState struct {
-	t            *testing.T
+	c            *check.C
 	account      []int
 	pendingPatch [][]DataPatch
 	index        int
@@ -43,11 +41,8 @@ type bankReactorState struct {
 
 const bankTestPrefix = "/ticdc/test/bank/"
 
-func (b *bankReactorState) UpdatePendingChange() {
-}
-
 func (b *bankReactorState) Update(key util.EtcdKey, value []byte, isInit bool) error {
-	require.True(b.t, strings.HasPrefix(key.String(), bankTestPrefix))
+	b.c.Assert(strings.HasPrefix(key.String(), bankTestPrefix), check.IsTrue)
 	indexStr := key.String()[len(bankTestPrefix):]
 	b.account[b.atoi(indexStr)] = b.atoi(string(value))
 	return nil
@@ -67,12 +62,12 @@ func (b *bankReactorState) Check() {
 	if sum != 0 {
 		log.Info("show account", zap.Int("index", b.index), zap.Int("sum", sum), zap.Ints("account", b.account))
 	}
-	require.Equal(b.t, sum, 0, fmt.Sprintf("not ft:%t", b.notFirstTick))
+	b.c.Assert(sum, check.Equals, 0, check.Commentf("not ft:%t", b.notFirstTick))
 }
 
 func (b *bankReactorState) atoi(value string) int {
 	i, err := strconv.Atoi(value)
-	require.Nil(b.t, err)
+	b.c.Assert(err, check.IsNil)
 	return i
 }
 
@@ -119,38 +114,37 @@ func (b *bankReactor) Tick(ctx context.Context, state ReactorState) (nextState R
 	bankState.TransferRandomly(rand.Intn(b.accountNumber/5 + 2))
 	// there is a 20% chance of restarting etcd worker
 	if rand.Intn(10) < 2 {
-		err = errors.ErrReactorFinished.GenWithStackByArgs()
+		err = cerror.ErrReactorFinished.GenWithStackByArgs()
 	}
 	bankState.notFirstTick = true
 	return state, err
 }
 
-func TestEtcdBank(t *testing.T) {
-	_ = failpoint.Enable("github.com/pingcap/tiflow/pkg/orchestrator/InjectProgressRequestAfterCommit", "10%return(true)")
+func (s *etcdWorkerSuite) TestEtcdBank(c *check.C) {
+	defer testleak.AfterTest(c)()
+
+	_ = failpoint.Enable("github.com/pingcap/ticdc/pkg/orchestrator/InjectProgressRequestAfterCommit", "10%return(true)")
 	defer func() {
-		_ = failpoint.Disable("github.com/pingcap/tiflow/pkg/orchestrator/InjectProgressRequestAfterCommit")
+		_ = failpoint.Disable("github.com/pingcap/ticdc/pkg/orchestrator/InjectProgressRequestAfterCommit")
 	}()
 
 	totalAccountNumber := 25
 	workerNumber := 10
 	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
 
-	newClient, closer := setUpTest(t)
+	newClient, closer := setUpTest(c)
 	defer closer()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	cli := newClient()
-	cdcCli, err := etcd.NewCDCEtcdClient(ctx, cli.Unwrap(), "default")
-	require.Nil(t, err)
-
 	defer func() {
 		_ = cli.Unwrap().Close()
 	}()
 
-	defer cancel()
 	for i := 0; i < totalAccountNumber; i++ {
 		_, err := cli.Put(ctx, fmt.Sprintf("%s%d", bankTestPrefix, i), "0")
-		require.Nil(t, err)
+		c.Assert(err, check.IsNil)
 	}
 
 	for i := 0; i < workerNumber; i++ {
@@ -159,16 +153,15 @@ func TestEtcdBank(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				worker, err := NewEtcdWorker(cdcCli, bankTestPrefix, &bankReactor{
+				worker, err := NewEtcdWorker(cli, bankTestPrefix, &bankReactor{
 					accountNumber: totalAccountNumber,
-				}, &bankReactorState{t: t, index: i, account: make([]int, totalAccountNumber)},
-					&migrate.NoOpMigrator{})
-				require.Nil(t, err)
-				err = worker.Run(ctx, nil, 100*time.Millisecond, "owner")
+				}, &bankReactorState{c: c, index: i, account: make([]int, totalAccountNumber)})
+				c.Assert(err, check.IsNil)
+				err = worker.Run(ctx, nil, 100*time.Millisecond, "127.0.0.1", "")
 				if err == nil || err.Error() == "etcdserver: request timed out" {
 					continue
 				}
-				require.Contains(t, err.Error(), "context deadline exceeded")
+				c.Assert(err, check.ErrorMatches, ".*context deadline exceeded.*")
 				return
 			}
 		}()

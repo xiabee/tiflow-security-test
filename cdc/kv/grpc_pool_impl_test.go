@@ -15,19 +15,19 @@ package kv
 
 import (
 	"context"
-	"testing"
 
+	"github.com/pingcap/check"
 	"github.com/pingcap/tiflow/pkg/security"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-// Use clientSuite for some special reasons, the embed etcd uses zap as the only candidate
-// logger and in the logger initialization it also initializes the grpclog/loggerv2, which
+// Use etcdSuite for some special reasons, the embed etcd uses zap as the only candidate
+// logger and in the logger initializtion it also initializes the grpclog/loggerv2, which
 // is not a thread-safe operation and it must be called before any gRPC functions
 // ref: https://github.com/grpc/grpc-go/blob/master/grpclog/loggerv2.go#L67-L72
-func TestConnArray(t *testing.T) {
-	t.Parallel()
-
+func (s *etcdSuite) TestConnArray(c *check.C) {
+	defer testleak.AfterTest(c)()
+	defer s.TearDownTest(c)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -35,33 +35,33 @@ func TestConnArray(t *testing.T) {
 	defer pool.Close()
 	addr := "127.0.0.1:20161"
 	conn, err := pool.GetConn(addr)
-	require.Nil(t, err)
-	require.Equal(t, int64(1), conn.active)
+	c.Assert(err, check.IsNil)
+	c.Assert(conn.active, check.Equals, int64(1))
 	pool.ReleaseConn(conn, addr)
-	require.Equal(t, int64(0), conn.active)
+	c.Assert(conn.active, check.Equals, int64(0))
 
 	lastConn := conn
 	// First grpcConnCapacity*2 connections will use initial two connections.
 	for i := 0; i < grpcConnCapacity*2; i++ {
 		conn, err := pool.GetConn(addr)
-		require.Nil(t, err)
-		require.NotSame(t, conn.ClientConn, lastConn.ClientConn)
-		require.Equal(t, int64(i)/2+1, conn.active)
+		c.Assert(err, check.IsNil)
+		c.Assert(lastConn.ClientConn, check.Not(check.Equals), conn.ClientConn)
+		c.Assert(conn.active, check.Equals, int64(i)/2+1)
 		lastConn = conn
 	}
 	// The following grpcConnCapacity*2 connections will trigger resize of connection array.
 	for i := 0; i < grpcConnCapacity*2; i++ {
 		conn, err := pool.GetConn(addr)
-		require.Nil(t, err)
-		require.NotSame(t, conn.ClientConn, lastConn.ClientConn)
-		require.Equal(t, int64(i)/2+1, conn.active)
+		c.Assert(err, check.IsNil)
+		c.Assert(lastConn.ClientConn, check.Not(check.Equals), conn.ClientConn)
+		c.Assert(conn.active, check.Equals, int64(i)/2+1)
 		lastConn = conn
 	}
 }
 
-func TestConnArrayRecycle(t *testing.T) {
-	t.Parallel()
-
+func (s *etcdSuite) TestConnArrayRecycle(c *check.C) {
+	defer testleak.AfterTest(c)()
+	defer s.TearDownTest(c)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -75,7 +75,7 @@ func TestConnArrayRecycle(t *testing.T) {
 	// get conn for 6000 times, and grpc pool will create 6 buckets
 	for i := 0; i < grpcConnCapacity*bucket; i++ {
 		conn, err := pool.GetConn(addr)
-		require.Nil(t, err)
+		c.Assert(err, check.IsNil)
 		if i%(grpcConnCapacity*resizeBucketStep) == 0 {
 			sharedConns[i/grpcConnCapacity] = conn
 		}
@@ -84,22 +84,22 @@ func TestConnArrayRecycle(t *testing.T) {
 		}
 	}
 	for i := 2; i < bucket; i++ {
-		require.Equal(t, int64(grpcConnCapacity), sharedConns[i].active)
+		c.Assert(sharedConns[i].active, check.Equals, int64(grpcConnCapacity))
 		for j := 0; j < grpcConnCapacity; j++ {
 			pool.ReleaseConn(sharedConns[i], addr)
 		}
 	}
 	empty := pool.bucketConns[addr].recycle()
-	require.False(t, empty)
-	require.Len(t, pool.bucketConns[addr].conns, 2)
+	c.Assert(empty, check.IsFalse)
+	c.Assert(pool.bucketConns[addr].conns, check.HasLen, 2)
 
 	for i := 0; i < 2; i++ {
-		require.Equal(t, int64(grpcConnCapacity), sharedConns[i].active)
+		c.Assert(sharedConns[i].active, check.Equals, int64(grpcConnCapacity))
 		for j := 0; j < grpcConnCapacity; j++ {
 			pool.ReleaseConn(sharedConns[i], addr)
 		}
 	}
 	empty = pool.bucketConns[addr].recycle()
-	require.True(t, empty)
-	require.Len(t, pool.bucketConns[addr].conns, 0)
+	c.Assert(empty, check.IsTrue)
+	c.Assert(pool.bucketConns[addr].conns, check.HasLen, 0)
 }

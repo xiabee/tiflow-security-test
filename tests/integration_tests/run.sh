@@ -4,7 +4,7 @@ set -eu
 
 OUT_DIR=/tmp/tidb_cdc_test
 CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export PATH=$PATH:$CUR/_utils:$CUR/../bin
+export PATH=$PATH:$CUR/_utils:$CUR/../../bin
 
 mkdir -p $OUT_DIR || true
 
@@ -14,8 +14,8 @@ if [ "${1-}" = '--debug' ]; then
 
 	rm -rf $WORK_DIR && mkdir -p $WORK_DIR
 
-	PATH="$CUR/../bin:$CUR/_utils:$PATH" \
-		LD_LIBRARY_PATH="$CUR/../bin:$CUR/_utils:$PATH" \
+	PATH="$CUR/../../bin:$CUR/_utils:$PATH" \
+		LD_LIBRARY_PATH="$CUR/../../bin:$CUR/_utils:$PATH" \
 		OUT_DIR=$OUT_DIR \
 		TEST_NAME="debug" \
 		start_tidb_cluster --workdir $WORK_DIR
@@ -37,8 +37,8 @@ run_case() {
 	local script=$2
 	local sink_type=$3
 	echo "=================>> Running test $script using Sink-Type: $sink_type... <<================="
-	PATH="$CUR/../bin:$CUR/_utils:$PATH" \
-		LD_LIBRARY_PATH="$CUR/../bin:$CUR/_utils:$PATH" \
+	PATH="$CUR/../../bin:$CUR/_utils:$PATH" \
+		LD_LIBRARY_PATH="$CUR/../../bin:$CUR/_utils:$PATH" \
 		OUT_DIR=$OUT_DIR \
 		TEST_NAME=$case \
 		bash "$script" "$sink_type"
@@ -52,26 +52,12 @@ test_case=$2
 if [ -z "$test_case" ]; then
 	test_case="*"
 fi
-
-start_at=$3
-run_test="no"
-if [ -z "$start_at" ]; then
-	run_test="yes"
-else
-	test_case="*"
-fi
-
-# Print environment variables.
-env
 set -eu
 
 if [ "$test_case" == "*" ]; then
 	for script in $CUR/*/run.sh; do
 		test_name="$(basename "$(dirname "$script")")"
-		if [ "$run_test" == "yes" ] || [ "$start_at" == "$test_name" ]; then
-			run_test="yes"
-			run_case $test_name $script $sink_type
-		fi
+		run_case $test_name $script $sink_type
 	done
 else
 	for name in $test_case; do

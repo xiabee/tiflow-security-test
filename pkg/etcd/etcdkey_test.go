@@ -14,128 +14,112 @@
 package etcd
 
 import (
-	"fmt"
-	"testing"
-
-	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestEtcdKey(t *testing.T) {
+type etcdkeySuite struct{}
+
+var _ = check.Suite(&etcdkeySuite{})
+
+func (s *etcdkeySuite) TestEtcdKey(c *check.C) {
+	defer testleak.AfterTest(c)()
 	testcases := []struct {
 		key      string
 		expected *CDCKey
 	}{{
-		key: fmt.Sprintf("%s/owner/223176cb44d20a13", DefaultClusterAndMetaPrefix),
+		key: "/tidb/cdc/owner/223176cb44d20a13",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeOwner,
 			OwnerLeaseID: "223176cb44d20a13",
-			ClusterID:    DefaultCDCClusterID,
 		},
 	}, {
-		key: fmt.Sprintf("%s/owner", DefaultClusterAndMetaPrefix),
+		key: "/tidb/cdc/owner",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeOwner,
 			OwnerLeaseID: "",
-			ClusterID:    DefaultCDCClusterID,
 		},
 	}, {
-		key: fmt.Sprintf("%s/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
-			DefaultClusterAndMetaPrefix),
+		key: "/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
 		expected: &CDCKey{
 			Tp:        CDCKeyTypeCapture,
 			CaptureID: "6bbc01c8-0605-4f86-a0f9-b3119109b225",
-			ClusterID: DefaultCDCClusterID,
 		},
 	}, {
-		key: DefaultClusterAndNamespacePrefix +
-			"/changefeed/info/test-_@#$%changefeed",
+		key: "/tidb/cdc/changefeed/info/test-_@#$%changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeChangefeedInfo,
-			ChangefeedID: model.DefaultChangeFeedID("test-_@#$%changefeed"),
-			ClusterID:    DefaultCDCClusterID,
-			Namespace:    model.DefaultNamespace,
+			ChangefeedID: "test-_@#$%changefeed",
 		},
 	}, {
-		key: DefaultClusterAndNamespacePrefix +
-			"/changefeed/info/test/changefeed",
+		key: "/tidb/cdc/changefeed/info/test/changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeChangefeedInfo,
-			ChangefeedID: model.DefaultChangeFeedID("test/changefeed"),
-			ClusterID:    DefaultCDCClusterID,
-			Namespace:    model.DefaultNamespace,
+			ChangefeedID: "test/changefeed",
 		},
 	}, {
-		key: DefaultClusterAndNamespacePrefix +
-			"/changefeed/status/test-changefeed",
+		key: "/tidb/cdc/job/test-changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeChangeFeedStatus,
-			ChangefeedID: model.DefaultChangeFeedID("test-changefeed"),
-			ClusterID:    DefaultCDCClusterID,
-			Namespace:    model.DefaultNamespace,
+			ChangefeedID: "test-changefeed",
 		},
 	}, {
-		key: "/tidb/cdc/default/name/task" +
-			"/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-changefeed",
-		expected: &CDCKey{
-			Tp: CDCKeyTypeTaskPosition,
-			ChangefeedID: model.ChangeFeedID{
-				Namespace: "name",
-				ID:        "test-changefeed",
-			},
-			CaptureID: "6bbc01c8-0605-4f86-a0f9-b3119109b225",
-			ClusterID: DefaultCDCClusterID,
-			Namespace: "name",
-		},
-	}, {
-		key: DefaultClusterAndNamespacePrefix +
-			"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test/changefeed",
+		key: "/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeTaskPosition,
-			ChangefeedID: model.DefaultChangeFeedID("test/changefeed"),
+			ChangefeedID: "test-changefeed",
 			CaptureID:    "6bbc01c8-0605-4f86-a0f9-b3119109b225",
-			ClusterID:    DefaultCDCClusterID,
-			Namespace:    model.DefaultNamespace,
 		},
 	}, {
-		key: DefaultClusterAndNamespacePrefix + "/upstream/12345",
+		key: "/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test/changefeed",
 		expected: &CDCKey{
-			Tp:         CDCKeyTypeUpStream,
-			ClusterID:  DefaultCDCClusterID,
-			Namespace:  model.DefaultNamespace,
-			UpstreamID: 12345,
+			Tp:           CDCKeyTypeTaskPosition,
+			ChangefeedID: "test/changefeed",
+			CaptureID:    "6bbc01c8-0605-4f86-a0f9-b3119109b225",
 		},
 	}, {
-		key: fmt.Sprintf("%s%s", DefaultClusterAndMetaPrefix, metaVersionKey),
+		key: "/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-changefeed",
 		expected: &CDCKey{
-			Tp:        CDCKeyTypeMetaVersion,
-			ClusterID: DefaultCDCClusterID,
+			Tp:           CDCKeyTypeTaskStatus,
+			ChangefeedID: "test-changefeed",
+			CaptureID:    "6bbc01c8-0605-4f86-a0f9-b3119109b225",
+		},
+	}, {
+		key: "/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-changefeed",
+		expected: &CDCKey{
+			Tp:           CDCKeyTypeTaskWorkload,
+			ChangefeedID: "test-changefeed",
+			CaptureID:    "6bbc01c8-0605-4f86-a0f9-b3119109b225",
 		},
 	}}
 	for _, tc := range testcases {
 		k := new(CDCKey)
-		err := k.Parse(DefaultCDCClusterID, tc.key)
-		require.NoError(t, err)
-		require.Equal(t, k, tc.expected)
-		require.Equal(t, k.String(), tc.key)
+		err := k.Parse(tc.key)
+		c.Assert(err, check.IsNil)
+		c.Assert(k, check.DeepEquals, tc.expected)
+		c.Assert(k.String(), check.Equals, tc.key)
 	}
 }
 
-func TestEtcdKeyParseError(t *testing.T) {
+func (s *etcdkeySuite) TestEtcdKeyParseError(c *check.C) {
+	defer testleak.AfterTest(c)()
 	testCases := []struct {
 		key   string
 		error bool
 	}{{
-		key: DefaultClusterAndNamespacePrefix +
-			"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test/changefeed",
+		key:   "/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test/changefeed",
 		error: false,
 	}, {
-		key: DefaultClusterAndNamespacePrefix +
-			"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/",
+		key:   "/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/",
 		error: false,
 	}, {
-		key: DefaultClusterAndNamespacePrefix +
-			"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+		key:   "/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+		error: true,
+	}, {
+		key:   "/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+		error: true,
+	}, {
+		key:   "/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225",
 		error: true,
 	}, {
 		key:   "/tidb/cd",
@@ -143,25 +127,14 @@ func TestEtcdKeyParseError(t *testing.T) {
 	}, {
 		key:   "/tidb/cdc/",
 		error: true,
-	}, {
-		key:   "/tidb/cdc/default/__meta_data__/abcd",
-		error: true,
-	}, {
-		key:   "/tidb/cdc/default/default/abcd",
-		error: true,
 	}}
 	for _, tc := range testCases {
 		k := new(CDCKey)
-		err := k.Parse(DefaultCDCClusterID, tc.key)
+		err := k.Parse(tc.key)
 		if tc.error {
-			require.NotNil(t, err)
+			c.Assert(err, check.NotNil)
 		} else {
-			require.Nil(t, err)
+			c.Assert(err, check.IsNil)
 		}
 	}
-	k := new(CDCKey)
-	k.Tp = CDCKeyTypeUpStream + 1
-	require.Panics(t, func() {
-		_ = k.String()
-	})
 }

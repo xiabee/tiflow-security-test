@@ -46,7 +46,6 @@ key-path = "$TLS_DIR/server-key.pem"
 EOF
 
 echo "Starting TLS PD..."
-pd-server --version
 pd-server \
 	--client-urls https://${TLS_PD_HOST}:${TLS_PD_PORT} \
 	--peer-urls https://${TLS_PD_HOST}:${TLS_PD_PEER_PORT} \
@@ -65,7 +64,7 @@ done
 while [ -z "$(curl --cacert $TLS_DIR/ca.pem \
 	--cert $TLS_DIR/client.pem \
 	--key $TLS_DIR/client-key.pem \
-	https://${TLS_PD_HOST}:${TLS_PD_PORT}/pd/api/v1/health 2>/dev/null | grep 'health' | grep 'true')" ]; do
+	https://${TLS_PD_HOST}:${TLS_PD_PORT}/pd/health 2>/dev/null | grep 'health' | grep 'true')" ]; do
 	sleep 1
 done
 
@@ -103,7 +102,7 @@ cluster-ssl-key = "$TLS_DIR/server-key.pem"
 EOF
 
 echo "Starting TLS TiKV..."
-tikv-server --version
+
 # Uncomment to turn on grpc versbose log.
 # GRPC_VERBOSITY=debug \
 # GRPC_TRACE=server_channel,call_error,handshaker,tsi \
@@ -118,7 +117,6 @@ tikv-server \
 sleep 2
 
 echo "Starting TLS TiDB..."
-tidb-server -V
 tidb-server \
 	-P ${TLS_TIDB_PORT} \
 	-config "$OUT_DIR/tidb-config-tls.toml" \
@@ -144,7 +142,7 @@ run_sql "update mysql.tidb set variable_value='60m' where variable_name='tikv_gc
 	--ssl-key=$TLS_DIR/server-key.pem
 
 echo "Starting CDC state checker..."
-cd $CUR/../../utils/cdc_state_checker
+cd $CUR/../../../testing_utils/cdc_state_checker
 if [ ! -f ./cdc_state_checker ]; then
 	GO111MODULE=on go build
 fi

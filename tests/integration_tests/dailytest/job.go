@@ -19,7 +19,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/types"
 )
 
@@ -139,9 +139,14 @@ func doDDLProcess(table *table, db *sql.DB) {
 	// do add  column ddl
 	index = randInt(2, len(table.columns)-1)
 	colName := randString(5)
-	tp := types.NewFieldType(mysql.TypeVarchar)
-	tp.SetFlen(45)
-	col = &column{name: colName, tp: tp}
+
+	col = &column{
+		name: colName,
+		tp: &types.FieldType{
+			Tp:   mysql.TypeVarchar,
+			Flen: 45,
+		},
+	}
 
 	newCols := make([]*column, 0, len(table.columns)+1)
 	newCols = append(newCols, table.columns[:index]...)

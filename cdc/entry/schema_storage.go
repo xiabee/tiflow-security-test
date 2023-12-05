@@ -22,29 +22,27 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	timodel "github.com/pingcap/parser/model"
 	timeta "github.com/pingcap/tidb/meta"
-	timodel "github.com/pingcap/tidb/parser/model"
-	schema "github.com/pingcap/tiflow/cdc/entry/schema"
+	"github.com/pingcap/tiflow/cdc/entry/schema"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/retry"
-	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 // SchemaStorage stores the schema information with multi-version
 type SchemaStorage interface {
-	// GetSnapshot returns the nearest snapshot which currentTs is less than or
-	// equal to the ts.
-	// It may block caller when ts is larger than the resolvedTs of SchemaStorage.
+	// GetSnapshot returns the snapshot which of ts is specified.
+	// It may block caller when ts is larger than ResolvedTs.
 	GetSnapshot(ctx context.Context, ts uint64) (*schema.Snapshot, error)
 	// GetLastSnapshot returns the last snapshot
 	GetLastSnapshot() *schema.Snapshot
 	// HandleDDLJob creates a new snapshot in storage and handles the ddl job
 	HandleDDLJob(job *timodel.Job) error
-	// AdvanceResolvedTs advances the resolved ts
+	// AdvanceResolvedTs advances the resolved
 	AdvanceResolvedTs(ts uint64)
 	// ResolvedTs returns the resolved ts of the schema storage
 	ResolvedTs() uint64
@@ -54,58 +52,42 @@ type SchemaStorage interface {
 }
 
 type schemaStorageImpl struct {
-	snaps         []*schema.Snapshot
-	snapsMu       sync.RWMutex
-	gcTs          uint64
-	resolvedTs    uint64
-	schemaVersion int64
+	snaps      []*schema.Snapshot
+	snapsMu    sync.RWMutex
+	gcTs       uint64
+	resolvedTs uint64
 
+	filter         *filter.Filter
 	forceReplicate bool
 
-	id   model.ChangeFeedID
-	role util.Role
+	id model.ChangeFeedID
 }
 
 // NewSchemaStorage creates a new schema storage
 func NewSchemaStorage(
-	meta *timeta.Meta, startTs uint64,
+	meta *timeta.Meta, startTs uint64, filter *filter.Filter,
 	forceReplicate bool, id model.ChangeFeedID,
-	role util.Role, filter filter.Filter,
 ) (SchemaStorage, error) {
-	var (
-		snap    *schema.Snapshot
-		err     error
-		version int64
-	)
+	var snap *schema.Snapshot
+	var err error
 	if meta == nil {
 		snap = schema.NewEmptySnapshot(forceReplicate)
 	} else {
-		snap, err = schema.NewSnapshotFromMeta(meta, startTs, forceReplicate, filter)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		version, err = schema.GetSchemaVersion(meta)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
+		snap, err = schema.NewSnapshotFromMeta(meta, startTs, forceReplicate)
 	}
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-
 	schema := &schemaStorageImpl{
 		snaps:          []*schema.Snapshot{snap},
 		resolvedTs:     startTs,
+		filter:         filter,
 		forceReplicate: forceReplicate,
 		id:             id,
-		schemaVersion:  version,
-		role:           role,
 	}
 	return schema, nil
 }
 
-// getSnapshot returns the snapshot which currentTs is less than(but most close to)
-// or equal to the ts.
 func (s *schemaStorageImpl) getSnapshot(ts uint64) (*schema.Snapshot, error) {
 	gcTs := atomic.LoadUint64(&s.gcTs)
 	if ts < gcTs {
@@ -119,16 +101,10 @@ func (s *schemaStorageImpl) getSnapshot(ts uint64) (*schema.Snapshot, error) {
 	}
 	s.snapsMu.RLock()
 	defer s.snapsMu.RUnlock()
-	// Here we search for the first snapshot whose currentTs is larger than ts.
-	// So the result index -1 is the snapshot we want.
 	i := sort.Search(len(s.snaps), func(i int) bool {
 		return s.snaps[i].CurrentTs() > ts
 	})
-	// i == 0 has two meanings:
-	// 1. The schema storage is empty.
-	// 2. The ts is smaller than the first snapshot.
-	// In both cases, we should return an error.
-	if i == 0 {
+	if i <= 0 {
 		// Unexpected error, caller should fail immediately.
 		return nil, cerror.ErrSchemaSnapshotNotFound.GenWithStackByArgs(ts)
 	}
@@ -149,16 +125,14 @@ func (s *schemaStorageImpl) GetSnapshot(ctx context.Context, ts uint64) (*schema
 		now := time.Now()
 		if now.Sub(logTime) >= 30*time.Second && isRetryable(err) {
 			log.Warn("GetSnapshot is taking too long, DDL puller stuck?",
-				zap.Error(err),
 				zap.Uint64("ts", ts),
 				zap.Duration("duration", now.Sub(startTime)),
-				zap.String("namespace", s.id.Namespace),
-				zap.String("changefeed", s.id.ID),
-				zap.String("role", s.role.String()))
+				zap.String("changefeed", s.id))
 			logTime = now
 		}
 		return err
-	}, retry.WithBackoffBaseDelay(10), retry.WithIsRetryableErr(isRetryable))
+	}, retry.WithBackoffBaseDelay(10), retry.WithInfiniteTries(),
+		retry.WithIsRetryableErr(isRetryable))
 
 	return snap, err
 }
@@ -177,7 +151,6 @@ func (s *schemaStorageImpl) GetLastSnapshot() *schema.Snapshot {
 // HandleDDLJob creates a new snapshot in storage and handles the ddl job
 func (s *schemaStorageImpl) HandleDDLJob(job *timodel.Job) error {
 	if s.skipJob(job) {
-		s.schemaVersion = job.BinlogInfo.SchemaVersion
 		s.AdvanceResolvedTs(job.BinlogInfo.FinishedTS)
 		return nil
 	}
@@ -186,18 +159,10 @@ func (s *schemaStorageImpl) HandleDDLJob(job *timodel.Job) error {
 	var snap *schema.Snapshot
 	if len(s.snaps) > 0 {
 		lastSnap := s.snaps[len(s.snaps)-1]
-		// We use schemaVersion to check if an already-executed DDL job is processed for a second time.
-		// Unexecuted DDL jobs should have largest schemaVersions.
-		if job.BinlogInfo.FinishedTS <= lastSnap.CurrentTs() || job.BinlogInfo.SchemaVersion <= s.schemaVersion {
-			log.Info("ignore foregone DDL",
-				zap.String("namespace", s.id.Namespace),
-				zap.String("changefeed", s.id.ID),
-				zap.String("DDL", job.Query),
-				zap.Int64("jobID", job.ID),
-				zap.Uint64("finishTs", job.BinlogInfo.FinishedTS),
-				zap.Int64("schemaVersion", s.schemaVersion),
-				zap.Int64("jobSchemaVersion", job.BinlogInfo.SchemaVersion),
-				zap.String("role", s.role.String()))
+		if job.BinlogInfo.FinishedTS <= lastSnap.CurrentTs() {
+			log.Info("ignore foregone DDL", zap.Int64("jobID", job.ID),
+				zap.String("DDL", job.Query), zap.String("changefeed", s.id),
+				zap.Uint64("finishTs", job.BinlogInfo.FinishedTS))
 			return nil
 		}
 		snap = lastSnap.Copy()
@@ -205,34 +170,29 @@ func (s *schemaStorageImpl) HandleDDLJob(job *timodel.Job) error {
 		snap = schema.NewEmptySnapshot(s.forceReplicate)
 	}
 	if err := snap.HandleDDL(job); err != nil {
-		log.Error("handle DDL failed",
-			zap.String("namespace", s.id.Namespace),
-			zap.String("changefeed", s.id.ID),
-			zap.String("DDL", job.Query),
+		log.Error("handle DDL failed", zap.String("DDL", job.Query),
 			zap.Stringer("job", job), zap.Error(err),
-			zap.Uint64("finishTs", job.BinlogInfo.FinishedTS),
-			zap.String("role", s.role.String()))
+			zap.String("changefeed", s.id), zap.Uint64("finishTs", job.BinlogInfo.FinishedTS))
 		return errors.Trace(err)
 	}
-	log.Info("handle DDL",
-		zap.String("namespace", s.id.Namespace),
-		zap.String("changefeed", s.id.ID),
-		zap.String("DDL", job.Query),
-		zap.Stringer("job", job),
-		zap.Uint64("finishTs", job.BinlogInfo.FinishedTS),
-		zap.String("role", s.role.String()))
+	log.Info("handle DDL", zap.String("DDL", job.Query),
+		zap.Stringer("job", job), zap.String("changefeed", s.id),
+		zap.Uint64("finishTs", job.BinlogInfo.FinishedTS))
 
 	s.snaps = append(s.snaps, snap)
-	s.schemaVersion = job.BinlogInfo.SchemaVersion
 	s.AdvanceResolvedTs(job.BinlogInfo.FinishedTS)
 	return nil
 }
 
-// AdvanceResolvedTs advances the resolved. Not thread safe.
-// NOTE: SHOULD NOT call it concurrently
+// AdvanceResolvedTs advances the resolved
 func (s *schemaStorageImpl) AdvanceResolvedTs(ts uint64) {
-	if ts > s.ResolvedTs() {
-		atomic.StoreUint64(&s.resolvedTs, ts)
+	var swapped bool
+	for !swapped {
+		oldResolvedTs := atomic.LoadUint64(&s.resolvedTs)
+		if ts < oldResolvedTs {
+			return
+		}
+		swapped = atomic.CompareAndSwapUint64(&s.resolvedTs, oldResolvedTs, ts)
 	}
 }
 
@@ -277,53 +237,19 @@ func (s *schemaStorageImpl) DoGC(ts uint64) (lastSchemaTs uint64) {
 }
 
 // SkipJob skip the job should not be executed
-// TiDB write DDL Binlog for every DDL Job,
-// we must ignore jobs that are cancelled or rollback
-// For older version TiDB, it writes DDL Binlog in the txn
-// that the state of job is changed to *synced*
-// Now, it writes DDL Binlog in the txn that the state of
-// job is changed to *done* (before change to *synced*)
+// TiDB write DDL Binlog for every DDL Job, we must ignore jobs that are cancelled or rollback
+// For older version TiDB, it write DDL Binlog in the txn that the state of job is changed to *synced*
+// Now, it write DDL Binlog in the txn that the state of job is changed to *done* (before change to *synced*)
 // At state *done*, it will be always and only changed to *synced*.
 func (s *schemaStorageImpl) skipJob(job *timodel.Job) bool {
 	log.Debug("handle DDL new commit",
 		zap.String("DDL", job.Query), zap.Stringer("job", job),
-		zap.String("namespace", s.id.Namespace),
-		zap.String("changefeed", s.id.ID),
-		zap.String("role", s.role.String()))
+		zap.String("changefeed", s.id))
+	if s.filter != nil && s.filter.ShouldDiscardDDL(job.Type) {
+		log.Info("discard DDL",
+			zap.Int64("jobID", job.ID), zap.String("DDL", job.Query),
+			zap.String("changefeed", s.id))
+		return true
+	}
 	return !job.IsSynced() && !job.IsDone()
-}
-
-// MockSchemaStorage is for tests.
-type MockSchemaStorage struct {
-	Resolved uint64
-}
-
-// GetSnapshot implements SchemaStorage.
-func (s *MockSchemaStorage) GetSnapshot(ctx context.Context, ts uint64) (*schema.Snapshot, error) {
-	return nil, nil
-}
-
-// GetLastSnapshot implements SchemaStorage.
-func (s *MockSchemaStorage) GetLastSnapshot() *schema.Snapshot {
-	return nil
-}
-
-// HandleDDLJob implements SchemaStorage.
-func (s *MockSchemaStorage) HandleDDLJob(job *timodel.Job) error {
-	return nil
-}
-
-// AdvanceResolvedTs implements SchemaStorage.
-func (s *MockSchemaStorage) AdvanceResolvedTs(ts uint64) {
-	s.Resolved = ts
-}
-
-// ResolvedTs implements SchemaStorage.
-func (s *MockSchemaStorage) ResolvedTs() uint64 {
-	return s.Resolved
-}
-
-// DoGC implements SchemaStorage.
-func (s *MockSchemaStorage) DoGC(ts uint64) uint64 {
-	return s.Resolved
 }

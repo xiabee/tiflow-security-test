@@ -7,9 +7,6 @@ CREATE TABLE many_cols1 (
 	val INT DEFAULT 0,
 	col0 INT NOT NULL
 );
-
-INSERT INTO many_cols1(col0) VALUES (1);
-
 ALTER TABLE many_cols1 DROP COLUMN col0;
 INSERT INTO many_cols1 (val) VALUES (1);
 
@@ -18,9 +15,6 @@ CREATE TABLE many_cols2 (
 	val INT DEFAULT 0,
 	col0 INT NOT NULL
 );
-
-INSERT INTO many_cols2(col0) VALUES (1);
-
 ALTER TABLE many_cols2 DROP COLUMN col0;
 INSERT INTO many_cols2 (val) VALUES (1);
 
@@ -29,8 +23,6 @@ CREATE TABLE many_cols3 (
 	val INT DEFAULT 0,
 	col0 INT NOT NULL
 );
-
-INSERT INTO many_cols3(col0) VALUES (1);
 ALTER TABLE many_cols3 DROP COLUMN col0;
 INSERT INTO many_cols3 (val) VALUES (1);
 
@@ -39,7 +31,6 @@ CREATE TABLE many_cols4 (
 	val INT DEFAULT 0,
 	col0 INT NOT NULL
 );
-INSERT INTO many_cols4(col0) VALUES (1);
 ALTER TABLE many_cols4 DROP COLUMN col0;
 INSERT INTO many_cols4 (val) VALUES (1);
 
@@ -48,7 +39,6 @@ CREATE TABLE many_cols5 (
 	val INT DEFAULT 0,
 	col0 INT NOT NULL
 );
-INSERT INTO many_cols5(col0) VALUES (1);
 ALTER TABLE many_cols5 DROP COLUMN col0;
 INSERT INTO many_cols5 (val) VALUES (1);
 

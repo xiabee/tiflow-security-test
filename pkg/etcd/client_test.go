@@ -15,16 +15,19 @@ package etcd
 
 import (
 	"context"
-	"sync/atomic"
-	"testing"
 	"time"
 
 	"github.com/benbjohnson/clock"
+	"github.com/pingcap/check"
 	"github.com/pingcap/errors"
-	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
+	"go.etcd.io/etcd/clientv3"
 )
+
+type clientSuite struct {
+}
+
+var _ = check.Suite(&clientSuite{})
 
 type mockClient struct {
 	clientv3.KV
@@ -43,34 +46,31 @@ func (m *mockClient) Put(ctx context.Context, key, val string, opts ...clientv3.
 	return nil, errors.New("mock error")
 }
 
-func (m *mockClient) Txn(ctx context.Context) clientv3.Txn {
-	return &mockTxn{ctx: ctx}
-}
-
 type mockWatcher struct {
 	clientv3.Watcher
 	watchCh      chan clientv3.WatchResponse
-	resetCount   *int32
-	requestCount *int32
+	resetCount   *int
+	requestCount *int
 	rev          *int64
 }
 
 func (m mockWatcher) Watch(ctx context.Context, key string, opts ...clientv3.OpOption) clientv3.WatchChan {
-	atomic.AddInt32(m.resetCount, 1)
+	*m.resetCount++
 	op := &clientv3.Op{}
 	for _, opt := range opts {
 		opt(op)
 	}
-	atomic.StoreInt64(m.rev, op.Rev())
+	*m.rev = op.Rev()
 	return m.watchCh
 }
 
 func (m mockWatcher) RequestProgress(ctx context.Context) error {
-	atomic.AddInt32(m.requestCount, 1)
+	*m.requestCount++
 	return nil
 }
 
-func TestRetry(t *testing.T) {
+func (s *clientSuite) TestRetry(c *check.C) {
+	defer testleak.AfterTest(c)()
 	originValue := maxTries
 	// to speedup the test
 	maxTries = 2
@@ -79,78 +79,49 @@ func TestRetry(t *testing.T) {
 	cli.KV = &mockClient{}
 	retrycli := Wrap(cli, nil)
 	get, err := retrycli.Get(context.TODO(), "")
-
-	require.NoError(t, err)
-	require.NotNil(t, get)
+	c.Assert(err, check.IsNil)
+	c.Assert(get, check.NotNil)
 
 	_, err = retrycli.Put(context.TODO(), "", "")
-	require.NotNil(t, err)
-	require.Containsf(t, errors.Cause(err).Error(), "mock error", "err:%v", err.Error())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Test Txn case
-	// case 0: normal
-	rsp, err := retrycli.Txn(ctx, nil, nil, nil)
-	require.NoError(t, err)
-	require.False(t, rsp.Succeeded)
-
-	// case 1: errors.ErrReachMaxTry
-	_, err = retrycli.Txn(ctx, txnEmptyCmps, nil, nil)
-	require.Regexp(t, ".*CDC:ErrReachMaxTry.*", err)
-
-	// case 2: errors.ErrReachMaxTry
-	_, err = retrycli.Txn(ctx, nil, txnEmptyOpsThen, nil)
-	require.Regexp(t, ".*CDC:ErrReachMaxTry.*", err)
-
-	// case 3: context.DeadlineExceeded
-	_, err = retrycli.Txn(ctx, txnEmptyCmps, txnEmptyOpsThen, nil)
-	require.Equal(t, context.DeadlineExceeded, err)
-
-	// other case: mock error
-	_, err = retrycli.Txn(ctx, txnEmptyCmps, txnEmptyOpsThen, TxnEmptyOpsElse)
-	require.Containsf(t, errors.Cause(err).Error(), "mock error", "err:%v", err.Error())
-
+	c.Assert(err, check.NotNil)
+	c.Assert(errors.Cause(err), check.ErrorMatches, "mock error", check.Commentf("err:%v", err.Error()))
 	maxTries = originValue
 }
 
-func TestDelegateLease(t *testing.T) {
+func (s *etcdSuite) TestDelegateLease(c *check.C) {
+	defer testleak.AfterTest(c)()
+	defer s.TearDownTest(c)
 	ctx := context.Background()
-	url, server, err := SetupEmbedEtcd(t.TempDir())
-	defer func() {
-		server.Close()
-	}()
-	require.Nil(t, err)
 	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   []string{url.String()},
+		Endpoints:   []string{s.clientURL.String()},
 		DialTimeout: 3 * time.Second,
 	})
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	defer cli.Close()
 
 	ttl := int64(10)
 	lease, err := cli.Grant(ctx, ttl)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 
 	ttlResp, err := cli.TimeToLive(ctx, lease.ID)
-	require.Nil(t, err)
-	require.Equal(t, ttlResp.GrantedTTL, ttl)
-	require.Less(t, ttlResp.TTL, ttl)
-	require.Greater(t, ttlResp.TTL, int64(0))
+	c.Assert(err, check.IsNil)
+	c.Assert(ttlResp.GrantedTTL, check.Equals, ttl)
+	c.Assert(ttlResp.TTL, check.Less, ttl)
+	c.Assert(ttlResp.TTL, check.Greater, int64(0))
 
 	_, err = cli.Revoke(ctx, lease.ID)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	ttlResp, err = cli.TimeToLive(ctx, lease.ID)
-	require.Nil(t, err)
-	require.Equal(t, ttlResp.TTL, int64(-1))
+	c.Assert(err, check.IsNil)
+	c.Assert(ttlResp.TTL, check.Equals, int64(-1))
 }
 
 // test no data lost when WatchCh blocked
-func TestWatchChBlocked(t *testing.T) {
+func (s *clientSuite) TestWatchChBlocked(c *check.C) {
+	defer testleak.AfterTest(c)()
 	cli := clientv3.NewCtxClient(context.TODO())
-	resetCount := int32(0)
-	requestCount := int32(0)
+	resetCount := 0
+	requestCount := 0
 	rev := int64(0)
 	watchCh := make(chan clientv3.WatchResponse, 1)
 	watcher := mockWatcher{watchCh: watchCh, resetCount: &resetCount, requestCount: &requestCount, rev: &rev}
@@ -198,23 +169,26 @@ func TestWatchChBlocked(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, sentRes, receivedRes)
+	c.Check(sentRes, check.DeepEquals, receivedRes)
 	// make sure watchCh has been reset since timeout
-	require.True(t, atomic.LoadInt32(watcher.resetCount) > 1)
+	c.Assert(*watcher.resetCount > 1, check.IsTrue)
 	// make sure RequestProgress has been call since timeout
-	require.True(t, atomic.LoadInt32(watcher.requestCount) > 1)
+	c.Assert(*watcher.requestCount > 1, check.IsTrue)
 	// make sure etcdRequestProgressDuration is less than etcdWatchChTimeoutDuration
-	require.Less(t, etcdRequestProgressDuration, etcdWatchChTimeoutDuration)
+	c.Assert(etcdRequestProgressDuration, check.Less, etcdWatchChTimeoutDuration)
 }
 
 // test no data lost when OutCh blocked
-func TestOutChBlocked(t *testing.T) {
+func (s *clientSuite) TestOutChBlocked(c *check.C) {
+	defer testleak.AfterTest(c)()
+
 	cli := clientv3.NewCtxClient(context.TODO())
-	resetCount := int32(0)
-	requestCount := int32(0)
+	resetCount := 0
+	requestCount := 0
 	rev := int64(0)
 	watchCh := make(chan clientv3.WatchResponse, 1)
 	watcher := mockWatcher{watchCh: watchCh, resetCount: &resetCount, requestCount: &requestCount, rev: &rev}
+
 	cli.Watcher = watcher
 
 	mockClock := clock.NewMock()
@@ -256,14 +230,15 @@ func TestOutChBlocked(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, sentRes, receivedRes)
+	c.Check(sentRes, check.DeepEquals, receivedRes)
 }
 
-func TestRevisionNotFallBack(t *testing.T) {
+func (s *clientSuite) TestRevisionNotFallBack(c *check.C) {
+	defer testleak.AfterTest(c)()
 	cli := clientv3.NewCtxClient(context.TODO())
 
-	resetCount := int32(0)
-	requestCount := int32(0)
+	resetCount := 0
+	requestCount := 0
 	rev := int64(0)
 	watchCh := make(chan clientv3.WatchResponse, 1)
 	watcher := mockWatcher{watchCh: watchCh, resetCount: &resetCount, requestCount: &requestCount, rev: &rev}
@@ -297,50 +272,9 @@ func TestRevisionNotFallBack(t *testing.T) {
 	// move time forward
 	mockClock.Add(time.Second * 30)
 	// make sure watchCh has been reset since timeout
-	require.True(t, atomic.LoadInt32(watcher.resetCount) > 1)
-	// make sure revision in WatchWitchChan does not fall back
+	c.Assert(*watcher.resetCount > 1, check.IsTrue)
+	// make suer revision in WatchWitchChan does not fall back
 	// even if there has not any response been received from WatchCh
 	// while WatchCh was reset
-	require.Equal(t, atomic.LoadInt64(watcher.rev), revision)
-}
-
-type mockTxn struct {
-	ctx  context.Context
-	mode int
-}
-
-func (txn *mockTxn) If(cs ...clientv3.Cmp) clientv3.Txn {
-	if cs != nil {
-		txn.mode += 1
-	}
-	return txn
-}
-
-func (txn *mockTxn) Then(ops ...clientv3.Op) clientv3.Txn {
-	if ops != nil {
-		txn.mode += 1 << 1
-	}
-	return txn
-}
-
-func (txn *mockTxn) Else(ops ...clientv3.Op) clientv3.Txn {
-	if ops != nil {
-		txn.mode += 1 << 2
-	}
-	return txn
-}
-
-func (txn *mockTxn) Commit() (*clientv3.TxnResponse, error) {
-	switch txn.mode {
-	case 0:
-		return &clientv3.TxnResponse{}, nil
-	case 1:
-		return nil, rpctypes.ErrNoSpace
-	case 2:
-		return nil, rpctypes.ErrTimeoutDueToLeaderFail
-	case 3:
-		return nil, context.DeadlineExceeded
-	default:
-		return nil, errors.New("mock error")
-	}
+	c.Assert(*watcher.rev, check.Equals, revision)
 }

@@ -16,21 +16,28 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"github.com/pingcap/errors"
-	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/log"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
+	"go.uber.org/zap"
 )
 
 // AdminJobType represents for admin job type, both used in owner and processor
 type AdminJobType int
 
+// AdminJobOption records addition options of an admin job
+type AdminJobOption struct {
+	ForceRemove bool
+}
+
 // AdminJob holds an admin job
 type AdminJob struct {
-	CfID                  ChangeFeedID
-	Type                  AdminJobType
-	Error                 *RunningError
-	OverwriteCheckpointTs uint64
+	CfID  string
+	Type  AdminJobType
+	Opts  *AdminJobOption
+	Error *RunningError
 }
 
 // All AdminJob types
@@ -68,33 +75,16 @@ func (t AdminJobType) IsStopState() bool {
 	return false
 }
 
-// DDLJobEntry is the DDL job entry.
-type DDLJobEntry struct {
-	Job    *timodel.Job
-	OpType OpType
-	CRTs   uint64
-	Err    error
-}
-
 // TaskPosition records the process information of a capture
 type TaskPosition struct {
 	// The maximum event CommitTs that has been synchronized. This is updated by corresponding processor.
-	//
-	// Deprecated: only used in API. TODO: remove API usage.
 	CheckPointTs uint64 `json:"checkpoint-ts"`
 	// The event that satisfies CommitTs <= ResolvedTs can be synchronized. This is updated by corresponding processor.
-	//
-	// Deprecated: only used in API. TODO: remove API usage.
 	ResolvedTs uint64 `json:"resolved-ts"`
 	// The count of events were synchronized. This is updated by corresponding processor.
-	//
-	// Deprecated: only used in API. TODO: remove API usage.
 	Count uint64 `json:"count"`
-
-	// Error when changefeed error happens
+	// Error code when error happens
 	Error *RunningError `json:"error"`
-	// Warning when module error happens
-	Warning *RunningError `json:"warning"`
 }
 
 // Marshal returns the json marshal format of a TaskStatus
@@ -116,30 +106,23 @@ func (tp *TaskPosition) String() string {
 	return data
 }
 
-// Clone returns a deep clone of TaskPosition
-func (tp *TaskPosition) Clone() *TaskPosition {
-	ret := &TaskPosition{
-		CheckPointTs: tp.CheckPointTs,
-		ResolvedTs:   tp.ResolvedTs,
-		Count:        tp.Count,
-	}
-	if tp.Error != nil {
-		ret.Error = &RunningError{
-			Time:    tp.Error.Time,
-			Addr:    tp.Error.Addr,
-			Code:    tp.Error.Code,
-			Message: tp.Error.Message,
-		}
-	}
-	if tp.Warning != nil {
-		ret.Warning = &RunningError{
-			Time:    tp.Warning.Time,
-			Addr:    tp.Warning.Addr,
-			Code:    tp.Warning.Code,
-			Message: tp.Warning.Message,
-		}
-	}
-	return ret
+// MoveTableStatus represents for the status of a MoveTableJob
+type MoveTableStatus int
+
+// All MoveTable status
+const (
+	MoveTableStatusNone MoveTableStatus = iota
+	MoveTableStatusDeleted
+	MoveTableStatusFinished
+)
+
+// MoveTableJob records a move operation of a table
+type MoveTableJob struct {
+	From             CaptureID
+	To               CaptureID
+	TableID          TableID
+	TableReplicaInfo *TableReplicaInfo
+	Status           MoveTableStatus
 }
 
 // All TableOperation flags
@@ -159,23 +142,26 @@ const (
 
 // TableOperation records the current information of a table migration
 type TableOperation struct {
+	Done   bool   `json:"done"` // deprecated, will be removed in the next version
 	Delete bool   `json:"delete"`
 	Flag   uint64 `json:"flag,omitempty"`
 	// if the operation is a delete operation, BoundaryTs is checkpoint ts
-	// if the operation is an add operation, BoundaryTs is start ts
+	// if the operation is a add operation, BoundaryTs is start ts
 	BoundaryTs uint64 `json:"boundary_ts"`
 	Status     uint64 `json:"status,omitempty"`
 }
 
 // TableProcessed returns whether the table has been processed by processor
 func (o *TableOperation) TableProcessed() bool {
-	return o.Status == OperProcessed || o.Status == OperFinished
+	// TODO: remove o.Done
+	return o.Status == OperProcessed || o.Status == OperFinished || o.Done
 }
 
 // TableApplied returns whether the table has finished the startup procedure.
 // Returns true if table has been processed by processor and resolved ts reaches global resolved ts.
 func (o *TableOperation) TableApplied() bool {
-	return o.Status == OperFinished
+	// TODO: remove o.Done
+	return o.Status == OperFinished || o.Done
 }
 
 // Clone returns a deep-clone of the struct
@@ -187,9 +173,35 @@ func (o *TableOperation) Clone() *TableOperation {
 	return &clone
 }
 
+// TaskWorkload records the workloads of a task
+// the value of the struct is the workload
+type TaskWorkload map[TableID]WorkloadInfo
+
+// WorkloadInfo records the workload info of a table
+type WorkloadInfo struct {
+	Workload uint64 `json:"workload"`
+}
+
+// Unmarshal unmarshals into *TaskWorkload from json marshal byte slice
+func (w *TaskWorkload) Unmarshal(data []byte) error {
+	err := json.Unmarshal(data, w)
+	return errors.Annotatef(
+		cerror.WrapError(cerror.ErrUnmarshalFailed, err), "Unmarshal data: %v", data)
+}
+
+// Marshal returns the json marshal format of a TaskWorkload
+func (w *TaskWorkload) Marshal() (string, error) {
+	if w == nil {
+		return "{}", nil
+	}
+	data, err := json.Marshal(w)
+	return string(data), cerror.WrapError(cerror.ErrMarshalFailed, err)
+}
+
 // TableReplicaInfo records the table replica info
 type TableReplicaInfo struct {
-	StartTs Ts `json:"start-ts"`
+	StartTs     Ts      `json:"start-ts"`
+	MarkTableID TableID `json:"mark-table-id"`
 }
 
 // Clone clones a TableReplicaInfo
@@ -201,20 +213,110 @@ func (i *TableReplicaInfo) Clone() *TableReplicaInfo {
 	return &clone
 }
 
-// TaskStatus records the task information of a capture.
-//
-// Deprecated: only used in API. TODO: remove API usage.
+// TaskStatus records the task information of a capture
 type TaskStatus struct {
+	// Table information list, containing tables that processor should process, updated by ownrer, processor is read only.
 	Tables       map[TableID]*TableReplicaInfo `json:"tables"`
 	Operation    map[TableID]*TableOperation   `json:"operation"`
 	AdminJobType AdminJobType                  `json:"admin-job-type"`
 	ModRevision  int64                         `json:"-"`
+	// true means Operation record has been changed
+	Dirty bool `json:"-"`
 }
 
 // String implements fmt.Stringer interface.
 func (ts *TaskStatus) String() string {
 	data, _ := ts.Marshal()
 	return data
+}
+
+// RemoveTable remove the table in TableInfos and add a remove table operation.
+func (ts *TaskStatus) RemoveTable(id TableID, boundaryTs Ts, isMoveTable bool) (*TableReplicaInfo, bool) {
+	if ts.Tables == nil {
+		return nil, false
+	}
+	table, exist := ts.Tables[id]
+	if !exist {
+		return nil, false
+	}
+	delete(ts.Tables, id)
+	log.Info("remove a table", zap.Int64("tableId", id), zap.Uint64("boundaryTs", boundaryTs), zap.Bool("isMoveTable", isMoveTable))
+	if ts.Operation == nil {
+		ts.Operation = make(map[TableID]*TableOperation)
+	}
+	op := &TableOperation{
+		Delete:     true,
+		BoundaryTs: boundaryTs,
+	}
+	if isMoveTable {
+		op.Flag |= OperFlagMoveTable
+	}
+	ts.Operation[id] = op
+	return table, true
+}
+
+// AddTable add the table in TableInfos and add a add table operation.
+func (ts *TaskStatus) AddTable(id TableID, table *TableReplicaInfo, boundaryTs Ts) {
+	if ts.Tables == nil {
+		ts.Tables = make(map[TableID]*TableReplicaInfo)
+	}
+	_, exist := ts.Tables[id]
+	if exist {
+		return
+	}
+	ts.Tables[id] = table
+	log.Info("add a table", zap.Int64("tableId", id), zap.Uint64("boundaryTs", boundaryTs))
+	if ts.Operation == nil {
+		ts.Operation = make(map[TableID]*TableOperation)
+	}
+	ts.Operation[id] = &TableOperation{
+		Delete:     false,
+		BoundaryTs: boundaryTs,
+		Status:     OperDispatched,
+	}
+}
+
+// SomeOperationsUnapplied returns true if there are some operations not applied
+func (ts *TaskStatus) SomeOperationsUnapplied() bool {
+	for _, o := range ts.Operation {
+		if !o.TableApplied() {
+			return true
+		}
+	}
+	return false
+}
+
+// AppliedTs returns a Ts which less or equal to the ts boundary of any unapplied operation
+func (ts *TaskStatus) AppliedTs() Ts {
+	appliedTs := uint64(math.MaxUint64)
+	for _, o := range ts.Operation {
+		if !o.TableApplied() {
+			if appliedTs > o.BoundaryTs {
+				appliedTs = o.BoundaryTs
+			}
+		}
+	}
+	return appliedTs
+}
+
+// Snapshot takes a snapshot of `*TaskStatus` and returns a new `*ProcInfoSnap`
+func (ts *TaskStatus) Snapshot(cfID ChangeFeedID, captureID CaptureID, checkpointTs Ts) *ProcInfoSnap {
+	snap := &ProcInfoSnap{
+		CfID:      cfID,
+		CaptureID: captureID,
+		Tables:    make(map[TableID]*TableReplicaInfo, len(ts.Tables)),
+	}
+	for tableID, table := range ts.Tables {
+		ts := checkpointTs
+		if ts < table.StartTs {
+			ts = table.StartTs
+		}
+		snap.Tables[tableID] = &TableReplicaInfo{
+			StartTs:     ts,
+			MarkTableID: table.MarkTableID,
+		}
+	}
+	return snap
 }
 
 // Marshal returns the json marshal format of a TaskStatus
@@ -246,6 +348,12 @@ func (ts *TaskStatus) Clone() *TaskStatus {
 	return &clone
 }
 
+// CaptureID is the type for capture ID
+type CaptureID = string
+
+// ChangeFeedID is the type for change feed ID
+type ChangeFeedID = string
+
 // TableID is the ID of the table
 type TableID = int64
 
@@ -257,6 +365,22 @@ type Ts = uint64
 
 // ProcessorsInfos maps from capture IDs to TaskStatus
 type ProcessorsInfos map[CaptureID]*TaskStatus
+
+// ChangeFeedDDLState is the type for change feed status
+type ChangeFeedDDLState int
+
+const (
+	// ChangeFeedUnknown stands for all unknown status
+	ChangeFeedUnknown ChangeFeedDDLState = iota
+	// ChangeFeedSyncDML means DMLs are being processed
+	ChangeFeedSyncDML
+	// ChangeFeedWaitToExecDDL means we are waiting to execute a DDL
+	ChangeFeedWaitToExecDDL
+	// ChangeFeedExecDDL means a DDL is being executed
+	ChangeFeedExecDDL
+	// ChangeFeedDDLExecuteFailed means that an error occurred when executing a DDL
+	ChangeFeedDDLExecuteFailed
+)
 
 // String implements fmt.Stringer interface.
 func (p ProcessorsInfos) String() string {
@@ -270,16 +394,25 @@ func (p ProcessorsInfos) String() string {
 	return s
 }
 
+// String implements fmt.Stringer interface.
+func (s ChangeFeedDDLState) String() string {
+	switch s {
+	case ChangeFeedSyncDML:
+		return "SyncDML"
+	case ChangeFeedWaitToExecDDL:
+		return "WaitToExecDDL"
+	case ChangeFeedExecDDL:
+		return "ExecDDL"
+	case ChangeFeedDDLExecuteFailed:
+		return "DDLExecuteFailed"
+	}
+	return "Unknown"
+}
+
 // ChangeFeedStatus stores information about a ChangeFeed
-// It is stored in etcd.
 type ChangeFeedStatus struct {
-	CheckpointTs uint64 `json:"checkpoint-ts"`
-	// minTableBarrierTs is the minimum commitTs of all DDL events and is only
-	// used to check whether there is a pending DDL job at the checkpointTs when
-	// initializing the changefeed.
-	MinTableBarrierTs uint64 `json:"min-table-barrier-ts"`
-	// TODO: remove this filed after we don't use ChangeFeedStatus to
-	// control processor. This is too ambiguous.
+	ResolvedTs   uint64       `json:"resolved-ts"`
+	CheckpointTs uint64       `json:"checkpoint-ts"`
 	AdminJobType AdminJobType `json:"admin-job-type"`
 }
 
@@ -298,48 +431,7 @@ func (status *ChangeFeedStatus) Unmarshal(data []byte) error {
 
 // ProcInfoSnap holds most important replication information of a processor
 type ProcInfoSnap struct {
-	CfID      ChangeFeedID `json:"changefeed-id"`
-	CaptureID string       `json:"capture-id"`
-}
-
-// TableSet maintains a set of TableID.
-type TableSet struct {
-	memo map[TableID]struct{}
-}
-
-// NewTableSet creates a TableSet.
-func NewTableSet() *TableSet {
-	return &TableSet{
-		memo: make(map[TableID]struct{}),
-	}
-}
-
-// Add adds a tableID to TableSet.
-func (s *TableSet) Add(tableID TableID) {
-	s.memo[tableID] = struct{}{}
-}
-
-// Remove removes a tableID from a TableSet.
-func (s *TableSet) Remove(tableID TableID) {
-	delete(s.memo, tableID)
-}
-
-// Keys returns a collection of TableID.
-func (s *TableSet) Keys() []TableID {
-	result := make([]TableID, 0, len(s.memo))
-	for k := range s.memo {
-		result = append(result, k)
-	}
-	return result
-}
-
-// Contain checks whether a TableID is in TableSet.
-func (s *TableSet) Contain(tableID TableID) bool {
-	_, ok := s.memo[tableID]
-	return ok
-}
-
-// Size returns the size of TableSet.
-func (s *TableSet) Size() int {
-	return len(s.memo)
+	CfID      string                        `json:"changefeed-id"`
+	CaptureID string                        `json:"capture-id"`
+	Tables    map[TableID]*TableReplicaInfo `json:"-"`
 }

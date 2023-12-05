@@ -18,35 +18,51 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/pingcap/check"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestBarrier(t *testing.T) {
+func Test(t *testing.T) { check.TestingT(t) }
+
+var _ = check.Suite(&barrierSuite{})
+
+type barrierSuite struct {
+}
+
+func (s *barrierSuite) TestBarrier(c *check.C) {
+	defer testleak.AfterTest(c)()
 	b := newBarriers()
+	b.Update(ddlJobBarrier, 2)
 	b.Update(syncPointBarrier, 3)
 	b.Update(finishBarrier, 1)
 	tp, ts := b.Min()
-	require.Equal(t, tp, finishBarrier)
-	require.Equal(t, ts, uint64(1))
+	c.Assert(tp, check.Equals, finishBarrier)
+	c.Assert(ts, check.Equals, uint64(1))
 
 	b.Update(finishBarrier, 4)
-
 	tp, ts = b.Min()
-	require.Equal(t, tp, syncPointBarrier)
-	require.Equal(t, ts, uint64(3))
+	c.Assert(tp, check.Equals, ddlJobBarrier)
+	c.Assert(ts, check.Equals, uint64(2))
+
+	b.Remove(ddlJobBarrier)
+	tp, ts = b.Min()
+	c.Assert(tp, check.Equals, syncPointBarrier)
+	c.Assert(ts, check.Equals, uint64(3))
 
 	b.Update(finishBarrier, 1)
 	tp, ts = b.Min()
-	require.Equal(t, tp, finishBarrier)
-	require.Equal(t, ts, uint64(1))
+	c.Assert(tp, check.Equals, finishBarrier)
+	c.Assert(ts, check.Equals, uint64(1))
 
+	b.Update(ddlJobBarrier, 5)
 	tp, ts = b.Min()
-	require.Equal(t, tp, finishBarrier)
-	require.Equal(t, ts, uint64(1))
+	c.Assert(tp, check.Equals, finishBarrier)
+	c.Assert(ts, check.Equals, uint64(1))
 }
 
-func TestBarrierRandom(t *testing.T) {
+func (s *barrierSuite) TestBarrierRandom(c *check.C) {
+	defer testleak.AfterTest(c)()
 	maxBarrierType := 50
 	maxBarrierTs := 1000000
 	b := newBarriers()
@@ -75,7 +91,7 @@ func TestBarrierRandom(t *testing.T) {
 			}
 		}
 		tp, ts := b.Min()
-		require.Equal(t, ts, expectedMinTs)
-		require.Equal(t, expectedBarriers[tp], expectedMinTs)
+		c.Assert(ts, check.Equals, expectedMinTs)
+		c.Assert(expectedBarriers[tp], check.Equals, expectedMinTs)
 	}
 }

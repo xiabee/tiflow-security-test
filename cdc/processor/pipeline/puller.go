@@ -17,13 +17,11 @@ import (
 	"context"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/puller"
-	"github.com/pingcap/tiflow/pkg/config"
+	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	"github.com/pingcap/tiflow/pkg/pipeline"
 	"github.com/pingcap/tiflow/pkg/regionspan"
-	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/pingcap/tiflow/pkg/util"
 	"golang.org/x/sync/errgroup"
 )
@@ -31,63 +29,53 @@ import (
 type pullerNode struct {
 	tableName string // quoted schema and table, used in metircs only
 
-	plr        puller.Puller
-	tableID    model.TableID
-	startTs    model.Ts
-	changefeed model.ChangeFeedID
-	cancel     context.CancelFunc
-	wg         *errgroup.Group
+	tableID     model.TableID
+	replicaInfo *model.TableReplicaInfo
+	changefeed  string
+	cancel      context.CancelFunc
+	wg          errgroup.Group
 }
 
 func newPullerNode(
-	tableID model.TableID,
-	startTs model.Ts,
-	tableName string,
-	changefeed model.ChangeFeedID,
-) *pullerNode {
+	tableID model.TableID, replicaInfo *model.TableReplicaInfo,
+	tableName, changefeed string,
+) pipeline.Node {
 	return &pullerNode{
-		tableID:    tableID,
-		startTs:    startTs,
-		tableName:  tableName,
-		changefeed: changefeed,
+		tableID:     tableID,
+		replicaInfo: replicaInfo,
+		tableName:   tableName,
+		changefeed:  changefeed,
 	}
 }
 
-func (n *pullerNode) tableSpan() []regionspan.Span {
+func (n *pullerNode) tableSpan(ctx cdcContext.Context) []regionspan.Span {
 	// start table puller
+	config := ctx.ChangefeedVars().Info.Config
 	spans := make([]regionspan.Span, 0, 4)
 	spans = append(spans, regionspan.GetTableSpan(n.tableID))
+
+	if config.Cyclic.IsEnabled() && n.replicaInfo.MarkTableID != 0 {
+		spans = append(spans, regionspan.GetTableSpan(n.replicaInfo.MarkTableID))
+	}
 	return spans
 }
 
-func (n *pullerNode) startWithSorterNode(ctx pipeline.NodeContext,
-	up *upstream.Upstream, wg *errgroup.Group,
-	sorter *sorterNode, filterLoop bool,
-) error {
-	n.wg = wg
+func (n *pullerNode) Init(ctx pipeline.NodeContext) error {
 	ctxC, cancel := context.WithCancel(ctx)
-	ctxC = contextutil.PutCaptureAddrInCtx(ctxC, ctx.GlobalVars().CaptureInfo.AdvertiseAddr)
-	ctxC = contextutil.PutRoleInCtx(ctxC, util.RoleProcessor)
-	serverCfg := config.GetGlobalServerConfig()
+	ctxC = util.PutTableInfoInCtx(ctxC, n.tableID, n.tableName)
+	ctxC = util.PutCaptureAddrInCtx(ctxC, ctx.GlobalVars().CaptureInfo.AdvertiseAddr)
+	ctxC = util.PutChangefeedIDInCtx(ctxC, ctx.ChangefeedVars().ID)
 	// NOTICE: always pull the old value internally
 	// See also: https://github.com/pingcap/tiflow/issues/2301.
-	n.plr = puller.New(
+	plr := puller.NewPuller(
 		ctxC,
-		up.PDClient,
-		up.GrpcPool,
-		up.RegionCache,
-		up.KVStorage,
-		up.PDClock,
-		n.startTs,
-		n.tableSpan(),
-		serverCfg,
+		ctx.GlobalVars().PDClient,
+		ctx.GlobalVars().GrpcPool,
+		ctx.GlobalVars().KVStorage,
 		n.changefeed,
-		n.tableID,
-		n.tableName,
-		filterLoop,
-	)
+		n.replicaInfo.StartTs, n.tableSpan(ctx), true)
 	n.wg.Go(func() error {
-		ctx.Throw(errors.Trace(n.plr.Run(ctxC)))
+		ctx.Throw(errors.Trace(plr.Run(ctxC)))
 		return nil
 	})
 	n.wg.Go(func() error {
@@ -95,15 +83,27 @@ func (n *pullerNode) startWithSorterNode(ctx pipeline.NodeContext,
 			select {
 			case <-ctxC.Done():
 				return nil
-			case rawKV := <-n.plr.Output():
+			case rawKV := <-plr.Output():
 				if rawKV == nil {
 					continue
 				}
 				pEvent := model.NewPolymorphicEvent(rawKV)
-				sorter.handleRawEvent(ctx, pEvent)
+				ctx.SendToNextNode(pipeline.PolymorphicEventMessage(pEvent))
 			}
 		}
 	})
 	n.cancel = cancel
 	return nil
+}
+
+// Receive receives the message from the previous node
+func (n *pullerNode) Receive(ctx pipeline.NodeContext) error {
+	// just forward any messages to the next node
+	ctx.SendToNextNode(ctx.Message())
+	return nil
+}
+
+func (n *pullerNode) Destroy(ctx pipeline.NodeContext) error {
+	n.cancel()
+	return n.wg.Wait()
 }

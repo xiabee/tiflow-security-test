@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -eu
+set -e
 
 CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source $CUR/../_utils/test_prepare
@@ -36,7 +36,7 @@ function run() {
 
 	pd_addr="http://$UP_PD_HOST_1:$UP_PD_PORT_1"
 	run_cdc_server --workdir $WORK_DIR --binary $CDC_BINARY --pd $pd_addr --logsuffix 1 --addr "127.0.0.1:8300"
-	export GO_FAILPOINTS='github.com/pingcap/tiflow/cdc/sinkv2/eventsink/txn/mysql/MySQLSinkHangLongTime=1*return(true)'
+	export GO_FAILPOINTS='github.com/pingcap/tiflow/cdc/sink/MySQLSinkHangLongTime=1*return(true)'
 	run_cdc_server --workdir $WORK_DIR --binary $CDC_BINARY --pd $pd_addr --logsuffix 2 --addr "127.0.0.1:8301"
 
 	SINK_URI="mysql://normal:123456@127.0.0.1:3306/?max-txn-row=1"
@@ -53,25 +53,19 @@ function run() {
 
 	capture1_id=$(cdc cli capture list | jq -r '.[]|select(.address=="127.0.0.1:8300")|.id')
 	capture2_id=$(cdc cli capture list | jq -r '.[]|select(.address=="127.0.0.1:8301")|.id')
-
-	target_capture=$capture1_id
 	one_table_id=$(cdc cli processor query -c $changefeed_id -p $capture2_id | jq -r '.status.tables|keys[0]')
-	if [[ $one_table_id == "null" ]]; then
-		target_capture=$capture2_id
-		one_table_id=$(cdc cli processor query -c $changefeed_id -p $capture1_id | jq -r '.status.tables|keys[0]')
-	fi
 	table_query=$(mysql -h${UP_TIDB_HOST} -P${UP_TIDB_PORT} -uroot -e "select table_name from information_schema.tables where tidb_table_id = ${one_table_id}\G")
 	table_name=$(echo $table_query | tail -n 1 | awk '{print $(NF)}')
 	run_sql "insert into capture_suicide_while_balance_table.${table_name} values (),(),(),(),()"
 
 	# sleep some time to wait global resolved ts forwarded
 	sleep 2
-	curl -X POST http://127.0.0.1:8300/capture/owner/move_table -d "cf-id=${changefeed_id}&target-cp-id=${target_capture}&table-id=${one_table_id}"
+	curl -X POST http://127.0.0.1:8300/capture/owner/move_table -d "cf-id=${changefeed_id}&target-cp-id=${capture1_id}&table-id=${one_table_id}"
 	# sleep some time to wait table balance job is written to etcd
 	sleep 2
 
 	# revoke lease of etcd capture key to simulate etcd session done
-	lease=$(ETCDCTL_API=3 etcdctl get /tidb/cdc/default/__cdc_meta__/capture/${capture2_id} -w json | grep -o 'lease":[0-9]*' | awk -F: '{print $2}')
+	lease=$(ETCDCTL_API=3 etcdctl get /tidb/cdc/capture/${capture2_id} -w json | grep -o 'lease":[0-9]*' | awk -F: '{print $2}')
 	lease_hex=$(printf '%x\n' $lease)
 	ETCDCTL_API=3 etcdctl lease revoke $lease_hex
 

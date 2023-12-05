@@ -17,7 +17,7 @@ import (
 	"github.com/pingcap/failpoint"
 )
 
-// FailpointBuild is true if this is a failpoint build
+// FailpointBuild is ture if this is a failpoint build
 var FailpointBuild = isFailpointBuild()
 
 // using failpoint package when the failpoint is enabled to avoid imported and not used error

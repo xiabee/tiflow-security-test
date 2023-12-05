@@ -16,12 +16,17 @@ package util
 import (
 	"bytes"
 	"fmt"
-	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestOverlapCoveringMerge(t *testing.T) {
+type overlapSuite struct{}
+
+var _ = check.Suite(&overlapSuite{})
+
+func (s *overlapSuite) TestOverlapCoveringMerge(c *check.C) {
+	defer testleak.AfterTest(c)()
 	tests := []struct {
 		name string
 		// inputs is a slice of coverings. The inner slice represents a covering
@@ -107,7 +112,7 @@ func TestOverlapCoveringMerge(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Log("test: ", test.name)
+		c.Log("test: ", test.name)
 
 		var payload int
 		var inputs []Covering
@@ -133,8 +138,8 @@ func TestOverlapCoveringMerge(t *testing.T) {
 			}
 			outputPayloads = append(outputPayloads, payload.String())
 		}
-		require.Equal(t, test.expectedIntervals, outputIntervals)
-		require.Equal(t, test.expectedPayloads, outputPayloads)
 
+		c.Assert(outputIntervals, check.DeepEquals, test.expectedIntervals)
+		c.Assert(outputPayloads, check.DeepEquals, test.expectedPayloads)
 	}
 }

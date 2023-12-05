@@ -23,16 +23,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
-	"github.com/pingcap/tiflow/pkg/migrate"
 	"github.com/pingcap/tiflow/pkg/orchestrator/util"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -43,6 +42,13 @@ const (
 	numValuesPerGroup    = 5
 	totalTicksPerReactor = 1000
 )
+
+func Test(t *testing.T) { check.TestingT(t) }
+
+var _ = check.Suite(&etcdWorkerSuite{})
+
+type etcdWorkerSuite struct {
+}
 
 type simpleReactor struct {
 	state     *simpleReactorState
@@ -77,8 +83,7 @@ func (s *simpleReactor) Tick(_ context.Context, state ReactorState) (nextState R
 			}
 		}
 		if sum != expectedSum {
-			log.Panic("state is inconsistent",
-				zap.Int("expectedSum", sum), zap.Int("actualSum", s.state.sum))
+			log.Panic("state is inconsistent", zap.Int("expected-sum", sum), zap.Int("actual-sum", s.state.sum))
 		}
 
 		s.state.SetSum(sum)
@@ -147,9 +152,6 @@ func (s *simpleReactorState) SetSum(sum int) {
 	s.patches = append(s.patches, patch)
 }
 
-func (s *simpleReactorState) UpdatePendingChange() {
-}
-
 func (s *simpleReactorState) Update(key util.EtcdKey, value []byte, isInit bool) error {
 	subMatches := keyParseRegexp.FindSubmatch(key.Bytes())
 	if len(subMatches) != 2 {
@@ -197,24 +199,26 @@ func (s *simpleReactorState) GetPatches() [][]DataPatch {
 	return [][]DataPatch{ret}
 }
 
-func setUpTest(t *testing.T) (func() *etcd.Client, func()) {
-	url, server, err := etcd.SetupEmbedEtcd(t.TempDir())
-	require.Nil(t, err)
+func setUpTest(c *check.C) (func() *etcd.Client, func()) {
+	dir := c.MkDir()
+	url, server, err := etcd.SetupEmbedEtcd(dir)
+	c.Assert(err, check.IsNil)
 	endpoints := []string{url.String()}
 	return func() *etcd.Client {
 			rawCli, err := clientv3.NewFromURLs(endpoints)
-			require.Nil(t, err)
+			c.Check(err, check.IsNil)
 			return etcd.Wrap(rawCli, map[string]prometheus.Counter{})
 		}, func() {
 			server.Close()
 		}
 }
 
-func TestEtcdSum(t *testing.T) {
+func (s *etcdWorkerSuite) TestEtcdSum(c *check.C) {
+	defer testleak.AfterTest(c)()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	defer cancel()
 
-	newClient, closer := setUpTest(t)
+	newClient, closer := setUpTest(c)
 	defer closer()
 
 	cli := newClient()
@@ -222,15 +226,15 @@ func TestEtcdSum(t *testing.T) {
 		_ = cli.Unwrap().Close()
 	}()
 	_, err := cli.Put(ctx, testEtcdKeyPrefix+"/sum", "0")
-	require.Nil(t, err)
+	c.Check(err, check.IsNil)
 
 	initArray := make([]int, numValuesPerGroup)
 	jsonStr, err := json.Marshal(initArray)
-	require.Nil(t, err)
+	c.Check(err, check.IsNil)
 
 	for i := 0; i < numGroups; i++ {
 		_, err := cli.Put(ctx, testEtcdKeyPrefix+"/"+strconv.Itoa(i), string(jsonStr))
-		require.Nil(t, err)
+		c.Check(err, check.IsNil)
 	}
 
 	errg, ctx := errgroup.WithContext(ctx)
@@ -255,19 +259,16 @@ func TestEtcdSum(t *testing.T) {
 			}
 
 			cli := newClient()
-			cdcCli, err := etcd.NewCDCEtcdClient(ctx, cli.Unwrap(), "default")
-			require.Nil(t, err)
 			defer func() {
 				_ = cli.Unwrap().Close()
 			}()
 
-			etcdWorker, err := NewEtcdWorker(cdcCli, testEtcdKeyPrefix, reactor, initState,
-				&migrate.NoOpMigrator{})
+			etcdWorker, err := NewEtcdWorker(cli, testEtcdKeyPrefix, reactor, initState)
 			if err != nil {
 				return errors.Trace(err)
 			}
 
-			return errors.Trace(etcdWorker.Run(ctx, nil, 10*time.Millisecond, "owner"))
+			return errors.Trace(etcdWorker.Run(ctx, nil, 10*time.Millisecond, "127.0.0.1", ""))
 		})
 	}
 
@@ -277,16 +278,13 @@ func TestEtcdSum(t *testing.T) {
 		strings.Contains(err.Error(), "etcdserver: request timeout")) {
 		return
 	}
-	require.Nil(t, err)
+	c.Check(err, check.IsNil)
 }
 
 type intReactorState struct {
 	val       int
 	isUpdated bool
 	lastVal   int
-}
-
-func (s *intReactorState) UpdatePendingChange() {
 }
 
 func (s *intReactorState) Update(key util.EtcdKey, value []byte, isInit bool) error {
@@ -329,56 +327,53 @@ func (r *linearizabilityReactor) Tick(ctx context.Context, state ReactorState) (
 	return r.state, nil
 }
 
-func TestLinearizability(t *testing.T) {
+func (s *etcdWorkerSuite) TestLinearizability(c *check.C) {
+	defer testleak.AfterTest(c)()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	defer cancel()
 
-	newClient, closer := setUpTest(t)
+	newClient, closer := setUpTest(c)
 	defer closer()
 
 	cli0 := newClient()
-	cdcCli, err := etcd.NewCDCEtcdClient(ctx, cli0.Unwrap(), "default")
-	require.Nil(t, err)
 	cli := newClient()
 	for i := 0; i < 1000; i++ {
 		_, err := cli.Put(ctx, testEtcdKeyPrefix+"/lin", strconv.Itoa(i))
-		require.Nil(t, err)
+		c.Assert(err, check.IsNil)
 	}
 
-	reactor, err := NewEtcdWorker(cdcCli, testEtcdKeyPrefix+"/lin", &linearizabilityReactor{
+	reactor, err := NewEtcdWorker(cli0, testEtcdKeyPrefix+"/lin", &linearizabilityReactor{
 		state:     nil,
 		tickCount: 999,
 	}, &intReactorState{
 		val:       0,
 		isUpdated: false,
-	}, &migrate.NoOpMigrator{})
-	require.Nil(t, err)
+	})
+	c.Assert(err, check.IsNil)
 	errg := &errgroup.Group{}
 	errg.Go(func() error {
-		return reactor.Run(ctx, nil, 10*time.Millisecond, "owner")
+		return reactor.Run(ctx, nil, 10*time.Millisecond, "127.0.0.1", "")
 	})
 
 	time.Sleep(500 * time.Millisecond)
 	for i := 999; i < 2000; i++ {
 		_, err := cli.Put(ctx, testEtcdKeyPrefix+"/lin", strconv.Itoa(i))
-		require.Nil(t, err)
+		c.Assert(err, check.IsNil)
 	}
 
 	err = errg.Wait()
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 
 	err = cli.Unwrap().Close()
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	err = cli0.Unwrap().Close()
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 }
 
 type commonReactorState struct {
 	state          map[string]string
 	pendingPatches []DataPatch
-}
-
-func (s *commonReactorState) UpdatePendingChange() {
 }
 
 func (s *commonReactorState) Update(key util.EtcdKey, value []byte, isInit bool) error {
@@ -426,35 +421,35 @@ func (r *finishedReactor) Tick(ctx context.Context, state ReactorState) (nextSta
 	return r.state, cerrors.ErrReactorFinished
 }
 
-func TestFinished(t *testing.T) {
+func (s *etcdWorkerSuite) TestFinished(c *check.C) {
+	defer testleak.AfterTest(c)()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	defer cancel()
 
-	newClient, closer := setUpTest(t)
+	newClient, closer := setUpTest(c)
 	defer closer()
 
 	cli := newClient()
-	cdcCli, err := etcd.NewCDCEtcdClient(ctx, cli.Unwrap(), "default")
-	require.Nil(t, err)
-
 	prefix := testEtcdKeyPrefix + "/finished"
-	reactor, err := NewEtcdWorker(cdcCli, prefix, &finishedReactor{
+	reactor, err := NewEtcdWorker(cli, prefix, &finishedReactor{
 		prefix: prefix,
 	}, &commonReactorState{
 		state: make(map[string]string),
-	}, &migrate.NoOpMigrator{})
-	require.Nil(t, err)
-	err = reactor.Run(ctx, nil, 10*time.Millisecond, "owner")
-	require.Nil(t, err)
+	})
+	c.Assert(err, check.IsNil)
+
+	err = reactor.Run(ctx, nil, 10*time.Millisecond, "127.0.0.1", "")
+	c.Assert(err, check.IsNil)
 	resp, err := cli.Get(ctx, prefix+"/key1")
-	require.Nil(t, err)
-	require.Equal(t, string(resp.Kvs[0].Key), "/cdc_etcd_worker_test/finished/key1")
-	require.Equal(t, string(resp.Kvs[0].Value), "abcabcfin")
+	c.Assert(err, check.IsNil)
+	c.Assert(string(resp.Kvs[0].Key), check.Equals, "/cdc_etcd_worker_test/finished/key1")
+	c.Assert(string(resp.Kvs[0].Value), check.Equals, "abcabcfin")
 	resp, err = cli.Get(ctx, prefix+"/key2")
-	require.Nil(t, err)
-	require.Len(t, resp.Kvs, 0)
+	c.Assert(err, check.IsNil)
+	c.Assert(resp.Kvs, check.HasLen, 0)
 	err = cli.Unwrap().Close()
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 }
 
 type coverReactor struct {
@@ -496,36 +491,36 @@ func (r *coverReactor) Tick(ctx context.Context, state ReactorState) (nextState 
 	return r.state, cerrors.ErrReactorFinished
 }
 
-func TestCover(t *testing.T) {
+func (s *etcdWorkerSuite) TestCover(c *check.C) {
+	defer testleak.AfterTest(c)()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	defer cancel()
 
-	newClient, closer := setUpTest(t)
+	newClient, closer := setUpTest(c)
 	defer closer()
 
 	cli := newClient()
-	cdcCli, err := etcd.NewCDCEtcdClient(ctx, cli.Unwrap(), "default")
-	require.Nil(t, err)
-
 	prefix := testEtcdKeyPrefix + "/cover"
-	reactor, err := NewEtcdWorker(cdcCli, prefix, &coverReactor{
+	reactor, err := NewEtcdWorker(cli, prefix, &coverReactor{
 		prefix: prefix,
 	}, &commonReactorState{
 		state: make(map[string]string),
-	}, &migrate.NoOpMigrator{})
-	require.Nil(t, err)
-	err = reactor.Run(ctx, nil, 10*time.Millisecond, "owner")
-	require.Nil(t, err)
+	})
+	c.Assert(err, check.IsNil)
+
+	err = reactor.Run(ctx, nil, 10*time.Millisecond, "127.0.0.1", "")
+	c.Assert(err, check.IsNil)
 	resp, err := cli.Get(ctx, prefix+"/key1")
-	require.Nil(t, err)
-	require.Equal(t, string(resp.Kvs[0].Key), "/cdc_etcd_worker_test/cover/key1")
-	require.Equal(t, string(resp.Kvs[0].Value), "abccbaabccbafinfin")
+	c.Assert(err, check.IsNil)
+	c.Assert(string(resp.Kvs[0].Key), check.Equals, "/cdc_etcd_worker_test/cover/key1")
+	c.Assert(string(resp.Kvs[0].Value), check.Equals, "abccbaabccbafinfin")
 	resp, err = cli.Get(ctx, prefix+"/key2")
-	require.Nil(t, err)
-	require.Equal(t, string(resp.Kvs[0].Key), "/cdc_etcd_worker_test/cover/key2")
-	require.Equal(t, string(resp.Kvs[0].Value), "fin")
+	c.Assert(err, check.IsNil)
+	c.Assert(string(resp.Kvs[0].Key), check.Equals, "/cdc_etcd_worker_test/cover/key2")
+	c.Assert(string(resp.Kvs[0].Value), check.Equals, "fin")
 	err = cli.Unwrap().Close()
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 }
 
 type emptyTxnReactor struct {
@@ -575,36 +570,36 @@ func (r *emptyTxnReactor) Tick(ctx context.Context, state ReactorState) (nextSta
 	return r.state, cerrors.ErrReactorFinished
 }
 
-func TestEmptyTxn(t *testing.T) {
+func (s *etcdWorkerSuite) TestEmptyTxn(c *check.C) {
+	defer testleak.AfterTest(c)()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	defer cancel()
 
-	newClient, closer := setUpTest(t)
+	newClient, closer := setUpTest(c)
 	defer closer()
 
 	cli := newClient()
-	cdcCli, err := etcd.NewCDCEtcdClient(ctx, cli.Unwrap(), "default")
-	require.Nil(t, err)
-
 	prefix := testEtcdKeyPrefix + "/empty_txn"
-	reactor, err := NewEtcdWorker(cdcCli, prefix, &emptyTxnReactor{
+	reactor, err := NewEtcdWorker(cli, prefix, &emptyTxnReactor{
 		prefix: prefix,
 		cli:    cli,
 	}, &commonReactorState{
 		state: make(map[string]string),
-	}, &migrate.NoOpMigrator{})
-	require.Nil(t, err)
-	err = reactor.Run(ctx, nil, 10*time.Millisecond, "owner")
-	require.Nil(t, err)
+	})
+	c.Assert(err, check.IsNil)
+
+	err = reactor.Run(ctx, nil, 10*time.Millisecond, "127.0.0.1", "")
+	c.Assert(err, check.IsNil)
 	resp, err := cli.Get(ctx, prefix+"/key1")
-	require.Nil(t, err)
-	require.Len(t, resp.Kvs, 0)
+	c.Assert(err, check.IsNil)
+	c.Assert(resp.Kvs, check.HasLen, 0)
 	resp, err = cli.Get(ctx, prefix+"/key2")
-	require.Nil(t, err)
-	require.Equal(t, string(resp.Kvs[0].Key), "/cdc_etcd_worker_test/empty_txn/key2")
-	require.Equal(t, string(resp.Kvs[0].Value), "123")
+	c.Assert(err, check.IsNil)
+	c.Assert(string(resp.Kvs[0].Key), check.Equals, "/cdc_etcd_worker_test/empty_txn/key2")
+	c.Assert(string(resp.Kvs[0].Value), check.Equals, "123")
 	err = cli.Unwrap().Close()
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 }
 
 type emptyOrNilReactor struct {
@@ -644,35 +639,35 @@ func (r *emptyOrNilReactor) Tick(ctx context.Context, state ReactorState) (nextS
 	return r.state, cerrors.ErrReactorFinished
 }
 
-func TestEmptyOrNil(t *testing.T) {
+func (s *etcdWorkerSuite) TestEmptyOrNil(c *check.C) {
+	defer testleak.AfterTest(c)()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	defer cancel()
 
-	newClient, closer := setUpTest(t)
+	newClient, closer := setUpTest(c)
 	defer closer()
 
 	cli := newClient()
-	cdcCli, err := etcd.NewCDCEtcdClient(ctx, cli.Unwrap(), "default")
-	require.Nil(t, err)
-
 	prefix := testEtcdKeyPrefix + "/emptyOrNil"
-	reactor, err := NewEtcdWorker(cdcCli, prefix, &emptyOrNilReactor{
+	reactor, err := NewEtcdWorker(cli, prefix, &emptyOrNilReactor{
 		prefix: prefix,
 	}, &commonReactorState{
 		state: make(map[string]string),
-	}, &migrate.NoOpMigrator{})
-	require.Nil(t, err)
-	err = reactor.Run(ctx, nil, 10*time.Millisecond, "owner")
-	require.Nil(t, err)
+	})
+	c.Assert(err, check.IsNil)
+
+	err = reactor.Run(ctx, nil, 10*time.Millisecond, "127.0.0.1", "")
+	c.Assert(err, check.IsNil)
 	resp, err := cli.Get(ctx, prefix+"/key1")
-	require.Nil(t, err)
-	require.Equal(t, string(resp.Kvs[0].Key), "/cdc_etcd_worker_test/emptyOrNil/key1")
-	require.Equal(t, string(resp.Kvs[0].Value), "")
+	c.Assert(err, check.IsNil)
+	c.Assert(string(resp.Kvs[0].Key), check.Equals, "/cdc_etcd_worker_test/emptyOrNil/key1")
+	c.Assert(string(resp.Kvs[0].Value), check.Equals, "")
 	resp, err = cli.Get(ctx, prefix+"/key2")
-	require.Nil(t, err)
-	require.Len(t, resp.Kvs, 0)
+	c.Assert(err, check.IsNil)
+	c.Assert(resp.Kvs, check.HasLen, 0)
 	err = cli.Unwrap().Close()
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 }
 
 type modifyOneReactor struct {
@@ -714,40 +709,37 @@ func (r *modifyOneReactor) Tick(ctx context.Context, state ReactorState) (nextSt
 
 // TestModifyAfterDelete tests snapshot isolation when there is one modifying transaction delayed in the middle while a deleting transaction
 // commits. The first transaction should be aborted and retried, and isolation should not be violated.
-func TestModifyAfterDelete(t *testing.T) {
+func (s *etcdWorkerSuite) TestModifyAfterDelete(c *check.C) {
+	defer testleak.AfterTest(c)()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5)
 	defer cancel()
 
-	newClient, closer := setUpTest(t)
+	newClient, closer := setUpTest(c)
 	defer closer()
 
 	cli1 := newClient()
-	cdcCli1, err := etcd.NewCDCEtcdClient(ctx, cli1.Unwrap(), "default")
-	require.Nil(t, err)
-
 	cli2 := newClient()
-	cdcCli2, err := etcd.NewCDCEtcdClient(ctx, cli2.Unwrap(), "default")
-	require.Nil(t, err)
 
-	_, err = cli1.Put(ctx, "/test/key1", "original value")
-	require.Nil(t, err)
+	_, err := cli1.Put(ctx, "/test/key1", "original value")
+	c.Assert(err, check.IsNil)
 
 	modifyReactor := &modifyOneReactor{
 		key:      []byte("/test/key1"),
 		value:    []byte("modified value"),
 		waitOnCh: make(chan struct{}),
 	}
-	worker1, err := NewEtcdWorker(cdcCli1, "/test", modifyReactor, &commonReactorState{
+	worker1, err := NewEtcdWorker(cli1, "/test", modifyReactor, &commonReactorState{
 		state: make(map[string]string),
-	}, &migrate.NoOpMigrator{})
-	require.Nil(t, err)
+	})
+	c.Assert(err, check.IsNil)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := worker1.Run(ctx, nil, time.Millisecond*100, "owner")
-		require.Nil(t, err)
+		err := worker1.Run(ctx, nil, time.Millisecond*100, "127.0.0.1", "")
+		c.Assert(err, check.IsNil)
 	}()
 
 	modifyReactor.waitOnCh <- struct{}{}
@@ -756,29 +748,22 @@ func TestModifyAfterDelete(t *testing.T) {
 		key:   []byte("/test/key1"),
 		value: nil, // deletion
 	}
-	worker2, err := NewEtcdWorker(cdcCli2, "/test", deleteReactor, &commonReactorState{
+	worker2, err := NewEtcdWorker(cli2, "/test", deleteReactor, &commonReactorState{
 		state: make(map[string]string),
-	}, &migrate.NoOpMigrator{})
-	require.Nil(t, err)
+	})
+	c.Assert(err, check.IsNil)
 
-	err = worker2.Run(ctx, nil, time.Millisecond*100, "owner")
-	require.Nil(t, err)
+	err = worker2.Run(ctx, nil, time.Millisecond*100, "127.0.0.1", "")
+	c.Assert(err, check.IsNil)
 
 	modifyReactor.waitOnCh <- struct{}{}
 	wg.Wait()
 
 	resp, err := cli1.Get(ctx, "/test/key1")
-	require.Nil(t, err)
-	require.Len(t, resp.Kvs, 0)
-	require.Equal(t, worker1.deleteCounter, int64(1))
+	c.Assert(err, check.IsNil)
+	c.Assert(resp.Kvs, check.HasLen, 0)
+	c.Assert(worker1.deleteCounter, check.Equals, int64(1))
 
 	_ = cli1.Unwrap().Close()
 	_ = cli2.Unwrap().Close()
-}
-
-func TestRetryableError(t *testing.T) {
-	require.True(t, isRetryableError(cerrors.ErrEtcdTryAgain))
-	require.True(t, isRetryableError(cerrors.ErrReachMaxTry.Wrap(rpctypes.ErrTimeoutDueToLeaderFail)))
-	require.True(t, isRetryableError(errors.Trace(context.DeadlineExceeded)))
-	require.False(t, isRetryableError(context.Canceled))
 }

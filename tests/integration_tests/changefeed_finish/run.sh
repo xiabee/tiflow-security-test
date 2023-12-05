@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -eu
+set -e
 
 CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source $CUR/../_utils/test_prepare
@@ -8,6 +8,26 @@ WORK_DIR=$OUT_DIR/$TEST_NAME
 CDC_BINARY=cdc.test
 SINK_TYPE=$1
 MAX_RETRIES=10
+
+function check_changefeed_is_finished() {
+	pd=$1
+	changefeed=$2
+	query=$(cdc cli changefeed query -c=$changefeed)
+	echo "$query"
+	state=$(echo "$query" | jq ".state" | tr -d '"')
+	if [[ ! "$state" -eq "finished" ]]; then
+		echo "state $state is not finished"
+		exit 1
+	fi
+
+	status_length=$(echo "$query" | sed "/has been deleted/d" | jq '."task-status"|length')
+	if [[ ! "$status_length" -eq "0" ]]; then
+		echo "unexpected task status length $status_length, should be 0"
+		exit 1
+	fi
+}
+
+export -f check_changefeed_is_finished
 
 function run() {
 	rm -rf $WORK_DIR && mkdir -p $WORK_DIR
@@ -17,7 +37,7 @@ function run() {
 	pd_addr="http://$UP_PD_HOST_1:$UP_PD_PORT_1"
 	TOPIC_NAME="ticdc-changefeed-pause-resume-$RANDOM"
 	case $SINK_TYPE in
-	kafka) SINK_URI="kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
+	kafka) SINK_URI="kafka://127.0.0.1:9092/$TOPIC_NAME?partition-num=4&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
 	*) SINK_URI="mysql://normal:123456@127.0.0.1:3306/?max-txn-row=1" ;;
 	esac
 
@@ -28,7 +48,7 @@ function run() {
 	changefeed_id=$(cdc cli changefeed create --sink-uri="$SINK_URI" --target-ts=$target_ts 2>&1 | tail -n2 | head -n1 | awk '{print $2}')
 
 	if [ "$SINK_TYPE" == "kafka" ]; then
-		run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760"
+		run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760"
 	fi
 
 	run_sql "CREATE DATABASE changefeed_finish;" ${UP_TIDB_HOST} ${UP_TIDB_PORT}
@@ -40,7 +60,7 @@ function run() {
 
 	sleep 90
 
-	ensure $MAX_RETRIES check_changefeed_state $pd_addr $changefeed_id "finished" "null" ""
+	ensure $MAX_RETRIES check_changefeed_is_finished $pd_addr $changefeed_id
 
 	cleanup_process $CDC_BINARY
 }

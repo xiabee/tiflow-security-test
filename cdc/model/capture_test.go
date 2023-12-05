@@ -14,14 +14,16 @@
 package model
 
 import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestMarshalUnmarshal(t *testing.T) {
-	t.Parallel()
+type captureSuite struct{}
 
+var _ = check.Suite(&captureSuite{})
+
+func (s *captureSuite) TestMarshalUnmarshal(c *check.C) {
+	defer testleak.AfterTest(c)()
 	info := &CaptureInfo{
 		ID:            "9ff52aca-aea6-4022-8ec4-fbee3f2c7890",
 		AdvertiseAddr: "127.0.0.1:8300",
@@ -29,15 +31,16 @@ func TestMarshalUnmarshal(t *testing.T) {
 	}
 	expected := `{"id":"9ff52aca-aea6-4022-8ec4-fbee3f2c7890","address":"127.0.0.1:8300","version":"dev"}`
 	data, err := info.Marshal()
-	require.Nil(t, err)
-	require.Equal(t, expected, string(data))
+	c.Assert(err, check.IsNil)
+	c.Assert(string(data), check.Equals, expected)
 	decodedInfo := &CaptureInfo{}
 	err = decodedInfo.Unmarshal(data)
-	require.Nil(t, err)
-	require.Equal(t, info, decodedInfo)
+	c.Assert(err, check.IsNil)
+	c.Assert(decodedInfo, check.DeepEquals, info)
 }
 
-func TestListVersionsFromCaptureInfos(t *testing.T) {
+func (s *captureSuite) TestListVersionsFromCaptureInfos(c *check.C) {
+	defer testleak.AfterTest(c)()
 	infos := []*CaptureInfo{
 		{
 			ID:            "9ff52aca-aea6-4022-8ec4-fbee3f2c7891",
@@ -51,5 +54,5 @@ func TestListVersionsFromCaptureInfos(t *testing.T) {
 		},
 	}
 
-	require.ElementsMatch(t, []string{"dev", ""}, ListVersionsFromCaptureInfos(infos))
+	c.Assert(ListVersionsFromCaptureInfos(infos), check.DeepEquals, []string{"dev", ""})
 }

@@ -17,37 +17,45 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
+	"io/ioutil"
+	"net"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tidb-tools/pkg/utils"
 	"github.com/pingcap/tiflow/pkg/security"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
+
+func Test(t *testing.T) { check.TestingT(t) }
+
+type httputilSuite struct{}
+
+var _ = check.Suite(&httputilSuite{})
 
 var httputilServerMsg = "this is httputil test server"
 
-func TestHttputilNewClient(t *testing.T) {
-	t.Parallel()
+func (s *httputilSuite) TestHttputilNewClient(c *check.C) {
+	defer testleak.AfterTest(c)()
+	port := 8303
+	_, cancel := context.WithCancel(context.Background())
 
 	dir, err := os.Getwd()
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
 	certDir := "_certificates"
-	serverTLS, err := util.ToTLSConfigWithVerify(
+	serverTLS, err := utils.ToTLSConfigWithVerify(
 		filepath.Join(dir, certDir, "ca.pem"),
 		filepath.Join(dir, certDir, "server.pem"),
 		filepath.Join(dir, certDir, "server-key.pem"),
 		[]string{},
 	)
-	require.Nil(t, err)
-	server, addr := runServer(http.HandlerFunc(handler), serverTLS)
+	c.Assert(err, check.IsNil)
+	server := runServer(serverTLS, port, c)
 	defer func() {
+		cancel()
 		server.Close()
 	}()
 	credential := &security.Credential{
@@ -57,56 +65,14 @@ func TestHttputilNewClient(t *testing.T) {
 		CertAllowedCN: []string{},
 	}
 	cli, err := NewClient(credential)
-	require.Nil(t, err)
-	url := fmt.Sprintf("https://%s/", addr)
-	resp, err := cli.Get(context.Background(), url)
-	require.Nil(t, err)
+	c.Assert(err, check.IsNil)
+	url := fmt.Sprintf("https://127.0.0.1:%d/", port)
+	resp, err := cli.Get(url)
+	c.Assert(err, check.IsNil)
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	require.Nil(t, err)
-	require.Equal(t, httputilServerMsg, string(body))
-}
-
-func TestStatusCodeCreated(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	server, addr := runServer(http.HandlerFunc(createHandler), nil)
-	defer func() {
-		cancel()
-		server.Close()
-	}()
-	cli, err := NewClient(nil)
-	require.Nil(t, err)
-	url := fmt.Sprintf("http://%s/create", addr)
-	respBody, err := cli.DoRequest(ctx, url, http.MethodPost, nil, nil)
-	require.NoError(t, err)
-	require.Equal(t, []byte(`"{"id": "value"}"`), respBody)
-}
-
-func TestTimeout(t *testing.T) {
-	t.Parallel()
-
-	const timeout = 500 * time.Millisecond
-
-	server, addr := runServer(sleepHandler(time.Second), nil)
-	defer func() {
-		server.Close()
-	}()
-	cli, err := NewClient(nil)
-	require.NoError(t, err)
-
-	cli.SetTimeout(timeout)
-	start := time.Now()
-	resp, err := cli.Get(context.Background(), fmt.Sprintf("http://%s/", addr))
-	if resp != nil && resp.Body != nil {
-		require.NoError(t, resp.Body.Close())
-	}
-	var uErr *url.Error
-	require.ErrorAs(t, err, &uErr)
-	require.True(t, uErr.Timeout())
-	require.GreaterOrEqual(t, time.Since(start), timeout)
+	body, err := ioutil.ReadAll(resp.Body)
+	c.Assert(err, check.IsNil)
+	c.Assert(string(body), check.Equals, httputilServerMsg)
 }
 
 func handler(w http.ResponseWriter, req *http.Request) {
@@ -115,31 +81,19 @@ func handler(w http.ResponseWriter, req *http.Request) {
 	w.Write([]byte(httputilServerMsg))
 }
 
-func createHandler(w http.ResponseWriter, req *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	//nolint:errcheck
-	w.WriteHeader(http.StatusCreated)
-	w.Write([]byte(`"{"id": "value"}"`))
-}
+func runServer(tlsCfg *tls.Config, port int, c *check.C) *http.Server {
+	http.HandleFunc("/", handler)
+	server := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: nil}
 
-func sleepHandler(d time.Duration) http.HandlerFunc {
-	return func(w http.ResponseWriter, req *http.Request) {
-		select {
-		case <-time.After(d):
-		case <-req.Context().Done():
-		}
+	conn, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		c.Assert(err, check.IsNil)
 	}
-}
 
-func runServer(handler http.Handler, tlsCfg *tls.Config) (*httptest.Server, string) {
-	server := httptest.NewUnstartedServer(handler)
-	addr := server.Listener.Addr().String()
-
-	if tlsCfg != nil {
-		server.TLS = tlsCfg
-		server.StartTLS()
-	} else {
-		server.Start()
-	}
-	return server, addr
+	tlsListener := tls.NewListener(conn, tlsCfg)
+	go func() {
+		//nolint:errcheck
+		server.Serve(tlsListener)
+	}()
+	return server
 }

@@ -14,15 +14,17 @@
 package regionspan
 
 import (
-	"testing"
-
+	"github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestCheckRegionsLeftCover(t *testing.T) {
-	t.Parallel()
+type regionSuite struct{}
 
+var _ = check.Suite(&regionSuite{})
+
+func (s *regionSuite) TestCheckRegionsLeftCover(c *check.C) {
+	defer testleak.AfterTest(c)()
 	cases := []struct {
 		regions []*metapb.Region
 		span    ComparableSpan
@@ -50,6 +52,6 @@ func TestCheckRegionsLeftCover(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		require.Equal(t, tc.cover, CheckRegionsLeftCover(tc.regions, tc.span))
+		c.Assert(CheckRegionsLeftCover(tc.regions, tc.span), check.Equals, tc.cover)
 	}
 }

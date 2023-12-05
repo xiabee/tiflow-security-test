@@ -14,40 +14,24 @@
 package etcd
 
 import (
-	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
 
 const (
-	metaPrefix = "/__cdc_meta__"
+	etcdKeyBase = "/tidb/cdc"
+	ownerKey    = "/owner"
+	captureKey  = "/capture"
 
-	ownerKey        = "/owner"
-	captureKey      = "/capture"
-	taskPositionKey = "/task/position"
+	taskKey         = "/task"
+	taskWorkloadKey = taskKey + "/workload"
+	taskStatusKey   = taskKey + "/status"
+	taskPositionKey = taskKey + "/position"
 
-	// ChangefeedInfoKey is the key path for changefeed info
-	ChangefeedInfoKey = "/changefeed/info"
-	// ChangefeedStatusKey is the key path for changefeed status
-	ChangefeedStatusKey = "/changefeed/status"
-	// metaVersionKey is the key path for metadata version
-	metaVersionKey = "/meta/meta-version"
-	upstreamKey    = "/upstream"
-
-	// DeletionCounterKey is the key path for the counter of deleted keys
-	DeletionCounterKey = metaPrefix + "/meta/ticdc-delete-etcd-key-count"
-
-	// DefaultClusterAndNamespacePrefix is the default prefix of changefeed data
-	DefaultClusterAndNamespacePrefix = "/tidb/cdc/default/default"
-	// DefaultClusterAndMetaPrefix is the default prefix of cluster meta
-	DefaultClusterAndMetaPrefix = "/tidb/cdc/default" + metaPrefix
-
-	// MigrateBackupPrefix is the prefix of backup keys during a migration
-	migrateBackupPrefix = "/tidb/cdc/__backup__"
+	changefeedInfoKey = "/changefeed/info"
+	jobKey            = "/job"
 )
 
 // CDCKeyType is the type of etcd key
@@ -61,11 +45,11 @@ const (
 	CDCKeyTypeChangefeedInfo
 	CDCKeyTypeChangeFeedStatus
 	CDCKeyTypeTaskPosition
-	CDCKeyTypeMetaVersion
-	CDCKeyTypeUpStream
+	CDCKeyTypeTaskStatus
+	CDCKeyTypeTaskWorkload
 )
 
-// CDCKey represents an etcd key which is defined by TiCDC
+// CDCKey represents a etcd key which is defined by TiCDC
 /*
  Usage:
  we can parse a raw etcd key:
@@ -91,97 +75,71 @@ const (
 */
 type CDCKey struct {
 	Tp           CDCKeyType
-	ChangefeedID model.ChangeFeedID
+	ChangefeedID string
 	CaptureID    string
 	OwnerLeaseID string
-	ClusterID    string
-	UpstreamID   model.UpstreamID
-	Namespace    string
-}
-
-// BaseKey is the common prefix of the keys with cluster id in CDC
-func BaseKey(clusterID string) string {
-	return fmt.Sprintf("/tidb/cdc/%s", clusterID)
-}
-
-// NamespacedPrefix returns the etcd prefix of changefeed data
-func NamespacedPrefix(clusterID, namespace string) string {
-	return BaseKey(clusterID) + "/" + namespace
 }
 
 // Parse parses the given etcd key
-func (k *CDCKey) Parse(clusterID, key string) error {
-	if !strings.HasPrefix(key, BaseKey(clusterID)) {
+func (k *CDCKey) Parse(key string) error {
+	if !strings.HasPrefix(key, etcdKeyBase) {
 		return cerror.ErrInvalidEtcdKey.GenWithStackByArgs(key)
 	}
-	key = key[len("/tidb/cdc"):]
-	parts := strings.Split(key, "/")
-	k.ClusterID = parts[1]
-	key = key[len(k.ClusterID)+1:]
-	if strings.HasPrefix(key, metaPrefix) {
-		key = key[len(metaPrefix):]
-		switch {
-		case strings.HasPrefix(key, ownerKey):
-			k.Tp = CDCKeyTypeOwner
-			k.CaptureID = ""
-			key = key[len(ownerKey):]
-			if len(key) > 0 {
-				key = key[1:]
-			}
-			k.OwnerLeaseID = key
-		case strings.HasPrefix(key, captureKey):
-			k.Tp = CDCKeyTypeCapture
-			k.CaptureID = key[len(captureKey)+1:]
-			k.OwnerLeaseID = ""
-		case strings.HasPrefix(key, metaVersionKey):
-			k.Tp = CDCKeyTypeMetaVersion
-		default:
+	key = key[len(etcdKeyBase):]
+	switch {
+	case strings.HasPrefix(key, ownerKey):
+		k.Tp = CDCKeyTypeOwner
+		k.CaptureID = ""
+		k.ChangefeedID = ""
+		key = key[len(ownerKey):]
+		if len(key) > 0 {
+			key = key[1:]
+		}
+		k.OwnerLeaseID = key
+	case strings.HasPrefix(key, captureKey):
+		k.Tp = CDCKeyTypeCapture
+		k.CaptureID = key[len(captureKey)+1:]
+		k.ChangefeedID = ""
+		k.OwnerLeaseID = ""
+	case strings.HasPrefix(key, changefeedInfoKey):
+		k.Tp = CDCKeyTypeChangefeedInfo
+		k.CaptureID = ""
+		k.ChangefeedID = key[len(changefeedInfoKey)+1:]
+		k.OwnerLeaseID = ""
+	case strings.HasPrefix(key, jobKey):
+		k.Tp = CDCKeyTypeChangeFeedStatus
+		k.CaptureID = ""
+		k.ChangefeedID = key[len(jobKey)+1:]
+		k.OwnerLeaseID = ""
+	case strings.HasPrefix(key, taskStatusKey):
+		splitKey := strings.SplitN(key[len(taskStatusKey)+1:], "/", 2)
+		if len(splitKey) != 2 {
 			return cerror.ErrInvalidEtcdKey.GenWithStackByArgs(key)
 		}
-	} else {
-		namespace := parts[2]
-		key = key[len(namespace)+1:]
-		k.Namespace = namespace
-		switch {
-		case strings.HasPrefix(key, ChangefeedInfoKey):
-			k.Tp = CDCKeyTypeChangefeedInfo
-			k.CaptureID = ""
-			k.ChangefeedID = model.ChangeFeedID{
-				Namespace: namespace,
-				ID:        key[len(ChangefeedInfoKey)+1:],
-			}
-			k.OwnerLeaseID = ""
-		case strings.HasPrefix(key, upstreamKey):
-			k.Tp = CDCKeyTypeUpStream
-			k.CaptureID = ""
-			id, err := strconv.ParseUint(key[len(upstreamKey)+1:], 10, 64)
-			if err != nil {
-				return err
-			}
-			k.UpstreamID = id
-		case strings.HasPrefix(key, ChangefeedStatusKey):
-			k.Tp = CDCKeyTypeChangeFeedStatus
-			k.CaptureID = ""
-			k.ChangefeedID = model.ChangeFeedID{
-				Namespace: namespace,
-				ID:        key[len(ChangefeedStatusKey)+1:],
-			}
-			k.OwnerLeaseID = ""
-		case strings.HasPrefix(key, taskPositionKey):
-			splitKey := strings.SplitN(key[len(taskPositionKey)+1:], "/", 2)
-			if len(splitKey) != 2 {
-				return cerror.ErrInvalidEtcdKey.GenWithStackByArgs(key)
-			}
-			k.Tp = CDCKeyTypeTaskPosition
-			k.CaptureID = splitKey[0]
-			k.ChangefeedID = model.ChangeFeedID{
-				Namespace: namespace,
-				ID:        splitKey[1],
-			}
-			k.OwnerLeaseID = ""
-		default:
+		k.Tp = CDCKeyTypeTaskStatus
+		k.CaptureID = splitKey[0]
+		k.ChangefeedID = splitKey[1]
+		k.OwnerLeaseID = ""
+	case strings.HasPrefix(key, taskPositionKey):
+		splitKey := strings.SplitN(key[len(taskPositionKey)+1:], "/", 2)
+		if len(splitKey) != 2 {
 			return cerror.ErrInvalidEtcdKey.GenWithStackByArgs(key)
 		}
+		k.Tp = CDCKeyTypeTaskPosition
+		k.CaptureID = splitKey[0]
+		k.ChangefeedID = splitKey[1]
+		k.OwnerLeaseID = ""
+	case strings.HasPrefix(key, taskWorkloadKey):
+		splitKey := strings.SplitN(key[len(taskWorkloadKey)+1:], "/", 2)
+		if len(splitKey) != 2 {
+			return cerror.ErrInvalidEtcdKey.GenWithStackByArgs(key)
+		}
+		k.Tp = CDCKeyTypeTaskWorkload
+		k.CaptureID = splitKey[0]
+		k.ChangefeedID = splitKey[1]
+		k.OwnerLeaseID = ""
+	default:
+		return cerror.ErrInvalidEtcdKey.GenWithStackByArgs(key)
 	}
 	return nil
 }
@@ -190,26 +148,21 @@ func (k *CDCKey) String() string {
 	switch k.Tp {
 	case CDCKeyTypeOwner:
 		if len(k.OwnerLeaseID) == 0 {
-			return BaseKey(k.ClusterID) + metaPrefix + ownerKey
+			return etcdKeyBase + ownerKey
 		}
-		return BaseKey(k.ClusterID) + metaPrefix + ownerKey + "/" + k.OwnerLeaseID
+		return etcdKeyBase + ownerKey + "/" + k.OwnerLeaseID
 	case CDCKeyTypeCapture:
-		return BaseKey(k.ClusterID) + metaPrefix + captureKey + "/" + k.CaptureID
+		return etcdKeyBase + captureKey + "/" + k.CaptureID
 	case CDCKeyTypeChangefeedInfo:
-		return NamespacedPrefix(k.ClusterID, k.ChangefeedID.Namespace) + ChangefeedInfoKey +
-			"/" + k.ChangefeedID.ID
+		return etcdKeyBase + changefeedInfoKey + "/" + k.ChangefeedID
 	case CDCKeyTypeChangeFeedStatus:
-		return NamespacedPrefix(k.ClusterID, k.ChangefeedID.Namespace) + ChangefeedStatusKey +
-			"/" + k.ChangefeedID.ID
+		return etcdKeyBase + jobKey + "/" + k.ChangefeedID
 	case CDCKeyTypeTaskPosition:
-		return NamespacedPrefix(k.ClusterID, k.ChangefeedID.Namespace) + taskPositionKey +
-			"/" + k.CaptureID + "/" + k.ChangefeedID.ID
-	case CDCKeyTypeMetaVersion:
-		return BaseKey(k.ClusterID) + metaPrefix + metaVersionKey
-	case CDCKeyTypeUpStream:
-		return fmt.Sprintf("%s%s/%d",
-			NamespacedPrefix(k.ClusterID, k.Namespace),
-			upstreamKey, k.UpstreamID)
+		return etcdKeyBase + taskPositionKey + "/" + k.CaptureID + "/" + k.ChangefeedID
+	case CDCKeyTypeTaskStatus:
+		return etcdKeyBase + taskStatusKey + "/" + k.CaptureID + "/" + k.ChangefeedID
+	case CDCKeyTypeTaskWorkload:
+		return etcdKeyBase + taskWorkloadKey + "/" + k.CaptureID + "/" + k.ChangefeedID
 	}
 	log.Panic("unreachable")
 	return ""

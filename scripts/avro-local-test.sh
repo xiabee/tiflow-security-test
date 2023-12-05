@@ -38,18 +38,18 @@ sub_help() {
 
 sub_init() {
 	sudo docker exec -it ticdc_controller_1 sh -c "
-  /cdc cli changefeed create --pd=\"http://upstream-pd:2379\" --sink-uri=\"kafka://kafka:9092/testdb_test?protocol=avro\"
+  /cdc cli changefeed create --pd=\"http://upstream-pd:2379\" --sink-uri=\"kafka://kafka:9092/testdb_test?protocol=avro\" --opts \"registry=http://schema-registry:8081\"
   curl -X POST -H \"Content-Type: application/json\" -d @/config/jdbc-sink-connector.json http://kafka-connect-01:8083/connectors
   "
 }
 
 sub_up() {
-	sudo docker-compose -f ../deployments/ticdc/docker-compose/docker-compose-avro.yml up --detach
+	sudo docker-compose -f ../docker-compose-avro.yml up --detach
 }
 
 sub_down() {
-	sudo docker-compose -f ../deployments/ticdc/docker-compose/docker-compose-avro.yml down
-	sudo rm -r ../deployments/ticdc/docker-compose/logs ../deployments/ticdc/docker-compose/data
+	sudo docker-compose -f ../docker-compose-avro.yml down
+	sudo rm -r ../docker/logs ../docker/data
 }
 
 subcommand=$1

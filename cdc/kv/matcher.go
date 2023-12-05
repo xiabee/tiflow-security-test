@@ -19,6 +19,13 @@ import (
 	"go.uber.org/zap"
 )
 
+type matcher struct {
+	// TODO : clear the single prewrite
+	unmatchedValue map[matchKey]*cdcpb.Event_Row
+	cachedCommit   []*cdcpb.Event_Row
+	cachedRollback []*cdcpb.Event_Row
+}
+
 type matchKey struct {
 	startTs uint64
 	key     string
@@ -26,13 +33,6 @@ type matchKey struct {
 
 func newMatchKey(row *cdcpb.Event_Row) matchKey {
 	return matchKey{startTs: row.GetStartTs(), key: string(row.GetKey())}
-}
-
-type matcher struct {
-	// TODO : clear the single prewrite
-	unmatchedValue map[matchKey]*cdcpb.Event_Row
-	cachedCommit   []*cdcpb.Event_Row
-	cachedRollback []*cdcpb.Event_Row
 }
 
 func newMatcher() *matcher {
@@ -50,7 +50,7 @@ func (m *matcher) putPrewriteRow(row *cdcpb.Event_Row) {
 	// when the old-value is enabled, the value of the fake prewrite event is also empty,
 	// but the old value of the fake prewrite event is not empty.
 	// We can distinguish fake prewrite events by whether the value is empty,
-	// no matter the old-value is enabled or disabled
+	// no matter the old-value is enable or disabled
 	if _, exist := m.unmatchedValue[key]; exist && len(row.GetValue()) == 0 {
 		return
 	}
@@ -80,7 +80,6 @@ func (m *matcher) cacheCommitRow(row *cdcpb.Event_Row) {
 	m.cachedCommit = append(m.cachedCommit, row)
 }
 
-//nolint:unparam
 func (m *matcher) matchCachedRow(initialized bool) []*cdcpb.Event_Row {
 	if !initialized {
 		log.Panic("must be initialized before match cahced rows")
@@ -97,7 +96,7 @@ func (m *matcher) matchCachedRow(initialized bool) []*cdcpb.Event_Row {
 			// the same key and start-ts must have been received.
 			log.Info("ignore commit event without prewrite",
 				zap.Binary("key", cacheEntry.GetKey()),
-				zap.Uint64("startTs", cacheEntry.GetStartTs()))
+				zap.Uint64("ts", cacheEntry.GetStartTs()))
 			continue
 		}
 		cachedCommit[top] = cacheEntry
@@ -114,7 +113,6 @@ func (m *matcher) cacheRollbackRow(row *cdcpb.Event_Row) {
 	m.cachedRollback = append(m.cachedRollback, row)
 }
 
-//nolint:unparam
 func (m *matcher) matchCachedRollbackRow(initialized bool) {
 	if !initialized {
 		log.Panic("must be initialized before match cahced rollback rows")

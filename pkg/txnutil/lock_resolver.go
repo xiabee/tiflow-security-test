@@ -20,12 +20,9 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/pkg/util"
-	tikverr "github.com/tikv/client-go/v2/error"
-	"github.com/tikv/client-go/v2/tikv"
-	"github.com/tikv/client-go/v2/tikvrpc"
-	"github.com/tikv/client-go/v2/txnkv"
+	"github.com/pingcap/tidb/store/tikv"
+	tikverr "github.com/pingcap/tidb/store/tikv/error"
+	"github.com/pingcap/tidb/store/tikv/tikvrpc"
 	"go.uber.org/zap"
 )
 
@@ -35,50 +32,27 @@ type LockResolver interface {
 }
 
 type resolver struct {
-	kvStorage  tikv.Storage
-	changefeed model.ChangeFeedID
-	role       util.Role
+	kvStorage tikv.Storage
 }
 
 // NewLockerResolver returns a LockResolver.
-func NewLockerResolver(
-	kvStorage tikv.Storage, id model.ChangeFeedID, role util.Role,
-) LockResolver {
+func NewLockerResolver(kvStorage tikv.Storage) LockResolver {
 	return &resolver{
-		kvStorage:  kvStorage,
-		changefeed: id,
-		role:       role,
+		kvStorage: kvStorage,
 	}
 }
 
 const scanLockLimit = 1024
 
-func (r *resolver) Resolve(ctx context.Context, regionID uint64, maxVersion uint64) (err error) {
-	var lockCount int = 0
-
-	log.Info("resolve lock starts",
-		zap.Uint64("regionID", regionID),
-		zap.Uint64("maxVersion", maxVersion),
-		zap.String("namespace", r.changefeed.Namespace),
-		zap.String("changefeed", r.changefeed.ID))
-
-	defer func() {
-		log.Info("resolve lock finishes",
-			zap.Uint64("regionID", regionID),
-			zap.Int("lockCount", lockCount),
-			zap.Uint64("maxVersion", maxVersion),
-			zap.String("namespace", r.changefeed.Namespace),
-			zap.String("changefeed", r.changefeed.ID),
-			zap.Error(err))
-	}()
-
+func (r *resolver) Resolve(ctx context.Context, regionID uint64, maxVersion uint64) error {
 	// TODO test whether this function will kill active transaction
+
 	req := tikvrpc.NewRequest(tikvrpc.CmdScanLock, &kvrpcpb.ScanLockRequest{
 		MaxVersion: maxVersion,
 		Limit:      scanLockLimit,
 	})
 
-	bo := tikv.NewGcResolveLockMaxBackoffer(ctx)
+	bo := tikv.NewBackoffer(ctx, tikv.GcResolveLockMaxBackoff)
 	var loc *tikv.KeyLocation
 	var key []byte
 	flushRegion := func() error {
@@ -109,7 +83,7 @@ func (r *resolver) Resolve(ctx context.Context, regionID uint64, maxVersion uint
 			return errors.Trace(err)
 		}
 		if regionErr != nil {
-			err = bo.Backoff(tikv.BoRegionMiss(), errors.New(regionErr.String()))
+			err = bo.Backoff(tikv.BoRegionMiss, errors.New(regionErr.String()))
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -126,13 +100,12 @@ func (r *resolver) Resolve(ctx context.Context, regionID uint64, maxVersion uint
 			return errors.Errorf("unexpected scanlock error: %s", locksResp)
 		}
 		locksInfo := locksResp.GetLocks()
-		locks := make([]*txnkv.Lock, len(locksInfo))
+		locks := make([]*tikv.Lock, len(locksInfo))
 		for i := range locksInfo {
-			locks[i] = txnkv.NewLock(locksInfo[i])
+			locks[i] = tikv.NewLock(locksInfo[i])
 		}
-		lockCount += len(locksInfo)
 
-		_, err1 := r.kvStorage.GetLockResolver().ResolveLocks(bo, 0, locks)
+		_, _, err1 := r.kvStorage.GetLockResolver().ResolveLocks(bo, 0, locks)
 		if err1 != nil {
 			return errors.Trace(err1)
 		}
@@ -145,7 +118,8 @@ func (r *resolver) Resolve(ctx context.Context, regionID uint64, maxVersion uint
 		if len(key) == 0 || (len(loc.EndKey) != 0 && bytes.Compare(key, loc.EndKey) >= 0) {
 			break
 		}
-		bo = tikv.NewGcResolveLockMaxBackoffer(ctx)
+		bo = tikv.NewBackoffer(ctx, tikv.GcResolveLockMaxBackoff)
 	}
+	log.Info("resolve lock successfully", zap.Uint64("regionID", regionID), zap.Uint64("maxVersion", maxVersion))
 	return nil
 }

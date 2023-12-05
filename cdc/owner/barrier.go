@@ -16,14 +16,17 @@ package owner
 import (
 	"math"
 
+	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
 )
 
 type barrierType int
 
 const (
+	// ddlJobBarrier denotes a replication barrier caused by a DDL.
+	ddlJobBarrier barrierType = iota
 	// syncPointBarrier denotes a barrier for snapshot replication.
-	syncPointBarrier barrierType = iota
+	syncPointBarrier
 	// finishBarrier denotes a barrier for changefeed finished.
 	finishBarrier
 )
@@ -44,9 +47,8 @@ func newBarriers() *barriers {
 }
 
 func (b *barriers) Update(tp barrierType, barrierTs model.Ts) {
-	// the barriers structure was given the ability to
-	// handle a fallback barrierTs by design.
-	// but the barrierTs should never fall back in owner replication model
+	// the barriers structure was given the ability to handle a fallback barrierTs by design.
+	// but the barrierTs should never fallback in owner replication model
 	if !b.dirty && (tp == b.min || barrierTs <= b.inner[b.min]) {
 		b.dirty = true
 	}
@@ -70,6 +72,9 @@ func (b *barriers) calcMin() (tp barrierType, barrierTs model.Ts) {
 			tp = br
 			barrierTs = ts
 		}
+	}
+	if barrierTs == math.MaxUint64 {
+		log.Panic("the barriers is empty, please report a bug")
 	}
 	return
 }

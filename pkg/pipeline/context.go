@@ -13,31 +13,25 @@
 
 package pipeline
 
-import (
-	"github.com/pingcap/tiflow/pkg/context"
-	pmessage "github.com/pingcap/tiflow/pkg/pipeline/message"
-)
+import "github.com/pingcap/tiflow/pkg/context"
 
 // NodeContext adds two functions to `context.Context` and is created by pipeline
 type NodeContext interface {
 	context.Context
 
 	// Message returns the message sent by the previous node
-	Message() pmessage.Message
+	Message() Message
 	// SendToNextNode sends the message to the next node
-	SendToNextNode(msg pmessage.Message)
+	SendToNextNode(msg Message)
 }
 
 type nodeContext struct {
 	context.Context
-	msg      pmessage.Message
-	outputCh chan<- pmessage.Message
+	msg      Message
+	outputCh chan Message
 }
 
-// NewNodeContext returns a new NodeContext.
-func NewNodeContext(
-	ctx context.Context, msg pmessage.Message, outputCh chan<- pmessage.Message,
-) NodeContext {
+func newNodeContext(ctx context.Context, msg Message, outputCh chan Message) NodeContext {
 	return &nodeContext{
 		Context:  ctx,
 		msg:      msg,
@@ -45,18 +39,27 @@ func NewNodeContext(
 	}
 }
 
-// MockNodeContext4Test creates a node context with a message and an output channel for tests.
-func MockNodeContext4Test(
-	ctx context.Context, msg pmessage.Message, outputCh chan pmessage.Message,
-) NodeContext {
-	return NewNodeContext(ctx, msg, outputCh)
-}
-
-func (ctx *nodeContext) Message() pmessage.Message {
+func (ctx *nodeContext) Message() Message {
 	return ctx.msg
 }
 
-func (ctx *nodeContext) SendToNextNode(msg pmessage.Message) {
+func (ctx *nodeContext) SendToNextNode(msg Message) {
 	// The header channel should never be blocked
 	ctx.outputCh <- msg
+}
+
+type messageContext struct {
+	NodeContext
+	message Message
+}
+
+func withMessage(ctx NodeContext, msg Message) NodeContext {
+	return messageContext{
+		NodeContext: ctx,
+		message:     msg,
+	}
+}
+
+func (ctx messageContext) Message() Message {
+	return ctx.message
 }

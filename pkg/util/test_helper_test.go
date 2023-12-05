@@ -20,10 +20,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestWaitSomething(t *testing.T) {
+func Test(t *testing.T) {
+	check.TestingT(t)
+}
+
+type testHelperSuite struct{}
+
+var _ = check.Suite(&testHelperSuite{})
+
+func (s *testHelperSuite) TestWaitSomething(c *check.C) {
+	defer testleak.AfterTest(c)()
 	var (
 		backoff  = 10
 		waitTime = 10 * time.Millisecond
@@ -35,8 +45,8 @@ func TestWaitSomething(t *testing.T) {
 		count++
 		return false
 	}
-	require.False(t, WaitSomething(backoff, waitTime, f1))
-	require.Equal(t, backoff, count)
+	c.Assert(WaitSomething(backoff, waitTime, f1), check.IsFalse)
+	c.Assert(count, check.Equals, backoff)
 
 	count = 0 // reset
 	// wait success
@@ -44,11 +54,13 @@ func TestWaitSomething(t *testing.T) {
 		count++
 		return count >= 5
 	}
-	require.True(t, WaitSomething(backoff, waitTime, f2))
-	require.Equal(t, 5, count)
+
+	c.Assert(WaitSomething(backoff, waitTime, f2), check.IsTrue)
+	c.Assert(count, check.Equals, 5)
 }
 
-func TestHandleErr(t *testing.T) {
+func (s *testHelperSuite) TestHandleErr(c *check.C) {
+	defer testleak.AfterTest(c)()
 	var (
 		ctx, cancel = context.WithCancel(context.Background())
 		errCh       = make(chan error)
@@ -58,7 +70,7 @@ func TestHandleErr(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		errCh <- errors.New("test error")
 	}
-	require.True(t, WaitSomething(5, time.Millisecond*10, func() bool { return atomic.LoadInt32(&count) == int32(5) }))
+	c.Assert(WaitSomething(5, time.Millisecond*10, func() bool { return atomic.LoadInt32(&count) == int32(5) }), check.IsTrue)
 	cancel()
-	require.Nil(t, errg.Wait())
+	c.Assert(errg.Wait(), check.IsNil)
 }

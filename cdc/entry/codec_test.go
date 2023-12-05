@@ -16,36 +16,49 @@ package entry
 import (
 	"testing"
 
+	"github.com/pingcap/check"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
-func TestDecodeRecordKey(t *testing.T) {
-	t.Parallel()
+func Test(t *testing.T) { check.TestingT(t) }
+
+type codecSuite struct {
+}
+
+var _ = check.Suite(&codecSuite{})
+
+func (s *codecSuite) TestDecodeRecordKey(c *check.C) {
+	defer testleak.AfterTest(c)()
 	recordPrefix := tablecodec.GenTableRecordPrefix(12345)
 	key := tablecodec.EncodeRecordKey(recordPrefix, kv.IntHandle(67890))
 	key, tableID, err := decodeTableID(key)
-	require.Nil(t, err)
-	require.Equal(t, tableID, int64(12345))
+	c.Assert(err, check.IsNil)
+	c.Assert(tableID, check.Equals, int64(12345))
 	key, recordID, err := decodeRecordID(key)
-	require.Nil(t, err)
-	require.Equal(t, recordID, int64(67890))
-	require.Equal(t, len(key), 0)
+	c.Assert(err, check.IsNil)
+	c.Assert(recordID, check.Equals, int64(67890))
+	c.Assert(len(key), check.Equals, 0)
 }
 
-func TestDecodeListData(t *testing.T) {
-	t.Parallel()
+type decodeMetaKeySuite struct {
+}
+
+var _ = check.Suite(&decodeMetaKeySuite{})
+
+func (s *decodeMetaKeySuite) TestDecodeListData(c *check.C) {
+	defer testleak.AfterTest(c)()
 	key := []byte("hello")
 	var index int64 = 3
 
 	meta, err := decodeMetaKey(buildMetaKey(key, index))
-	require.Nil(t, err)
-	require.Equal(t, meta.getType(), ListData)
+	c.Assert(err, check.IsNil)
+	c.Assert(meta.getType(), check.Equals, ListData)
 	list := meta.(metaListData)
-	require.Equal(t, list.key, string(key))
-	require.Equal(t, list.index, index)
+	c.Assert(list.key, check.Equals, string(key))
+	c.Assert(list.index, check.Equals, index)
 }
 
 func buildMetaKey(key []byte, index int64) []byte {

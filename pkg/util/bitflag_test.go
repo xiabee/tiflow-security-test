@@ -14,9 +14,8 @@
 package util
 
 import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
+	"github.com/pingcap/tiflow/pkg/util/testleak"
 )
 
 const (
@@ -26,7 +25,12 @@ const (
 	FlagD
 )
 
-func TestExample(t *testing.T) {
+type bitFlagSuite struct{}
+
+var _ = check.Suite(&bitFlagSuite{})
+
+func (b *bitFlagSuite) TestExample(c *check.C) {
+	defer testleak.AfterTest(c)()
 	var flag Flag
 
 	flag.Add(FlagA)
@@ -37,40 +41,43 @@ func TestExample(t *testing.T) {
 	flag.Remove(FlagA)
 	flag.Remove(FlagB, FlagC)
 
-	require.False(t, flag.HasAll(FlagA))
-	require.False(t, flag.HasAll(FlagB))
-	require.False(t, flag.HasAll(FlagC))
-	require.True(t, flag.HasAll(FlagD))
+	c.Assert(flag.HasAll(FlagA), check.IsFalse)
+	c.Assert(flag.HasAll(FlagB), check.IsFalse)
+	c.Assert(flag.HasAll(FlagC), check.IsFalse)
+	c.Assert(flag.HasAll(FlagD), check.IsTrue)
 }
 
-func TestAdd(t *testing.T) {
+func (b *bitFlagSuite) TestAdd(c *check.C) {
+	defer testleak.AfterTest(c)()
 	var flag Flag
 
 	flag.Add(FlagA)
 	flag.Add(FlagB)
-	require.True(t, flag.HasAll(FlagA, FlagB))
+	c.Check(flag.HasAll(FlagA, FlagB), check.IsTrue)
 
 	flag.Add(FlagA, FlagB)
-	require.True(t, flag.HasAll(FlagA, FlagB))
+	c.Check(flag.HasAll(FlagA, FlagB), check.IsTrue)
 }
 
-func TestRemove(t *testing.T) {
+func (b *bitFlagSuite) TestRemove(c *check.C) {
+	defer testleak.AfterTest(c)()
 	var flag Flag
 
 	flag.Add(FlagA, FlagB, FlagC)
-	require.True(t, flag.HasAll(FlagA, FlagB, FlagC))
+	c.Check(flag.HasAll(FlagA, FlagB, FlagC), check.IsTrue)
 
 	flag.Remove(FlagB)
-	require.False(t, flag.HasAll(FlagB))
-	require.True(t, flag.HasAll(FlagA, FlagC))
+	c.Check(flag.HasAll(FlagB), check.IsFalse)
+	c.Check(flag.HasAll(FlagA, FlagC), check.IsTrue)
 }
 
-func TestClear(t *testing.T) {
+func (b *bitFlagSuite) TestClear(c *check.C) {
+	defer testleak.AfterTest(c)()
 	var flag Flag
 
 	flag.Add(FlagA, FlagB, FlagC)
-	require.True(t, flag.HasAll(FlagA, FlagB, FlagC))
+	c.Check(flag.HasAll(FlagA, FlagB, FlagC), check.IsTrue)
 
 	flag.Clear()
-	require.False(t, flag.HasOne(FlagA, FlagB, FlagC))
+	c.Check(flag.HasOne(FlagA, FlagB, FlagC), check.IsFalse)
 }

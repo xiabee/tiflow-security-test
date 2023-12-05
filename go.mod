@@ -10,7 +10,7 @@ require (
 	github.com/KimMachineGun/automemlimit v0.2.4
 	github.com/Shopify/sarama v1.38.1
 	github.com/VividCortex/mysqlerr v1.0.0
-	github.com/aws/aws-sdk-go v1.44.48
+	github.com/aws/aws-sdk-go v1.44.259
 	github.com/benbjohnson/clock v1.3.0
 	github.com/bradleyjkemp/grpc-tools v0.2.5
 	github.com/cenkalti/backoff/v4 v4.0.2
@@ -49,20 +49,22 @@ require (
 	github.com/jarcoal/httpmock v1.2.0
 	github.com/jmoiron/sqlx v1.3.3
 	github.com/kami-zh/go-capturer v0.0.0-20171211120116-e492ea43421d
+	github.com/klauspost/compress v1.15.14
 	github.com/labstack/gommon v0.3.0
 	github.com/linkedin/goavro/v2 v2.11.1
 	github.com/mailru/easyjson v0.7.7
 	github.com/mattn/go-shellwords v1.0.12
 	github.com/modern-go/reflect2 v1.0.2
 	github.com/phayes/freeport v0.0.0-20180830031419-95f893ade6f2
+	github.com/pierrec/lz4/v4 v4.1.17
 	github.com/pingcap/check v0.0.0-20211026125417-57bd13f7b5f0
 	github.com/pingcap/errors v0.11.5-0.20220729040631-518f63d66278
 	github.com/pingcap/failpoint v0.0.0-20220423142525-ae43b7f4e5c3
-	github.com/pingcap/kvproto v0.0.0-20221130022225-6c56ac56fe5f
+	github.com/pingcap/kvproto v0.0.0-20230928035022-1bdcc25ed63c
 	github.com/pingcap/log v1.1.1-0.20221116035753-734d527bc87c
-	github.com/pingcap/tidb v1.1.0-beta.0.20230412065101-c24a1cda6d26
+	github.com/pingcap/tidb v1.1.0-beta.0.20231124055343-a06279f27e4c
 	github.com/pingcap/tidb-tools v7.0.1-0.20230410100500-0bbe5f0cd5c9+incompatible
-	github.com/pingcap/tidb/parser v0.0.0-20230412065101-c24a1cda6d26
+	github.com/pingcap/tidb/parser v0.0.0-20231124055343-a06279f27e4c
 	github.com/prometheus/client_golang v1.13.0
 	github.com/prometheus/client_model v0.2.0
 	github.com/r3labs/diff v1.1.0
@@ -78,9 +80,9 @@ require (
 	github.com/swaggo/gin-swagger v1.2.0
 	github.com/swaggo/swag v1.6.6-0.20200529100950-7c765ddd0476
 	github.com/syndtr/goleveldb v1.0.1-0.20210305035536-64b5b1c73954
-	github.com/tikv/client-go/v2 v2.0.4-0.20230131081004-cd83d1507d70
+	github.com/tikv/client-go/v2 v2.0.4-0.20231121073938-194639470f84
 	github.com/tikv/pd v1.1.0-beta.0.20220303060546-3695d8164800
-	github.com/tikv/pd/client v0.0.0-20221031025758-80f0d8ca4d07
+	github.com/tikv/pd/client v0.0.0-20230904040343-947701a32c05
 	github.com/tinylib/msgp v1.1.6
 	github.com/uber-go/atomic v1.4.0
 	github.com/vmihailenco/msgpack/v5 v5.3.5
@@ -105,8 +107,8 @@ require (
 	golang.org/x/sys v0.13.0
 	golang.org/x/text v0.13.0
 	golang.org/x/time v0.2.0
-	google.golang.org/genproto v0.0.0-20221201164419-0e50fba7f41c
-	google.golang.org/grpc v1.50.1
+	google.golang.org/genproto v0.0.0-20221202195650-67e5cbc046fd
+	google.golang.org/grpc v1.51.0
 	google.golang.org/protobuf v1.30.0
 	gopkg.in/yaml.v2 v2.4.0
 	gorm.io/driver/mysql v1.3.3
@@ -131,7 +133,7 @@ require (
 	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
 	github.com/apache/thrift v0.13.1-0.20201008052519-daf620915714 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/blacktear23/go-proxyprotocol v1.0.5 // indirect
+	github.com/blacktear23/go-proxyprotocol v1.0.6 // indirect
 	github.com/bytedance/sonic v1.9.1 // indirect
 	github.com/cakturk/go-netstat v0.0.0-20200220111822-e5b49efee7a5 // indirect
 	github.com/carlmjohnson/flagext v0.21.0 // indirect
@@ -162,6 +164,7 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.2 // indirect
 	github.com/ghodss/yaml v1.0.0 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
+	github.com/go-logr/logr v1.2.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-openapi/jsonpointer v0.19.5 // indirect
 	github.com/go-openapi/jsonreference v0.20.0 // indirect
@@ -174,6 +177,7 @@ require (
 	github.com/golang/glog v1.0.0 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/snappy v0.0.4 // indirect
+	github.com/google/gofuzz v1.1.0 // indirect
 	github.com/google/pprof v0.0.0-20211122183932-1daafda22083 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.2.0 // indirect
 	github.com/googleapis/gax-go/v2 v2.7.0 // indirect
@@ -185,6 +189,7 @@ require (
 	github.com/iancoleman/strcase v0.2.0 // indirect
 	github.com/improbable-eng/grpc-web v0.12.0 // indirect
 	github.com/inconshreveable/mousetrap v1.0.1 // indirect
+	github.com/influxdata/tdigest v0.0.1 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
 	github.com/jcmturner/dnsutils/v2 v2.0.0 // indirect
 	github.com/jcmturner/gofork v1.7.6 // indirect
@@ -198,7 +203,6 @@ require (
 	github.com/jonboulle/clockwork v0.3.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.15.14 // indirect
 	github.com/klauspost/cpuid v1.3.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.4 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
@@ -226,7 +230,6 @@ require (
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/philhofer/fwd v1.1.1 // indirect
-	github.com/pierrec/lz4/v4 v4.1.17 // indirect
 	github.com/pingcap/badger v1.5.1-0.20220314162537-ab58fbf40580 // indirect
 	github.com/pingcap/fn v0.0.0-20200306044125-d5540d389059 // indirect
 	github.com/pingcap/goleveldb v0.0.0-20191226122134-f82aafb29989 // indirect
@@ -249,6 +252,7 @@ require (
 	github.com/siddontang/go v0.0.0-20180604090527-bdc77568d726 // indirect
 	github.com/siddontang/go-log v0.0.0-20180807004314-8d05993dda07 // indirect
 	github.com/sirupsen/logrus v1.9.0 // indirect
+	github.com/spkg/bom v1.0.0 // indirect
 	github.com/stathat/consistent v1.0.0 // indirect
 	github.com/stretchr/objx v0.5.0 // indirect
 	github.com/tiancaiamao/appdash v0.0.0-20181126055449-889f96f722a2 // indirect
@@ -289,13 +293,20 @@ require (
 	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
 	google.golang.org/api v0.103.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
+	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/mgo.v2 v2.0.0-20190816093944-a6b53ec6cb22 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	k8s.io/api v0.24.0 // indirect
+	k8s.io/apimachinery v0.24.0 // indirect
+	k8s.io/klog/v2 v2.60.1 // indirect
+	k8s.io/utils v0.0.0-20220210201930-3a6ce19ff2f9 // indirect
 	modernc.org/libc v1.16.8 // indirect
 	modernc.org/mathutil v1.4.1 // indirect
 	modernc.org/memory v1.1.1 // indirect
 	modernc.org/sqlite v1.17.3 // indirect
+	sigs.k8s.io/json v0.0.0-20211208200746-9f7c6b3444d2 // indirect
+	sigs.k8s.io/structured-merge-diff/v4 v4.2.1 // indirect
 	sigs.k8s.io/yaml v1.2.0 // indirect
 	sourcegraph.com/sourcegraph/appdash v0.0.0-20190731080439-ebfcffb1b5c0 // indirect
 	sourcegraph.com/sourcegraph/appdash-data v0.0.0-20151005221446-73f23eafcf67 // indirect

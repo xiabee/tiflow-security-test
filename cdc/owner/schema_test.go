@@ -14,40 +14,38 @@
 package owner
 
 import (
+	"encoding/json"
 	"sort"
+	"testing"
 
-	"github.com/pingcap/check"
-	timodel "github.com/pingcap/parser/model"
-	"github.com/pingcap/parser/mysql"
-	"github.com/pingcap/tidb/store/tikv/oracle"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/util/testleak"
+	"github.com/stretchr/testify/require"
+	"github.com/tikv/client-go/v2/oracle"
 )
 
-var _ = check.Suite(&schemaSuite{})
+var dummyChangeFeedID = model.DefaultChangeFeedID("dummy_changefeed")
 
-type schemaSuite struct {
-}
-
-func (s *schemaSuite) TestAllPhysicalTables(c *check.C) {
-	defer testleak.AfterTest(c)()
-	helper := entry.NewSchemaTestHelper(c)
+func TestAllPhysicalTables(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
 	defer helper.Close()
 	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
-	c.Assert(err, check.IsNil)
-	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver, config.GetDefaultReplicaConfig())
-	c.Assert(err, check.IsNil)
-	c.Assert(schema.AllPhysicalTables(), check.HasLen, 0)
+	require.Nil(t, err)
+	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver,
+		config.GetDefaultReplicaConfig(), dummyChangeFeedID)
+	require.Nil(t, err)
+	require.Len(t, schema.AllPhysicalTables(), 0)
 	// add normal table
 	job := helper.DDL2Job("create table test.t1(id int primary key)")
 	tableIDT1 := job.BinlogInfo.TableInfo.ID
-	c.Assert(schema.HandleDDL(job), check.IsNil)
-	c.Assert(schema.AllPhysicalTables(), check.DeepEquals, []model.TableID{tableIDT1})
+	require.Nil(t, schema.HandleDDL(job))
+	require.Equal(t, schema.AllPhysicalTables(), []model.TableID{tableIDT1})
 	// add ineligible table
-	c.Assert(schema.HandleDDL(helper.DDL2Job("create table test.t2(id int)")), check.IsNil)
-	c.Assert(schema.AllPhysicalTables(), check.DeepEquals, []model.TableID{tableIDT1})
+	require.Nil(t, schema.HandleDDL(helper.DDL2Job("create table test.t2(id int)")))
+	require.Equal(t, schema.AllPhysicalTables(), []model.TableID{tableIDT1})
 	// add partition table
 	job = helper.DDL2Job(`CREATE TABLE test.employees  (
 			id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -63,7 +61,7 @@ func (s *schemaSuite) TestAllPhysicalTables(c *check.C) {
 			PARTITION p2 VALUES LESS THAN (15),
 			PARTITION p3 VALUES LESS THAN (20)
 		)`)
-	c.Assert(schema.HandleDDL(job), check.IsNil)
+	require.Nil(t, schema.HandleDDL(job))
 	expectedTableIDs := []model.TableID{tableIDT1}
 	for _, p := range job.BinlogInfo.TableInfo.GetPartitionInfo().Definitions {
 		expectedTableIDs = append(expectedTableIDs, p.ID)
@@ -75,42 +73,62 @@ func (s *schemaSuite) TestAllPhysicalTables(c *check.C) {
 	}
 	sortTableIDs(expectedTableIDs)
 	sortTableIDs(schema.AllPhysicalTables())
-	c.Assert(schema.AllPhysicalTables(), check.DeepEquals, expectedTableIDs)
+	require.Equal(t, schema.AllPhysicalTables(), expectedTableIDs)
 }
 
-func (s *schemaSuite) TestIsIneligibleTableID(c *check.C) {
-	defer testleak.AfterTest(c)()
-	helper := entry.NewSchemaTestHelper(c)
+func TestAllTableNames(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
 	defer helper.Close()
 	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
-	c.Assert(err, check.IsNil)
-	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver, config.GetDefaultReplicaConfig())
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
+	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver,
+		config.GetDefaultReplicaConfig(), dummyChangeFeedID)
+	require.Nil(t, err)
+	require.Len(t, schema.AllTableNames(), 0)
+	// add normal table
+	job := helper.DDL2Job("create table test.t1(id int primary key)")
+	require.Nil(t, schema.HandleDDL(job))
+	require.Equal(t, []model.TableName{{Schema: "test", Table: "t1"}}, schema.AllTableNames())
+	// add ineligible table
+	require.Nil(t, schema.HandleDDL(helper.DDL2Job("create table test.t2(id int)")))
+	require.Equal(t, []model.TableName{{Schema: "test", Table: "t1"}}, schema.AllTableNames())
+}
+
+func TestIsIneligibleTableID(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
+	require.Nil(t, err)
+	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver,
+		config.GetDefaultReplicaConfig(), dummyChangeFeedID)
+	require.Nil(t, err)
 	// add normal table
 	job := helper.DDL2Job("create table test.t1(id int primary key)")
 	tableIDT1 := job.BinlogInfo.TableInfo.ID
-	c.Assert(schema.HandleDDL(job), check.IsNil)
+	require.Nil(t, schema.HandleDDL(job))
 	// add ineligible table
 	job = helper.DDL2Job("create table test.t2(id int)")
 	tableIDT2 := job.BinlogInfo.TableInfo.ID
-	c.Assert(schema.HandleDDL(job), check.IsNil)
-	c.Assert(schema.IsIneligibleTableID(tableIDT1), check.IsFalse)
-	c.Assert(schema.IsIneligibleTableID(tableIDT2), check.IsTrue)
+
+	require.Nil(t, schema.HandleDDL(job))
+	require.False(t, schema.IsIneligibleTableID(tableIDT1))
+	require.True(t, schema.IsIneligibleTableID(tableIDT2))
 }
 
-func (s *schemaSuite) TestBuildDDLEvent(c *check.C) {
-	defer testleak.AfterTest(c)()
-	helper := entry.NewSchemaTestHelper(c)
+func TestBuildDDLEventsFromSingleTableDDL(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
 	defer helper.Close()
 	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
-	c.Assert(err, check.IsNil)
-	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver, config.GetDefaultReplicaConfig())
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
+	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver,
+		config.GetDefaultReplicaConfig(), dummyChangeFeedID)
+	require.Nil(t, err)
 	// add normal table
 	job := helper.DDL2Job("create table test.t1(id int primary key)")
-	event, err := schema.BuildDDLEvent(job)
-	c.Assert(err, check.IsNil)
-	c.Assert(event, check.DeepEquals, &model.DDLEvent{
+	events, err := schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Equal(t, events[0], &model.DDLEvent{
 		StartTs:  job.StartTS,
 		CommitTs: job.BinlogInfo.FinishedTS,
 		Query:    "create table test.t1(id int primary key)",
@@ -123,11 +141,12 @@ func (s *schemaSuite) TestBuildDDLEvent(c *check.C) {
 		},
 		PreTableInfo: nil,
 	})
-	c.Assert(schema.HandleDDL(job), check.IsNil)
+	require.Nil(t, schema.HandleDDL(job))
 	job = helper.DDL2Job("ALTER TABLE test.t1 ADD COLUMN c1 CHAR(16) NOT NULL")
-	event, err = schema.BuildDDLEvent(job)
-	c.Assert(err, check.IsNil)
-	c.Assert(event, check.DeepEquals, &model.DDLEvent{
+	events, err = schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Equal(t, events[0], &model.DDLEvent{
 		StartTs:  job.StartTS,
 		CommitTs: job.BinlogInfo.FinishedTS,
 		Query:    "ALTER TABLE test.t1 ADD COLUMN c1 CHAR(16) NOT NULL",
@@ -147,27 +166,320 @@ func (s *schemaSuite) TestBuildDDLEvent(c *check.C) {
 	})
 }
 
-func (s *schemaSuite) TestSinkTableInfos(c *check.C) {
-	defer testleak.AfterTest(c)()
-	helper := entry.NewSchemaTestHelper(c)
+func TestBuildDDLEventsFromRenameTablesDDL(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
 	defer helper.Close()
+
 	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
-	c.Assert(err, check.IsNil)
-	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver, config.GetDefaultReplicaConfig())
-	c.Assert(err, check.IsNil)
-	// add normal table
+	require.Nil(t, err)
+	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver,
+		config.GetDefaultReplicaConfig(), dummyChangeFeedID)
+	require.Nil(t, err)
+	job := helper.DDL2Job("create database test1")
+	events, err := schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(job))
+	schemaID := job.SchemaID
+	// add test.t1
+	job = helper.DDL2Job("create table test1.t1(id int primary key)")
+	events, err = schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(job))
+	t1TableID := job.TableID
+
+	// add test.t2
+	job = helper.DDL2Job("create table test1.t2(id int primary key)")
+	events, err = schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(job))
+	t2TableID := job.TableID
+
+	// rename test.t1 and test.t2
+	job = helper.DDL2Job(
+		"rename table test1.t1 to test1.t10, test1.t2 to test1.t20")
+	oldSchemaIDs := []int64{schemaID, schemaID}
+	oldTableIDs := []int64{t1TableID, t2TableID}
+	newSchemaIDs := oldSchemaIDs
+	oldSchemaNames := []timodel.CIStr{
+		timodel.NewCIStr("test1"),
+		timodel.NewCIStr("test1"),
+	}
+	newTableNames := []timodel.CIStr{
+		timodel.NewCIStr("t10"),
+		timodel.NewCIStr("t20"),
+	}
+	args := []interface{}{
+		oldSchemaIDs, newSchemaIDs,
+		newTableNames, oldTableIDs, oldSchemaNames,
+	}
+	rawArgs, err := json.Marshal(args)
+	require.Nil(t, err)
+	// the RawArgs field in job fetched from tidb snapshot meta is incorrent,
+	// so we manually construct `job.RawArgs` to do the workaround.
+	job.RawArgs = rawArgs
+
+	events, err = schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 2)
+	require.Equal(t, events[0], &model.DDLEvent{
+		StartTs:  job.StartTS,
+		CommitTs: job.BinlogInfo.FinishedTS,
+		Query:    "RENAME TABLE `test1`.`t1` TO `test1`.`t10`",
+		Type:     timodel.ActionRenameTable,
+		TableInfo: &model.SimpleTableInfo{
+			Schema:  "test1",
+			Table:   "t10",
+			TableID: t1TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeLong,
+				},
+			},
+		},
+		PreTableInfo: &model.SimpleTableInfo{
+			Schema:  "test1",
+			Table:   "t1",
+			TableID: t1TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeLong,
+				},
+			},
+		},
+	})
+	require.Equal(t, events[1], &model.DDLEvent{
+		StartTs:  job.StartTS,
+		CommitTs: job.BinlogInfo.FinishedTS,
+		Query:    "RENAME TABLE `test1`.`t2` TO `test1`.`t20`",
+		Type:     timodel.ActionRenameTable,
+		TableInfo: &model.SimpleTableInfo{
+			Schema:  "test1",
+			Table:   "t20",
+			TableID: t2TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeLong,
+				},
+			},
+		},
+		PreTableInfo: &model.SimpleTableInfo{
+			Schema:  "test1",
+			Table:   "t2",
+			TableID: t2TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeLong,
+				},
+			},
+		},
+	})
+}
+
+func TestBuildDDLEventsFromDropTablesDDL(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
+	require.Nil(t, err)
+	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver,
+		config.GetDefaultReplicaConfig(), dummyChangeFeedID)
+	require.Nil(t, err)
+	// add test.t1
 	job := helper.DDL2Job("create table test.t1(id int primary key)")
-	tableIDT1 := job.BinlogInfo.TableInfo.ID
-	c.Assert(schema.HandleDDL(job), check.IsNil)
-	// add ineligible table
-	job = helper.DDL2Job("create table test.t2(id int)")
-	c.Assert(schema.HandleDDL(job), check.IsNil)
-	c.Assert(schema.SinkTableInfos(), check.DeepEquals, []*model.SimpleTableInfo{
-		{
-			Schema:     "test",
-			Table:      "t1",
-			TableID:    tableIDT1,
-			ColumnInfo: []*model.ColumnInfo{{Name: "id", Type: mysql.TypeLong}},
+	events, err := schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(job))
+
+	// add test.t2
+	job = helper.DDL2Job("create table test.t2(id int primary key)")
+	events, err = schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(job))
+
+	jobs := helper.DDL2Jobs("drop table test.t1, test.t2", 2)
+	t1DropJob := jobs[1]
+	t2DropJob := jobs[0]
+	events, err = schema.BuildDDLEvents(t1DropJob)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(t1DropJob))
+	require.Equal(t, events[0], &model.DDLEvent{
+		StartTs:  t1DropJob.StartTS,
+		CommitTs: t1DropJob.BinlogInfo.FinishedTS,
+		Query:    "DROP TABLE `test`.`t1`",
+		Type:     timodel.ActionDropTable,
+		PreTableInfo: &model.SimpleTableInfo{
+			Schema:  "test",
+			Table:   "t1",
+			TableID: t1DropJob.TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeLong,
+				},
+			},
+		},
+		TableInfo: &model.SimpleTableInfo{
+			Schema:  "test",
+			Table:   "t1",
+			TableID: t1DropJob.TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeLong,
+				},
+			},
+		},
+	})
+
+	events, err = schema.BuildDDLEvents(t2DropJob)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(t2DropJob))
+	require.Equal(t, events[0], &model.DDLEvent{
+		StartTs:  t2DropJob.StartTS,
+		CommitTs: t2DropJob.BinlogInfo.FinishedTS,
+		Query:    "DROP TABLE `test`.`t2`",
+		Type:     timodel.ActionDropTable,
+		PreTableInfo: &model.SimpleTableInfo{
+			Schema:  "test",
+			Table:   "t2",
+			TableID: t2DropJob.TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeLong,
+				},
+			},
+		},
+		TableInfo: &model.SimpleTableInfo{
+			Schema:  "test",
+			Table:   "t2",
+			TableID: t2DropJob.TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeLong,
+				},
+			},
+		},
+	})
+}
+
+func TestBuildDDLEventsFromDropViewsDDL(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
+	require.Nil(t, err)
+	schema, err := newSchemaWrap4Owner(helper.Storage(), ver.Ver,
+		config.GetDefaultReplicaConfig(), dummyChangeFeedID)
+	require.Nil(t, err)
+	// add test.tb1
+	job := helper.DDL2Job("create table test.tb1(id int primary key)")
+	events, err := schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(job))
+
+	// add test.tb2
+	job = helper.DDL2Job("create table test.tb2(id int primary key)")
+	events, err = schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(job))
+
+	// add test.view1
+	job = helper.DDL2Job(
+		"create view test.view1 as select * from test.tb1 where id > 100")
+	events, err = schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(job))
+
+	// add test.view2
+	job = helper.DDL2Job(
+		"create view test.view2 as select * from test.tb2 where id > 100")
+	events, err = schema.BuildDDLEvents(job)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(job))
+
+	jobs := helper.DDL2Jobs("drop view test.view1, test.view2", 2)
+	view1DropJob := jobs[1]
+	view2DropJob := jobs[0]
+	events, err = schema.BuildDDLEvents(view1DropJob)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(view1DropJob))
+	require.Equal(t, events[0], &model.DDLEvent{
+		StartTs:  view1DropJob.StartTS,
+		CommitTs: view1DropJob.BinlogInfo.FinishedTS,
+		Query:    "DROP VIEW `test`.`view1`",
+		Type:     timodel.ActionDropView,
+		PreTableInfo: &model.SimpleTableInfo{
+			Schema:  "test",
+			Table:   "view1",
+			TableID: view1DropJob.TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeUnspecified,
+				},
+			},
+		},
+		TableInfo: &model.SimpleTableInfo{
+			Schema:  "test",
+			Table:   "view1",
+			TableID: view1DropJob.TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeUnspecified,
+				},
+			},
+		},
+	})
+
+	events, err = schema.BuildDDLEvents(view2DropJob)
+	require.Nil(t, err)
+	require.Len(t, events, 1)
+	require.Nil(t, schema.HandleDDL(view2DropJob))
+	require.Equal(t, events[0], &model.DDLEvent{
+		StartTs:  view2DropJob.StartTS,
+		CommitTs: view2DropJob.BinlogInfo.FinishedTS,
+		Query:    "DROP VIEW `test`.`view2`",
+		Type:     timodel.ActionDropView,
+		PreTableInfo: &model.SimpleTableInfo{
+			Schema:  "test",
+			Table:   "view2",
+			TableID: view2DropJob.TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeUnspecified,
+				},
+			},
+		},
+		TableInfo: &model.SimpleTableInfo{
+			Schema:  "test",
+			Table:   "view2",
+			TableID: view2DropJob.TableID,
+			ColumnInfo: []*model.ColumnInfo{
+				{
+					Name: "id",
+					Type: mysql.TypeUnspecified,
+				},
+			},
 		},
 	})
 }

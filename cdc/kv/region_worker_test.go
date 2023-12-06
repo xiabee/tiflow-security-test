@@ -20,36 +20,28 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/cdcpb"
-	"github.com/pingcap/tidb/store/tikv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/regionspan"
-	"github.com/pingcap/tiflow/pkg/util/testleak"
 	"github.com/stretchr/testify/require"
+	"github.com/tikv/client-go/v2/tikv"
 )
 
-type regionWorkerSuite struct{}
-
-var _ = check.Suite(&regionWorkerSuite{})
-
-func (s *regionWorkerSuite) TestRegionStateManager(c *check.C) {
-	defer testleak.AfterTest(c)()
+func TestRegionStateManager(t *testing.T) {
 	rsm := newRegionStateManager(4)
 
 	regionID := uint64(1000)
 	_, ok := rsm.getState(regionID)
-	c.Assert(ok, check.IsFalse)
+	require.False(t, ok)
 
 	rsm.setState(regionID, &regionFeedState{requestID: 2})
 	state, ok := rsm.getState(regionID)
-	c.Assert(ok, check.IsTrue)
-	c.Assert(state.requestID, check.Equals, uint64(2))
+	require.True(t, ok)
+	require.Equal(t, uint64(2), state.requestID)
 }
 
-func (s *regionWorkerSuite) TestRegionStateManagerThreadSafe(c *check.C) {
-	defer testleak.AfterTest(c)()
+func TestRegionStateManagerThreadSafe(t *testing.T) {
 	rsm := newRegionStateManager(4)
 	regionCount := 100
 	regionIDs := make([]uint64, regionCount)
@@ -69,9 +61,9 @@ func (s *regionWorkerSuite) TestRegionStateManagerThreadSafe(c *check.C) {
 				idx := rand.Intn(regionCount)
 				regionID := regionIDs[idx]
 				s, ok := rsm.getState(regionID)
-				c.Assert(ok, check.IsTrue)
+				require.True(t, ok)
 				s.lock.RLock()
-				c.Assert(s.requestID, check.Equals, uint64(idx+1))
+				require.Equal(t, uint64(idx+1), s.requestID)
 				s.lock.RUnlock()
 			}
 		}()
@@ -86,7 +78,7 @@ func (s *regionWorkerSuite) TestRegionStateManagerThreadSafe(c *check.C) {
 				}
 				regionID := regionIDs[rand.Intn(regionCount)]
 				s, ok := rsm.getState(regionID)
-				c.Assert(ok, check.IsTrue)
+				require.True(t, ok)
 				s.lock.Lock()
 				s.lastResolvedTs += 10
 				s.lock.Unlock()
@@ -99,29 +91,26 @@ func (s *regionWorkerSuite) TestRegionStateManagerThreadSafe(c *check.C) {
 	totalResolvedTs := uint64(0)
 	for _, regionID := range regionIDs {
 		s, ok := rsm.getState(regionID)
-		c.Assert(ok, check.IsTrue)
-		c.Assert(s.lastResolvedTs, check.Greater, uint64(1000))
+		require.True(t, ok)
+		require.Greater(t, s.lastResolvedTs, uint64(1000))
 		totalResolvedTs += s.lastResolvedTs
 	}
 	// 100 regions, initial resolved ts 1000;
 	// 2000 * resolved ts forward, increased by 10 each time, routine number is `concurrency`.
-	c.Assert(totalResolvedTs, check.Equals, uint64(100*1000+2000*10*concurrency))
+	require.Equal(t, uint64(100*1000+2000*10*concurrency), totalResolvedTs)
 }
 
-func (s *regionWorkerSuite) TestRegionStateManagerBucket(c *check.C) {
-	defer testleak.AfterTest(c)()
+func TestRegionStateManagerBucket(t *testing.T) {
 	rsm := newRegionStateManager(-1)
-	c.Assert(rsm.bucket, check.GreaterEqual, minRegionStateBucket)
-	c.Assert(rsm.bucket, check.LessEqual, maxRegionStateBucket)
+	require.GreaterOrEqual(t, rsm.bucket, minRegionStateBucket)
+	require.LessOrEqual(t, rsm.bucket, maxRegionStateBucket)
 
 	bucket := rsm.bucket * 2
 	rsm = newRegionStateManager(bucket)
-	c.Assert(rsm.bucket, check.Equals, bucket)
+	require.Equal(t, bucket, rsm.bucket)
 }
 
-func (s *regionWorkerSuite) TestRegionWorkerPoolSize(c *check.C) {
-	defer testleak.AfterTest(c)()
-
+func TestRegionWorkerPoolSize(t *testing.T) {
 	conf := config.GetDefaultServerConfig()
 	conf.KVClient.WorkerPoolSize = 0
 	config.StoreGlobalServerConfig(conf)
@@ -132,15 +121,15 @@ func (s *regionWorkerSuite) TestRegionWorkerPoolSize(c *check.C) {
 		}
 		return b
 	}
-	c.Assert(size, check.Equals, min(runtime.NumCPU()*2, maxWorkerPoolSize))
+	require.Equal(t, min(runtime.NumCPU()*2, maxWorkerPoolSize), size)
 
 	conf.KVClient.WorkerPoolSize = 5
 	size = getWorkerPoolSize()
-	c.Assert(size, check.Equals, 5)
+	require.Equal(t, 5, size)
 
 	conf.KVClient.WorkerPoolSize = maxWorkerPoolSize + 1
 	size = getWorkerPoolSize()
-	c.Assert(size, check.Equals, maxWorkerPoolSize)
+	require.Equal(t, maxWorkerPoolSize, size)
 }
 
 func TestRegionWokerHandleEventEntryEventOutOfOrder(t *testing.T) {
@@ -162,7 +151,6 @@ func TestRegionWokerHandleEventEntryEventOutOfOrder(t *testing.T) {
 	defer cancel()
 	eventCh := make(chan model.RegionFeedEvent, 2)
 	s := createFakeEventFeedSession(ctx)
-	s.enableOldValue = true
 	s.eventCh = eventCh
 	span := regionspan.Span{}.Hack()
 	state := newRegionFeedState(newSingleRegionInfo(
@@ -170,8 +158,7 @@ func TestRegionWokerHandleEventEntryEventOutOfOrder(t *testing.T) {
 		regionspan.ToComparableSpan(span),
 		0, &tikv.RPCContext{}), 0)
 	state.start()
-	worker := newRegionWorker(s, "")
-	worker.initMetrics(ctx)
+	worker := newRegionWorker(model.ChangeFeedID{}, s, "")
 	require.Equal(t, 2, cap(worker.outputCh))
 
 	// Receive prewrite2 with empty value.
@@ -270,4 +257,52 @@ func TestRegionWokerHandleEventEntryEventOutOfOrder(t *testing.T) {
 			OldValue: []byte("oldvalue"),
 		},
 	}, event, "%v", event)
+}
+
+func TestRegionWorkerHandleResolvedTs(t *testing.T) {
+	ctx := context.Background()
+	w := &regionWorker{}
+	outputCh := make(chan model.RegionFeedEvent, 1)
+	w.outputCh = outputCh
+	w.rtsUpdateCh = make(chan *rtsUpdateEvent, 1)
+	w.session = &eventFeedSession{client: &CDCClient{
+		changefeed: model.DefaultChangeFeedID("1"),
+	}}
+	w.metrics = &regionWorkerMetrics{metricSendEventResolvedCounter: sendEventCounter.
+		WithLabelValues("native-resolved", "n", "id")}
+	s1 := newRegionFeedState(singleRegionInfo{
+		verID: tikv.NewRegionVerID(1, 1, 1),
+	}, 1)
+	s1.initialized = true
+	s1.lastResolvedTs = 9
+
+	s2 := newRegionFeedState(singleRegionInfo{
+		verID: tikv.NewRegionVerID(2, 2, 2),
+	}, 2)
+	s2.initialized = true
+	s2.lastResolvedTs = 11
+
+	s3 := newRegionFeedState(singleRegionInfo{
+		verID: tikv.NewRegionVerID(3, 3, 3),
+	}, 3)
+	s3.initialized = false
+	s3.lastResolvedTs = 8
+	err := w.handleResolvedTs(ctx, &resolvedTsEvent{
+		resolvedTs: 10,
+		regions:    []*regionFeedState{s1, s2, s3},
+	})
+	require.Nil(t, err)
+	require.Equal(t, uint64(10), s1.lastResolvedTs)
+	require.Equal(t, uint64(11), s2.lastResolvedTs)
+	require.Equal(t, uint64(8), s3.lastResolvedTs)
+
+	re := <-w.rtsUpdateCh
+	require.Equal(t, uint64(10), re.resolvedTs)
+	require.Equal(t, 2, len(re.regions))
+
+	event := <-outputCh
+	require.Equal(t, uint64(0), event.RegionID)
+	require.Equal(t, uint64(10), event.Resolved.ResolvedTs)
+	require.Equal(t, 1, len(event.Resolved.Spans))
+	require.Equal(t, uint64(1), event.Resolved.Spans[0].Region)
 }

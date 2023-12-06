@@ -13,37 +13,49 @@
 
 package owner
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 var (
+	changefeedBarrierTsGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "ticdc",
+			Subsystem: "owner",
+			Name:      "barrier_ts",
+			Help:      "barrier ts of changefeeds",
+		}, []string{"namespace", "changefeed"})
+
 	changefeedCheckpointTsGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "ticdc",
 			Subsystem: "owner",
 			Name:      "checkpoint_ts",
 			Help:      "checkpoint ts of changefeeds",
-		}, []string{"changefeed"})
+		}, []string{"namespace", "changefeed"})
 	changefeedCheckpointTsLagGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "ticdc",
 			Subsystem: "owner",
 			Name:      "checkpoint_ts_lag",
 			Help:      "checkpoint ts lag of changefeeds in seconds",
-		}, []string{"changefeed"})
+		}, []string{"namespace", "changefeed"})
 	changefeedResolvedTsGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "ticdc",
 			Subsystem: "owner",
 			Name:      "resolved_ts",
 			Help:      "resolved ts of changefeeds",
-		}, []string{"changefeed"})
+		}, []string{"namespace", "changefeed"})
 	changefeedResolvedTsLagGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "ticdc",
 			Subsystem: "owner",
 			Name:      "resolved_ts_lag",
 			Help:      "resolved ts lag of changefeeds in seconds",
-		}, []string{"changefeed"})
+		}, []string{"namespace", "changefeed"})
 	ownershipCounter = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "ticdc",
@@ -57,14 +69,30 @@ var (
 			Subsystem: "owner",
 			Name:      "maintain_table_num",
 			Help:      "number of replicated tables maintained in owner",
-		}, []string{"changefeed", "capture", "type"})
+		}, []string{"namespace", "changefeed", "capture", "type"})
 	changefeedStatusGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "ticdc",
 			Subsystem: "owner",
 			Name:      "status",
 			Help:      "The status of changefeeds",
-		}, []string{"changefeed"})
+		}, []string{"namespace", "changefeed"})
+	changefeedTickDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "ticdc",
+			Subsystem: "owner",
+			Name:      "changefeed_tick_duration",
+			Help:      "Bucketed histogram of owner tick changefeed reactor time (s).",
+			Buckets:   prometheus.ExponentialBuckets(0.01 /* 10 ms */, 2, 18),
+		}, []string{"namespace", "changefeed"})
+	changefeedCloseDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "ticdc",
+			Subsystem: "owner",
+			Name:      "changefeed_close_duration",
+			Help:      "Bucketed histogram of owner close changefeed reactor time (s).",
+			Buckets:   prometheus.ExponentialBuckets(0.01 /* 10 ms */, 2, 18),
+		})
 )
 
 const (
@@ -72,10 +100,16 @@ const (
 	maintainTableTypeTotal string = "total"
 	// tables that are dispatched to a processor and have not been finished yet
 	maintainTableTypeWip string = "wip"
+	// When heavy operations (such as network IO and serialization) take too much time, the program
+	// should print a warning log, and if necessary, the timeout should be exposed externally through
+	// monitor.
+	changefeedLogsWarnDuration = 1 * time.Second
+	schedulerLogsWarnDuration  = 1 * time.Second
 )
 
 // InitMetrics registers all metrics used in owner
 func InitMetrics(registry *prometheus.Registry) {
+	registry.MustRegister(changefeedBarrierTsGauge)
 	registry.MustRegister(changefeedCheckpointTsGauge)
 	registry.MustRegister(changefeedResolvedTsGauge)
 	registry.MustRegister(changefeedCheckpointTsLagGauge)
@@ -83,4 +117,6 @@ func InitMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(ownershipCounter)
 	registry.MustRegister(ownerMaintainTableNumGauge)
 	registry.MustRegister(changefeedStatusGauge)
+	registry.MustRegister(changefeedTickDuration)
+	registry.MustRegister(changefeedCloseDuration)
 }

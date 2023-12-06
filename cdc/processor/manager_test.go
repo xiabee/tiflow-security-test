@@ -15,11 +15,12 @@ package processor
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"math"
+	"testing"
 	"time"
 
-	"github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/cdc/model"
 	tablepipeline "github.com/pingcap/tiflow/cdc/processor/pipeline"
@@ -27,31 +28,30 @@ import (
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
-	"github.com/pingcap/tiflow/pkg/util/testleak"
+	"github.com/pingcap/tiflow/pkg/upstream"
+	"github.com/stretchr/testify/require"
 )
 
-type managerSuite struct {
+type managerTester struct {
 	manager *Manager
-	state   *model.GlobalReactorState
+	state   *orchestrator.GlobalReactorState
 	tester  *orchestrator.ReactorStateTester
 }
 
-var _ = check.Suite(&managerSuite{})
-
 // NewManager4Test creates a new processor manager for test
 func NewManager4Test(
-	c *check.C,
+	t *testing.T,
 	createTablePipeline func(ctx cdcContext.Context, tableID model.TableID, replicaInfo *model.TableReplicaInfo) (tablepipeline.TablePipeline, error),
 ) *Manager {
-	m := NewManager()
-	m.newProcessor = func(ctx cdcContext.Context) *processor {
-		return newProcessor4Test(ctx, c, createTablePipeline)
+	m := NewManager(upstream.NewManager4Test(nil))
+	m.newProcessor = func(ctx cdcContext.Context, upStream *upstream.Upstream) *processor {
+		return newProcessor4Test(ctx, t, createTablePipeline)
 	}
 	return m
 }
 
-func (s *managerSuite) resetSuit(ctx cdcContext.Context, c *check.C) {
-	s.manager = NewManager4Test(c, func(ctx cdcContext.Context, tableID model.TableID, replicaInfo *model.TableReplicaInfo) (tablepipeline.TablePipeline, error) {
+func (s *managerTester) resetSuit(ctx cdcContext.Context, t *testing.T) {
+	s.manager = NewManager4Test(t, func(ctx cdcContext.Context, tableID model.TableID, replicaInfo *model.TableReplicaInfo) (tablepipeline.TablePipeline, error) {
 		return &mockTablePipeline{
 			tableID:      tableID,
 			name:         fmt.Sprintf("`test`.`table%d`", tableID),
@@ -60,163 +60,172 @@ func (s *managerSuite) resetSuit(ctx cdcContext.Context, c *check.C) {
 			checkpointTs: replicaInfo.StartTs,
 		}, nil
 	})
-	s.state = model.NewGlobalState().(*model.GlobalReactorState)
+	s.state = orchestrator.NewGlobalState()
 	captureInfoBytes, err := ctx.GlobalVars().CaptureInfo.Marshal()
-	c.Assert(err, check.IsNil)
-	s.tester = orchestrator.NewReactorStateTester(c, s.state, map[string]string{
+	require.Nil(t, err)
+	s.tester = orchestrator.NewReactorStateTester(t, s.state, map[string]string{
 		fmt.Sprintf("/tidb/cdc/capture/%s", ctx.GlobalVars().CaptureInfo.ID): string(captureInfoBytes),
 	})
 }
 
-func (s *managerSuite) TestChangefeed(c *check.C) {
-	defer testleak.AfterTest(c)()
+func TestChangefeed(t *testing.T) {
 	ctx := cdcContext.NewBackendContext4Test(false)
-	s.resetSuit(ctx, c)
+	s := &managerTester{}
+	s.resetSuit(ctx, t)
 	var err error
 
 	// no changefeed
 	_, err = s.manager.Tick(ctx, s.state)
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 
+	changefeedID := model.DefaultChangeFeedID("test-changefeed")
 	// an inactive changefeed
-	s.state.Changefeeds["test-changefeed"] = model.NewChangefeedReactorState("test-changefeed")
+	s.state.Changefeeds[changefeedID] = orchestrator.NewChangefeedReactorState(changefeedID)
 	_, err = s.manager.Tick(ctx, s.state)
 	s.tester.MustApplyPatches()
-	c.Assert(err, check.IsNil)
-	c.Assert(s.manager.processors, check.HasLen, 0)
+	require.Nil(t, err)
+	require.Len(t, s.manager.processors, 0)
 
 	// an active changefeed
-	s.state.Changefeeds["test-changefeed"].PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
-		return &model.ChangeFeedInfo{
-			SinkURI:    "blackhole://",
-			CreateTime: time.Now(),
-			StartTs:    0,
-			TargetTs:   math.MaxUint64,
-			Config:     config.GetDefaultReplicaConfig(),
-		}, true, nil
-	})
-	s.state.Changefeeds["test-changefeed"].PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		return &model.ChangeFeedStatus{}, true, nil
-	})
-	s.state.Changefeeds["test-changefeed"].PatchTaskStatus(ctx.GlobalVars().CaptureInfo.ID, func(status *model.TaskStatus) (*model.TaskStatus, bool, error) {
-		return &model.TaskStatus{
-			Tables: map[int64]*model.TableReplicaInfo{1: {}},
-		}, true, nil
-	})
+	s.state.Changefeeds[changefeedID].PatchInfo(
+		func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
+			return &model.ChangeFeedInfo{
+				SinkURI:    "blackhole://",
+				CreateTime: time.Now(),
+				StartTs:    0,
+				TargetTs:   math.MaxUint64,
+				Config:     config.GetDefaultReplicaConfig(),
+			}, true, nil
+		})
+	s.state.Changefeeds[changefeedID].PatchStatus(
+		func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
+			return &model.ChangeFeedStatus{}, true, nil
+		})
 	s.tester.MustApplyPatches()
 	_, err = s.manager.Tick(ctx, s.state)
 	s.tester.MustApplyPatches()
-	c.Assert(err, check.IsNil)
-	c.Assert(s.manager.processors, check.HasLen, 1)
+	require.Nil(t, err)
+	require.Len(t, s.manager.processors, 1)
 
 	// processor return errors
-	s.state.Changefeeds["test-changefeed"].PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		status.AdminJobType = model.AdminStop
-		return status, true, nil
-	})
-	s.state.Changefeeds["test-changefeed"].PatchTaskStatus(ctx.GlobalVars().CaptureInfo.ID, func(status *model.TaskStatus) (*model.TaskStatus, bool, error) {
-		status.AdminJobType = model.AdminStop
-		return status, true, nil
-	})
+	s.state.Changefeeds[changefeedID].PatchStatus(
+		func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
+			status.AdminJobType = model.AdminStop
+			return status, true, nil
+		})
 	s.tester.MustApplyPatches()
 	_, err = s.manager.Tick(ctx, s.state)
 	s.tester.MustApplyPatches()
-	c.Assert(err, check.IsNil)
-	c.Assert(s.manager.processors, check.HasLen, 0)
+	require.Nil(t, err)
+	require.Len(t, s.manager.processors, 0)
 }
 
-func (s *managerSuite) TestDebugInfo(c *check.C) {
-	defer testleak.AfterTest(c)()
+func TestDebugInfo(t *testing.T) {
 	ctx := cdcContext.NewBackendContext4Test(false)
-	s.resetSuit(ctx, c)
+	s := &managerTester{}
+	s.resetSuit(ctx, t)
 	var err error
 
 	// no changefeed
 	_, err = s.manager.Tick(ctx, s.state)
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 
+	changefeedID := model.DefaultChangeFeedID("test-changefeed")
 	// an active changefeed
-	s.state.Changefeeds["test-changefeed"] = model.NewChangefeedReactorState("test-changefeed")
-	s.state.Changefeeds["test-changefeed"].PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
-		return &model.ChangeFeedInfo{
-			SinkURI:    "blackhole://",
-			CreateTime: time.Now(),
-			StartTs:    0,
-			TargetTs:   math.MaxUint64,
-			Config:     config.GetDefaultReplicaConfig(),
-		}, true, nil
-	})
-	s.state.Changefeeds["test-changefeed"].PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		return &model.ChangeFeedStatus{}, true, nil
-	})
-	s.state.Changefeeds["test-changefeed"].PatchTaskStatus(ctx.GlobalVars().CaptureInfo.ID, func(status *model.TaskStatus) (*model.TaskStatus, bool, error) {
-		return &model.TaskStatus{
-			Tables: map[int64]*model.TableReplicaInfo{1: {}},
-		}, true, nil
-	})
+	s.state.Changefeeds[changefeedID] = orchestrator.NewChangefeedReactorState(changefeedID)
+	s.state.Changefeeds[changefeedID].PatchInfo(
+		func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
+			return &model.ChangeFeedInfo{
+				SinkURI:    "blackhole://",
+				CreateTime: time.Now(),
+				StartTs:    1,
+				TargetTs:   math.MaxUint64,
+				Config:     config.GetDefaultReplicaConfig(),
+			}, true, nil
+		})
+	s.state.Changefeeds[changefeedID].PatchStatus(
+		func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
+			return &model.ChangeFeedStatus{}, true, nil
+		})
 	s.tester.MustApplyPatches()
 	_, err = s.manager.Tick(ctx, s.state)
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 	s.tester.MustApplyPatches()
-	c.Assert(s.manager.processors, check.HasLen, 1)
+	require.Len(t, s.manager.processors, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for {
 			_, err = s.manager.Tick(ctx, s.state)
 			if err != nil {
-				c.Assert(cerrors.ErrReactorFinished.Equal(errors.Cause(err)), check.IsTrue)
+				require.True(t, cerrors.ErrReactorFinished.Equal(errors.Cause(err)))
 				return
 			}
-			c.Assert(err, check.IsNil)
+			require.Nil(t, err)
 			s.tester.MustApplyPatches()
 		}
 	}()
+	doneM := make(chan error, 1)
 	buf := bytes.NewBufferString("")
-	s.manager.WriteDebugInfo(buf)
-	c.Assert(len(buf.String()), check.Greater, 0)
+	s.manager.WriteDebugInfo(ctx, buf, doneM)
+	<-doneM
+	require.Greater(t, len(buf.String()), 0)
 	s.manager.AsyncClose()
 	<-done
 }
 
-func (s *managerSuite) TestClose(c *check.C) {
-	defer testleak.AfterTest(c)()
+func TestClose(t *testing.T) {
 	ctx := cdcContext.NewBackendContext4Test(false)
-	s.resetSuit(ctx, c)
+	s := &managerTester{}
+	s.resetSuit(ctx, t)
 	var err error
 
 	// no changefeed
 	_, err = s.manager.Tick(ctx, s.state)
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 
+	changefeedID := model.DefaultChangeFeedID("test-changefeed")
 	// an active changefeed
-	s.state.Changefeeds["test-changefeed"] = model.NewChangefeedReactorState("test-changefeed")
-	s.state.Changefeeds["test-changefeed"].PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
-		return &model.ChangeFeedInfo{
-			SinkURI:    "blackhole://",
-			CreateTime: time.Now(),
-			StartTs:    0,
-			TargetTs:   math.MaxUint64,
-			Config:     config.GetDefaultReplicaConfig(),
-		}, true, nil
-	})
-	s.state.Changefeeds["test-changefeed"].PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		return &model.ChangeFeedStatus{}, true, nil
-	})
-	s.state.Changefeeds["test-changefeed"].PatchTaskStatus(ctx.GlobalVars().CaptureInfo.ID, func(status *model.TaskStatus) (*model.TaskStatus, bool, error) {
-		return &model.TaskStatus{
-			Tables: map[int64]*model.TableReplicaInfo{1: {}},
-		}, true, nil
-	})
+	s.state.Changefeeds[changefeedID] = orchestrator.NewChangefeedReactorState(changefeedID)
+	s.state.Changefeeds[changefeedID].PatchInfo(
+		func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
+			return &model.ChangeFeedInfo{
+				SinkURI:    "blackhole://",
+				CreateTime: time.Now(),
+				StartTs:    0,
+				TargetTs:   math.MaxUint64,
+				Config:     config.GetDefaultReplicaConfig(),
+			}, true, nil
+		})
+	s.state.Changefeeds[changefeedID].PatchStatus(
+		func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
+			return &model.ChangeFeedStatus{}, true, nil
+		})
 	s.tester.MustApplyPatches()
 	_, err = s.manager.Tick(ctx, s.state)
-	c.Assert(err, check.IsNil)
+	require.Nil(t, err)
 	s.tester.MustApplyPatches()
-	c.Assert(s.manager.processors, check.HasLen, 1)
+	require.Len(t, s.manager.processors, 1)
 
 	s.manager.AsyncClose()
 	_, err = s.manager.Tick(ctx, s.state)
-	c.Assert(cerrors.ErrReactorFinished.Equal(errors.Cause(err)), check.IsTrue)
+	require.True(t, cerrors.ErrReactorFinished.Equal(errors.Cause(err)))
 	s.tester.MustApplyPatches()
-	c.Assert(s.manager.processors, check.HasLen, 0)
+	require.Len(t, s.manager.processors, 0)
+}
+
+func TestSendCommandError(t *testing.T) {
+	m := NewManager(nil)
+	ctx, cancel := context.WithCancel(context.TODO())
+	cancel()
+	// Use unbuffered channel to stable test.
+	m.commandQueue = make(chan *command)
+	done := make(chan error, 1)
+	err := m.sendCommand(ctx, commandTpClose, nil, done)
+	require.Error(t, err)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		require.FailNow(t, "done must be closed")
+	}
 }

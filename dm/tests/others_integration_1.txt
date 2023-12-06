@@ -1,0 +1,10 @@
+check_task
+validator_basic
+drop_column_with_index
+downstream_diff_index
+full_mode
+sequence_sharding_optimistic
+sequence_sharding_removemeta
+gtid
+only_dml
+adjust_gtid

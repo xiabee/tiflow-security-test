@@ -15,6 +15,7 @@ package errors
 
 import (
 	"context"
+	"strings"
 
 	"github.com/pingcap/errors"
 )
@@ -23,11 +24,11 @@ import (
 // as cause error.
 // If given `err` is nil, returns a nil error, which a the different behavior
 // against `Wrap` function in pingcap/errors.
-func WrapError(rfcError *errors.Error, err error) error {
+func WrapError(rfcError *errors.Error, err error, args ...interface{}) error {
 	if err == nil {
 		return nil
 	}
-	return rfcError.Wrap(err).GenWithStackByCause()
+	return rfcError.Wrap(err).GenWithStackByArgs(args...)
 }
 
 // ChangeFeedFastFailError is read only.
@@ -92,4 +93,31 @@ func IsRetryableError(err error) bool {
 		return false
 	}
 	return true
+}
+
+// WrapChangefeedUnretryableErr wraps an error into ErrChangefeedUnRetryable.
+func WrapChangefeedUnretryableErr(err error, args ...interface{}) error {
+	return WrapError(ErrChangefeedUnretryable, err, args...)
+}
+
+var changefeedUnRetryableErrors = []*errors.Error{
+	ErrChangefeedUnretryable,
+}
+
+// IsChangefeedUnRetryableError returns true if an error is a changefeed not retry error.
+func IsChangefeedUnRetryableError(err error) bool {
+	for _, e := range changefeedUnRetryableErrors {
+		if e.Equal(err) {
+			return true
+		}
+		if code, ok := RFCCode(err); ok {
+			if code == e.RFCCode() {
+				return true
+			}
+		}
+		if strings.Contains(err.Error(), string(e.RFCCode())) {
+			return true
+		}
+	}
+	return false
 }

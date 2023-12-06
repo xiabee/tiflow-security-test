@@ -61,7 +61,7 @@ func (m MarkMap) shouldFilterTxn(startTs uint64, filterReplicaIDs []uint64, repl
 }
 
 // FilterAndReduceTxns filters duplicate txns bases on filterReplicaIDs and
-// if the mark table dml is exist in the txn, this functiong will set the replicaID by mark table dml
+// if the mark table dml is exist in the txn, this function will set the replicaID by mark table dml
 // if the mark table dml is not exist, this function will set the replicaID by config
 func FilterAndReduceTxns(
 	txnsMap map[model.TableID][]*model.SingleTableTxn, filterReplicaIDs []uint64, replicaID uint64,
@@ -80,7 +80,7 @@ func FilterAndReduceTxns(
 						event.RowID != first.RowID {
 						log.Panic(
 							"there should be at most one mark row for each txn",
-							zap.Uint64("start-ts", event.StartTs),
+							zap.Uint64("startTs", event.StartTs),
 							zap.Any("first", first),
 							zap.Any("second", event))
 					}

@@ -17,7 +17,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/pingcap/tidb/store/tikv/oracle"
+	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
 )
 
@@ -36,3 +36,7 @@ func (m *MockPDClient) UpdateServiceGCSafePoint(ctx context.Context, serviceID s
 func (m *MockPDClient) GetTS(ctx context.Context) (int64, int64, error) {
 	return oracle.GetPhysical(time.Now()), 0, nil
 }
+
+// Close implements pd.Client.Close()
+// This method is used in some unit test cases.
+func (m *MockPDClient) Close() {}

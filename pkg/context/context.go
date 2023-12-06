@@ -18,31 +18,36 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	tidbkv "github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/store/tikv/oracle"
-	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/pipeline/system"
+	ssystem "github.com/pingcap/tiflow/cdc/sorter/leveldb/system"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/pdtime"
+	"github.com/pingcap/tiflow/pkg/etcd"
+	"github.com/pingcap/tiflow/pkg/p2p"
 	"github.com/pingcap/tiflow/pkg/version"
-	pd "github.com/tikv/pd/client"
+	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
 )
 
 // GlobalVars contains some vars which can be used anywhere in a pipeline
-// the lifecycle of vars in the GlobalVars shoule be aligned with the ticdc server process.
+// the lifecycle of vars in the GlobalVars should be aligned with the ticdc server process.
 // All field in Vars should be READ-ONLY and THREAD-SAFE
 type GlobalVars struct {
-	PDClient     pd.Client
-	KVStorage    tidbkv.Storage
-	CaptureInfo  *model.CaptureInfo
-	EtcdClient   *kv.CDCEtcdClient
-	GrpcPool     kv.GrpcPool
-	TimeAcquirer pdtime.TimeAcquirer
+	CaptureInfo      *model.CaptureInfo
+	EtcdClient       *etcd.CDCEtcdClient
+	TableActorSystem *system.System
+	SorterSystem     *ssystem.System
+
+	// OwnerRevision is the Etcd revision when the owner got elected.
+	OwnerRevision int64
+
+	// MessageServer and MessageRouter are for peer-messaging
+	MessageServer *p2p.MessageServer
+	MessageRouter p2p.MessageRouter
 }
 
 // ChangefeedVars contains some vars which can be used anywhere in a pipeline
-// the lifecycle of vars in the ChangefeedVars shoule be aligned with the changefeed.
+// the lifecycle of vars in the ChangefeedVars should be aligned with the changefeed.
 // All field in Vars should be READ-ONLY and THREAD-SAFE
 type ChangefeedVars struct {
 	ID   model.ChangeFeedID
@@ -177,19 +182,19 @@ func (ctx *throwContext) Throw(err error) {
 	}
 }
 
-// NewBackendContext4Test returns a new pipeline context for test
-func NewBackendContext4Test(withChangefeedVars bool) Context {
-	ctx := NewContext(context.Background(), &GlobalVars{
+// NewContext4Test returns a new pipeline context for test, and use the
+// given context as parent context.
+func NewContext4Test(baseCtx context.Context, withChangefeedVars bool) Context {
+	ctx := NewContext(baseCtx, &GlobalVars{
 		CaptureInfo: &model.CaptureInfo{
 			ID:            "capture-id-test",
 			AdvertiseAddr: "127.0.0.1:0000",
 			Version:       version.ReleaseVersion,
 		},
-		TimeAcquirer: pdtime.NewTimeAcquirer4Test(),
 	})
 	if withChangefeedVars {
 		ctx = WithChangefeedVars(ctx, &ChangefeedVars{
-			ID: "changefeed-id-test",
+			ID: model.DefaultChangeFeedID("changefeed-id-test"),
 			Info: &model.ChangeFeedInfo{
 				StartTs: oracle.GoTimeToTS(time.Now()),
 				Config:  config.GetDefaultReplicaConfig(),
@@ -199,6 +204,12 @@ func NewBackendContext4Test(withChangefeedVars bool) Context {
 	return ctx
 }
 
+// NewBackendContext4Test returns a new pipeline context for test, and us
+// context.Background() as ethe parent context
+func NewBackendContext4Test(withChangefeedVars bool) Context {
+	return NewContext4Test(context.Background(), withChangefeedVars)
+}
+
 // ZapFieldCapture returns a zap field containing capture address
 func ZapFieldCapture(ctx Context) zap.Field {
 	return zap.String("capture", ctx.GlobalVars().CaptureInfo.AdvertiseAddr)
@@ -206,5 +217,5 @@ func ZapFieldCapture(ctx Context) zap.Field {
 
 // ZapFieldChangefeed returns a zap field containing changefeed id
 func ZapFieldChangefeed(ctx Context) zap.Field {
-	return zap.String("changefeed", ctx.ChangefeedVars().ID)
+	return zap.String("changefeed", ctx.ChangefeedVars().ID.ID)
 }

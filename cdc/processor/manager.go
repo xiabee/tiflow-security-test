@@ -26,6 +26,8 @@ import (
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
+	"github.com/pingcap/tiflow/pkg/upstream"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -35,29 +37,34 @@ const (
 	commandTpUnknow commandTp = iota //nolint:varcheck,deadcode
 	commandTpClose
 	commandTpWriteDebugInfo
+	processorLogsWarnDuration = 1 * time.Second
 )
 
 type command struct {
 	tp      commandTp
 	payload interface{}
-	done    chan struct{}
+	done    chan<- error
 }
 
 // Manager is a manager of processor, which maintains the state and behavior of processors
 type Manager struct {
-	processors map[model.ChangeFeedID]*processor
+	processors      map[model.ChangeFeedID]*processor
+	commandQueue    chan *command
+	upstreamManager *upstream.Manager
 
-	commandQueue chan *command
+	newProcessor func(cdcContext.Context, *upstream.Upstream) *processor
 
-	newProcessor func(cdcContext.Context) *processor
+	metricProcessorCloseDuration prometheus.Observer
 }
 
 // NewManager creates a new processor manager
-func NewManager() *Manager {
+func NewManager(upstreamManager *upstream.Manager) *Manager {
 	return &Manager{
-		processors:   make(map[model.ChangeFeedID]*processor),
-		commandQueue: make(chan *command, 4),
-		newProcessor: newProcessor,
+		processors:                   make(map[model.ChangeFeedID]*processor),
+		commandQueue:                 make(chan *command, 4),
+		upstreamManager:              upstreamManager,
+		newProcessor:                 newProcessor,
+		metricProcessorCloseDuration: processorCloseDuration,
 	}
 }
 
@@ -66,7 +73,7 @@ func NewManager() *Manager {
 // the Tick function of Manager create or remove processor instances according to the specified `state`, or pass the `state` to processor instances
 func (m *Manager) Tick(stdCtx context.Context, state orchestrator.ReactorState) (nextState orchestrator.ReactorState, err error) {
 	ctx := stdCtx.(cdcContext.Context)
-	globalState := state.(*model.GlobalReactorState)
+	globalState := state.(*orchestrator.GlobalReactorState)
 	if err := m.handleCommand(); err != nil {
 		return state, err
 	}
@@ -85,16 +92,9 @@ func (m *Manager) Tick(stdCtx context.Context, state orchestrator.ReactorState) 
 		})
 		processor, exist := m.processors[changefeedID]
 		if !exist {
-			if changefeedState.Status.AdminJobType.IsStopState() || changefeedState.TaskStatuses[captureID].AdminJobType.IsStopState() {
-				continue
-			}
-			// the processor should start after at least one table has been added to this capture
-			taskStatus := changefeedState.TaskStatuses[captureID]
-			if taskStatus == nil || (len(taskStatus.Tables) == 0 && len(taskStatus.Operation) == 0) {
-				continue
-			}
+			upStream := m.upstreamManager.Get(changefeedState.Info.UpstreamID)
 			failpoint.Inject("processorManagerHandleNewChangefeedDelay", nil)
-			processor = m.newProcessor(ctx)
+			processor = m.newProcessor(ctx, upStream)
 			m.processors[changefeedID] = processor
 		}
 		if _, err := processor.Tick(ctx, changefeedState); err != nil {
@@ -118,43 +118,63 @@ func (m *Manager) Tick(stdCtx context.Context, state orchestrator.ReactorState) 
 
 func (m *Manager) closeProcessor(changefeedID model.ChangeFeedID) {
 	if processor, exist := m.processors[changefeedID]; exist {
+		startTime := time.Now()
+		captureID := processor.captureInfo.ID
 		err := processor.Close()
+		costTime := time.Since(startTime)
+		if costTime > processorLogsWarnDuration {
+			log.Warn("processor close took too long",
+				zap.String("namespace", changefeedID.Namespace),
+				zap.String("changefeed", changefeedID.ID),
+				zap.String("capture", captureID), zap.Duration("duration", costTime))
+		}
+		m.metricProcessorCloseDuration.Observe(costTime.Seconds())
 		if err != nil {
 			log.Warn("failed to close processor",
-				zap.String("changefeed", changefeedID),
+				zap.String("namespace", changefeedID.Namespace),
+				zap.String("changefeed", changefeedID.ID),
 				zap.Error(err))
 		}
 		delete(m.processors, changefeedID)
 	}
 }
 
-// AsyncClose sends a close signal to Manager and closing all processors
+// AsyncClose sends a signal to Manager to close all processors.
 func (m *Manager) AsyncClose() {
-	m.sendCommand(commandTpClose, nil)
+	timeout := 3 * time.Second
+	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
+	defer cancel()
+	done := make(chan error, 1)
+	err := m.sendCommand(ctx, commandTpClose, nil, done)
+	if err != nil {
+		log.Warn("async close failed", zap.Error(err))
+	}
 }
 
 // WriteDebugInfo write the debug info to Writer
-func (m *Manager) WriteDebugInfo(w io.Writer) {
-	timeout := time.Second * 3
-	done := m.sendCommand(commandTpWriteDebugInfo, w)
-	// wait the debug info printed
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		fmt.Fprintf(w, "failed to print debug info for processor\n")
+func (m *Manager) WriteDebugInfo(
+	ctx context.Context, w io.Writer, done chan<- error,
+) {
+	err := m.sendCommand(ctx, commandTpWriteDebugInfo, w, done)
+	if err != nil {
+		log.Warn("send command commandTpWriteDebugInfo failed", zap.Error(err))
 	}
 }
 
-func (m *Manager) sendCommand(tp commandTp, payload interface{}) chan struct{} {
-	timeout := time.Second * 3
-	cmd := &command{tp: tp, payload: payload, done: make(chan struct{})}
+// sendCommands sends command to manager.
+// `done` is closed upon command completion or sendCommand returns error.
+func (m *Manager) sendCommand(
+	ctx context.Context, tp commandTp, payload interface{}, done chan<- error,
+) error {
+	cmd := &command{tp: tp, payload: payload, done: done}
 	select {
+	case <-ctx.Done():
+		close(done)
+		return errors.Trace(ctx.Err())
 	case m.commandQueue <- cmd:
-	case <-time.After(timeout):
-		close(cmd.done)
-		log.Warn("the command queue is full, ignore this command", zap.Any("command", cmd))
+		// FIXME: signal EtcdWorker to handle commands ASAP.
 	}
-	return cmd.done
+	return nil
 }
 
 func (m *Manager) handleCommand() error {
@@ -170,6 +190,7 @@ func (m *Manager) handleCommand() error {
 		for changefeedID := range m.processors {
 			m.closeProcessor(changefeedID)
 		}
+		// FIXME: we should drain command queue and signal callers an error.
 		return cerrors.ErrReactorFinished
 	case commandTpWriteDebugInfo:
 		w := cmd.payload.(io.Writer)

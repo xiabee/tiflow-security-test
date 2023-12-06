@@ -17,47 +17,39 @@ import (
 	"context"
 	"testing"
 
-	"github.com/pingcap/check"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tiflow/pkg/util/testleak"
+	"github.com/stretchr/testify/require"
 )
 
-func TestSuite(t *testing.T) {
-	check.TestingT(t)
-}
-
-type helperSuite struct{}
-
-var _ = check.Suite(&helperSuite{})
-
-func (s *helperSuite) TestWrapError(c *check.C) {
-	defer testleak.AfterTest(c)()
+func TestWrapError(t *testing.T) {
+	t.Parallel()
 	var (
-		rfcError  = ErrDecodeFailed
-		err       = errors.New("test")
+		err       = errors.New("cause error")
 		testCases = []struct {
+			rfcError *errors.Error
 			err      error
 			isNil    bool
 			expected string
+			args     []interface{}
 		}{
-			{nil, true, ""},
-			{err, false, "[CDC:ErrDecodeFailed]test"},
+			{ErrDecodeFailed, nil, true, "", nil},
+			{ErrDecodeFailed, err, false, "[CDC:ErrDecodeFailed]decode failed: args data: cause error", []interface{}{"args data"}},
+			{ErrWriteTsConflict, err, false, "[CDC:ErrWriteTsConflict]write ts conflict: cause error", nil},
 		}
 	)
 	for _, tc := range testCases {
-		we := WrapError(rfcError, tc.err)
+		we := WrapError(tc.rfcError, tc.err, tc.args...)
 		if tc.isNil {
-			c.Assert(we, check.IsNil)
+			require.Nil(t, we)
 		} else {
-			c.Assert(we, check.NotNil)
-			c.Assert(we.Error(), check.Equals, tc.expected)
+			require.NotNil(t, we)
+			require.Equal(t, we.Error(), tc.expected)
 		}
 	}
 }
 
-func (s *helperSuite) TestIsRetryableError(c *check.C) {
-	defer testleak.AfterTest(c)()
-
+func TestIsRetryableError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -71,40 +63,60 @@ func (s *helperSuite) TestIsRetryableError(c *check.C) {
 	}
 	for _, tt := range tests {
 		ret := IsRetryableError(tt.err)
-		c.Assert(ret, check.Equals, tt.want, check.Commentf("case:%s", tt.name))
+		require.Equal(t, ret, tt.want, "case:%s", tt.name)
 	}
 }
 
-func (s *helperSuite) TestChangefeedFastFailError(c *check.C) {
-	defer testleak.AfterTest(c)()
-
+func TestChangefeedFastFailError(t *testing.T) {
+	t.Parallel()
 	err := ErrGCTTLExceeded.FastGenByArgs()
 	rfcCode, _ := RFCCode(err)
-	c.Assert(ChangefeedFastFailError(err), check.IsTrue)
-	c.Assert(ChangefeedFastFailErrorCode(rfcCode), check.IsTrue)
+	require.Equal(t, true, ChangefeedFastFailError(err))
+	require.Equal(t, true, ChangefeedFastFailErrorCode(rfcCode))
 
 	err = ErrGCTTLExceeded.GenWithStack("aa")
 	rfcCode, _ = RFCCode(err)
-	c.Assert(ChangefeedFastFailError(err), check.IsTrue)
-	c.Assert(ChangefeedFastFailErrorCode(rfcCode), check.IsTrue)
+	require.Equal(t, true, ChangefeedFastFailError(err))
+	require.Equal(t, true, ChangefeedFastFailErrorCode(rfcCode))
 
 	err = ErrGCTTLExceeded.Wrap(errors.New("aa"))
 	rfcCode, _ = RFCCode(err)
-	c.Assert(ChangefeedFastFailError(err), check.IsTrue)
-	c.Assert(ChangefeedFastFailErrorCode(rfcCode), check.IsTrue)
+	require.Equal(t, true, ChangefeedFastFailError(err))
+	require.Equal(t, true, ChangefeedFastFailErrorCode(rfcCode))
 
 	err = ErrSnapshotLostByGC.FastGenByArgs()
 	rfcCode, _ = RFCCode(err)
-	c.Assert(ChangefeedFastFailError(err), check.IsTrue)
-	c.Assert(ChangefeedFastFailErrorCode(rfcCode), check.IsTrue)
+	require.Equal(t, true, ChangefeedFastFailError(err))
+	require.Equal(t, true, ChangefeedFastFailErrorCode(rfcCode))
 
 	err = ErrStartTsBeforeGC.FastGenByArgs()
 	rfcCode, _ = RFCCode(err)
-	c.Assert(ChangefeedFastFailError(err), check.IsTrue)
-	c.Assert(ChangefeedFastFailErrorCode(rfcCode), check.IsTrue)
+	require.Equal(t, true, ChangefeedFastFailError(err))
+	require.Equal(t, true, ChangefeedFastFailErrorCode(rfcCode))
 
 	err = ErrToTLSConfigFailed.FastGenByArgs()
 	rfcCode, _ = RFCCode(err)
-	c.Assert(ChangefeedFastFailError(err), check.IsFalse)
-	c.Assert(ChangefeedFastFailErrorCode(rfcCode), check.IsFalse)
+	require.Equal(t, false, ChangefeedFastFailError(err))
+	require.Equal(t, false, ChangefeedFastFailErrorCode(rfcCode))
+}
+
+func TestIsChangefeedUnRetryableError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		err      error
+		expected bool
+	}{
+		{
+			err:      ErrCaptureSuicide.FastGenByArgs(),
+			expected: false,
+		},
+		{
+			err:      WrapChangefeedUnretryableErr(errors.New("whatever")),
+			expected: true,
+		},
+	}
+
+	for _, c := range cases {
+		require.Equal(t, c.expected, IsChangefeedUnRetryableError(c.err))
+	}
 }

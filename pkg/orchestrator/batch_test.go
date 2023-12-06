@@ -18,7 +18,6 @@ import (
 	"testing"
 
 	"github.com/pingcap/tiflow/pkg/orchestrator/util"
-
 	"github.com/stretchr/testify/require"
 )
 

@@ -25,8 +25,8 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"go.uber.org/zap"
 
-	timodel "github.com/pingcap/parser/model"
 	timeta "github.com/pingcap/tidb/meta"
+	timodel "github.com/pingcap/tidb/parser/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
 
@@ -394,6 +394,11 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
+	case timodel.ActionRenameTables:
+		err := s.inner.renameTables(job, job.BinlogInfo.FinishedTS)
+		if err != nil {
+			return errors.Trace(err)
+		}
 	case timodel.ActionCreateTable, timodel.ActionCreateView, timodel.ActionRecoverTable:
 		err := s.inner.createTable(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
 		if err != nil {
@@ -707,8 +712,8 @@ func (s *snapshot) doDropTable(tbInfo *model.TableInfo, currentTs uint64) {
 
 // truncateTable truncate the table with the given ID, and replace it with a new `tbInfo`.
 // NOTE: after a table is truncated:
-//   * physicalTableByID(id) will return nil;
-//   * IsTruncateTableID(id) should return true.
+//   - physicalTableByID(id) will return nil;
+//   - IsTruncateTableID(id) should return true.
 func (s *snapshot) truncateTable(id int64, tbInfo *model.TableInfo, currentTs uint64) (err error) {
 	old, ok := s.physicalTableByID(id)
 	if !ok {
@@ -830,6 +835,37 @@ func (s *snapshot) updatePartition(tbInfo *model.TableInfo, currentTs uint64) er
 	return nil
 }
 
+func (s *snapshot) renameTables(job *timodel.Job, currentTs uint64) error {
+	var oldSchemaIDs, newSchemaIDs, oldTableIDs []int64
+	var newTableNames, oldSchemaNames []*timodel.CIStr
+	err := job.DecodeArgs(&oldSchemaIDs, &newSchemaIDs, &newTableNames, &oldTableIDs, &oldSchemaNames)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if len(job.BinlogInfo.MultipleTableInfos) < len(newTableNames) {
+		return cerror.ErrInvalidDDLJob.GenWithStackByArgs(job.ID)
+	}
+	// NOTE: should handle failures in halfway better.
+	for _, tableID := range oldTableIDs {
+		if err := s.dropTable(tableID, currentTs); err != nil {
+			return errors.Trace(err)
+		}
+	}
+	for i, tableInfo := range job.BinlogInfo.MultipleTableInfos {
+		newSchema, ok := s.schemaByID(newSchemaIDs[i])
+		if !ok {
+			return cerror.ErrSnapshotSchemaNotFound.GenWithStackByArgs(newSchemaIDs[i])
+		}
+		newSchemaName := newSchema.Name.L
+		tbInfo := model.WrapTableInfo(newSchemaIDs[i], newSchemaName, job.BinlogInfo.FinishedTS, tableInfo)
+		err = s.createTable(tbInfo, currentTs)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	}
+	return nil
+}
+
 func (s *snapshot) iterTables(includeIneligible bool, f func(i *model.TableInfo)) {
 	tag := negative(s.currentTs)
 	var tableID int64 = -1
@@ -843,6 +879,7 @@ func (s *snapshot) iterTables(includeIneligible bool, f func(i *model.TableInfo)
 		}
 		return true
 	})
+	return
 }
 
 func (s *snapshot) iterPartitions(includeIneligible bool, f func(id int64, i *model.TableInfo)) {
@@ -858,6 +895,7 @@ func (s *snapshot) iterPartitions(includeIneligible bool, f func(id int64, i *mo
 		}
 		return true
 	})
+	return
 }
 
 func (s *snapshot) iterSchemas(f func(i *timodel.DBInfo)) {

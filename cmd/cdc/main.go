@@ -15,9 +15,14 @@ package main
 
 import (
 	_ "github.com/pingcap/tidb/types/parser_driver"
-	"github.com/pingcap/tiflow/cmd"
+	// cmd package init the godbus in keyring init function,
+	// according golang initialization and program execution order,
+	// we must import hack package before cmd package,
+	// then DBUS_SESSION_BUS_ADDRESS is set before gobus checking it
+	_ "github.com/pingcap/tiflow/cmd/cdc/hack"
+	"github.com/pingcap/tiflow/pkg/cmd"
 )
 
 func main() {
-	cmd.Execute()
+	cmd.Run()
 }

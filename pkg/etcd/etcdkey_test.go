@@ -14,16 +14,13 @@
 package etcd
 
 import (
-	"github.com/pingcap/check"
-	"github.com/pingcap/tiflow/pkg/util/testleak"
+	"testing"
+
+	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/stretchr/testify/require"
 )
 
-type etcdkeySuite struct{}
-
-var _ = check.Suite(&etcdkeySuite{})
-
-func (s *etcdkeySuite) TestEtcdKey(c *check.C) {
-	defer testleak.AfterTest(c)()
+func TestEtcdKey(t *testing.T) {
 	testcases := []struct {
 		key      string
 		expected *CDCKey
@@ -49,60 +46,59 @@ func (s *etcdkeySuite) TestEtcdKey(c *check.C) {
 		key: "/tidb/cdc/changefeed/info/test-_@#$%changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeChangefeedInfo,
-			ChangefeedID: "test-_@#$%changefeed",
+			ChangefeedID: model.DefaultChangeFeedID("test-_@#$%changefeed"),
 		},
 	}, {
 		key: "/tidb/cdc/changefeed/info/test/changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeChangefeedInfo,
-			ChangefeedID: "test/changefeed",
+			ChangefeedID: model.DefaultChangeFeedID("test/changefeed"),
 		},
 	}, {
 		key: "/tidb/cdc/job/test-changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeChangeFeedStatus,
-			ChangefeedID: "test-changefeed",
+			ChangefeedID: model.DefaultChangeFeedID("test-changefeed"),
 		},
 	}, {
 		key: "/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeTaskPosition,
-			ChangefeedID: "test-changefeed",
+			ChangefeedID: model.DefaultChangeFeedID("test-changefeed"),
 			CaptureID:    "6bbc01c8-0605-4f86-a0f9-b3119109b225",
 		},
 	}, {
 		key: "/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test/changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeTaskPosition,
-			ChangefeedID: "test/changefeed",
+			ChangefeedID: model.DefaultChangeFeedID("test/changefeed"),
 			CaptureID:    "6bbc01c8-0605-4f86-a0f9-b3119109b225",
 		},
 	}, {
 		key: "/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeTaskStatus,
-			ChangefeedID: "test-changefeed",
+			ChangefeedID: model.DefaultChangeFeedID("test-changefeed"),
 			CaptureID:    "6bbc01c8-0605-4f86-a0f9-b3119109b225",
 		},
 	}, {
 		key: "/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-changefeed",
 		expected: &CDCKey{
 			Tp:           CDCKeyTypeTaskWorkload,
-			ChangefeedID: "test-changefeed",
+			ChangefeedID: model.DefaultChangeFeedID("test-changefeed"),
 			CaptureID:    "6bbc01c8-0605-4f86-a0f9-b3119109b225",
 		},
 	}}
 	for _, tc := range testcases {
 		k := new(CDCKey)
 		err := k.Parse(tc.key)
-		c.Assert(err, check.IsNil)
-		c.Assert(k, check.DeepEquals, tc.expected)
-		c.Assert(k.String(), check.Equals, tc.key)
+		require.NoError(t, err)
+		require.Equal(t, k, tc.expected)
+		require.Equal(t, k.String(), tc.key)
 	}
 }
 
-func (s *etcdkeySuite) TestEtcdKeyParseError(c *check.C) {
-	defer testleak.AfterTest(c)()
+func TestEtcdKeyParseError(t *testing.T) {
 	testCases := []struct {
 		key   string
 		error bool
@@ -132,9 +128,9 @@ func (s *etcdkeySuite) TestEtcdKeyParseError(c *check.C) {
 		k := new(CDCKey)
 		err := k.Parse(tc.key)
 		if tc.error {
-			c.Assert(err, check.NotNil)
+			require.NotNil(t, err)
 		} else {
-			c.Assert(err, check.IsNil)
+			require.Nil(t, err)
 		}
 	}
 }

@@ -20,26 +20,54 @@ import (
 	"github.com/pingcap/tiflow/cdc/processor"
 	tablepipeline "github.com/pingcap/tiflow/cdc/processor/pipeline"
 	"github.com/pingcap/tiflow/cdc/puller"
-	"github.com/pingcap/tiflow/cdc/puller/sorter"
-	"github.com/pingcap/tiflow/cdc/sink"
+	redo "github.com/pingcap/tiflow/cdc/redo/common"
+	sink "github.com/pingcap/tiflow/cdc/sink/metrics"
+	"github.com/pingcap/tiflow/cdc/sink/mq"
+	"github.com/pingcap/tiflow/cdc/sorter"
+	"github.com/pingcap/tiflow/cdc/sorter/leveldb"
+	"github.com/pingcap/tiflow/cdc/sorter/memory"
+	"github.com/pingcap/tiflow/cdc/sorter/unified"
+	"github.com/pingcap/tiflow/pkg/actor"
+	"github.com/pingcap/tiflow/pkg/db"
+	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
+	"github.com/pingcap/tiflow/pkg/p2p"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	tikvmetrics "github.com/tikv/client-go/v2/metrics"
 )
 
 var registry = prometheus.NewRegistry()
 
 func init() {
 	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
-	registry.MustRegister(prometheus.NewGoCollector())
+	registry.MustRegister(prometheus.NewGoCollector(
+		collectors.WithGoCollections(collectors.GoRuntimeMemStatsCollection | collectors.GoRuntimeMetricsCollection)))
 
 	kv.InitMetrics(registry)
-	sorter.InitMetrics(registry)
 	puller.InitMetrics(registry)
 	sink.InitMetrics(registry)
 	entry.InitMetrics(registry)
-	orchestrator.InitMetrics(registry)
 	processor.InitMetrics(registry)
 	tablepipeline.InitMetrics(registry)
 	owner.InitMetrics(registry)
+	etcd.InitMetrics(registry)
 	initServerMetrics(registry)
+	actor.InitMetrics(registry)
+	orchestrator.InitMetrics(registry)
+	p2p.InitMetrics(registry)
+	// Sorter metrics
+	sorter.InitMetrics(registry)
+	memory.InitMetrics(registry)
+	unified.InitMetrics(registry)
+	leveldb.InitMetrics(registry)
+	redo.InitMetrics(registry)
+	db.InitMetrics(registry)
+	mq.InitMetrics(registry)
+	// TiKV client metrics, including metrics about resolved and region cache.
+	originalRegistry := prometheus.DefaultRegisterer
+	prometheus.DefaultRegisterer = registry
+	tikvmetrics.InitMetrics("ticdc", "tikvclient")
+	tikvmetrics.RegisterMetrics()
+	prometheus.DefaultRegisterer = originalRegistry
 }

@@ -15,27 +15,27 @@ package entry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
-	"github.com/pingcap/check"
 	"github.com/pingcap/errors"
-	timodel "github.com/pingcap/parser/model"
-	"github.com/pingcap/parser/mysql"
 	ticonfig "github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain"
 	tidbkv "github.com/pingcap/tidb/kv"
 	timeta "github.com/pingcap/tidb/meta"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/store/mockstore"
-	"github.com/pingcap/tidb/store/tikv/oracle"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/testkit"
 	"github.com/pingcap/tiflow/cdc/entry/schema"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/stretchr/testify/require"
+	"github.com/tikv/client-go/v2/oracle"
 )
 
 func TestSchema(t *testing.T) {
@@ -385,19 +385,107 @@ func TestHandleDDL(t *testing.T) {
 	}
 }
 
+func TestHandleRenameTables(t *testing.T) {
+	// Initial schema: db_1.table_1 and db_2.table_2.
+	snap := schema.NewEmptySnapshot(true)
+	var i int64
+	for i = 1; i < 3; i++ {
+		dbInfo := &timodel.DBInfo{
+			ID:    i,
+			Name:  timodel.NewCIStr(fmt.Sprintf("db_%d", i)),
+			State: timodel.StatePublic,
+		}
+		job := &timodel.Job{
+			ID:         i,
+			State:      timodel.JobStateSynced,
+			SchemaID:   i,
+			Type:       timodel.ActionCreateSchema,
+			BinlogInfo: &timodel.HistoryInfo{SchemaVersion: i, DBInfo: dbInfo, FinishedTS: uint64(i)},
+			Query:      fmt.Sprintf("create database %s", dbInfo.Name.O),
+		}
+		err := snap.HandleDDL(job)
+		require.Nil(t, err)
+	}
+	for i = 1; i < 3; i++ {
+		tblInfo := &timodel.TableInfo{
+			ID:    10 + i,
+			Name:  timodel.NewCIStr(fmt.Sprintf("table_%d", i)),
+			State: timodel.StatePublic,
+		}
+		job := &timodel.Job{
+			ID:         i,
+			State:      timodel.JobStateSynced,
+			SchemaID:   i,
+			TableID:    10 + i,
+			Type:       timodel.ActionCreateTable,
+			BinlogInfo: &timodel.HistoryInfo{SchemaVersion: i, TableInfo: tblInfo, FinishedTS: uint64(10 + i)},
+			Query:      "create table " + tblInfo.Name.O,
+		}
+		err := snap.HandleDDL(job)
+		require.Nil(t, err)
+	}
+
+	// rename table db1.table_1 to db2.x, db2.table_2 to db1.y
+	oldSchemaIDs := []int64{1, 2}
+	newSchemaIDs := []int64{2, 1}
+	oldTableIDs := []int64{11, 12}
+	newTableNames := []timodel.CIStr{timodel.NewCIStr("x"), timodel.NewCIStr("y")}
+	oldSchemaNames := []timodel.CIStr{timodel.NewCIStr("db_1"), timodel.NewCIStr("db_2")}
+	args := []interface{}{oldSchemaIDs, newSchemaIDs, newTableNames, oldTableIDs, oldSchemaNames}
+	rawArgs, err := json.Marshal(args)
+	require.Nil(t, err)
+	var job *timodel.Job = &timodel.Job{
+		Type:    timodel.ActionRenameTables,
+		RawArgs: rawArgs,
+		BinlogInfo: &timodel.HistoryInfo{
+			FinishedTS: 11112222,
+		},
+	}
+	job.BinlogInfo.MultipleTableInfos = append(job.BinlogInfo.MultipleTableInfos,
+		&timodel.TableInfo{
+			ID:    13,
+			Name:  timodel.NewCIStr("x"),
+			State: timodel.StatePublic,
+		})
+	job.BinlogInfo.MultipleTableInfos = append(job.BinlogInfo.MultipleTableInfos,
+		&timodel.TableInfo{
+			ID:    14,
+			Name:  timodel.NewCIStr("y"),
+			State: timodel.StatePublic,
+		})
+	testDoDDLAndCheck(t, snap, job, false)
+
+	var ok bool
+	_, ok = snap.PhysicalTableByID(13)
+	require.True(t, ok)
+	_, ok = snap.PhysicalTableByID(14)
+	require.True(t, ok)
+	_, ok = snap.PhysicalTableByID(11)
+	require.False(t, ok)
+	_, ok = snap.PhysicalTableByID(12)
+	require.False(t, ok)
+
+	n1, _ := snap.TableIDByName("db_2", "x")
+	require.Equal(t, n1, int64(13))
+	n2, _ := snap.TableIDByName("db_1", "y")
+	require.Equal(t, n2, int64(14))
+	require.Equal(t, uint64(11112222), snap.CurrentTs())
+}
+
 func testDoDDLAndCheck(t *testing.T, snap *schema.Snapshot, job *timodel.Job, isErr bool) {
 	err := snap.HandleDDL(job)
 	require.Equal(t, err != nil, isErr)
 }
 
 func TestPKShouldBeInTheFirstPlaceWhenPKIsNotHandle(t *testing.T) {
+	ft := types.NewFieldType(mysql.TypeUnspecified)
+	ft.SetFlag(mysql.NotNullFlag)
+
 	tblInfo := timodel.TableInfo{
 		Columns: []*timodel.ColumnInfo{
 			{
-				Name: timodel.CIStr{O: "name"},
-				FieldType: types.FieldType{
-					Flag: mysql.NotNullFlag,
-				},
+				Name:      timodel.CIStr{O: "name"},
+				FieldType: *ft,
 			},
 			{Name: timodel.CIStr{O: "id"}},
 		},
@@ -437,6 +525,12 @@ func TestPKShouldBeInTheFirstPlaceWhenPKIsNotHandle(t *testing.T) {
 }
 
 func TestPKShouldBeInTheFirstPlaceWhenPKIsHandle(t *testing.T) {
+	ftNotNUll := types.NewFieldType(mysql.TypeUnspecified)
+	ftNotNUll.SetFlag(mysql.NotNullFlag)
+
+	ftPK := types.NewFieldType(mysql.TypeUnspecified)
+	ftPK.SetFlag(mysql.PriKeyFlag)
+
 	tblInfo := timodel.TableInfo{
 		Indices: []*timodel.IndexInfo{
 			{
@@ -454,17 +548,13 @@ func TestPKShouldBeInTheFirstPlaceWhenPKIsHandle(t *testing.T) {
 				Name: timodel.CIStr{
 					O: "job",
 				},
-				FieldType: types.FieldType{
-					Flag: mysql.NotNullFlag,
-				},
+				FieldType: *ftNotNUll,
 			},
 			{
 				Name: timodel.CIStr{
 					O: "uid",
 				},
-				FieldType: types.FieldType{
-					Flag: mysql.PriKeyFlag,
-				},
+				FieldType: *ftPK,
 			},
 		},
 		PKIsHandle: true,
@@ -537,7 +627,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	}
 
 	jobs = append(jobs, job)
-	storage, err := NewSchemaStorage(nil, 0, nil, false, "")
+	storage, err := NewSchemaStorage(nil, 0, nil, false, dummyChangeFeedID)
 	require.Nil(t, err)
 	for _, job := range jobs {
 		err := storage.HandleDDLJob(job)
@@ -663,7 +753,6 @@ func TestCreateSnapFromMeta(t *testing.T) {
 	store, err := mockstore.NewMockStore()
 	require.Nil(t, err)
 	defer store.Close() //nolint:errcheck
-	var c check.C
 
 	session.SetSchemaLease(0)
 	session.DisableStats4Test()
@@ -671,7 +760,7 @@ func TestCreateSnapFromMeta(t *testing.T) {
 	require.Nil(t, err)
 	defer domain.Close()
 	domain.SetStatsUpdating(true)
-	tk := testkit.NewTestKit(&c, store)
+	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("create database test2")
 	tk.MustExec("create table test.simple_test1 (id bigint primary key)")
 	tk.MustExec("create table test.simple_test2 (id bigint primary key)")
@@ -698,7 +787,6 @@ func TestExplicitTables(t *testing.T) {
 	store, err := mockstore.NewMockStore()
 	require.Nil(t, err)
 	defer store.Close() //nolint:errcheck
-	var c check.C
 
 	session.SetSchemaLease(0)
 	session.DisableStats4Test()
@@ -706,7 +794,7 @@ func TestExplicitTables(t *testing.T) {
 	require.Nil(t, err)
 	defer domain.Close()
 	domain.SetStatsUpdating(true)
-	tk := testkit.NewTestKit(&c, store)
+	tk := testkit.NewTestKit(t, store)
 	ver1, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
 	tk.MustExec("create database test2")
@@ -733,6 +821,7 @@ func TestExplicitTables(t *testing.T) {
 	require.GreaterOrEqual(t, snap2.TableCount(false), 4)
 
 	require.Equal(t, snap3.TableCount(true)-snap1.TableCount(true), 5)
+	require.Equal(t, snap3.TableCount(false), 37)
 }
 
 /*
@@ -836,8 +925,6 @@ func TestSchemaStorage(t *testing.T) {
 		store, err := mockstore.NewMockStore()
 		require.Nil(t, err)
 		defer store.Close() //nolint:errcheck
-		var c check.C
-
 		ticonfig.UpdateGlobal(func(conf *ticonfig.Config) {
 			conf.AlterPrimaryKey = true
 		})
@@ -847,7 +934,7 @@ func TestSchemaStorage(t *testing.T) {
 		require.Nil(t, err)
 		defer domain.Close()
 		domain.SetStatsUpdating(true)
-		tk := testkit.NewTestKit(&c, store)
+		tk := testkit.NewTestKit(t, store)
 
 		for _, ddlSQL := range tc {
 			tk.MustExec(ddlSQL)
@@ -855,7 +942,7 @@ func TestSchemaStorage(t *testing.T) {
 
 		jobs, err := getAllHistoryDDLJob(store)
 		require.Nil(t, err)
-		schemaStorage, err := NewSchemaStorage(nil, 0, nil, false, "")
+		schemaStorage, err := NewSchemaStorage(nil, 0, nil, false, dummyChangeFeedID)
 		require.Nil(t, err)
 		for _, job := range jobs {
 			err := schemaStorage.HandleDDLJob(job)

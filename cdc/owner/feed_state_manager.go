@@ -21,14 +21,15 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/orchestrator"
 	"go.uber.org/zap"
 )
 
 const (
-	// When errors occurred and we need to do backoff, we start an exponential backoff
+	// When errors occurred, and we need to do backoff, we start an exponential backoff
 	// with an interval from 10s to 30min (10s, 20s, 40s, 80s, 160s, 320s, 640s, 1280s, 1800s).
 	// And the backoff will be stopped after 72 min (about 9 tries) because if we do another 30min backoff,
-	// the total duration (72+30=102min) will exceeds the MaxElapsedTime (90min).
+	// the total duration (72+30=102min) will exceed the MaxElapsedTime (90min).
 	// To avoid thunderherd, a random factor is also added.
 	defaultBackoffInitInterval        = 10 * time.Second
 	defaultBackoffMaxInterval         = 30 * time.Minute
@@ -36,17 +37,21 @@ const (
 	defaultBackoffRandomizationFactor = 0.1
 	defaultBackoffMultiplier          = 2.0
 
-	// If all states recorded in window are 'normal', it can be assumed that the changfeed
+	// If all states recorded in window are 'normal', it can be assumed that the changefeed
 	// is running steady. And then if we enter a state other than normal at next tick,
 	// the backoff must be reset.
 	defaultStateWindowSize = 512
 )
 
 // feedStateManager manages the ReactorState of a changefeed
-// when a error or a admin job occurs, the feedStateManager is responsible for controlling the ReactorState
+// when an error or an admin job occurs, the feedStateManager is responsible for controlling the ReactorState
 type feedStateManager struct {
-	state           *model.ChangefeedReactorState
+	state           *orchestrator.ChangefeedReactorState
 	shouldBeRunning bool
+	// Based on shouldBeRunning = false
+	// shouldBeRemoved = true means the changefeed is removed
+	// shouldBeRemoved = false means the changefeed is paused
+	shouldBeRemoved bool
 
 	adminJobQueue   []*model.AdminJob
 	stateHistory    [defaultStateWindowSize]model.FeedState
@@ -115,7 +120,7 @@ func (m *feedStateManager) shiftStateWindow(state model.FeedState) {
 	m.stateHistory[defaultStateWindowSize-1] = state
 }
 
-func (m *feedStateManager) Tick(state *model.ChangefeedReactorState) {
+func (m *feedStateManager) Tick(state *orchestrator.ChangefeedReactorState) {
 	m.state = state
 	m.shouldBeRunning = true
 	defer func() {
@@ -131,7 +136,11 @@ func (m *feedStateManager) Tick(state *model.ChangefeedReactorState) {
 		return
 	}
 	switch m.state.Info.State {
-	case model.StateStopped, model.StateFailed, model.StateRemoved, model.StateFinished:
+	case model.StateRemoved:
+		m.shouldBeRunning = false
+		m.shouldBeRemoved = true
+		return
+	case model.StateStopped, model.StateFailed, model.StateFinished:
 		m.shouldBeRunning = false
 		return
 	}
@@ -141,6 +150,10 @@ func (m *feedStateManager) Tick(state *model.ChangefeedReactorState) {
 
 func (m *feedStateManager) ShouldRunning() bool {
 	return m.shouldBeRunning
+}
+
+func (m *feedStateManager) ShouldRemoved() bool {
+	return m.shouldBeRemoved
 }
 
 func (m *feedStateManager) MarkFinished() {
@@ -159,7 +172,9 @@ func (m *feedStateManager) PushAdminJob(job *model.AdminJob) {
 	switch job.Type {
 	case model.AdminStop, model.AdminResume, model.AdminRemove:
 	default:
-		log.Panic("Can not handle this job", zap.String("changefeedID", m.state.ID),
+		log.Panic("Can not handle this job",
+			zap.String("namespace", m.state.ID.Namespace),
+			zap.String("changefeed", m.state.ID.ID),
 			zap.String("changefeedState", string(m.state.Info.State)), zap.Any("job", job))
 	}
 	m.pushAdminJob(job)
@@ -170,13 +185,17 @@ func (m *feedStateManager) handleAdminJob() (jobsPending bool) {
 	if job == nil || job.CfID != m.state.ID {
 		return false
 	}
-	log.Info("handle admin job", zap.String("changefeedID", m.state.ID), zap.Reflect("job", job))
+	log.Info("handle admin job",
+		zap.String("namespace", m.state.ID.Namespace),
+		zap.String("changefeed", m.state.ID.ID), zap.Reflect("job", job))
 	switch job.Type {
 	case model.AdminStop:
 		switch m.state.Info.State {
 		case model.StateNormal, model.StateError:
 		default:
-			log.Warn("can not pause the changefeed in the current state", zap.String("changefeedID", m.state.ID),
+			log.Warn("can not pause the changefeed in the current state",
+				zap.String("namespace", m.state.ID.Namespace),
+				zap.String("changefeed", m.state.ID.ID),
 				zap.String("changefeedState", string(m.state.Info.State)), zap.Any("job", job))
 			return
 		}
@@ -188,11 +207,14 @@ func (m *feedStateManager) handleAdminJob() (jobsPending bool) {
 		case model.StateNormal, model.StateError, model.StateFailed,
 			model.StateStopped, model.StateFinished, model.StateRemoved:
 		default:
-			log.Warn("can not remove the changefeed in the current state", zap.String("changefeedID", m.state.ID),
+			log.Warn("can not remove the changefeed in the current state",
+				zap.String("namespace", m.state.ID.Namespace),
+				zap.String("changefeed", m.state.ID.ID),
 				zap.String("changefeedState", string(m.state.Info.State)), zap.Any("job", job))
 			return
 		}
 		m.shouldBeRunning = false
+		m.shouldBeRemoved = true
 		jobsPending = true
 
 		// remove changefeedInfo
@@ -204,13 +226,18 @@ func (m *feedStateManager) handleAdminJob() (jobsPending bool) {
 			return nil, true, nil
 		})
 		checkpointTs := m.state.Info.GetCheckpointTs(m.state.Status)
-		log.Info("the changefeed is removed", zap.String("changefeed-id", m.state.ID), zap.Uint64("checkpoint-ts", checkpointTs))
 
+		log.Info("the changefeed is removed",
+			zap.String("namespace", m.state.ID.Namespace),
+			zap.String("changefeed", m.state.ID.ID),
+			zap.Uint64("checkpointTs", checkpointTs))
 	case model.AdminResume:
 		switch m.state.Info.State {
 		case model.StateFailed, model.StateError, model.StateStopped, model.StateFinished:
 		default:
-			log.Warn("can not resume the changefeed in the current state", zap.String("changefeedID", m.state.ID),
+			log.Warn("can not resume the changefeed in the current state",
+				zap.String("namespace", m.state.ID.Namespace),
+				zap.String("changefeed", m.state.ID.ID),
 				zap.String("changefeedState", string(m.state.Info.State)), zap.Any("job", job))
 			return
 		}
@@ -235,7 +262,9 @@ func (m *feedStateManager) handleAdminJob() (jobsPending bool) {
 		switch m.state.Info.State {
 		case model.StateNormal:
 		default:
-			log.Warn("can not finish the changefeed in the current state", zap.String("changefeedID", m.state.ID),
+			log.Warn("can not finish the changefeed in the current state",
+				zap.String("namespace", m.state.ID.Namespace),
+				zap.String("changefeed", m.state.ID.ID),
 				zap.String("changefeedState", string(m.state.Info.State)), zap.Any("job", job))
 			return
 		}
@@ -243,7 +272,9 @@ func (m *feedStateManager) handleAdminJob() (jobsPending bool) {
 		jobsPending = true
 		m.patchState(model.StateFinished)
 	default:
-		log.Warn("Unknown admin job", zap.Any("adminJob", job), zap.String("changefeed", m.state.ID))
+		log.Warn("Unknown admin job", zap.Any("adminJob", job),
+			zap.String("namespace", m.state.ID.Namespace),
+			zap.String("changefeed", m.state.ID.ID))
 	}
 	return
 }
@@ -303,19 +334,9 @@ func (m *feedStateManager) patchState(feedState model.FeedState) {
 }
 
 func (m *feedStateManager) cleanUpInfos() {
-	for captureID := range m.state.TaskStatuses {
-		m.state.PatchTaskStatus(captureID, func(status *model.TaskStatus) (*model.TaskStatus, bool, error) {
-			return nil, status != nil, nil
-		})
-	}
 	for captureID := range m.state.TaskPositions {
 		m.state.PatchTaskPosition(captureID, func(position *model.TaskPosition) (*model.TaskPosition, bool, error) {
 			return nil, position != nil, nil
-		})
-	}
-	for captureID := range m.state.Workloads {
-		m.state.PatchTaskWorkload(captureID, func(workload model.TaskWorkload) (model.TaskWorkload, bool, error) {
-			return nil, workload != nil, nil
 		})
 	}
 }
@@ -328,7 +349,10 @@ func (m *feedStateManager) errorsReportedByProcessors() []*model.RunningError {
 				runningErrors = make(map[string]*model.RunningError)
 			}
 			runningErrors[position.Error.Code] = position.Error
-			log.Error("processor report an error", zap.String("changefeedID", m.state.ID), zap.String("captureID", captureID), zap.Any("error", position.Error))
+			log.Error("processor report an error",
+				zap.String("namespace", m.state.ID.Namespace),
+				zap.String("changefeed", m.state.ID.ID),
+				zap.String("captureID", captureID), zap.Any("error", position.Error))
 			m.state.PatchTaskPosition(captureID, func(position *model.TaskPosition) (*model.TaskPosition, bool, error) {
 				if position == nil {
 					return nil, false, nil
@@ -362,6 +386,34 @@ func (m *feedStateManager) handleError(errs ...*model.RunningError) {
 			})
 			m.shouldBeRunning = false
 			m.patchState(model.StateFailed)
+			return
+		}
+	}
+
+	//  changefeed state from stopped to failed is allowed
+	// but stopped to error or normal is not allowed
+	if m.state.Info != nil && m.state.Info.State == model.StateStopped {
+		log.Warn("changefeed is stopped, ignore errors",
+			zap.String("changefeed", m.state.ID.ID),
+			zap.String("namespace", m.state.ID.Namespace),
+			zap.Any("errors", errs))
+		return
+	}
+
+	// we need to patch changefeed unretryable error to the changefeed info,
+	// so we have to iterate all errs here to check wether it is a unretryable
+	// error in errs
+	for _, err := range errs {
+		if err.IsChangefeedUnRetryableError() {
+			m.state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
+				if info == nil {
+					return nil, false, nil
+				}
+				info.Error = err
+				return info, true, nil
+			})
+			m.shouldBeRunning = false
+			m.patchState(model.StateError)
 			return
 		}
 	}
@@ -411,9 +463,11 @@ func (m *feedStateManager) handleError(errs ...*model.RunningError) {
 			log.Warn("changefeed will not be restarted because it has been failing for a long time period",
 				zap.Duration("maxElapsedTime", m.errBackoff.MaxElapsedTime))
 			m.shouldBeRunning = false
-			m.patchState(model.StateFailed)
+			m.patchState(model.StateError)
 		} else {
-			log.Info("changefeed restart backoff interval is changed", zap.String("changefeed", m.state.ID),
+			log.Info("changefeed restart backoff interval is changed",
+				zap.String("namespace", m.state.ID.Namespace),
+				zap.String("changefeed", m.state.ID.ID),
 				zap.Duration("oldInterval", oldBackoffInterval), zap.Duration("newInterval", m.backoffInterval))
 		}
 	}

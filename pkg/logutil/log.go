@@ -48,6 +48,8 @@ type Config struct {
 	FileMaxDays int `toml:"max-days" json:"max-days"`
 	// Maximum number of old log files to retain.
 	FileMaxBackups int `toml:"max-backups" json:"max-backups"`
+	// ZapInternalErrOutput specify where the internal error of zap logger should be send to.
+	ZapInternalErrOutput string `toml:"error-output" json:"error-output"`
 }
 
 // Adjust adjusts config
@@ -91,6 +93,7 @@ func InitLogger(cfg *Config) error {
 			MaxDays:    cfg.FileMaxDays,
 			MaxBackups: cfg.FileMaxBackups,
 		},
+		ErrorOutputPath: cfg.ZapInternalErrOutput,
 	}
 
 	var lg *zap.Logger
@@ -111,11 +114,13 @@ func InitLogger(cfg *Config) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	err = initSaramaLogger(level)
+
+	err = initGRPCLogger(level)
 	if err != nil {
 		return err
 	}
-	err = initGRPCLogger(level)
+
+	err = initSaramaLogger(level)
 	if err != nil {
 		return err
 	}
@@ -134,7 +139,7 @@ func ZapErrorFilter(err error, filterErrors ...error) zap.Field {
 	return zap.Error(err)
 }
 
-// InitSaramaLogger hacks logger used in sarama lib
+// initSaramaLogger hacks logger used in sarama lib
 func initSaramaLogger(level zapcore.Level) error {
 	// only available less than info level
 	if !zapcore.InfoLevel.Enabled(level) {

@@ -15,39 +15,51 @@ package model
 
 import (
 	"context"
+	"math"
+
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 )
 
-// PolymorphicEvent describes an event can be in multiple states
+// PolymorphicEvent describes an event can be in multiple states.
 type PolymorphicEvent struct {
-	StartTs uint64
-	// Commit or resolved TS
-	CRTs uint64
+	StartTs  uint64
+	CRTs     uint64
+	Resolved *ResolvedTs
 
-	RawKV    *RawKVEntry
-	Row      *RowChangedEvent
+	RawKV *RawKVEntry
+	Row   *RowChangedEvent
+
 	finished chan struct{}
 }
 
-// NewPolymorphicEvent creates a new PolymorphicEvent with a raw KV
+// NewEmptyPolymorphicEvent creates a new empty PolymorphicEvent.
+func NewEmptyPolymorphicEvent(ts uint64) *PolymorphicEvent {
+	return &PolymorphicEvent{
+		CRTs:  ts,
+		RawKV: &RawKVEntry{},
+		Row:   &RowChangedEvent{},
+	}
+}
+
+// NewPolymorphicEvent creates a new PolymorphicEvent with a raw KV.
 func NewPolymorphicEvent(rawKV *RawKVEntry) *PolymorphicEvent {
 	if rawKV.OpType == OpTypeResolved {
 		return NewResolvedPolymorphicEvent(rawKV.RegionID, rawKV.CRTs)
 	}
 	return &PolymorphicEvent{
-		StartTs:  rawKV.StartTs,
-		CRTs:     rawKV.CRTs,
-		RawKV:    rawKV,
-		finished: nil,
+		StartTs: rawKV.StartTs,
+		CRTs:    rawKV.CRTs,
+		RawKV:   rawKV,
 	}
 }
 
-// NewResolvedPolymorphicEvent creates a new PolymorphicEvent with the resolved ts
+// NewResolvedPolymorphicEvent creates a new PolymorphicEvent with the resolved ts.
 func NewResolvedPolymorphicEvent(regionID uint64, resolvedTs uint64) *PolymorphicEvent {
 	return &PolymorphicEvent{
-		CRTs:     resolvedTs,
-		RawKV:    &RawKVEntry{CRTs: resolvedTs, OpType: OpTypeResolved, RegionID: regionID},
-		Row:      nil,
-		finished: nil,
+		CRTs:  resolvedTs,
+		RawKV: &RawKVEntry{CRTs: resolvedTs, OpType: OpTypeResolved, RegionID: regionID},
+		Row:   nil,
 	}
 }
 
@@ -56,23 +68,28 @@ func (e *PolymorphicEvent) RegionID() uint64 {
 	return e.RawKV.RegionID
 }
 
-// SetUpFinishedChan creates an internal channel to support PrepareFinished and WaitPrepare
-func (e *PolymorphicEvent) SetUpFinishedChan() {
+// IsResolved returns true if the event is resolved. Note that this function can
+// only be called when `RawKV != nil`.
+func (e *PolymorphicEvent) IsResolved() bool {
+	return e.RawKV.OpType == OpTypeResolved
+}
+
+// SetUpFinishedCh set up the finished chan, should be called before mounting the event.
+func (e *PolymorphicEvent) SetUpFinishedCh() {
 	if e.finished == nil {
 		e.finished = make(chan struct{})
 	}
 }
 
-// PrepareFinished marks the prepare process is finished
-// In prepare process, Mounter will translate raw KV to row data
-func (e *PolymorphicEvent) PrepareFinished() {
+// MarkFinished is called to indicate that mount is finished.
+func (e *PolymorphicEvent) MarkFinished() {
 	if e.finished != nil {
 		close(e.finished)
 	}
 }
 
-// WaitPrepare waits for prepare process finished
-func (e *PolymorphicEvent) WaitPrepare(ctx context.Context) error {
+// WaitFinished is called by caller to wait for the mount finished.
+func (e *PolymorphicEvent) WaitFinished(ctx context.Context) error {
 	if e.finished != nil {
 		select {
 		case <-ctx.Done():
@@ -81,4 +98,91 @@ func (e *PolymorphicEvent) WaitPrepare(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ComparePolymorphicEvents compares two events by CRTs, Resolved, StartTs, Delete/Put order.
+// It returns true if and only if i should precede j.
+func ComparePolymorphicEvents(i, j *PolymorphicEvent) bool {
+	if i.CRTs == j.CRTs {
+		if i.IsResolved() {
+			return false
+		} else if j.IsResolved() {
+			return true
+		}
+
+		if i.StartTs > j.StartTs {
+			return false
+		} else if i.StartTs < j.StartTs {
+			return true
+		}
+
+		if i.RawKV.OpType == OpTypeDelete && j.RawKV.OpType != OpTypeDelete {
+			return true
+		}
+		// update DML
+		if i.RawKV.OldValue != nil && j.RawKV.OldValue == nil {
+			return true
+		}
+	}
+	return i.CRTs < j.CRTs
+}
+
+// ResolvedMode describes the batch type of a resolved event.
+type ResolvedMode int
+
+const (
+	// NormalResolvedMode means that all events whose commitTs is less than or equal to
+	// `resolved.Ts` are sent to Sink.
+	NormalResolvedMode ResolvedMode = iota
+	// BatchResolvedMode means that all events whose commitTs is less than
+	// 'resolved.Ts' are sent to Sink.
+	BatchResolvedMode
+)
+
+// ResolvedTs is the resolved timestamp of sink module.
+type ResolvedTs struct {
+	Mode    ResolvedMode
+	Ts      uint64
+	BatchID uint64
+}
+
+// NewResolvedTs creates a normal ResolvedTs.
+func NewResolvedTs(t uint64) ResolvedTs {
+	return ResolvedTs{Ts: t, Mode: NormalResolvedMode, BatchID: math.MaxUint64}
+}
+
+// IsBatchMode returns true if the resolved ts is BatchResolvedMode.
+func (r ResolvedTs) IsBatchMode() bool {
+	return r.Mode == BatchResolvedMode
+}
+
+// ResolvedMark returns a timestamp `ts` based on the r.mode, which marks that all events
+// whose commitTs is less than or equal to `ts` are sent to Sink.
+func (r ResolvedTs) ResolvedMark() uint64 {
+	switch r.Mode {
+	case NormalResolvedMode:
+		// with NormalResolvedMode, cdc guarantees all events whose commitTs is
+		// less than or equal to `resolved.Ts` are sent to Sink.
+		return r.Ts
+	case BatchResolvedMode:
+		// with BatchResolvedMode, cdc guarantees all events whose commitTs is
+		// less than `resolved.Ts` are sent to Sink.
+		return r.Ts - 1
+	default:
+		log.Error("unknown resolved mode", zap.Any("resolved", r))
+		return 0
+	}
+}
+
+// EqualOrGreater judge whether the resolved ts is equal or greater than the given ts.
+func (r ResolvedTs) EqualOrGreater(r1 ResolvedTs) bool {
+	if r.Ts == r1.Ts {
+		return r.BatchID >= r1.BatchID
+	}
+	return r.Ts > r1.Ts
+}
+
+// Less judge whether the resolved ts is less than the given ts.
+func (r ResolvedTs) Less(r1 ResolvedTs) bool {
+	return !r.EqualOrGreater(r1)
 }

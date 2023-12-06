@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -eu
 
 CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source $CUR/../_utils/test_prepare
@@ -8,17 +8,6 @@ WORK_DIR=$OUT_DIR/$TEST_NAME
 CDC_BINARY=cdc.test
 SINK_TYPE=$1
 TLS_DIR=$(cd $CUR/../_certificates && pwd)
-
-function check_changefeed_state() {
-	changefeedid=$1
-	expected=$2
-	output=$(cdc cli changefeed query --simple --changefeed-id $changefeedid --pd=http://$UP_PD_HOST_1:$UP_PD_PORT_1 2>&1)
-	state=$(echo $output | grep -oE "\"state\": \"[a-z]+\"" | tr -d '" ' | awk -F':' '{print $(NF)}')
-	if [ "$state" != "$expected" ]; then
-		echo "unexpected state $output, expected $expected"
-		exit 1
-	fi
-}
 
 function check_changefeed_count() {
 	pd_addr=$1
@@ -48,14 +37,14 @@ function run() {
 
 	TOPIC_NAME="ticdc-cli-test-$RANDOM"
 	case $SINK_TYPE in
-	kafka) SINK_URI="kafka://127.0.0.1:9092/$TOPIC_NAME?partition-num=4&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
+	kafka) SINK_URI="kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
 	*) SINK_URI="mysql://normal:123456@127.0.0.1:3306/" ;;
 	esac
 
 	uuid="custom-changefeed-name"
 	run_cdc_cli changefeed create --start-ts=$start_ts --sort-engine=memory --sink-uri="$SINK_URI" --tz="Asia/Shanghai" -c="$uuid"
 	if [ "$SINK_TYPE" == "kafka" ]; then
-		run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760"
+		run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760"
 	fi
 
 	run_cdc_cli changefeed cyclic create-marktables \
@@ -65,7 +54,7 @@ function run() {
 	check_table_exists tidb_cdc.repl_mark_test_simple ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 	check_table_exists tidb_cdc."\`repl_mark_test_simple-dash\`" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 
-	check_changefeed_state $uuid "normal"
+	check_changefeed_state "http://${UP_PD_HOST_1}:${UP_PD_PORT_1}" $uuid "normal" "null" ""
 
 	check_changefeed_count http://${UP_PD_HOST_1}:${UP_PD_PORT_1} 1
 	check_changefeed_count http://${UP_PD_HOST_2}:${UP_PD_PORT_2} 1
@@ -101,7 +90,7 @@ EOF
 		echo "[$(date)] <<<<< unexpect admin job type! expect 1 got ${jobtype} >>>>>"
 		exit 1
 	fi
-	check_changefeed_state $uuid "stopped"
+	check_changefeed_state "http://${UP_PD_HOST_1}:${UP_PD_PORT_1}" $uuid "stopped" "null" ""
 
 	# Update changefeed
 	run_cdc_cli changefeed update --pd=$pd_addr --config="$WORK_DIR/changefeed.toml" --no-confirm --changefeed-id $uuid
@@ -132,14 +121,14 @@ EOF
 		echo "[$(date)] <<<<< unexpect admin job type! expect 0 got ${jobtype} >>>>>"
 		exit 1
 	fi
-	check_changefeed_state $uuid "normal"
+	check_changefeed_state "http://${UP_PD_HOST_1}:${UP_PD_PORT_1}" $uuid "normal" "null" ""
 
 	# Remove changefeed
 	run_cdc_cli changefeed --changefeed-id $uuid remove && sleep 3
 	check_changefeed_count http://${UP_PD_HOST_1}:${UP_PD_PORT_1} 0
 
 	run_cdc_cli changefeed create --sink-uri="$SINK_URI" --tz="Asia/Shanghai" -c="$uuid" && sleep 3
-	check_changefeed_state $uuid "normal"
+	check_changefeed_state "http://${UP_PD_HOST_1}:${UP_PD_PORT_1}" $uuid "normal" "null" ""
 
 	# Make sure bad sink url fails at creating changefeed.
 	badsink=$(run_cdc_cli changefeed create --start-ts=$start_ts --sink-uri="mysql://badsink" 2>&1 | grep -oE 'fail')
@@ -151,16 +140,20 @@ EOF
 	# Test Kafka SSL connection.
 	if [ "$SINK_TYPE" == "kafka" ]; then
 		SSL_TOPIC_NAME="ticdc-cli-test-ssl-$RANDOM"
-		SINK_URI="kafka://127.0.0.1:9093/$SSL_TOPIC_NAME?ca=${TLS_DIR}/ca.pem&cert=${TLS_DIR}/client.pem&key=${TLS_DIR}/client-key.pem&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760"
+		SINK_URI="kafka://127.0.0.1:9093/$SSL_TOPIC_NAME?protocol=open-protocol&ca=${TLS_DIR}/ca.pem&cert=${TLS_DIR}/client.pem&key=${TLS_DIR}/client-key.pem&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760"
 		run_cdc_cli changefeed create --start-ts=$start_ts --sink-uri="$SINK_URI" --tz="Asia/Shanghai"
 	fi
 
 	# Smoke test unsafe commands
 	echo "y" | run_cdc_cli unsafe delete-service-gc-safepoint
 	run_cdc_cli unsafe reset --no-confirm
+	REGION_ID=$(pd-ctl -u=$pd_addr region | jq '.regions[0].id')
+	TS=$(cdc cli tso query --pd=$pd_addr)
+	run_cdc_cli unsafe resolve-lock --region=$REGION_ID
+	run_cdc_cli unsafe resolve-lock --region=$REGION_ID --ts=$TS
 
 	# Smoke test change log level
-	curl -X POST -d '"warn"' http://127.0.0.1:8300/admin/log
+	curl -X POST -d '"warn"' http://127.0.0.1:8300/api/v1/log
 	sleep 3
 	# make sure TiCDC does not panic
 	curl http://127.0.0.1:8300/status

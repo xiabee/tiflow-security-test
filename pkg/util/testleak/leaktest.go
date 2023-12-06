@@ -48,16 +48,18 @@ func interestingGoroutines() (gs []string) {
 		// false positive leak failures
 		"google.golang.org/grpc.(*addrConn).resetTransport",
 		"google.golang.org/grpc.(*ccBalancerWrapper).watcher",
-		"go.etcd.io/etcd/pkg/logutil.(*MergeLogger).outputLoop",
+		"go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop",
 		"go.etcd.io/etcd/v3/pkg/logutil.(*MergeLogger).outputLoop",
 		// library used by sarama, ref: https://github.com/rcrowley/go-metrics/pull/266
 		"github.com/rcrowley/go-metrics.(*meterArbiter).tick",
 		// TODO: remove these two lines after unified sorter is fixed
-		"github.com/pingcap/tiflow/cdc/puller/sorter.newBackEndPool",
-		"github.com/pingcap/tiflow/cdc/puller/sorter.(*heapSorter).flush",
+		"github.com/pingcap/tiflow/cdc/sorter/unified.newBackEndPool",
+		"github.com/pingcap/tiflow/cdc/sorter/unified.(*heapSorter).flush",
 		// kv client region worker pool
 		"github.com/pingcap/tiflow/cdc/kv.RunWorkerPool",
 		"github.com/pingcap/tiflow/pkg/workerpool.(*defaultPoolImpl).Run",
+		// library used by log
+		"gopkg.in/natefinch/lumberjack%2ev2.(*Logger).millRun",
 	}
 	shouldIgnore := func(stack string) bool {
 		if stack == "" {
@@ -94,14 +96,16 @@ var (
 // It's used for check.Suite.SetUpSuite() function.
 // Now it's only used in the tidb_test.go.
 // Note: it's not accurate, consider the following function:
-// func loop() {
-//   for {
-//     select {
-//       case <-ticker.C:
-//         DoSomething()
-//     }
-//   }
-// }
+//
+//	func loop() {
+//	  for {
+//	    select {
+//	      case <-ticker.C:
+//	        DoSomething()
+//	    }
+//	  }
+//	}
+//
 // If this loop step into DoSomething() during BeforeTest(), the stack for this goroutine will contain DoSomething().
 // Then if this loop jumps out of DoSomething during AfterTest(), the stack for this goroutine will not contain DoSomething().
 // Resulting in false-positive leak reports.

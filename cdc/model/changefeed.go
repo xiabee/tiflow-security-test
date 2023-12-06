@@ -16,18 +16,42 @@ package model
 import (
 	"encoding/json"
 	"math"
+	"net/url"
 	"regexp"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/store/tikv/oracle"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/cyclic/mark"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
+	cerrors "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/sink"
+	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/pingcap/tiflow/pkg/version"
+	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
 )
+
+// DefaultNamespace is the default namespace value,
+// all the old changefeed will be put into default namespace
+const DefaultNamespace = "default"
+
+// ChangeFeedID is the type for change feed ID
+type ChangeFeedID struct {
+	// Namespace and ID pair is unique in one ticdc cluster
+	// the default value of Namespace is "default"
+	Namespace string
+	ID        string
+}
+
+// DefaultChangeFeedID returns `ChangeFeedID` with default namespace
+func DefaultChangeFeedID(id string) ChangeFeedID {
+	return ChangeFeedID{
+		Namespace: DefaultNamespace,
+		ID:        id,
+	}
+}
 
 // SortEngine is the sorter engine
 type SortEngine = string
@@ -52,7 +76,7 @@ const (
 	StateFinished FeedState = "finished"
 )
 
-// ToInt return a int for each `FeedState`, only use this for metrics.
+// ToInt return an int for each `FeedState`, only use this for metrics.
 func (s FeedState) ToInt() int {
 	switch s {
 	case StateNormal:
@@ -72,8 +96,27 @@ func (s FeedState) ToInt() int {
 	return -1
 }
 
+// IsNeeded return true if the given feedState matches the listState.
+func (s FeedState) IsNeeded(need string) bool {
+	if need == "all" {
+		return true
+	}
+	if need == "" {
+		switch s {
+		case StateNormal:
+			return true
+		case StateStopped:
+			return true
+		case StateFailed:
+			return true
+		}
+	}
+	return need == string(s)
+}
+
 // ChangeFeedInfo describes the detail of a ChangeFeed
 type ChangeFeedInfo struct {
+	UpstreamID uint64            `json:"upstream-id"`
 	SinkURI    string            `json:"sink-uri"`
 	Opts       map[string]string `json:"opts"`
 	CreateTime time.Time         `json:"create-time"`
@@ -125,7 +168,12 @@ func (info *ChangeFeedInfo) String() (str string) {
 		log.Error("failed to unmarshal changefeed info", zap.Error(err))
 		return
 	}
-	clone.SinkURI = "***"
+
+	clone.SinkURI, err = util.MaskSinkURI(clone.SinkURI)
+	if err != nil {
+		log.Error("failed to mask sink uri", zap.Error(err))
+	}
+
 	str, err = clone.Marshal()
 	if err != nil {
 		log.Error("failed to marshal changefeed info", zap.Error(err))
@@ -133,13 +181,14 @@ func (info *ChangeFeedInfo) String() (str string) {
 	return
 }
 
-// GetStartTs returns StartTs if it's  specified or using the CreateTime of changefeed.
+// GetStartTs returns StartTs if it's specified or using the
+// CreateTime of changefeed.
 func (info *ChangeFeedInfo) GetStartTs() uint64 {
 	if info.StartTs > 0 {
 		return info.StartTs
 	}
 
-	return oracle.EncodeTSO(info.CreateTime.Unix() * 1000)
+	return oracle.GoTimeToTS(info.CreateTime)
 }
 
 // GetCheckpointTs returns CheckpointTs if it's specified in ChangeFeedStatus, otherwise StartTs is returned.
@@ -214,9 +263,10 @@ func (info *ChangeFeedInfo) VerifyAndComplete() error {
 	if info.Config.Cyclic == nil {
 		info.Config.Cyclic = defaultConfig.Cyclic
 	}
-	if info.Config.Scheduler == nil {
-		info.Config.Scheduler = defaultConfig.Scheduler
+	if info.Config.Consistent == nil {
+		info.Config.Consistent = defaultConfig.Consistent
 	}
+
 	return nil
 }
 
@@ -224,9 +274,21 @@ func (info *ChangeFeedInfo) VerifyAndComplete() error {
 func (info *ChangeFeedInfo) FixIncompatible() {
 	creatorVersionGate := version.NewCreatorVersionGate(info.CreatorVersion)
 	if creatorVersionGate.ChangefeedStateFromAdminJob() {
-		log.Info("Start fixing incompatible changefeed state", zap.Any("changefeed", info))
+		log.Info("Start fixing incompatible changefeed state", zap.String("changefeed", info.String()))
 		info.fixState()
-		log.Info("Fix incompatibility changefeed state completed", zap.Any("changefeed", info))
+		log.Info("Fix incompatibility changefeed state completed", zap.String("changefeed", info.String()))
+	}
+
+	if creatorVersionGate.ChangefeedAcceptUnknownProtocols() {
+		log.Info("Start fixing incompatible changefeed MQ sink protocol", zap.String("changefeed", info.String()))
+		info.fixMQSinkProtocol()
+		log.Info("Fix incompatibility changefeed MQ sink protocol completed", zap.String("changefeed", info.String()))
+	}
+
+	if creatorVersionGate.ChangefeedAcceptProtocolInMysqlSinURI() {
+		log.Info("Start fixing incompatible changefeed sink uri", zap.String("changefeed", info.String()))
+		info.fixMySQLSinkProtocol()
+		log.Info("Fix incompatibility changefeed sink uri completed", zap.String("changefeed", info.String()))
 	}
 }
 
@@ -244,7 +306,7 @@ func (info *ChangeFeedInfo) fixState() {
 		// This corresponds to the case of failure or error.
 		case AdminNone, AdminResume:
 			if info.Error != nil {
-				if cerror.ChangefeedFastFailErrorCode(errors.RFCErrorCode(info.Error.Code)) {
+				if cerrors.ChangefeedFastFailErrorCode(errors.RFCErrorCode(info.Error.Code)) {
 					state = StateFailed
 				} else {
 					state = StateError
@@ -261,11 +323,94 @@ func (info *ChangeFeedInfo) fixState() {
 
 	if state != info.State {
 		log.Info("handle old owner inconsistent state",
-			zap.String("old state", string(info.State)),
-			zap.String("admin job type", info.AdminJobType.String()),
-			zap.String("new state", string(state)))
+			zap.String("oldState", string(info.State)),
+			zap.String("adminJob", info.AdminJobType.String()),
+			zap.String("newState", string(state)))
 		info.State = state
 	}
+}
+
+func (info *ChangeFeedInfo) fixMySQLSinkProtocol() {
+	uri, err := url.Parse(info.SinkURI)
+	if err != nil {
+		log.Warn("parse sink URI failed", zap.Error(err))
+		// SAFETY: It is safe to ignore this unresolvable sink URI here,
+		// as it is almost impossible for this to happen.
+		// If we ignore it when fixing it after it happens,
+		// it will expose the problem when starting the changefeed,
+		// which is easier to troubleshoot than reporting the error directly in the bootstrap process.
+		return
+	}
+
+	if sink.IsMQScheme(uri.Scheme) {
+		return
+	}
+
+	query := uri.Query()
+	protocolStr := query.Get(config.ProtocolKey)
+	if protocolStr != "" || info.Config.Sink.Protocol != "" {
+		maskedSinkURI, _ := util.MaskSinkURI(info.SinkURI)
+		log.Warn("sink URI or sink config contains protocol, but scheme is not mq",
+			zap.String("sinkURI", maskedSinkURI),
+			zap.String("protocol", protocolStr),
+			zap.Any("sinkConfig", info.Config.Sink))
+		// always set protocol of mysql sink to ""
+		query.Del(config.ProtocolKey)
+		info.updateSinkURIAndConfigProtocol(uri, "", query)
+	}
+}
+
+func (info *ChangeFeedInfo) fixMQSinkProtocol() {
+	uri, err := url.Parse(info.SinkURI)
+	if err != nil {
+		log.Warn("parse sink URI failed", zap.Error(err))
+		return
+	}
+
+	if !sink.IsMQScheme(uri.Scheme) {
+		return
+	}
+
+	needsFix := func(protocolStr string) bool {
+		var protocol config.Protocol
+		err = protocol.FromString(protocolStr)
+		// There are two cases:
+		// 1. there is an error indicating that the old ticdc accepts
+		//    a protocol that is not known. It needs to be fixed as open protocol.
+		// 2. If it is default, then it needs to be fixed as open protocol.
+		return err != nil || protocolStr == config.ProtocolDefault.String()
+	}
+
+	query := uri.Query()
+	protocol := query.Get(config.ProtocolKey)
+	openProtocol := config.ProtocolOpen.String()
+
+	// The sinkURI always has a higher priority.
+	if protocol != "" && needsFix(protocol) {
+		query.Set(config.ProtocolKey, openProtocol)
+		info.updateSinkURIAndConfigProtocol(uri, openProtocol, query)
+		return
+	}
+
+	if needsFix(info.Config.Sink.Protocol) {
+		log.Info("handle incompatible protocol from sink config",
+			zap.String("oldProtocol", info.Config.Sink.Protocol),
+			zap.String("fixedProtocol", openProtocol))
+		info.Config.Sink.Protocol = openProtocol
+	}
+}
+
+func (info *ChangeFeedInfo) updateSinkURIAndConfigProtocol(uri *url.URL, newProtocol string, newQuery url.Values) {
+	oldRawQuery := uri.RawQuery
+	newRawQuery := newQuery.Encode()
+	log.Info("handle incompatible protocol from sink URI",
+		zap.String("oldUriQuery", oldRawQuery),
+		zap.String("fixedUriQuery", newQuery.Encode()))
+
+	uri.RawQuery = newRawQuery
+	fixedSinkURI := uri.String()
+	info.SinkURI = fixedSinkURI
+	info.Config.Sink.Protocol = newProtocol
 }
 
 // HasFastFailError returns true if the error in changefeed is fast-fail

@@ -15,34 +15,38 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/pkg/chdelay"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/orchestrator/util"
+	pkgutil "github.com/pingcap/tiflow/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
-	"go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/clientv3/concurrency"
-	"go.etcd.io/etcd/etcdserver/etcdserverpb"
-	"go.etcd.io/etcd/mvcc/mvccpb"
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/time/rate"
 )
 
 const (
-	// etcdTxnTimeoutDuration represents the timeout duration for committing a
-	// transaction to Etcd
-	etcdTxnTimeoutDuration = 30 * time.Second
 	// When EtcdWorker commits a txn to etcd or ticks its reactor
 	// takes more than etcdWorkerLogsWarnDuration, it will print a log
 	etcdWorkerLogsWarnDuration = 1 * time.Second
 	deletionCounterKey         = "/meta/ticdc-delete-etcd-key-count"
+	changefeedInfoKey          = "/changefeed/info"
 )
 
 // EtcdWorker handles all interactions with Etcd
@@ -107,11 +111,11 @@ func NewEtcdWorker(client *etcd.Client, prefix string, reactor Reactor, initStat
 	}, nil
 }
 
-func (worker *EtcdWorker) initMetrics(captureAddr string) {
+func (worker *EtcdWorker) initMetrics() {
 	metrics := &etcdWorkerMetrics{}
-	metrics.metricEtcdTxnSize = etcdTxnSize.WithLabelValues(captureAddr)
-	metrics.metricEtcdTxnDuration = etcdTxnExecDuration.WithLabelValues(captureAddr)
-	metrics.metricEtcdWorkerTickDuration = etcdWorkerTickDuration.WithLabelValues(captureAddr)
+	metrics.metricEtcdTxnSize = etcdTxnSize
+	metrics.metricEtcdTxnDuration = etcdTxnExecDuration
+	metrics.metricEtcdWorkerTickDuration = etcdWorkerTickDuration
 	worker.metrics = metrics
 }
 
@@ -119,9 +123,9 @@ func (worker *EtcdWorker) initMetrics(captureAddr string) {
 // A tick is generated either on a timer whose interval is timerInterval, or on an Etcd event.
 // If the specified etcd session is Done, this Run function will exit with cerrors.ErrEtcdSessionDone.
 // And the specified etcd session is nil-safety.
-func (worker *EtcdWorker) Run(ctx context.Context, session *concurrency.Session, timerInterval time.Duration, captureAddr string, role string) error {
+func (worker *EtcdWorker) Run(ctx context.Context, session *concurrency.Session, timerInterval time.Duration, role string) error {
 	defer worker.cleanUp()
-	worker.initMetrics(captureAddr)
+	worker.initMetrics()
 
 	err := worker.syncRawState(ctx)
 	if err != nil {
@@ -134,6 +138,14 @@ func (worker *EtcdWorker) Run(ctx context.Context, session *concurrency.Session,
 	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	watchCh := worker.client.Watch(watchCtx, worker.prefix.String(), role, clientv3.WithPrefix(), clientv3.WithRev(worker.revision+1))
+
+	if role == pkgutil.RoleProcessor.String() {
+		failpoint.Inject("ProcessorEtcdDelay", func() {
+			delayer := chdelay.NewChannelDelayer(time.Second*3, watchCh, 1024, 16)
+			defer delayer.Close()
+			watchCh = delayer.Out()
+		})
+	}
 
 	var (
 		pendingPatches [][]DataPatch
@@ -187,8 +199,8 @@ func (worker *EtcdWorker) Run(ctx context.Context, session *concurrency.Session,
 			// Check whether the response is stale.
 			if worker.revision >= response.Header.GetRevision() {
 				log.Info("Stale Etcd event dropped",
-					zap.Int64("event-revision", response.Header.GetRevision()),
-					zap.Int64("previous-revision", worker.revision),
+					zap.Int64("eventRevision", response.Header.GetRevision()),
+					zap.Int64("previousRevision", worker.revision),
 					zap.Any("events", response.Events),
 					zap.String("role", role))
 				continue
@@ -205,10 +217,10 @@ func (worker *EtcdWorker) Run(ctx context.Context, session *concurrency.Session,
 		if len(pendingPatches) > 0 {
 			// Here we have some patches yet to be uploaded to Etcd.
 			pendingPatches, err = worker.applyPatchGroups(ctx, pendingPatches)
+			if isRetryableError(err) {
+				continue
+			}
 			if err != nil {
-				if cerrors.ErrEtcdTryAgain.Equal(errors.Cause(err)) {
-					continue
-				}
 				return errors.Trace(err)
 			}
 		} else {
@@ -255,6 +267,18 @@ func (worker *EtcdWorker) Run(ctx context.Context, session *concurrency.Session,
 			pendingPatches = append(pendingPatches, nextState.GetPatches()...)
 		}
 	}
+}
+
+func isRetryableError(err error) bool {
+	err = errors.Cause(err)
+	if cerrors.ErrEtcdTryAgain.Equal(err) ||
+		context.DeadlineExceeded == err {
+		return true
+	}
+	// When encountering an abnormal connection with etcd, the worker will keep retrying
+	// until the session is done.
+	_, ok := err.(rpctypes.EtcdError)
+	return ok
 }
 
 func (worker *EtcdWorker) handleEvent(_ context.Context, event *clientv3.Event) {
@@ -351,7 +375,7 @@ func (worker *EtcdWorker) commitChangedState(ctx context.Context, changedState m
 	}
 
 	cmps := make([]clientv3.Cmp, 0, len(changedState))
-	ops := make([]clientv3.Op, 0, len(changedState))
+	opsThen := make([]clientv3.Op, 0, len(changedState))
 	hasDelete := false
 
 	for key, value := range changedState {
@@ -373,11 +397,11 @@ func (worker *EtcdWorker) commitChangedState(ctx context.Context, changedState m
 			op = clientv3.OpDelete(key.String())
 			hasDelete = true
 		}
-		ops = append(ops, op)
+		opsThen = append(opsThen, op)
 	}
 
 	if hasDelete {
-		ops = append(ops, clientv3.OpPut(worker.prefix.String()+deletionCounterKey, fmt.Sprint(worker.deleteCounter+1)))
+		opsThen = append(opsThen, clientv3.OpPut(worker.prefix.String()+deletionCounterKey, fmt.Sprint(worker.deleteCounter+1)))
 	}
 	if worker.deleteCounter > 0 {
 		cmps = append(cmps, clientv3.Compare(clientv3.Value(worker.prefix.String()+deletionCounterKey), "=", fmt.Sprint(worker.deleteCounter)))
@@ -389,10 +413,7 @@ func (worker *EtcdWorker) commitChangedState(ctx context.Context, changedState m
 
 	worker.metrics.metricEtcdTxnSize.Observe(float64(size))
 	startTime := time.Now()
-
-	txnCtx, cancel := context.WithTimeout(ctx, etcdTxnTimeoutDuration)
-	resp, err := worker.client.Txn(txnCtx).If(cmps...).Then(ops...).Commit()
-	cancel()
+	resp, err := worker.client.Txn(ctx, cmps, opsThen, etcd.TxnEmptyOpsElse)
 
 	// For testing the situation where we have a progress notification that
 	// has the same revision as the committed Etcd transaction.
@@ -411,7 +432,7 @@ func (worker *EtcdWorker) commitChangedState(ctx context.Context, changedState m
 		return errors.Trace(err)
 	}
 
-	logEtcdOps(ops, resp.Succeeded)
+	logEtcdOps(opsThen, resp.Succeeded)
 	if resp.Succeeded {
 		worker.barrierRev = resp.Header.GetRevision()
 		return nil
@@ -448,7 +469,18 @@ func logEtcdOps(ops []clientv3.Op, committed bool) {
 		if op.IsDelete() {
 			logFn("[etcd worker] delete key", zap.ByteString("key", op.KeyBytes()))
 		} else {
-			logFn("[etcd worker] put key", zap.ByteString("key", op.KeyBytes()), zap.ByteString("value", op.ValueBytes()))
+			etcdKey := util.NewEtcdKeyFromBytes(op.KeyBytes())
+			value := string(op.ValueBytes())
+			// we need to mask the sink-uri in changefeedInfo
+			if strings.Contains(etcdKey.String(), changefeedInfoKey) {
+				changefeedInfo := &model.ChangeFeedInfo{}
+				if err := json.Unmarshal(op.ValueBytes(), changefeedInfo); err != nil {
+					logFn("[etcd worker] unmarshal changefeed info failed", zap.Error(err))
+					continue
+				}
+				value = changefeedInfo.String()
+			}
+			logFn("[etcd worker] put key", zap.ByteString("key", op.KeyBytes()), zap.String("value", value))
 		}
 	}
 	logFn("[etcd worker] ============State Commit=============", zap.Bool("committed", committed))

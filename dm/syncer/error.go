@@ -17,22 +17,25 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/model"
 	tmysql "github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/dbutil"
-	"go.uber.org/zap"
-
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
+	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
 	"github.com/pingcap/tiflow/pkg/errorutil"
+	"go.uber.org/zap"
 )
 
 // ignoreTrackerDDLError is also same with ignoreDDLError, but in order to keep tracker's table structure same as
@@ -61,8 +64,9 @@ func isDropColumnWithIndexError(err error) bool {
 			strings.Contains(mysqlErr.Message, "with tidb_enable_change_multi_schema is disable"))
 }
 
-// handleSpecialDDLError handles special errors for DDL execution.
-func (s *Syncer) handleSpecialDDLError(tctx *tcontext.Context, err error, ddls []string, index int, conn *dbconn.DBConn) error {
+// handleSpecialDDLError handles special errors for DDL execution
+// if createTime equals to -1, skip the handle procedure for waitAsyncDDL.
+func (s *Syncer) handleSpecialDDLError(tctx *tcontext.Context, err error, ddls []string, index int, conn *dbconn.DBConn, createTime int64) error {
 	// We use default parser because ddls are came from *Syncer.genDDLInfo, which is StringSingleQuotes, KeyWordUppercase and NameBackQuotes
 	parser2 := parser.New()
 
@@ -72,7 +76,7 @@ func (s *Syncer) handleSpecialDDLError(tctx *tcontext.Context, err error, ddls [
 	// if we have other methods to judge the DDL dispatched but timeout for executing, we can update this method.
 	// NOTE: we must ensure other PK/UK exists for correctness.
 	// NOTE: when we are refactoring the shard DDL algorithm, we also need to consider supporting non-blocking `ADD INDEX`.
-	invalidConnF := func(tctx *tcontext.Context, err error, ddls []string, index int, conn *dbconn.DBConn) error {
+	ignoreAddIndexTimeout := func(tctx *tcontext.Context, err error, ddls []string, index int, conn *dbconn.DBConn, createTime int64) error {
 		// must ensure only the last statement executed failed with the `invalid connection` error
 		if len(ddls) == 0 || index != len(ddls)-1 || errors.Cause(err) != mysql.ErrInvalidConn {
 			return err // return the original error
@@ -117,7 +121,7 @@ func (s *Syncer) handleSpecialDDLError(tctx *tcontext.Context, err error, ddls [
 	// for DROP COLUMN with its single-column index, try drop index first then drop column
 	// TiDB will support DROP COLUMN with index soon. After its support, executing that SQL will not have an error,
 	// so this function will not trigger and cause some trouble
-	dropColumnF := func(tctx *tcontext.Context, originErr error, ddls []string, index int, conn *dbconn.DBConn) error {
+	dropColumnF := func(tctx *tcontext.Context, originErr error, ddls []string, index int, conn *dbconn.DBConn, createTime int64) error {
 		if !isDropColumnWithIndexError(originErr) {
 			return originErr
 		}
@@ -150,7 +154,7 @@ func (s *Syncer) handleSpecialDDLError(tctx *tcontext.Context, err error, ddls [
 		// check if dependent index is single-column index on this column
 		sql2 := "SELECT INDEX_NAME FROM information_schema.statistics WHERE TABLE_SCHEMA = ? and TABLE_NAME = ? and COLUMN_NAME = ?"
 		var rows *sql.Rows
-		rows, err2 = conn.QuerySQL(tctx, sql2, schema, table, col)
+		rows, err2 = conn.QuerySQL(tctx, s.metricsProxies, sql2, schema, table, col)
 		if err2 != nil {
 			return originErr
 		}
@@ -176,7 +180,7 @@ func (s *Syncer) handleSpecialDDLError(tctx *tcontext.Context, err error, ddls [
 
 		sql2 = "SELECT count(*) FROM information_schema.statistics WHERE TABLE_SCHEMA = ? and TABLE_NAME = ? and INDEX_NAME = ?"
 		for _, idx := range idx2Check {
-			rows, err2 = conn.QuerySQL(tctx, sql2, schema, table, idx)
+			rows, err2 = conn.QuerySQL(tctx, s.metricsProxies, sql2, schema, table, idx)
 			if err2 != nil || !rows.Next() || rows.Scan(&count) != nil || count != 1 {
 				tctx.L().Warn("can't auto drop index", zap.String("index", idx))
 				if rows != nil {
@@ -196,13 +200,13 @@ func (s *Syncer) handleSpecialDDLError(tctx *tcontext.Context, err error, ddls [
 		for i, idx := range idx2Drop {
 			sqls[i] = fmt.Sprintf("ALTER TABLE %s DROP INDEX %s", dbutil.TableName(schema, table), dbutil.ColumnName(idx))
 		}
-		if _, err2 = conn.ExecuteSQL(tctx, sqls); err2 != nil {
+		if _, err2 = conn.ExecuteSQL(tctx, s.metricsProxies, sqls); err2 != nil {
 			tctx.L().Warn("auto drop index failed", log.ShortError(err2))
 			return originErr
 		}
 
 		tctx.L().Info("drop index success, now try to drop column", zap.Strings("index", idx2Drop))
-		if _, err2 = conn.ExecuteSQLWithIgnore(tctx, errorutil.IsIgnorableMySQLDDLError, ddls[index:]); err2 != nil {
+		if _, err2 = conn.ExecuteSQLWithIgnore(tctx, s.metricsProxies, errorutil.IsIgnorableMySQLDDLError, ddls[index:]); err2 != nil {
 			return err2
 		}
 
@@ -211,16 +215,73 @@ func (s *Syncer) handleSpecialDDLError(tctx *tcontext.Context, err error, ddls [
 	}
 	// TODO: add support for downstream alter pk without schema
 
+	// it handles the operations for DDL when encountering `invalid connection` by waiting the asynchronous ddl to synchronize
+	waitAsyncDDL := func(tctx *tcontext.Context, err error, ddls []string, index int, conn *dbconn.DBConn, createTime int64) error {
+		if len(ddls) == 0 || index > len(ddls)-1 || errors.Cause(err) != mysql.ErrInvalidConn || createTime == -1 {
+			return err // return the original error
+		}
+
+		duration := 30
+		failpoint.Inject("ChangeDuration", func() {
+			duration = 1
+		})
+		ticker := time.NewTicker(time.Duration(duration) * time.Second)
+		defer ticker.Stop()
+
+		for {
+			status, err2 := getDDLStatusFromTiDB(tctx, conn, ddls[index], createTime)
+			if err2 != nil {
+				s.tctx.L().Warn("error when getting DDL status from TiDB", zap.Error(err2))
+			}
+			failpoint.Inject("TestStatus", func(val failpoint.Value) {
+				status = val.(string)
+				s.tctx.L().Info("injected test status:", zap.String("TestStatus", status))
+			})
+			switch status {
+			case model.JobStateDone.String(), model.JobStateSynced.String():
+				return nil
+			case model.JobStateCancelled.String(), model.JobStateRollingback.String(), model.JobStateRollbackDone.String(), model.JobStateCancelling.String():
+				return terror.ErrSyncerCancelledDDL.Generate(ddls[index])
+			case model.JobStateRunning.String(), model.JobStateQueueing.String(), model.JobStateNone.String():
+			default:
+				tctx.L().Warn("Unexpected DDL status", zap.String("DDL status", status))
+				return err
+			}
+			select {
+			case <-tctx.Ctx.Done():
+				return err
+			case <-ticker.C:
+			}
+		}
+	}
+
 	retErr := err
-	toHandle := []func(*tcontext.Context, error, []string, int, *dbconn.DBConn) error{
+	toHandle := []func(*tcontext.Context, error, []string, int, *dbconn.DBConn, int64) error{
 		dropColumnF,
-		invalidConnF,
+		ignoreAddIndexTimeout,
+		waitAsyncDDL,
 	}
 	for _, f := range toHandle {
-		retErr = f(tctx, retErr, ddls, index, conn)
+		retErr = f(tctx, retErr, ddls, index, conn, createTime)
 		if retErr == nil {
 			break
 		}
 	}
 	return retErr
+}
+
+func isDuplicateServerIDError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	return strings.Contains(err.Error(), "A slave with the same server_uuid/server_id as this slave has connected to the master")
+}
+
+func isConnectionRefusedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	return strings.Contains(err.Error(), "connect: connection refused")
 }

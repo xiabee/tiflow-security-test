@@ -18,17 +18,18 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/mysql"
 	. "github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/util/mock"
-
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/dm/dm/config"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/pingcap/tiflow/dm/syncer/metrics"
 	"github.com/pingcap/tiflow/pkg/sqlmodel"
 )
 
@@ -67,8 +68,8 @@ func (s *testSyncerSuite) TestCompactJob(c *C) {
 		updateJobMetricsFn: func(bool, string, *job) {},
 	}
 
-	location := binlog.NewLocation("")
-	ec := &eventContext{startLocation: &location, currentLocation: &location, lastLocation: &location}
+	location := binlog.MustZeroLocation(mysql.MySQLFlavor)
+	ec := &eventContext{startLocation: location, endLocation: location, lastLocation: location}
 	p := parser.New()
 	se := mock.NewContext()
 	sourceTable := &cdcmodel.TableName{Schema: "test", Table: "tb1"}
@@ -278,6 +279,7 @@ func (s *testSyncerSuite) TestCompactorSafeMode(c *C) {
 				WorkerCount: 100,
 			},
 		},
+		metricsProxies: metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source"),
 	}
 
 	c.Assert(failpoint.Enable("github.com/pingcap/tiflow/dm/syncer/SkipFlushCompactor", `return()`), IsNil)

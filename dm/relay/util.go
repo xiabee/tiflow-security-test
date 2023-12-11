@@ -15,23 +15,24 @@ package relay
 
 import (
 	"context"
-	"database/sql"
 	"io"
 	"strings"
 
 	"github.com/pingcap/errors"
-
+	"github.com/pingcap/tiflow/dm/pkg/conn"
+	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
+	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 )
 
 // isNewServer checks whether is connecting to a new server.
-func isNewServer(ctx context.Context, prevUUID string, db *sql.DB, flavor string) (bool, error) {
+func isNewServer(ctx context.Context, prevUUID string, db *conn.BaseDB, flavor string) (bool, error) {
 	if len(prevUUID) == 0 {
 		// no sub dir exists before
 		return true, nil
 	}
-	uuid, err := utils.GetServerUUID(ctx, db, flavor)
+	uuid, err := conn.GetServerUUID(tcontext.NewContext(ctx, log.L()), db, flavor)
 	if err != nil {
 		return false, err
 	}
@@ -42,16 +43,16 @@ func isNewServer(ctx context.Context, prevUUID string, db *sql.DB, flavor string
 	return true, nil
 }
 
-// getNextUUID gets (the nextUUID and its suffix) after the current UUID.
-func getNextUUID(currUUID string, uuids []string) (string, string, error) {
-	for i := len(uuids) - 2; i >= 0; i-- {
-		if uuids[i] == currUUID {
-			nextUUID := uuids[i+1]
-			_, suffixInt, err := utils.ParseSuffixForUUID(nextUUID)
+// getNextRelaySubDir gets next relay log subdirectory after the current subdirectory.
+func getNextRelaySubDir(currSubDir string, subDirs []string) (string, string, error) {
+	for i := len(subDirs) - 2; i >= 0; i-- {
+		if subDirs[i] == currSubDir {
+			nextSubDir := subDirs[i+1]
+			_, suffixInt, err := utils.ParseRelaySubDir(nextSubDir)
 			if err != nil {
-				return "", "", terror.Annotatef(err, "UUID %s", nextUUID)
+				return "", "", terror.Annotatef(err, "UUID %s", nextSubDir)
 			}
-			return nextUUID, utils.SuffixIntToStr(suffixInt), nil
+			return nextSubDir, utils.SuffixIntToStr(suffixInt), nil
 		}
 	}
 	return "", "", nil

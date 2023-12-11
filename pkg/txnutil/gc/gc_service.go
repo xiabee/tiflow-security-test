@@ -28,9 +28,11 @@ import (
 
 const (
 	// EnsureGCServiceCreating is a tag of GC service id for changefeed creation
-	EnsureGCServiceCreating = "ticdc-creating-"
+	EnsureGCServiceCreating = "-creating-"
+	// EnsureGCServiceResuming is a tag of GC service id for changefeed resumption
+	EnsureGCServiceResuming = "-resuming-"
 	// EnsureGCServiceInitializing is a tag of GC service id for changefeed initialization
-	EnsureGCServiceInitializing = "ticdc-initializing-"
+	EnsureGCServiceInitializing = "-initializing-"
 )
 
 // EnsureChangefeedStartTsSafety checks if the startTs less than the minimum of
@@ -41,14 +43,17 @@ func EnsureChangefeedStartTsSafety(
 	changefeedID model.ChangeFeedID,
 	TTL int64, startTs uint64,
 ) error {
-	minServiceGCTs, err := setServiceGCSafepoint(
+	minServiceGCTs, err := SetServiceGCSafepoint(
 		ctx, pdCli,
 		gcServiceIDPrefix+changefeedID.Namespace+"_"+changefeedID.ID,
 		TTL, startTs)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if startTs < minServiceGCTs {
+	// startTs should be greater than or equal to minServiceGCTs + 1, otherwise gcManager
+	// would return a ErrSnapshotLostByGC even though the changefeed would appear to be successfully
+	// created/resumed. See issue #6350 for more detail.
+	if startTs > 0 && startTs < minServiceGCTs+1 {
 		return cerrors.ErrStartTsBeforeGC.GenWithStackByArgs(startTs, minServiceGCTs)
 	}
 	return nil
@@ -80,8 +85,8 @@ const (
 	gcServiceMaxRetries   = 9
 )
 
-// setServiceGCSafepoint set a service safepoint to PD.
-func setServiceGCSafepoint(
+// SetServiceGCSafepoint set a service safepoint to PD.
+func SetServiceGCSafepoint(
 	ctx context.Context, pdCli pd.Client, serviceID string, TTL int64, safePoint uint64,
 ) (minServiceGCTs uint64, err error) {
 	err = retry.Do(ctx,

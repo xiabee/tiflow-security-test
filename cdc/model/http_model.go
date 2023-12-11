@@ -15,6 +15,7 @@ package model
 
 import (
 	"encoding/json"
+	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/tiflow/pkg/config"
@@ -59,17 +60,53 @@ func NewHTTPError(err error) HTTPError {
 	}
 }
 
+// Liveness is the liveness status of a capture.
+// Liveness can only be changed from alive to stopping, and no way back.
+type Liveness int32
+
+const (
+	// LivenessCaptureAlive means the capture is alive, and ready to serve.
+	LivenessCaptureAlive Liveness = 0
+	// LivenessCaptureStopping means the capture is in the process of graceful shutdown.
+	LivenessCaptureStopping Liveness = 1
+)
+
+// Store the given liveness. Returns true if it success.
+func (l *Liveness) Store(v Liveness) bool {
+	return atomic.CompareAndSwapInt32(
+		(*int32)(l), int32(LivenessCaptureAlive), int32(v))
+}
+
+// Load the liveness.
+func (l *Liveness) Load() Liveness {
+	return Liveness(atomic.LoadInt32((*int32)(l)))
+}
+
+func (l *Liveness) String() string {
+	switch *l {
+	case LivenessCaptureAlive:
+		return "Alive"
+	case LivenessCaptureStopping:
+		return "Stopping"
+	default:
+		return "unknown"
+	}
+}
+
 // ServerStatus holds some common information of a server
 type ServerStatus struct {
-	Version string `json:"version"`
-	GitHash string `json:"git_hash"`
-	ID      string `json:"id"`
-	Pid     int    `json:"pid"`
-	IsOwner bool   `json:"is_owner"`
+	Version   string   `json:"version"`
+	GitHash   string   `json:"git_hash"`
+	ID        string   `json:"id"`
+	ClusterID string   `json:"cluster_id"`
+	Pid       int      `json:"pid"`
+	IsOwner   bool     `json:"is_owner"`
+	Liveness  Liveness `json:"liveness"`
 }
 
 // ChangefeedCommonInfo holds some common usage information of a changefeed
 type ChangefeedCommonInfo struct {
+	UpstreamID     uint64        `json:"upstream_id"`
 	Namespace      string        `json:"namespace"`
 	ID             string        `json:"id"`
 	FeedState      FeedState     `json:"state"`
@@ -94,6 +131,7 @@ func (c ChangefeedCommonInfo) MarshalJSON() ([]byte, error) {
 
 // ChangefeedDetail holds detail info of a changefeed
 type ChangefeedDetail struct {
+	UpstreamID     uint64              `json:"upstream_id"`
 	Namespace      string              `json:"namespace"`
 	ID             string              `json:"id"`
 	SinkURI        string              `json:"sink_uri"`
@@ -103,12 +141,12 @@ type ChangefeedDetail struct {
 	TargetTs       uint64              `json:"target_ts"`
 	CheckpointTSO  uint64              `json:"checkpoint_tso"`
 	CheckpointTime JSONTime            `json:"checkpoint_time"`
-	Engine         SortEngine          `json:"sort_engine"`
+	Engine         SortEngine          `json:"sort_engine,omitempty"`
 	FeedState      FeedState           `json:"state"`
 	RunningError   *RunningError       `json:"error"`
 	ErrorHis       []int64             `json:"error_history"`
 	CreatorVersion string              `json:"creator_version"`
-	TaskStatus     []CaptureTaskStatus `json:"task_status"`
+	TaskStatus     []CaptureTaskStatus `json:"task_status,omitempty"`
 }
 
 // MarshalJSON use to marshal ChangefeedDetail
@@ -152,16 +190,8 @@ type ProcessorCommonInfo struct {
 
 // ProcessorDetail holds the detail info of a processor
 type ProcessorDetail struct {
-	// The maximum event CommitTs that has been synchronized.
-	CheckPointTs uint64 `json:"checkpoint_ts"`
-	// The event that satisfies CommitTs <= ResolvedTs can be synchronized.
-	ResolvedTs uint64 `json:"resolved_ts"`
-	// all table ids that this processor are replicating
+	// All table ids that this processor are replicating.
 	Tables []int64 `json:"table_ids"`
-	// The count of events that have been replicated.
-	Count uint64 `json:"count"`
-	// Error code when error happens
-	Error *RunningError `json:"error"`
 }
 
 // CaptureTaskStatus holds TaskStatus of a capture
@@ -177,4 +207,21 @@ type Capture struct {
 	ID            string `json:"id"`
 	IsOwner       bool   `json:"is_owner"`
 	AdvertiseAddr string `json:"address"`
+	ClusterID     string `json:"cluster_id"`
+}
+
+// DrainCaptureRequest is request for manual `DrainCapture`
+type DrainCaptureRequest struct {
+	CaptureID string `json:"capture_id"`
+}
+
+// DrainCaptureResp is response for manual `DrainCapture`
+type DrainCaptureResp struct {
+	CurrentTableCount int `json:"current_table_count"`
+}
+
+// MoveTableReq is the request for `MoveTable`
+type MoveTableReq struct {
+	CaptureID string `json:"capture_id"`
+	TableID   int64  `json:"table_id"`
 }

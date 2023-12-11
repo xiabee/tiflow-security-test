@@ -22,18 +22,16 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/docker/go-units"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	brstorage "github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/dumpling/export"
-	"github.com/spf13/pflag"
-
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/storage"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/spf13/pflag"
 )
 
 // DefaultTableFilter is the default table filter for dumpling.
@@ -160,7 +158,7 @@ func parseMetaDataByReader(filename, flavor string, rd io.Reader) (*binlog.Locat
 	if err != nil {
 		return nil, nil, invalidErr
 	}
-	loc := binlog.InitLocation(pos, gset)
+	loc := binlog.NewLocation(pos, gset)
 	locPtr = &loc
 
 	if useLocation2 {
@@ -171,7 +169,7 @@ func parseMetaDataByReader(filename, flavor string, rd io.Reader) (*binlog.Locat
 		if err != nil {
 			return nil, nil, invalidErr
 		}
-		loc2 := binlog.InitLocation(pos2, gset2)
+		loc2 := binlog.NewLocation(pos2, gset2)
 		locPtr2 = &loc2
 	}
 
@@ -207,21 +205,6 @@ func readFollowingGTIDs(br *bufio.Reader, flavor string) (string, error) {
 
 		following.WriteString(line)
 	}
-}
-
-// ParseFileSize parses the size in MiB from input.
-func ParseFileSize(fileSizeStr string, defaultSize uint64) (uint64, error) {
-	var fileSize uint64
-	if len(fileSizeStr) == 0 {
-		fileSize = defaultSize
-	} else if fileSizeMB, err := strconv.ParseUint(fileSizeStr, 10, 64); err == nil {
-		fileSize = fileSizeMB * units.MiB
-	} else if size, err := units.RAMInBytes(fileSizeStr); err == nil {
-		fileSize = uint64(size)
-	} else {
-		return 0, err
-	}
-	return fileSize, nil
 }
 
 // ParseArgLikeBash parses list arguments like bash, which helps us to run
@@ -293,7 +276,7 @@ func ParseExtraArgs(logger *log.Logger, dumpCfg *export.Config, args []string) e
 	}
 
 	if fileSizeStr != "" {
-		dumpCfg.FileSize, err = ParseFileSize(fileSizeStr, export.UnspecifiedSize)
+		dumpCfg.FileSize, err = utils.ParseFileSize(fileSizeStr, export.UnspecifiedSize)
 		if err != nil {
 			return err
 		}

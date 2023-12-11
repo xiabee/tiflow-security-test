@@ -23,14 +23,13 @@ import (
 
 	. "github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
-	"github.com/tikv/pd/pkg/tempurl"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/server/v3/embed"
-
 	"github.com/pingcap/tiflow/dm/pkg/etcdutil"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/tikv/pd/pkg/utils/tempurl"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/server/v3/embed"
 )
 
 var _ = SerialSuites(&testElectionSuite{})
@@ -210,7 +209,7 @@ func testElection2After1(t *testElectionSuite, c *C, normalExit bool) {
 	defer cancel5()
 	_, err = NewElection(ctx5, cli, sessionTTL, key, ID3, addr3, t.notifyBlockTime)
 	c.Assert(terror.ErrElectionCampaignFail.Equal(err), IsTrue)
-	c.Assert(err, ErrorMatches, ".*, Message: fail to campaign leader: create the initial session, RawCause: context canceled.*")
+	c.Assert(err, ErrorMatches, ".*Message: fail to campaign leader: create the initial session, RawCause: context canceled.*")
 	cancel0()
 }
 

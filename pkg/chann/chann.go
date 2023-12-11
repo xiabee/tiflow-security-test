@@ -112,9 +112,9 @@ type Chann[T any] struct {
 // By default, or without specification, the function returns an unbounded
 // channel which has unlimited capacity.
 //
-//		ch := chann.New[float64]()
-//		// or
-//	 ch := chann.New[float64](chann.Cap(-1))
+//	ch := chann.New[float64]()
+//	or
+//	ch := chann.New[float64](chann.Cap(-1))
 //
 // If the chann.Cap specified a non-negative integer, the returned channel
 // is either unbuffered (0) or buffered (positive).
@@ -122,6 +122,7 @@ type Chann[T any] struct {
 // Note that although the input arguments are  specified as variadic parameter
 // list, however, the function panics if there is more than one option is
 // provided.
+// DEPRECATED: use NewAutoDrainChann instead.
 func New[T any](opts ...Opt) *Chann[T] {
 	cfg := &config{
 		cap: -1, len: 0,
@@ -160,6 +161,7 @@ func (ch *Chann[T]) In() chan<- T { return ch.in }
 func (ch *Chann[T]) Out() <-chan T { return ch.out }
 
 // Close closes the channel gracefully.
+// DEPRECATED: use CloseAndDrain instead.
 func (ch *Chann[T]) Close() {
 	switch ch.cfg.typ {
 	case buffered, unbuffered:
@@ -223,11 +225,9 @@ func (ch *Chann[T]) unboundedTerminate() {
 		ch.q = append(ch.q, e)
 	}
 	for len(ch.q) > 0 {
-		select {
 		// NOTICE: If no receiver is receiving the element, it will be blocked.
 		// So the consumer have to deal with all the elements in the queue.
-		case ch.out <- ch.q[0]:
-		}
+		ch.out <- ch.q[0]
 		ch.q[0] = zeroT // de-reference earlier to help GC
 		ch.q = ch.q[1:]
 	}

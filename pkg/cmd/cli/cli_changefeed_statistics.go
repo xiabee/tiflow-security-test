@@ -18,38 +18,27 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pingcap/errors"
-	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/model"
-	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
+	v2 "github.com/pingcap/tiflow/cdc/api/v2"
+	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
 	cmdcontext "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
-	"github.com/pingcap/tiflow/pkg/etcd"
-	"github.com/pingcap/tiflow/pkg/version"
 	"github.com/spf13/cobra"
 	"github.com/tikv/client-go/v2/oracle"
-	pd "github.com/tikv/pd/client"
-	"go.uber.org/zap"
 )
 
 // status specifies the current status of the changefeed.
 type status struct {
-	OPS            uint64 `json:"ops"`
-	Count          uint64 `json:"count"`
 	SinkGap        string `json:"sink_gap"`
 	ReplicationGap string `json:"replication_gap"`
 }
 
 // statisticsChangefeedOptions defines flags for the `cli changefeed statistics` command.
 type statisticsChangefeedOptions struct {
-	etcdClient *etcd.CDCEtcdClient
-	pdClient   pd.Client
-	apiClient  apiv1client.APIV1Interface
+	apiClient apiv2client.APIV2Interface
 
-	changefeedID     string
-	interval         uint
-	runWithAPIClient bool
+	changefeedID string
+	interval     uint
 }
 
 // newStatisticsChangefeedOptions creates new options for the `cli changefeed statistics` command.
@@ -67,122 +56,35 @@ func (o *statisticsChangefeedOptions) addFlags(cmd *cobra.Command) {
 
 // complete adapts from the command line args to the data and client required.
 func (o *statisticsChangefeedOptions) complete(f factory.Factory) error {
-	etcdClient, err := f.EtcdClient()
+	var err error
+	o.apiClient, err = f.APIV2Client()
 	if err != nil {
 		return err
 	}
-
-	o.etcdClient = etcdClient
-	ctx := cmdcontext.GetDefaultContext()
-
-	owner, err := getOwnerCapture(ctx, o.etcdClient)
-	if err != nil {
-		return err
-	}
-
-	o.apiClient, err = apiv1client.NewAPIClient(owner.AdvertiseAddr, f.GetCredential())
-	if err != nil {
-		return err
-	}
-
-	pdClient, err := f.PdClient()
-	if err != nil {
-		return err
-	}
-	o.pdClient = pdClient
-
-	_, captureInfos, err := o.etcdClient.GetCaptures(ctx)
-	if err != nil {
-		return err
-	}
-	cdcClusterVer, err := version.GetTiCDCClusterVersion(model.ListVersionsFromCaptureInfos(captureInfos))
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	o.runWithAPIClient = true
-	if !cdcClusterVer.ShouldRunCliWithAPIClientByDefault() {
-		o.runWithAPIClient = false
-		log.Warn("The TiCDC cluster is built from an older version, run cli with etcd client by default.",
-			zap.String("version", cdcClusterVer.String()))
-	}
-
 	return nil
-}
-
-// run cli command with etcd client
-func (o *statisticsChangefeedOptions) runCliWithEtcdClient(ctx context.Context, cmd *cobra.Command, lastCount *uint64, lastTime *time.Time) error {
-	now := time.Now()
-
-	changefeedStatus, _, err := o.etcdClient.GetChangeFeedStatus(ctx,
-		model.DefaultChangeFeedID(o.changefeedID))
-	if err != nil {
-		return err
-	}
-
-	taskPositions, err := o.etcdClient.GetAllTaskPositions(ctx, o.changefeedID)
-	if err != nil {
-		return err
-	}
-
-	var count uint64
-	for _, pinfo := range taskPositions {
-		count += pinfo.Count
-	}
-
-	ts, _, err := o.pdClient.GetTS(ctx)
-	if err != nil {
-		return err
-	}
-
-	sinkGap := oracle.ExtractPhysical(changefeedStatus.ResolvedTs) - oracle.ExtractPhysical(changefeedStatus.CheckpointTs)
-	replicationGap := ts - oracle.ExtractPhysical(changefeedStatus.CheckpointTs)
-
-	statistics := status{
-		OPS:            (count - (*lastCount)) / uint64(now.Unix()-lastTime.Unix()),
-		SinkGap:        fmt.Sprintf("%dms", sinkGap),
-		ReplicationGap: fmt.Sprintf("%dms", replicationGap),
-		Count:          count,
-	}
-
-	*lastCount = count
-	*lastTime = now
-	return util.JSONPrint(cmd, statistics)
 }
 
 // run cli command with api client
 func (o *statisticsChangefeedOptions) runCliWithAPIClient(ctx context.Context, cmd *cobra.Command, lastCount *uint64, lastTime *time.Time) error {
 	now := time.Now()
 	var count uint64
-	captures, err := o.apiClient.Captures().List(ctx)
-	if err != nil {
-		return err
-	}
 
-	for _, capture := range *captures {
-		processor, err := o.apiClient.Processors().Get(ctx, o.changefeedID, capture.ID)
-		if err != nil {
-			return err
-		}
-		count += processor.Count
-	}
-
-	ts, _, err := o.pdClient.GetTS(ctx)
-	if err != nil {
-		return err
-	}
 	changefeed, err := o.apiClient.Changefeeds().Get(ctx, o.changefeedID)
 	if err != nil {
 		return err
 	}
+	ts, err := o.apiClient.Tso().Query(ctx,
+		&v2.UpstreamConfig{ID: changefeed.UpstreamID})
+	if err != nil {
+		return err
+	}
 
-	sinkGap := oracle.ExtractPhysical(changefeed.ResolvedTs) - oracle.ExtractPhysical(changefeed.CheckpointTSO)
-	replicationGap := ts - oracle.ExtractPhysical(changefeed.CheckpointTSO)
+	sinkGap := oracle.ExtractPhysical(changefeed.ResolvedTs) -
+		oracle.ExtractPhysical(changefeed.CheckpointTs)
+	replicationGap := ts.Timestamp - oracle.ExtractPhysical(changefeed.CheckpointTs)
 	statistics := status{
-		OPS:            (count - (*lastCount)) / uint64(now.Unix()-lastTime.Unix()),
 		SinkGap:        fmt.Sprintf("%dms", sinkGap),
 		ReplicationGap: fmt.Sprintf("%dms", replicationGap),
-		Count:          count,
 	}
 
 	*lastCount = count
@@ -197,7 +99,7 @@ func (o *statisticsChangefeedOptions) run(cmd *cobra.Command) error {
 	tick := time.NewTicker(time.Duration(o.interval) * time.Second)
 	var lastTime time.Time
 	var lastCount uint64
-
+	_ = o.runCliWithAPIClient(ctx, cmd, &lastCount, &lastTime)
 	for {
 		select {
 		case <-ctx.Done():
@@ -205,11 +107,7 @@ func (o *statisticsChangefeedOptions) run(cmd *cobra.Command) error {
 				return err
 			}
 		case <-tick.C:
-			if o.runWithAPIClient {
-				_ = o.runCliWithAPIClient(ctx, cmd, &lastCount, &lastTime)
-			} else {
-				_ = o.runCliWithEtcdClient(ctx, cmd, &lastCount, &lastTime)
-			}
+			_ = o.runCliWithAPIClient(ctx, cmd, &lastCount, &lastTime)
 		}
 	}
 }
@@ -222,13 +120,9 @@ func newCmdStatisticsChangefeed(f factory.Factory) *cobra.Command {
 		Use:   "statistics",
 		Short: "Periodically check and output the status of a replication task (changefeed)",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			err := o.complete(f)
-			if err != nil {
-				return err
-			}
-
-			return o.run(cmd)
+		Run: func(cmd *cobra.Command, args []string) {
+			util.CheckErr(o.complete(f))
+			util.CheckErr(o.run(cmd))
 		},
 	}
 

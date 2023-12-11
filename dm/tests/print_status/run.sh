@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -eu
+set -eux
 
 cur=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source $cur/../_utils/test_prepare
@@ -14,7 +14,7 @@ function run() {
 	# TableMapEvent, QueryEvent, GTIDEvent, and a specific Event in each group.
 	# so we slow down 460 * 4 ms. Besides the log may be not flushed to disk asap,
 	# we need to add some retry mechanism
-	inject_points=("github.com/pingcap/tiflow/dm/dm/worker/PrintStatusCheckSeconds=return(1)"
+	inject_points=("github.com/pingcap/tiflow/dm/worker/PrintStatusCheckSeconds=return(1)"
 		"github.com/pingcap/tiflow/dm/loader/LoadDataSlowDown=sleep(100)"
 		"github.com/pingcap/tiflow/dm/syncer/ProcessBinlogSlowDown=sleep(4)")
 	export GO_FAILPOINTS="$(join_string \; ${inject_points[@]})"
@@ -41,7 +41,7 @@ function run() {
 
 	run_sql_file $cur/data/db.increment.sql $MYSQL_HOST1 $MYSQL_PORT1 $MYSQL_PASSWORD1
 	check_sync_diff $WORK_DIR $cur/conf/diff_config.toml
-	check_log_contains $WORK_DIR/worker1/log/dm-worker.log 'enable safe-mode because of task initialization.*"duration in seconds"=60'
+	check_log_contains $WORK_DIR/worker1/log/dm-worker.log 'enable safe-mode because of task initialization.*duration=1m0s'
 }
 
 function check_print_status() {
@@ -62,17 +62,29 @@ function check_print_status() {
 	fi
 
 	echo "checking print status"
+	# check dump unit print status
+	dump_status_file=$WORK_DIR/worker1/log/dump_status.log
+	grep -o "progress status of dumpling" $WORK_DIR/worker1/log/dm-worker.log >$dump_status_file
+	dump_status_count=$(wc -l $dump_status_file | awk '{print $1}')
+	[ $dump_status_count -ge 1 ]
+	# bps must not be zero
+	grep -o '\[bps=0' $WORK_DIR/worker1/log/dm-worker.log >$dump_status_file || true
+	dump_status_count=$(wc -l $dump_status_file | awk '{print $1}')
+	[ $dump_status_count -eq 0 ]
+
 	# check load unit print status
 	status_file=$WORK_DIR/worker1/log/loader_status.log
-	grep -oP "\[unit=lightning-load\] \[IsCanceled=false\] \[finished_bytes=59637\] \[total_bytes=59637\] \[progress=.*\]" $WORK_DIR/worker1/log/dm-worker.log >$status_file
+	grep -oP "\[unit=lightning-load\] \[IsCanceled=false\] \[finished_bytes=59674\] \[total_bytes=59674\] \[progress=.*\]" $WORK_DIR/worker1/log/dm-worker.log >$status_file
 	status_count=$(wc -l $status_file | awk '{print $1}')
 	[ $status_count -eq 1 ]
+	# must have a non-zero speed in log
+	grep 'current speed (bytes / seconds)' $WORK_DIR/worker1/log/dm-worker.log | grep -vq '"current speed (bytes / seconds)"=0'
 	echo "check load unit print status success"
 
 	# check sync unit print status
 	status_file2=$WORK_DIR/worker1/log/syncer_status.log
 	#grep -oP "syncer.*\Ktotal events = [0-9]+, total tps = [0-9]+, recent tps = [0-9]+, master-binlog = .*" $WORK_DIR/worker1/log/dm-worker.log > $status_file2
-	grep -oP "\[total_events=[0-9]+\] \[total_tps=[0-9]+\] \[tps=[0-9]+\] \[master_position=.*\]" $WORK_DIR/worker1/log/dm-worker.log >$status_file2
+	grep -oP "\[total_rows=[0-9]+\] \[total_rps=[0-9]+\] \[rps=[0-9]+\] \[master_position=.*\]" $WORK_DIR/worker1/log/dm-worker.log >$status_file2
 	status_count2=$(wc -l $status_file2 | awk '{print $1}')
 	[ $status_count2 -ge 1 ]
 	echo "check sync unit print status success"

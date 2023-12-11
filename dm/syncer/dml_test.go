@@ -17,13 +17,6 @@ import (
 	"math"
 	"testing"
 
-	. "github.com/pingcap/check"
-	"github.com/stretchr/testify/require"
-
-	cdcmodel "github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/dm/pkg/binlog"
-	"github.com/pingcap/tiflow/pkg/sqlmodel"
-
 	tiddl "github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
@@ -32,17 +25,23 @@ import (
 	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/util/mock"
+	cdcmodel "github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/dm/pkg/binlog"
+	"github.com/pingcap/tiflow/pkg/sqlmodel"
+	"github.com/stretchr/testify/require"
 )
 
 var (
 	location = binlog.Location{
 		Position: binlog.MinPosition,
 	}
-	ec             = &eventContext{startLocation: &location, currentLocation: &location, lastLocation: &location}
-	ecWithSafeMode = &eventContext{startLocation: &location, currentLocation: &location, lastLocation: &location, safeMode: true}
+	ec             = &eventContext{startLocation: location, endLocation: location, lastLocation: location}
+	ecWithSafeMode = &eventContext{startLocation: location, endLocation: location, lastLocation: location, safeMode: true}
 )
 
-func (s *testSyncerSuite) TestCastUnsigned(c *C) {
+func TestCastUnsigned(t *testing.T) {
+	t.Parallel()
+
 	// ref: https://dev.mysql.com/doc/refman/5.7/en/integer-types.html
 	cases := []struct {
 		data     interface{}
@@ -67,7 +66,7 @@ func (s *testSyncerSuite) TestCastUnsigned(c *C) {
 			ft.AddFlag(mysql.UnsignedFlag)
 		}
 		obtained := castUnsigned(cs.data, ft)
-		c.Assert(obtained, Equals, cs.expected)
+		require.Equal(t, cs.expected, obtained)
 	}
 }
 
@@ -80,6 +79,8 @@ func createTableInfo(p *parser.Parser, se sessionctx.Context, tableID int64, sql
 }
 
 func TestGenDMLWithSameOp(t *testing.T) {
+	t.Parallel()
+
 	targetTable1 := &cdcmodel.TableName{Schema: "db1", Table: "tb1"}
 	targetTable2 := &cdcmodel.TableName{Schema: "db2", Table: "tb2"}
 	sourceTable11 := &cdcmodel.TableName{Schema: "dba", Table: "tba"}
@@ -280,9 +281,8 @@ func TestGenDMLWithSameOp(t *testing.T) {
 		"INSERT INTO `db2`.`tb2` (`id`,`col3`,`name`) VALUES (?,?,?) ON DUPLICATE KEY UPDATE `id`=VALUES(`id`),`col3`=VALUES(`col3`),`name`=VALUES(`name`)",
 		"INSERT INTO `db2`.`tb2` (`id`,`col2`,`name`) VALUES (?,?,?),(?,?,?) ON DUPLICATE KEY UPDATE `id`=VALUES(`id`),`col2`=VALUES(`col2`),`name`=VALUES(`name`)",
 		"INSERT INTO `db2`.`tb2` (`id`,`col3`,`name`) VALUES (?,?,?) ON DUPLICATE KEY UPDATE `id`=VALUES(`id`),`col3`=VALUES(`col3`),`name`=VALUES(`name`)",
-		"UPDATE `db2`.`tb2` SET `id` = ?, `col2` = ?, `name` = ? WHERE `id` = ? LIMIT 1",
-		"UPDATE `db2`.`tb2` SET `id` = ?, `col2` = ?, `name` = ? WHERE `id` = ? LIMIT 1",
-		"UPDATE `db2`.`tb2` SET `id` = ?, `col3` = ?, `name` = ? WHERE `id` = ? LIMIT 1",
+		"UPDATE `db2`.`tb2` SET `id`=CASE WHEN `id`=? THEN ? WHEN `id`=? THEN ? END, `col2`=CASE WHEN `id`=? THEN ? WHEN `id`=? THEN ? END, `name`=CASE WHEN `id`=? THEN ? WHEN `id`=? THEN ? END WHERE `id` IN (?,?)",
+		"UPDATE `db2`.`tb2` SET `id`=CASE WHEN `id`=? THEN ? END, `col3`=CASE WHEN `id`=? THEN ? END, `name`=CASE WHEN `id`=? THEN ? END WHERE `id` IN (?)",
 		"DELETE FROM `db2`.`tb2` WHERE (`id`) IN ((?),(?),(?))",
 
 		// table1
@@ -320,9 +320,8 @@ func TestGenDMLWithSameOp(t *testing.T) {
 		{3, 3, "cc"},
 		{1, 4, "aa", 2, 5, "bb"},
 		{3, 6, "cc"},
-		{4, 4, "aa", 1},
-		{5, 5, "bb", 2},
-		{6, 6, "cc", 3},
+		{1, 4, 2, 5, 1, 4, 2, 5, 1, "aa", 2, "bb", 1, 2},
+		{3, 6, 3, 6, 3, "cc", 3},
 		{4, 5, 6},
 
 		// table1
@@ -334,17 +333,18 @@ func TestGenDMLWithSameOp(t *testing.T) {
 	require.Equal(t, expectArgs, args)
 }
 
-func (s *testSyncerSuite) TestGBKExtractValueFromData(c *C) {
+func TestGBKExtractValueFromData(t *testing.T) {
+	t.Parallel()
+
 	table := `CREATE TABLE t (c INT PRIMARY KEY, d VARCHAR(20) CHARSET GBK);`
 	se := mock.NewContext()
 	p := parser.New()
-	stmt, _, err := p.Parse(table, "", "")
-	c.Assert(err, IsNil)
-	ti, err := tiddl.MockTableInfo(se, stmt[0].(*ast.CreateTableStmt), 6716)
-	c.Assert(err, IsNil)
+	ti, err := createTableInfo(p, se, 0, table)
+	require.NoError(t, err)
 
 	row := []interface{}{1, "\xc4\xe3\xba\xc3"}
 	expect := []interface{}{1, []byte("\xc4\xe3\xba\xc3")}
-	got := extractValueFromData(row, ti.Columns, ti)
-	c.Assert(got, DeepEquals, expect)
+	got, err := adjustValueFromBinlogData(row, ti)
+	require.NoError(t, err)
+	require.Equal(t, expect, got)
 }

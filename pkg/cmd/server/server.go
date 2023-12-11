@@ -23,9 +23,8 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	ticonfig "github.com/pingcap/tidb/config"
-	"github.com/pingcap/tiflow/cdc"
 	"github.com/pingcap/tiflow/cdc/contextutil"
-	"github.com/pingcap/tiflow/cdc/sorter/unified"
+	"github.com/pingcap/tiflow/cdc/server"
 	cmdcontext "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -62,6 +61,7 @@ func newOptions() *options {
 // addFlags receives a *cobra.Command reference and binds
 // flags related to template printing to it.
 func (o *options) addFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&o.serverConfig.ClusterID, "cluster-id", "default", "Set cdc cluster id")
 	cmd.Flags().StringVar(&o.serverConfig.Addr, "addr", o.serverConfig.Addr, "Set the listening address")
 	cmd.Flags().StringVar(&o.serverConfig.AdvertiseAddr, "advertise-addr", o.serverConfig.AdvertiseAddr, "Set the advertise listening address for client communication")
 
@@ -79,23 +79,7 @@ func (o *options) addFlags(cmd *cobra.Command) {
 	cmd.Flags().DurationVar((*time.Duration)(&o.serverConfig.ProcessorFlushInterval), "processor-flush-interval", time.Duration(o.serverConfig.ProcessorFlushInterval), "processor flushes task status interval")
 	_ = cmd.Flags().MarkHidden("processor-flush-interval")
 
-	// sorter related parameters, hidden them since cannot be configured by TiUP easily.
-	cmd.Flags().IntVar(&o.serverConfig.Sorter.NumWorkerPoolGoroutine, "sorter-num-workerpool-goroutine", o.serverConfig.Sorter.NumWorkerPoolGoroutine, "sorter workerpool size")
-	_ = cmd.Flags().MarkHidden("sorter-num-workerpool-goroutine")
-
-	cmd.Flags().IntVar(&o.serverConfig.Sorter.NumConcurrentWorker, "sorter-num-concurrent-worker", o.serverConfig.Sorter.NumConcurrentWorker, "sorter concurrency level")
-	_ = cmd.Flags().MarkHidden("sorter-num-concurrent-worker")
-
-	cmd.Flags().Uint64Var(&o.serverConfig.Sorter.ChunkSizeLimit, "sorter-chunk-size-limit", o.serverConfig.Sorter.ChunkSizeLimit, "size of heaps for sorting")
-	_ = cmd.Flags().MarkHidden("sorter-chunk-size-limit")
-
 	// 80 is safe on most systems.
-	cmd.Flags().IntVar(&o.serverConfig.Sorter.MaxMemoryPercentage, "sorter-max-memory-percentage", o.serverConfig.Sorter.MaxMemoryPercentage, "system memory usage threshold for forcing in-disk sort")
-	_ = cmd.Flags().MarkHidden("sorter-max-memory-percentage")
-	// We use 8GB as a safe default before we support local configuration file.
-	cmd.Flags().Uint64Var(&o.serverConfig.Sorter.MaxMemoryConsumption, "sorter-max-memory-consumption", o.serverConfig.Sorter.MaxMemoryConsumption, "maximum memory consumption of in-memory sort")
-	_ = cmd.Flags().MarkHidden("sorter-max-memory-consumption")
-
 	// sort-dir id deprecate, hidden it.
 	cmd.Flags().StringVar(&o.serverConfig.Sorter.SortDir, "sort-dir", o.serverConfig.Sorter.SortDir, "sorter's temporary file directory")
 	_ = cmd.Flags().MarkHidden("sort-dir")
@@ -130,7 +114,7 @@ func (o *options) run(cmd *cobra.Command) error {
 	ctx := contextutil.PutTimezoneInCtx(cmdcontext.GetDefaultContext(), tz)
 	ctx = contextutil.PutCaptureAddrInCtx(ctx, o.serverConfig.AdvertiseAddr)
 
-	version.LogVersionInfo()
+	version.LogVersionInfo("Change Data Capture (CDC)")
 	if ticdcutil.FailpointBuild {
 		for _, path := range failpoint.List() {
 			status, err := failpoint.Status(path)
@@ -142,20 +126,24 @@ func (o *options) run(cmd *cobra.Command) error {
 	}
 
 	util.LogHTTPProxies()
-	cdc.RecordGoRuntimeSettings()
-	server, err := cdc.NewServer(strings.Split(o.serverPdAddr, ","))
+	server.RecordGoRuntimeSettings()
+	server, err := server.New(strings.Split(o.serverPdAddr, ","))
 	if err != nil {
-		return errors.Annotate(err, "new server")
+		log.Error("create cdc server failed", zap.Error(err))
+		return errors.Trace(err)
 	}
+	// Drain the server before shutdown.
+	shutdownNotify := func() <-chan struct{} { return server.Drain() }
+	util.InitSignalHandling(shutdownNotify, cancel)
+
+	// Run TiCDC server.
 	err = server.Run(ctx)
 	if err != nil && errors.Cause(err) != context.Canceled {
-		log.Error("run server", zap.String("error", errors.ErrorStack(err)))
-		return errors.Annotate(err, "run server")
+		log.Warn("cdc server exits with error", zap.Error(err))
+	} else {
+		log.Info("cdc server exits normally")
 	}
 	server.Close()
-	unified.CleanUp()
-	log.Info("cdc server exits successfully")
-
 	return nil
 }
 
@@ -201,16 +189,6 @@ func (o *options) complete(cmd *cobra.Command) error {
 			cfg.OwnerFlushInterval = o.serverConfig.OwnerFlushInterval
 		case "processor-flush-interval":
 			cfg.ProcessorFlushInterval = o.serverConfig.ProcessorFlushInterval
-		case "sorter-num-workerpool-goroutine":
-			cfg.Sorter.NumWorkerPoolGoroutine = o.serverConfig.Sorter.NumWorkerPoolGoroutine
-		case "sorter-num-concurrent-worker":
-			cfg.Sorter.NumConcurrentWorker = o.serverConfig.Sorter.NumConcurrentWorker
-		case "sorter-chunk-size-limit":
-			cfg.Sorter.ChunkSizeLimit = o.serverConfig.Sorter.ChunkSizeLimit
-		case "sorter-max-memory-percentage":
-			cfg.Sorter.MaxMemoryPercentage = o.serverConfig.Sorter.MaxMemoryPercentage
-		case "sorter-max-memory-consumption":
-			cfg.Sorter.MaxMemoryConsumption = o.serverConfig.Sorter.MaxMemoryConsumption
 		case "ca":
 			cfg.Security.CAPath = o.serverConfig.Security.CAPath
 		case "cert":
@@ -227,6 +205,8 @@ func (o *options) complete(cmd *cobra.Command) error {
 					"sort-dir will be set to `{data-dir}/tmp/sorter`. The sort-dir here will be no-op\n"))
 			}
 			cfg.Sorter.SortDir = config.DefaultSortDir
+		case "cluster-id":
+			cfg.ClusterID = o.serverConfig.ClusterID
 		case "pd", "config":
 			// do nothing
 		default:
@@ -257,7 +237,7 @@ func (o *options) validate() error {
 		// NOTICE: The configuration used here is the one that has been completed,
 		// as it may be configured by the configuration file.
 		if err := util.VerifyPdEndpoint(ep, o.serverConfig.Security.IsTLSEnabled()); err != nil {
-			return cerror.ErrInvalidServerOption.Wrap(err).GenWithStackByCause()
+			return cerror.WrapError(cerror.ErrInvalidServerOption, err)
 		}
 	}
 	return nil

@@ -15,8 +15,6 @@ package etcd
 
 import (
 	"context"
-	"io/ioutil"
-	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -82,7 +80,7 @@ func TestRetry(t *testing.T) {
 	retrycli := Wrap(cli, nil)
 	get, err := retrycli.Get(context.TODO(), "")
 
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.NotNil(t, get)
 
 	_, err = retrycli.Put(context.TODO(), "", "")
@@ -95,7 +93,7 @@ func TestRetry(t *testing.T) {
 	// Test Txn case
 	// case 0: normal
 	rsp, err := retrycli.Txn(ctx, nil, nil, nil)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.False(t, rsp.Succeeded)
 
 	// case 1: errors.ErrReachMaxTry
@@ -119,12 +117,9 @@ func TestRetry(t *testing.T) {
 
 func TestDelegateLease(t *testing.T) {
 	ctx := context.Background()
-	dir, err := ioutil.TempDir("", "delegate-lease-test")
-	require.Nil(t, err)
-	url, server, err := SetupEmbedEtcd(dir)
+	url, server, err := SetupEmbedEtcd(t.TempDir())
 	defer func() {
 		server.Close()
-		os.RemoveAll(dir)
 	}()
 	require.Nil(t, err)
 	cli, err := clientv3.New(clientv3.Config{

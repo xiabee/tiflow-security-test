@@ -15,6 +15,7 @@ package optimism
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -25,15 +26,13 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/util/dbutil"
 	"github.com/pingcap/tidb/util/schemacmp"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
-	"golang.org/x/net/context"
-
-	"github.com/pingcap/tiflow/dm/dm/master/metrics"
+	"github.com/pingcap/tiflow/dm/master/metrics"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/pingcap/tiflow/dm/pkg/cputil"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
 )
 
 // DropColumnStage represents whether drop column done for a sharding table.
@@ -136,7 +135,7 @@ func (l *Lock) FetchTableInfos(task, source, schema, table string) (*model.Table
 		return nil, terror.ErrMasterOptimisticDownstreamMetaNotFound.Generate(task)
 	}
 
-	db, err := conn.DefaultDBProvider.Apply(l.downstreamMeta.dbConfig)
+	db, err := conn.GetDownstreamDB(l.downstreamMeta.dbConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -849,7 +848,7 @@ func (l *Lock) trySyncForOneDDL(source, schema, table string, prevTable, postTab
 
 	// Normal DDL
 	if tableErr == nil {
-		log.L().Debug("receive a normal DDL", zap.String("source", source), zap.String("schema", schema), zap.String("table", table), zap.Stringer("prevTable", prevTable), zap.Stringer("postTable", postTable))
+		log.L().Info("receive a normal DDL", zap.String("source", source), zap.String("schema", schema), zap.String("table", table), zap.Stringer("prevTable", prevTable), zap.Stringer("postTable", postTable))
 		oldJoined, oldErr := l.joinNormalTables()
 
 		l.tables[source][schema][table] = postTable
@@ -884,7 +883,8 @@ func (l *Lock) trySyncForOneDDL(source, schema, table string, prevTable, postTab
 			// oldJoined != newJoined
 			// postTable == oldJoined (CREATE TABLE)
 			// prevTable < postTable
-			return (joinedErr != nil || joinedCmp != 0) || (err2 == nil && cmp == 0) || tableCmp < 0, ConflictNone
+			// prevTable == postTable(Partition/Sequence)
+			return (joinedErr != nil || joinedCmp != 0) || (err2 == nil && cmp == 0) || tableCmp <= 0, ConflictNone
 		}
 	}
 
@@ -921,7 +921,7 @@ func (l *Lock) trySyncForOneDDL(source, schema, table string, prevTable, postTab
 
 		return true, ConflictNone
 	}
-	log.L().Debug("conflict hasn't been resolved", zap.String("source", source), zap.String("schema", schema), zap.String("table", table), zap.Stringer("prevTable", prevTable), zap.Stringer("postTable", postTable))
+	log.L().Info("conflict hasn't been resolved", zap.String("source", source), zap.String("schema", schema), zap.String("table", table), zap.Stringer("prevTable", prevTable), zap.Stringer("postTable", postTable))
 	return false, ConflictSkipWaitRedirect
 }
 

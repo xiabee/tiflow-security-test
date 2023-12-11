@@ -15,16 +15,21 @@ package model
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
-
-	"github.com/pingcap/tidb/parser/mysql"
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/util/rowcodec"
+	"github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/integrity"
 	"github.com/pingcap/tiflow/pkg/quotes"
+	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 )
@@ -45,6 +50,13 @@ const (
 	MessageTypeResolved
 )
 
+const (
+	// the RowChangedEvent order in the same transaction
+	typeDelete = iota + 1
+	typeUpdate
+	typeInsert
+)
+
 // ColumnFlagType is for encapsulating the flag operations for different flags.
 type ColumnFlagType util.Flag
 
@@ -52,6 +64,10 @@ const (
 	// BinaryFlag means the column charset is binary
 	BinaryFlag ColumnFlagType = 1 << ColumnFlagType(iota)
 	// HandleKeyFlag means the column is selected as the handle key
+	// The handleKey is chosen by the following rules:
+	// 1. If the table has a primary key, the handleKey is the first column of the primary key.
+	// 2. If the table has not null unique key, the handleKey is the first column of the unique key.
+	// 3. If the table has no primary key and no not null unique key, it has no handleKey.
 	HandleKeyFlag
 	// GeneratedColumnFlag means the column is a generated column
 	GeneratedColumnFlag
@@ -237,16 +253,57 @@ const (
 // more info https://github.com/tinylib/msgp/issues/158, https://github.com/tinylib/msgp/issues/149
 // so define a RedoColumn, RedoDDLEvent instead of using the Column, DDLEvent
 type RedoLog struct {
-	RedoRow *RedoRowChangedEvent `msg:"row"`
-	RedoDDL *RedoDDLEvent        `msg:"ddl"`
-	Type    RedoLogType          `msg:"type"`
+	RedoRow RedoRowChangedEvent `msg:"row"`
+	RedoDDL RedoDDLEvent        `msg:"ddl"`
+	Type    RedoLogType         `msg:"type"`
+}
+
+// GetCommitTs returns the commit ts of the redo log.
+func (r *RedoLog) GetCommitTs() Ts {
+	switch r.Type {
+	case RedoLogTypeRow:
+		return r.RedoRow.Row.CommitTs
+	case RedoLogTypeDDL:
+		return r.RedoDDL.DDL.CommitTs
+	default:
+		log.Panic("invalid redo log type", zap.Any("type", r.Type))
+	}
+	return 0
+}
+
+// TrySplitAndSortUpdateEvent redo log do nothing
+func (r *RedoLog) TrySplitAndSortUpdateEvent(_ string) error {
+	return nil
 }
 
 // RedoRowChangedEvent represents the DML event used in RedoLog
 type RedoRowChangedEvent struct {
 	Row        *RowChangedEvent `msg:"row"`
-	PreColumns []*RedoColumn    `msg:"pre-columns"`
-	Columns    []*RedoColumn    `msg:"columns"`
+	Columns    []RedoColumn     `msg:"columns"`
+	PreColumns []RedoColumn     `msg:"pre-columns"`
+}
+
+// RedoDDLEvent represents DDL event used in redo log persistent
+type RedoDDLEvent struct {
+	DDL       *DDLEvent `msg:"ddl"`
+	Type      byte      `msg:"type"`
+	TableName TableName `msg:"table-name"`
+}
+
+// ToRedoLog converts row changed event to redo log
+func (row *RowChangedEvent) ToRedoLog() *RedoLog {
+	return &RedoLog{
+		RedoRow: RedoRowChangedEvent{Row: row},
+		Type:    RedoLogTypeRow,
+	}
+}
+
+// ToRedoLog converts ddl event to redo log
+func (ddl *DDLEvent) ToRedoLog() *RedoLog {
+	return &RedoLog{
+		RedoDDL: RedoDDLEvent{DDL: ddl},
+		Type:    RedoLogTypeDDL,
+	}
 }
 
 // RowChangedEvent represents a row changed event
@@ -256,15 +313,29 @@ type RowChangedEvent struct {
 
 	RowID int64 `json:"row-id" msg:"-"` // Deprecated. It is empty when the RowID comes from clustered index table.
 
+	// Table contains the table name and table ID.
+	// NOTICE: We store the physical table ID here, not the logical table ID.
 	Table    *TableName         `json:"table" msg:"table"`
 	ColInfos []rowcodec.ColInfo `json:"column-infos" msg:"-"`
+	// NOTICE: We probably store the logical ID inside TableInfo's TableName,
+	// not the physical ID.
+	// For normal table, there is only one ID, which is the physical ID.
+	// AKA TIDB_TABLE_ID.
+	// For partitioned table, there are two kinds of ID:
+	// 1. TIDB_PARTITION_ID is the physical ID of the partition.
+	// 2. TIDB_TABLE_ID is the logical ID of the table.
+	// In general, we always use the physical ID to represent a table, but we
+	// record the logical ID from the DDL event(job.BinlogInfo.TableInfo).
+	// So be careful when using the TableInfo.
+	TableInfo *TableInfo `json:"-" msg:"-"`
 
-	TableInfoVersion uint64 `json:"table-info-version,omitempty" msg:"table-info-version"`
-
-	ReplicaID    uint64    `json:"replica-id" msg:"replica-id"`
-	Columns      []*Column `json:"columns" msg:"-"`
-	PreColumns   []*Column `json:"pre-columns" msg:"-"`
+	Columns      []*Column `json:"columns" msg:"columns"`
+	PreColumns   []*Column `json:"pre-columns" msg:"pre-columns"`
 	IndexColumns [][]int   `json:"-" msg:"index-columns"`
+
+	// Checksum for the event, only not nil if the upstream TiDB enable the row level checksum
+	// and TiCDC set the integrity check level to the correctness.
+	Checksum *integrity.Checksum `json:"-" msg:"-"`
 
 	// ApproximateDataSize is the approximate size of protobuf binary
 	// representation of this event.
@@ -274,6 +345,43 @@ type RowChangedEvent struct {
 	SplitTxn bool `json:"-" msg:"-"`
 	// ReplicatingTs is ts when a table starts replicating events to downstream.
 	ReplicatingTs Ts `json:"-" msg:"-"`
+}
+
+// txnRows represents a set of events that belong to the same transaction.
+type txnRows []*RowChangedEvent
+
+// Len is the number of elements in the collection.
+func (e txnRows) Len() int {
+	return len(e)
+}
+
+// Less sort the events base on the order of event type delete<update<insert
+func (e txnRows) Less(i, j int) bool {
+	return getDMLOrder(e[i]) < getDMLOrder(e[j])
+}
+
+// getDMLOrder returns the order of the dml types: delete<update<insert
+func getDMLOrder(event *RowChangedEvent) int {
+	if event.IsDelete() {
+		return typeDelete
+	} else if event.IsUpdate() {
+		return typeUpdate
+	}
+	return typeInsert
+}
+
+func (e txnRows) Swap(i, j int) {
+	e[i], e[j] = e[j], e[i]
+}
+
+// GetCommitTs returns the commit timestamp of this event.
+func (r *RowChangedEvent) GetCommitTs() uint64 {
+	return r.CommitTs
+}
+
+// TrySplitAndSortUpdateEvent do nothing
+func (r *RowChangedEvent) TrySplitAndSortUpdateEvent(_ string) error {
+	return nil
 }
 
 // IsDelete returns true if the row is a delete event
@@ -309,48 +417,6 @@ func (r *RowChangedEvent) PrimaryKeyColumnNames() []string {
 		}
 	}
 	return result
-}
-
-// PrimaryKeyColumns returns the column(s) corresponding to the handle key(s)
-func (r *RowChangedEvent) PrimaryKeyColumns() []*Column {
-	pkeyCols := make([]*Column, 0)
-
-	var cols []*Column
-	if r.IsDelete() {
-		cols = r.PreColumns
-	} else {
-		cols = r.Columns
-	}
-
-	for _, col := range cols {
-		if col != nil && (col.Flag.IsPrimaryKey()) {
-			pkeyCols = append(pkeyCols, col)
-		}
-	}
-
-	// It is okay not to have primary keys, so the empty array is an acceptable result
-	return pkeyCols
-}
-
-// HandleKeyColumns returns the column(s) corresponding to the handle key(s)
-func (r *RowChangedEvent) HandleKeyColumns() []*Column {
-	pkeyCols := make([]*Column, 0)
-
-	var cols []*Column
-	if r.IsDelete() {
-		cols = r.PreColumns
-	} else {
-		cols = r.Columns
-	}
-
-	for _, col := range cols {
-		if col != nil && col.Flag.IsHandleKey() {
-			pkeyCols = append(pkeyCols, col)
-		}
-	}
-
-	// It is okay not to have handle keys, so the empty array is an acceptable result
-	return pkeyCols
 }
 
 // HandleKeyColInfos returns the column(s) and colInfo(s) corresponding to the handle key(s)
@@ -423,21 +489,25 @@ func (r *RowChangedEvent) ApproximateBytes() int {
 
 // Column represents a column value in row changed event
 type Column struct {
-	Name    string         `json:"name" msg:"name"`
-	Type    byte           `json:"type" msg:"type"`
-	Charset string         `json:"charset" msg:"charset"`
-	Flag    ColumnFlagType `json:"flag" msg:"-"`
-	Value   interface{}    `json:"value" msg:"value"`
-	Default interface{}    `json:"default" msg:"-"`
+	Name      string         `json:"name" msg:"name"`
+	Type      byte           `json:"type" msg:"type"`
+	Charset   string         `json:"charset" msg:"charset"`
+	Collation string         `json:"collation" msg:"collation"`
+	Flag      ColumnFlagType `json:"flag" msg:"-"`
+	Value     interface{}    `json:"value" msg:"-"`
+	Default   interface{}    `json:"default" msg:"-"`
 
 	// ApproximateBytes is approximate bytes consumed by the column.
-	ApproximateBytes int `json:"-"`
+	ApproximateBytes int `json:"-" msg:"-"`
 }
 
 // RedoColumn stores Column change
 type RedoColumn struct {
-	Column *Column `msg:"column"`
-	Flag   uint64  `msg:"flag"`
+	// Fields from Column and can't be marshaled directly in Column.
+	Value interface{} `msg:"column"`
+	// msgp transforms empty byte slice into nil, PTAL msgp#247.
+	ValueIsEmptyBytes bool   `msg:"value-is-empty-bytes"`
+	Flag              uint64 `msg:"flag"`
 }
 
 // BuildTiDBTableInfo builds a TiDB TableInfo from given information.
@@ -508,26 +578,32 @@ func BuildTiDBTableInfo(columns []*Column, indexColumns [][]int) *model.TableInf
 		}
 		firstCol := columns[colOffsets[0]]
 		if firstCol == nil {
-			// when the referenced column is nil, we already have a handle index,
+			// when the referenced column is nil, we already have a handle index
 			// so we can skip this index.
 			// only happens for DELETE event and old value feature is disabled
 			continue
 		}
 		if firstCol.Flag.IsPrimaryKey() {
-			indexInfo.Primary = true
 			indexInfo.Unique = true
 		}
 		if firstCol.Flag.IsUniqueKey() {
 			indexInfo.Unique = true
 		}
 
+		isPrimary := true
 		for _, offset := range colOffsets {
-			col := ret.Columns[offset]
+			col := columns[offset]
+			// When only all columns in the index are primary key, then the index is primary key.
+			if col == nil || !col.Flag.IsPrimaryKey() {
+				isPrimary = false
+			}
 
+			tiCol := ret.Columns[offset]
 			indexCol := &model.IndexColumn{}
-			indexCol.Name = col.Name
+			indexCol.Name = tiCol.Name
 			indexCol.Offset = offset
 			indexInfo.Columns = append(indexInfo.Columns, indexCol)
+			indexInfo.Primary = isPrimary
 		}
 
 		// TODO: revert the "all column set index related flag" to "only the
@@ -582,138 +658,71 @@ func ColumnValueString(c interface{}) string {
 	return data
 }
 
-// ColumnInfo represents the name and type information passed to the sink
-type ColumnInfo struct {
-	Name string `msg:"name"`
-	Type byte   `msg:"type"`
-}
-
-// FromTiColumnInfo populates cdc's ColumnInfo from TiDB's model.ColumnInfo
-func (c *ColumnInfo) FromTiColumnInfo(tiColumnInfo *model.ColumnInfo) {
-	c.Type = tiColumnInfo.GetType()
-	c.Name = tiColumnInfo.Name.O
-}
-
-// SimpleTableInfo is the simplified table info passed to the sink
-type SimpleTableInfo struct {
-	// db name
-	Schema string `msg:"schema"`
-	// table name
-	Table string `msg:"table"`
-	// table ID
-	TableID    int64         `msg:"table-id"`
-	ColumnInfo []*ColumnInfo `msg:"column-info"`
-}
-
 // DDLEvent stores DDL event
 type DDLEvent struct {
 	StartTs      uint64           `msg:"start-ts"`
 	CommitTs     uint64           `msg:"commit-ts"`
-	TableInfo    *SimpleTableInfo `msg:"table-info"`
-	PreTableInfo *SimpleTableInfo `msg:"pre-table-info"`
 	Query        string           `msg:"query"`
+	TableInfo    *TableInfo       `msg:"-"`
+	PreTableInfo *TableInfo       `msg:"-"`
 	Type         model.ActionType `msg:"-"`
-	Done         bool             `msg:"-"`
+	Done         atomic.Bool      `msg:"-"`
+	Charset      string           `msg:"-"`
+	Collate      string           `msg:"-"`
 }
 
-// RedoDDLEvent represents DDL event used in redo log persistent
-type RedoDDLEvent struct {
-	DDL  *DDLEvent `msg:"ddl"`
-	Type byte      `msg:"type"`
+// FromJob fills the values with DDLEvent from DDL job
+func (d *DDLEvent) FromJob(job *model.Job, preTableInfo *TableInfo, tableInfo *TableInfo) {
+	d.FromJobWithArgs(job, preTableInfo, tableInfo, "", "")
 }
 
-// FromJob fills the values of DDLEvent from DDL job
-func (d *DDLEvent) FromJob(job *model.Job, preTableInfo *TableInfo) {
-	// populating DDLEvent of a rename tables job is handled in `FromRenameTablesJob()`
-	if d.Type == model.ActionRenameTables {
-		return
-	}
+// FromJobWithArgs fills the values with DDLEvent from DDL job
+func (d *DDLEvent) FromJobWithArgs(
+	job *model.Job,
+	preTableInfo, tableInfo *TableInfo,
+	oldSchemaName, newSchemaName string,
+) {
+	d.StartTs = job.StartTS
+	d.CommitTs = job.BinlogInfo.FinishedTS
+	d.Type = job.Type
+	d.PreTableInfo = preTableInfo
+	d.TableInfo = tableInfo
+	d.Charset = job.Charset
+	d.Collate = job.Collate
 
+	switch d.Type {
 	// The query for "DROP TABLE" and "DROP VIEW" statements need
 	// to be rebuilt. The reason is elaborated as follows:
 	// for a DDL statement like "DROP TABLE test1.table1, test2.table2",
 	// two DDL jobs will be generated. These two jobs can be differentiated
 	// from job.BinlogInfo.TableInfo whereas the job.Query are identical.
-	rebuildQuery := func() {
-		switch d.Type {
-		case model.ActionDropTable:
-			d.Query = fmt.Sprintf("DROP TABLE `%s`.`%s`", d.TableInfo.Schema, d.TableInfo.Table)
-		case model.ActionDropView:
-			d.Query = fmt.Sprintf("DROP VIEW `%s`.`%s`", d.TableInfo.Schema, d.TableInfo.Table)
-		default:
-			d.Query = job.Query
-		}
-	}
+	case model.ActionDropTable:
+		d.Query = fmt.Sprintf("DROP TABLE `%s`.`%s`",
+			d.TableInfo.TableName.Schema, d.TableInfo.TableName.Table)
+	case model.ActionDropView:
+		d.Query = fmt.Sprintf("DROP VIEW `%s`.`%s`",
+			d.TableInfo.TableName.Schema, d.TableInfo.TableName.Table)
+	case model.ActionRenameTables:
+		oldTableName := preTableInfo.Name.O
+		newTableName := tableInfo.Name.O
+		d.Query = fmt.Sprintf("RENAME TABLE `%s`.`%s` TO `%s`.`%s`",
+			oldSchemaName, oldTableName, newSchemaName, newTableName)
+		// Note that type is ActionRenameTable, not ActionRenameTables.
+		d.Type = model.ActionRenameTable
+	case model.ActionExchangeTablePartition:
+		// Parse idx of partition name from query.
+		upperQuery := strings.ToUpper(job.Query)
+		idx1 := strings.Index(upperQuery, "EXCHANGE PARTITION") + len("EXCHANGE PARTITION")
+		idx2 := strings.Index(upperQuery, "WITH TABLE")
 
-	d.StartTs = job.StartTS
-	d.CommitTs = job.BinlogInfo.FinishedTS
-	d.Type = job.Type
-	// fill PreTableInfo for the event.
-	d.fillPreTableInfo(preTableInfo)
-	// fill TableInfo for the event.
-	d.fillTableInfo(job.BinlogInfo.TableInfo, job.SchemaName)
-	// rebuild the query if necessary
-	rebuildQuery()
-}
-
-// FromRenameTablesJob fills the values of DDLEvent from a rename tables DDL job
-func (d *DDLEvent) FromRenameTablesJob(job *model.Job,
-	oldSchemaName, newSchemaName string,
-	preTableInfo *TableInfo, tableInfo *model.TableInfo,
-) {
-	if job.Type != model.ActionRenameTables {
-		return
-	}
-
-	d.StartTs = job.StartTS
-	d.CommitTs = job.BinlogInfo.FinishedTS
-	oldTableName := preTableInfo.Name.O
-	newTableName := tableInfo.Name.O
-	d.Query = fmt.Sprintf("RENAME TABLE `%s`.`%s` TO `%s`.`%s`",
-		oldSchemaName, oldTableName, newSchemaName, newTableName)
-	d.Type = model.ActionRenameTable
-	// fill PreTableInfo for the event.
-	d.fillPreTableInfo(preTableInfo)
-	// fill TableInfo for the event.
-	d.fillTableInfo(tableInfo, newSchemaName)
-}
-
-// fillTableInfo populates the TableInfo of an DDLEvent
-func (d *DDLEvent) fillTableInfo(tableInfo *model.TableInfo,
-	schemaName string,
-) {
-	// `TableInfo` field of `DDLEvent` should always not be nil
-	d.TableInfo = new(SimpleTableInfo)
-	d.TableInfo.Schema = schemaName
-
-	if tableInfo == nil {
-		return
-	}
-
-	d.TableInfo.ColumnInfo = make([]*ColumnInfo, len(tableInfo.Columns))
-	for i, colInfo := range tableInfo.Columns {
-		d.TableInfo.ColumnInfo[i] = new(ColumnInfo)
-		d.TableInfo.ColumnInfo[i].FromTiColumnInfo(colInfo)
-	}
-
-	d.TableInfo.Table = tableInfo.Name.O
-	d.TableInfo.TableID = tableInfo.ID
-}
-
-// fillPreTableInfo populates the PreTableInfo of an event
-func (d *DDLEvent) fillPreTableInfo(preTableInfo *TableInfo) {
-	if preTableInfo == nil {
-		return
-	}
-	d.PreTableInfo = new(SimpleTableInfo)
-	d.PreTableInfo.Schema = preTableInfo.TableName.Schema
-	d.PreTableInfo.Table = preTableInfo.TableName.Table
-	d.PreTableInfo.TableID = preTableInfo.ID
-
-	d.PreTableInfo.ColumnInfo = make([]*ColumnInfo, len(preTableInfo.Columns))
-	for i, colInfo := range preTableInfo.Columns {
-		d.PreTableInfo.ColumnInfo[i] = new(ColumnInfo)
-		d.PreTableInfo.ColumnInfo[i].FromTiColumnInfo(colInfo)
+		// Note that partition name should be parsed from original query, not the upperQuery.
+		partName := strings.TrimSpace(job.Query[idx1:idx2])
+		// The tableInfo is the partition table, preTableInfo is non partition table.
+		d.Query = fmt.Sprintf("ALTER TABLE `%s`.`%s` EXCHANGE PARTITION `%s` WITH TABLE `%s`.`%s`",
+			tableInfo.TableName.Schema, tableInfo.TableName.Table, partName,
+			preTableInfo.TableName.Schema, preTableInfo.TableName.Table)
+	default:
+		d.Query = job.Query
 	}
 }
 
@@ -721,17 +730,149 @@ func (d *DDLEvent) fillPreTableInfo(preTableInfo *TableInfo) {
 //
 //msgp:ignore SingleTableTxn
 type SingleTableTxn struct {
-	// data fields of SingleTableTxn
 	Table     *TableName
-	StartTs   uint64
-	CommitTs  uint64
-	Rows      []*RowChangedEvent
-	ReplicaID uint64
+	TableInfo *TableInfo
+	// TableInfoVersion is the version of the table info, it is used to generate data path
+	// in storage sink. Generally, TableInfoVersion equals to `SingleTableTxn.TableInfo.Version`.
+	// Besides, if one table is just scheduled to a new processor, the TableInfoVersion should be
+	// greater than or equal to the startTs of table sink.
+	TableInfoVersion uint64
+
+	StartTs  uint64
+	CommitTs uint64
+	Rows     []*RowChangedEvent
 
 	// control fields of SingleTableTxn
 	// FinishWg is a barrier txn, after this txn is received, the worker must
 	// flush cached txns and call FinishWg.Done() to mark txns have been flushed.
 	FinishWg *sync.WaitGroup
+}
+
+// GetCommitTs returns the commit timestamp of the transaction.
+func (t *SingleTableTxn) GetCommitTs() uint64 {
+	return t.CommitTs
+}
+
+// TrySplitAndSortUpdateEvent split update events if unique key is updated
+func (t *SingleTableTxn) TrySplitAndSortUpdateEvent(scheme string) error {
+	if t.dontSplitUpdateEvent(scheme) {
+		return nil
+	}
+	newRows, err := trySplitAndSortUpdateEvent(t.Rows)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	t.Rows = newRows
+	return nil
+}
+
+// Whether split a single update event into delete and insert events？
+//
+// For the MySQL Sink, there is no need to split a single unique key changed update event, this
+// is also to keep the backward compatibility, the same behavior as before.
+//
+// For the Kafka and Storage sink, always split a single unique key changed update event, since:
+// 1. Avro and CSV does not output the previous column values for the update event, so it would
+// cause consumer missing data if the unique key changed event is not split.
+// 2. Index-Value Dispatcher cannot work correctly if the unique key changed event isn't split.
+func (t *SingleTableTxn) dontSplitUpdateEvent(scheme string) bool {
+	if len(t.Rows) < 2 && sink.IsMySQLCompatibleScheme(scheme) {
+		return true
+	}
+	return false
+}
+
+// trySplitAndSortUpdateEvent try to split update events if unique key is updated
+// returns true if some updated events is split
+func trySplitAndSortUpdateEvent(
+	events []*RowChangedEvent,
+) ([]*RowChangedEvent, error) {
+	rowChangedEvents := make([]*RowChangedEvent, 0, len(events))
+	split := false
+	for _, e := range events {
+		if e == nil {
+			log.Warn("skip emit nil event",
+				zap.Any("event", e))
+			continue
+		}
+
+		colLen := len(e.Columns)
+		preColLen := len(e.PreColumns)
+		// Some transactions could generate empty row change event, such as
+		// begin; insert into t (id) values (1); delete from t where id=1; commit;
+		// Just ignore these row changed events.
+		if colLen == 0 && preColLen == 0 {
+			log.Warn("skip emit empty row event",
+				zap.Any("event", e))
+			continue
+		}
+
+		// This indicates that it is an update event. if the pk or uk is updated,
+		// we need to split it into two events (delete and insert).
+		if e.IsUpdate() && shouldSplitUpdateEvent(e) {
+			deleteEvent, insertEvent, err := splitUpdateEvent(e)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			split = true
+			rowChangedEvents = append(rowChangedEvents, deleteEvent, insertEvent)
+		} else {
+			rowChangedEvents = append(rowChangedEvents, e)
+		}
+	}
+	// some updated events is split, need to sort
+	if split {
+		sort.Sort(txnRows(rowChangedEvents))
+	}
+	return rowChangedEvents, nil
+}
+
+// shouldSplitUpdateEvent determines if the split event is needed to align the old format based on
+// whether the handle key column or unique key has been modified.
+// If  is modified, we need to use splitUpdateEvent to split the update event into a delete and an insert event.
+func shouldSplitUpdateEvent(updateEvent *RowChangedEvent) bool {
+	// nil event will never be split.
+	if updateEvent == nil {
+		return false
+	}
+
+	for i := range updateEvent.Columns {
+		col := updateEvent.Columns[i]
+		preCol := updateEvent.PreColumns[i]
+		if col != nil && (col.Flag.IsUniqueKey() || col.Flag.IsHandleKey()) &&
+			preCol != nil && (preCol.Flag.IsUniqueKey() || preCol.Flag.IsHandleKey()) {
+			colValueString := ColumnValueString(col.Value)
+			preColValueString := ColumnValueString(preCol.Value)
+			// If one unique key columns is updated, we need to split the event row.
+			if colValueString != preColValueString {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// splitUpdateEvent splits an update event into a delete and an insert event.
+func splitUpdateEvent(
+	updateEvent *RowChangedEvent,
+) (*RowChangedEvent, *RowChangedEvent, error) {
+	if updateEvent == nil {
+		return nil, nil, errors.New("nil event cannot be split")
+	}
+
+	// If there is an update to handle key columns,
+	// we need to split the event into two events to be compatible with the old format.
+	// NOTICE: Here we don't need a full deep copy because
+	// our two events need Columns and PreColumns respectively,
+	// so it won't have an impact and no more full deep copy wastes memory.
+	deleteEvent := *updateEvent
+	deleteEvent.Columns = nil
+
+	insertEvent := *updateEvent
+	// NOTICE: clean up pre cols for insert event.
+	insertEvent.PreColumns = nil
+
+	return &deleteEvent, &insertEvent, nil
 }
 
 // Append adds a row changed event into SingleTableTxn
@@ -744,4 +885,9 @@ func (t *SingleTableTxn) Append(row *RowChangedEvent) {
 			zap.Any("row", row))
 	}
 	t.Rows = append(t.Rows, row)
+}
+
+// ToWaitFlush indicates whether to wait flushing after the txn is processed or not.
+func (t *SingleTableTxn) ToWaitFlush() bool {
+	return t.FinishWg != nil
 }

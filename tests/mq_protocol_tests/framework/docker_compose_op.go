@@ -14,17 +14,18 @@
 package framework
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
 
+	"github.com/integralist/go-findroot/find"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"go.uber.org/zap"
-	"golang.org/x/net/context"
 )
 
 // DockerComposeOperator represent a docker compose
@@ -142,7 +143,11 @@ func execInController(controller, shellCmd string) ([]byte, error) {
 func (d *DockerComposeOperator) DumpStdout() error {
 	log.Info("Dumping container logs")
 	cmd := exec.Command("docker-compose", "-f", d.FileName, "logs", "-t")
-	f, err := os.Create("../deployments/ticdc/docker-compose/logs/stdout.log")
+	st, err := find.Repo()
+	if err != nil {
+		log.Fatal("Could not find git repo root", zap.Error(err))
+	}
+	f, err := os.Create(st.Path + "/deployments/ticdc/docker-compose/logs/stdout.log")
 	if err != nil {
 		return errors.AddStack(err)
 	}

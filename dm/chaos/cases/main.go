@@ -25,11 +25,10 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tiflow/dm/pb"
+	"github.com/pingcap/tiflow/dm/pkg/log"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-
-	"github.com/pingcap/tiflow/dm/dm/pb"
-	"github.com/pingcap/tiflow/dm/pkg/log"
 )
 
 // main starts to run the test case logic after MySQL, TiDB and DM have been set up.

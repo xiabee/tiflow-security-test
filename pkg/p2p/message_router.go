@@ -35,11 +35,9 @@ type MessageRouter interface {
 	// GetClient returns a MessageClient for `target`. It returns
 	// nil if the target peer does not exist. The returned client
 	// is canceled if RemovePeer is called on `target`.
-	GetClient(target NodeID) *MessageClient
-	// Close cancels all clients maintained internally.
+	GetClient(target NodeID) MessageClient
+	// Close cancels all clients maintained internally and waits for all clients to exit.
 	Close()
-	// Wait waits for all clients to exit.
-	Wait()
 	// Err returns a channel to receive errors from.
 	Err() <-chan error
 }
@@ -72,7 +70,7 @@ func NewMessageRouter(selfID NodeID, credentials *security.Credential, clientCon
 }
 
 type clientWrapper struct {
-	*MessageClient
+	MessageClient
 	cancelFn context.CancelFunc
 }
 
@@ -99,7 +97,7 @@ func (m *messageRouterImpl) RemovePeer(id NodeID) {
 
 // GetClient implements MessageRouter. The client will be created lazily.
 // It returns nil if the target peer does not exist.
-func (m *messageRouterImpl) GetClient(target NodeID) *MessageClient {
+func (m *messageRouterImpl) GetClient(target NodeID) MessageClient {
 	m.mu.RLock()
 	// fast path
 	if cliWrapper, ok := m.clients[target]; ok {
@@ -142,11 +140,16 @@ func (m *messageRouterImpl) GetClient(target NodeID) *MessageClient {
 		defer m.wg.Done()
 		defer cancel()
 		err := client.Run(ctx, "tcp", addr, target, m.credentials)
-		log.Warn("p2p client exited with error",
-			zap.String("addr", addr),
-			zap.String("targetCapture", target),
-			zap.Error(err))
-
+		if err != nil {
+			log.Warn("p2p client exited with error",
+				zap.String("addr", addr),
+				zap.String("targetCapture", target),
+				zap.Error(err))
+		} else {
+			log.Info("peer message client exited",
+				zap.String("addr", addr),
+				zap.String("targetCapture", target))
+		}
 		if errors.Cause(err) != context.Canceled {
 			// Send the error to the error channel.
 			select {
@@ -170,14 +173,11 @@ func (m *messageRouterImpl) Close() {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	for _, cliWrapper := range m.clients {
 		cliWrapper.cancelFn()
 	}
-}
+	m.mu.Unlock()
 
-func (m *messageRouterImpl) Wait() {
 	m.wg.Wait()
 }
 

@@ -28,17 +28,14 @@ import (
 	"github.com/pingcap/tidb/parser/format"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/util/filter"
-	"github.com/pingcap/tiflow/dm/pkg/utils"
-	"github.com/pingcap/tiflow/pkg/quotes"
-	"go.uber.org/zap"
-
-	"github.com/pingcap/tiflow/dm/dm/config"
-	"github.com/pingcap/tiflow/dm/dm/pb"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/openapi"
-	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
-	"github.com/pingcap/tiflow/dm/pkg/log"
+	"github.com/pingcap/tiflow/dm/pb"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
+	"github.com/pingcap/tiflow/pkg/quotes"
+	"go.uber.org/zap"
 )
 
 // OperateSchema operates schema for an upstream table.
@@ -51,11 +48,7 @@ func (s *Syncer) OperateSchema(ctx context.Context, req *pb.OperateWorkerSchemaR
 	case pb.SchemaOp_ListMigrateTargets:
 		return s.listMigrateTargets(req)
 	case pb.SchemaOp_ListSchema:
-		allSchema := s.schemaTracker.AllSchemas()
-		schemaList := make([]string, len(allSchema))
-		for i, schema := range allSchema {
-			schemaList[i] = schema.Name.String()
-		}
+		schemaList := s.schemaTracker.AllSchemas()
 		schemaListJSON, err := json.Marshal(schemaList)
 		if err != nil {
 			return "", terror.ErrSchemaTrackerMarshalJSON.Delegate(err, schemaList)
@@ -80,12 +73,12 @@ func (s *Syncer) OperateSchema(ctx context.Context, req *pb.OperateWorkerSchemaR
 			targetTable := s.route(sourceTable)
 			result, err2 := dbconn.GetTableCreateSQL(s.tctx.WithContext(ctx), s.downstreamTrackConn, targetTable.String())
 			result = strings.Replace(result, fmt.Sprintf("CREATE TABLE %s", quotes.QuoteName(targetTable.Name)), fmt.Sprintf("CREATE TABLE %s", quotes.QuoteName(sourceTable.Name)), 1)
-			return utils.CreateTableSQLToOneRow(result), err2
+			return conn.CreateTableSQLToOneRow(result), err2
 		}
 
 		result := bytes.NewBuffer(make([]byte, 0, 512))
 		err2 := executor.ConstructResultOfShowCreateTable(s.sessCtx, ti, autoid.Allocators{}, result)
-		return utils.CreateTableSQLToOneRow(result.String()), err2
+		return conn.CreateTableSQLToOneRow(result.String()), err2
 
 	case pb.SchemaOp_SetSchema:
 		// from source or target need get schema
@@ -144,21 +137,21 @@ func (s *Syncer) OperateSchema(ctx context.Context, req *pb.OperateWorkerSchemaR
 		}
 
 		s.tctx.L().Info("flush table info", zap.String("table info", newSQL))
-		err = s.checkpoint.FlushPointsWithTableInfos(tcontext.NewContext(ctx, log.L()), []*filter.Table{sourceTable}, []*model.TableInfo{ti})
+		err = s.checkpoint.FlushPointsWithTableInfos(s.tctx.WithContext(ctx), []*filter.Table{sourceTable}, []*model.TableInfo{ti})
 		if err != nil {
 			return "", err
 		}
 
 		if req.Sync {
 			if s.cfg.ShardMode != config.ShardOptimistic {
-				log.L().Info("ignore --sync flag", zap.String("shard mode", s.cfg.ShardMode))
+				s.tctx.L().Info("ignore --sync flag", zap.String("shard mode", s.cfg.ShardMode))
 				break
 			}
 			targetTable := s.route(sourceTable)
 			// use new table info as tableInfoBefore, we can also use the origin table from schemaTracker
 			info := s.optimist.ConstructInfo(req.Database, req.Table, targetTable.Schema, targetTable.Name, []string{""}, ti, []*model.TableInfo{ti})
 			info.IgnoreConflict = true
-			log.L().Info("sync info with operate-schema", zap.String("info", info.ShortString()))
+			s.tctx.L().Info("sync info with operate-schema", zap.String("info", info.ShortString()))
 			_, err = s.optimist.PutInfo(info)
 			if err != nil {
 				return "", err
@@ -182,14 +175,12 @@ func (s *Syncer) listMigrateTargets(req *pb.OperateWorkerSchemaRequest) (string,
 			return "", err
 		}
 		for _, schema := range s.schemaTracker.AllSchemas() {
-			if schemaR.MatchString(schema.Name.String()) {
-				schemaList = append(schemaList, schema.Name.String())
+			if schemaR.MatchString(schema) {
+				schemaList = append(schemaList, schema)
 			}
 		}
 	} else {
-		for _, schema := range s.schemaTracker.AllSchemas() {
-			schemaList = append(schemaList, schema.Name.String())
-		}
+		schemaList = s.schemaTracker.AllSchemas()
 	}
 
 	var targets []openapi.TaskMigrateTarget

@@ -21,7 +21,7 @@ import (
 
 func TestGetMemoryLimit(t *testing.T) {
 	t.Parallel()
-	limit, err := MemTotal()
+	limit, err := GetMemoryLimit()
 	require.NoError(t, err)
 	require.Less(t, limit, memoryMax)
 }

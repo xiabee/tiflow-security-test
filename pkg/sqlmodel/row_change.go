@@ -20,12 +20,11 @@ import (
 	"github.com/pingcap/failpoint"
 	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
-	"go.uber.org/zap"
-
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/pkg/quotes"
+	"go.uber.org/zap"
 )
 
 // RowChangeType is the type of row change.
@@ -109,16 +108,17 @@ func NewRowChange(
 		sourceTableInfo: sourceTableInfo,
 	}
 
-	if preValues != nil && len(preValues) != len(sourceTableInfo.Columns) {
+	colCount := ret.ColumnCount()
+	if preValues != nil && len(preValues) != colCount {
 		log.L().DPanic("preValues length not equal to sourceTableInfo columns",
 			zap.Int("preValues", len(preValues)),
-			zap.Int("sourceTableInfo", len(sourceTableInfo.Columns)),
+			zap.Int("sourceTableInfo", colCount),
 			zap.Stringer("sourceTable", sourceTable))
 	}
-	if postValues != nil && len(postValues) != len(sourceTableInfo.Columns) {
+	if postValues != nil && len(postValues) != colCount {
 		log.L().DPanic("postValues length not equal to sourceTableInfo columns",
 			zap.Int("postValues", len(postValues)),
-			zap.Int("sourceTableInfo", len(sourceTableInfo.Columns)),
+			zap.Int("sourceTableInfo", colCount),
 			zap.Stringer("sourceTable", sourceTable))
 	}
 
@@ -177,8 +177,16 @@ func (r *RowChange) TargetTableID() string {
 }
 
 // ColumnCount returns the number of columns of this RowChange.
+// TiDB TableInfo contains some internal columns like expression index, they
+// are not included in this count.
 func (r *RowChange) ColumnCount() int {
-	return len(r.sourceTableInfo.Columns)
+	c := 0
+	for _, col := range r.sourceTableInfo.Columns {
+		if !col.Hidden {
+			c++
+		}
+	}
+	return c
 }
 
 // SourceTableInfo returns the TableInfo of source table.

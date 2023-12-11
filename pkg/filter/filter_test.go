@@ -16,16 +16,17 @@ package filter
 import (
 	"testing"
 
+	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
-
-	"github.com/pingcap/tidb/parser/model"
 	"github.com/stretchr/testify/require"
 )
 
 func TestShouldUseDefaultRules(t *testing.T) {
 	t.Parallel()
 
-	filter, err := NewFilter(config.GetDefaultReplicaConfig())
+	filter, err := NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
 	require.True(t, filter.ShouldIgnoreTable("information_schema", ""))
 	require.True(t, filter.ShouldIgnoreTable("information_schema", "statistics"))
@@ -42,8 +43,7 @@ func TestShouldUseCustomRules(t *testing.T) {
 		Filter: &config.FilterConfig{
 			Rules: []string{"sns.*", "ecom.*", "!sns.log", "!ecom.test"},
 		},
-		Cyclic: &config.CyclicConfig{Enable: true},
-	})
+	}, "")
 	require.Nil(t, err)
 	require.True(t, filter.ShouldIgnoreTable("other", ""))
 	require.True(t, filter.ShouldIgnoreTable("other", "what"))
@@ -53,10 +53,38 @@ func TestShouldUseCustomRules(t *testing.T) {
 	require.True(t, filter.ShouldIgnoreTable("ecom", "test"))
 	require.True(t, filter.ShouldIgnoreTable("sns", "log"))
 	require.True(t, filter.ShouldIgnoreTable("information_schema", ""))
-	require.False(t, filter.ShouldIgnoreTable("tidb_cdc", "repl_mark_a_a"))
+
+	filter, err = NewFilter(&config.ReplicaConfig{
+		Filter: &config.FilterConfig{
+			// 1. match all schema and table
+			// 2. do not match test.season
+			// 3. match all table of schema school
+			// 4. do not match table school.teacher
+			Rules: []string{"*.*", "!test.season", "school.*", "!school.teacher"},
+		},
+	}, "")
+	require.True(t, filter.ShouldIgnoreTable("test", "season"))
+	require.False(t, filter.ShouldIgnoreTable("other", ""))
+	require.False(t, filter.ShouldIgnoreTable("school", "student"))
+	require.True(t, filter.ShouldIgnoreTable("school", "teacher"))
+	require.Nil(t, err)
+
+	filter, err = NewFilter(&config.ReplicaConfig{
+		Filter: &config.FilterConfig{
+			// 1. match all schema and table
+			// 2. do not match test.season
+			// 3. match all table of schema school
+			// 4. do not match table school.teacher
+			Rules: []string{"*.*", "!test.t1", "!test.t2"},
+		},
+	}, "")
+	require.False(t, filter.ShouldIgnoreTable("test", "season"))
+	require.True(t, filter.ShouldIgnoreTable("test", "t1"))
+	require.True(t, filter.ShouldIgnoreTable("test", "t2"))
+	require.Nil(t, err)
 }
 
-func TestShouldIgnoreTxn(t *testing.T) {
+func TestShouldIgnoreDMLEvent(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
@@ -110,113 +138,203 @@ func TestShouldIgnoreTxn(t *testing.T) {
 				IgnoreTxnStartTs: ftc.ignoreTxnStartTs,
 				Rules:            ftc.rules,
 			},
-		})
+		}, "")
 		require.Nil(t, err)
 		for _, tc := range ftc.cases {
-			require.Equal(t, filter.ShouldIgnoreDMLEvent(tc.ts, tc.schema, tc.table), tc.ignore)
-			require.Equal(t, filter.ShouldIgnoreDDLEvent(tc.ts, model.ActionCreateTable, tc.schema, tc.table), tc.ignore)
+			dml := &model.RowChangedEvent{
+				Table:   &model.TableName{Table: tc.table, Schema: tc.schema},
+				StartTs: tc.ts,
+			}
+			ignoreDML, err := filter.ShouldIgnoreDMLEvent(dml, model.RowChangedDatums{}, nil)
+			require.Nil(t, err)
+			require.Equal(t, ignoreDML, tc.ignore)
 		}
 	}
 }
 
 func TestShouldDiscardDDL(t *testing.T) {
 	t.Parallel()
-
-	config := &config.ReplicaConfig{
-		Filter: &config.FilterConfig{
-			DDLAllowlist: []model.ActionType{model.ActionAddForeignKey},
-		},
-	}
-	filter, err := NewFilter(config)
-	require.Nil(t, err)
-	require.False(t, filter.ShouldDiscardDDL(model.ActionAddForeignKey))
-
-	require.False(t, filter.ShouldDiscardDDL(model.ActionDropSchema))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionCreateTable))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionDropTable))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionAddColumn))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionDropColumn))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionAddIndex))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionDropIndex))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionTruncateTable))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionModifyColumn))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionRenameTable))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionRenameTables))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionSetDefaultValue))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionModifyTableComment))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionRenameIndex))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionAddTablePartition))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionDropTablePartition))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionCreateView))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionModifyTableCharsetAndCollate))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionTruncateTablePartition))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionDropView))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionRecoverTable))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionModifySchemaCharsetAndCollate))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionAddPrimaryKey))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionDropPrimaryKey))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionAddColumns))
-	require.False(t, filter.ShouldDiscardDDL(model.ActionDropColumns))
-
-	// Discard sequence DDL.
-	require.True(t, filter.ShouldDiscardDDL(model.ActionCreateSequence))
-	require.True(t, filter.ShouldDiscardDDL(model.ActionAlterSequence))
-	require.True(t, filter.ShouldDiscardDDL(model.ActionDropSequence))
-}
-
-func TestShouldIgnoreDDL(t *testing.T) {
-	t.Parallel()
-
 	testCases := []struct {
 		cases []struct {
+			startTs uint64
 			schema  string
 			table   string
-			ddlType model.ActionType
+			query   string
+			ddlType timodel.ActionType
 			ignore  bool
 		}
-		rules []string
+		rules        []string
+		ignoredTs    []uint64
+		eventFilters []*config.EventFilterRule
 	}{{
+		// Ignore by table name cases.
 		cases: []struct {
+			startTs uint64
 			schema  string
 			table   string
-			ddlType model.ActionType
+			query   string
+			ddlType timodel.ActionType
 			ignore  bool
 		}{
-			{"sns", "", model.ActionCreateSchema, false},
-			{"sns", "", model.ActionDropSchema, false},
-			{"sns", "", model.ActionModifySchemaCharsetAndCollate, false},
-			{"ecom", "", model.ActionCreateSchema, false},
-			{"ecom", "aa", model.ActionCreateTable, false},
-			{"ecom", "", model.ActionCreateSchema, false},
-			{"test", "", model.ActionCreateSchema, true},
+			{1, "sns", "", "create database test", timodel.ActionCreateSchema, false},
+			{1, "sns", "", "drop database test", timodel.ActionDropSchema, false},
+			{
+				1, "sns", "", "ALTER DATABASE dbname CHARACTER SET utf8 COLLATE utf8_general_ci",
+				timodel.ActionModifySchemaCharsetAndCollate, false,
+			},
+			{1, "ecom", "", "create database test", timodel.ActionCreateSchema, false},
+			{1, "ecom", "aa", "create table test.t1(a int primary key)", timodel.ActionCreateTable, false},
+			{1, "ecom", "", "create database test", timodel.ActionCreateSchema, false},
+			{1, "test", "", "create database test", timodel.ActionCreateSchema, true},
 		},
 		rules: []string{"sns.*", "ecom.*", "!sns.log", "!ecom.test"},
+		// Ignore by schema name cases.
 	}, {
 		cases: []struct {
+			startTs uint64
 			schema  string
 			table   string
-			ddlType model.ActionType
+			query   string
+			ddlType timodel.ActionType
 			ignore  bool
 		}{
-			{"sns", "", model.ActionCreateSchema, false},
-			{"sns", "", model.ActionDropSchema, false},
-			{"sns", "", model.ActionModifySchemaCharsetAndCollate, false},
-			{"sns", "aa", model.ActionCreateTable, true},
-			{"sns", "C1", model.ActionCreateTable, false},
-			{"sns", "", model.ActionCreateTable, true},
+			{1, "schema", "C1", "create database test", timodel.ActionCreateSchema, false},
+			{1, "test", "", "drop database test1", timodel.ActionDropSchema, true},
+			{
+				1, "dbname", "", "ALTER DATABASE dbname CHARACTER SET utf8 COLLATE utf8_general_ci",
+				timodel.ActionModifySchemaCharsetAndCollate, true,
+			},
+			{1, "test", "aa", "create table test.t1(a int primary key)", timodel.ActionCreateTable, true},
+			{1, "schema", "C1", "create table test.t1(a int primary key)", timodel.ActionCreateTable, false},
+			{1, "schema", "", "create table test.t1(a int primary key)", timodel.ActionCreateTable, true},
 		},
-		rules: []string{"sns.C1"},
+		rules: []string{"schema.C1"},
+	}, { // cases ignore by startTs
+		cases: []struct {
+			startTs uint64
+			schema  string
+			table   string
+			query   string
+			ddlType timodel.ActionType
+			ignore  bool
+		}{
+			{1, "ts", "", "create database test", timodel.ActionCreateSchema, true},
+			{2, "ts", "student", "drop database test2", timodel.ActionDropSchema, true},
+			{
+				3, "ts", "teacher", "ALTER DATABASE dbname CHARACTER SET utf8 COLLATE utf8_general_ci",
+				timodel.ActionModifySchemaCharsetAndCollate, true,
+			},
+			{4, "ts", "man", "create table test.t1(a int primary key)", timodel.ActionCreateTable, false},
+			{5, "ts", "fruit", "create table test.t1(a int primary key)", timodel.ActionCreateTable, false},
+			{6, "ts", "insect", "create table test.t1(a int primary key)", timodel.ActionCreateTable, false},
+		},
+		rules:     []string{"*.*"},
+		ignoredTs: []uint64{1, 2, 3},
+	}, { // cases ignore by ddl type.
+		cases: []struct {
+			startTs uint64
+			schema  string
+			table   string
+			query   string
+			ddlType timodel.ActionType
+			ignore  bool
+		}{
+			{1, "event", "", "drop table t1", timodel.ActionDropTable, true},
+			{1, "event", "January", "drop index i on t1", timodel.ActionDropIndex, true},
+			{1, "event", "February", "drop index x2 on t2", timodel.ActionDropIndex, true},
+			{1, "event", "March", "create table t2(age int)", timodel.ActionCreateTable, false},
+			{1, "event", "April", "create table t2(age int)", timodel.ActionCreateTable, false},
+			{1, "event", "May", "create table t2(age int)", timodel.ActionCreateTable, false},
+		},
+		rules: []string{"*.*"},
+		eventFilters: []*config.EventFilterRule{
+			{
+				Matcher: []string{"event.*"},
+				IgnoreEvent: []bf.EventType{
+					bf.AlterTable, bf.DropTable,
+				},
+			},
+		},
+	}, { // cases ignore by ddl query
+		cases: []struct {
+			startTs uint64
+			schema  string
+			table   string
+			query   string
+			ddlType timodel.ActionType
+			ignore  bool
+		}{
+			{1, "sql_pattern", "t1", "CREATE DATABASE sql_pattern", timodel.ActionCreateSchema, false},
+			{1, "sql_pattern", "t1", "DROP DATABASE sql_pattern", timodel.ActionDropSchema, true},
+			{
+				1, "sql_pattern", "t1",
+				"ALTER DATABASE `test_db` CHARACTER SET 'utf8' COLLATE 'utf8_general_ci'",
+				timodel.ActionModifySchemaCharsetAndCollate,
+				false,
+			},
+			{1, "sql_pattern", "t1", "CREATE TABLE t1(id int primary key)", timodel.ActionCreateTable, false},
+			{1, "sql_pattern", "t1", "DROP TABLE t1", timodel.ActionDropTable, true},
+			{1, "sql_pattern", "t1", "CREATE VIEW test.v AS SELECT * FROM t", timodel.ActionCreateView, true},
+		},
+		rules: []string{"*.*"},
+		eventFilters: []*config.EventFilterRule{
+			{
+				Matcher:   []string{"sql_pattern.*"},
+				IgnoreSQL: []string{"^DROP TABLE", "^CREATE VIEW", "^DROP DATABASE"},
+			},
+		},
 	}}
+
 	for _, ftc := range testCases {
 		filter, err := NewFilter(&config.ReplicaConfig{
 			Filter: &config.FilterConfig{
-				IgnoreTxnStartTs: []uint64{},
 				Rules:            ftc.rules,
+				IgnoreTxnStartTs: ftc.ignoredTs,
+				EventFilters:     ftc.eventFilters,
 			},
-		})
+		}, "")
 		require.Nil(t, err)
 		for _, tc := range ftc.cases {
-			require.Equal(t, filter.ShouldIgnoreDDLEvent(1, tc.ddlType, tc.schema, tc.table), tc.ignore, "%#v", tc)
+			ignore, err := filter.ShouldDiscardDDL(tc.startTs, tc.ddlType, tc.schema, tc.table, tc.query)
+			require.Nil(t, err, "%#v", tc)
+			require.Equal(t, tc.ignore, ignore, "%#v", tc)
 		}
+	}
+}
+
+func TestIsAllowedDDL(t *testing.T) {
+	type testCase struct {
+		timodel.ActionType
+		allowed bool
+	}
+	testCases := make([]testCase, 0, len(allowDDLList))
+	for _, action := range allowDDLList {
+		testCases = append(testCases, testCase{action, true})
+	}
+	testCases = append(testCases, testCase{timodel.ActionAddForeignKey, false})
+	testCases = append(testCases, testCase{timodel.ActionDropForeignKey, false})
+	testCases = append(testCases, testCase{timodel.ActionCreateSequence, false})
+	testCases = append(testCases, testCase{timodel.ActionAlterSequence, false})
+	testCases = append(testCases, testCase{timodel.ActionDropSequence, false})
+	for _, tc := range testCases {
+		require.Equal(t, tc.allowed, isAllowedDDL(tc.ActionType), "%#v", tc)
+	}
+}
+
+func TestIsSchemaDDL(t *testing.T) {
+	cases := []struct {
+		actionType timodel.ActionType
+		isSchema   bool
+	}{
+		{timodel.ActionCreateSchema, true},
+		{timodel.ActionDropSchema, true},
+		{timodel.ActionModifySchemaCharsetAndCollate, true},
+		{timodel.ActionCreateTable, false},
+		{timodel.ActionDropTable, false},
+		{timodel.ActionTruncateTable, false},
+		{timodel.ActionAddColumn, false},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.isSchema, IsSchemaDDL(tc.actionType), "%#v", tc)
 	}
 }

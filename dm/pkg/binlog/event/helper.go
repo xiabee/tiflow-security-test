@@ -16,13 +16,12 @@ package event
 import (
 	gmysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
-
 	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 )
 
 // GTIDsFromPreviousGTIDsEvent get GTID set from a PreviousGTIDsEvent.
-func GTIDsFromPreviousGTIDsEvent(e *replication.BinlogEvent) (gtid.Set, error) {
+func GTIDsFromPreviousGTIDsEvent(e *replication.BinlogEvent) (gmysql.GTIDSet, error) {
 	var gSetStr string
 	switch ev := e.Event.(type) {
 	case *replication.PreviousGTIDsEvent:
@@ -35,7 +34,7 @@ func GTIDsFromPreviousGTIDsEvent(e *replication.BinlogEvent) (gtid.Set, error) {
 }
 
 // GTIDsFromMariaDBGTIDListEvent get GTID set from a MariaDBGTIDListEvent.
-func GTIDsFromMariaDBGTIDListEvent(e *replication.BinlogEvent) (gtid.Set, error) {
+func GTIDsFromMariaDBGTIDListEvent(e *replication.BinlogEvent) (gmysql.GTIDSet, error) {
 	var gtidListEv *replication.MariadbGTIDListEvent
 	switch ev := e.Event.(type) {
 	case *replication.MariadbGTIDListEvent:
@@ -57,15 +56,5 @@ func GTIDsFromMariaDBGTIDListEvent(e *replication.BinlogEvent) (gtid.Set, error)
 		}
 	}
 
-	// always MariaDB for MariaDBGTIDListEvent
-	gSet, err := gtid.ParserGTID(gmysql.MariaDBFlavor, "")
-	if err != nil {
-		return nil, terror.Annotatef(err, "parse empty GTID set")
-	}
-	err = gSet.Set(ggSet)
-	if err != nil {
-		return nil, terror.Annotatef(err, "replace GTID set with set %v", ggSet)
-	}
-
-	return gSet, nil
+	return ggSet, nil
 }

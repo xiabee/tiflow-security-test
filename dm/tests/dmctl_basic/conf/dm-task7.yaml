@@ -16,23 +16,25 @@ mysql-instances:
   - source-id: "mysql-replica-01"
     block-allow-list:  "instance"
     route-rules: ["sharding-route-rules-table", "sharding-route-rules-schema"]
-    column-mapping-rules: ["instance-1"]
     mydumper-config-name: "global"
     loader-config-name: "global"
     syncer-config-name: "global"
     # sync t_1's alter event by task config(overwrite)
     # ignore t_2's alter event by source config
     filter-rules: ["user-filter-1"]
+    meta:
+      binlog-gtid: ""
 
   - source-id: "mysql-replica-02"
     block-allow-list:  "instance"
     route-rules: ["sharding-route-rules-table", "sharding-route-rules-schema"]
-    column-mapping-rules: ["instance-2"]
     mydumper-config-name: "global"
     loader-config-name: "global"
     syncer-config-name: "global"
     # ignore t_2's alter event by task config
     filter-rules: ["user-filter-2"]
+    meta:
+      binlog-gtid: ""
 
 block-allow-list:
   instance:
@@ -53,23 +55,6 @@ routes:
   sharding-route-rules-schema:
     schema-pattern: dmctl
     target-schema: dmctl
-
-column-mappings:
-  instance-1:
-    schema-pattern: "dmctl"
-    table-pattern: "t_*"
-    expression: "partition id"
-    source-column: "id"
-    target-column: "id"
-    arguments: ["1", "", "t_"]
-
-  instance-2:
-    schema-pattern: "dmctl"
-    table-pattern: "t_*"
-    expression: "partition id"
-    source-column: "id"
-    target-column: "id"
-    arguments: ["2", "", "t_"]
 
 mydumpers:
   global:

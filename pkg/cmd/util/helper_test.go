@@ -16,12 +16,15 @@ package util
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"net/url"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/pingcap/tiflow/pkg/config"
+	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -100,12 +103,8 @@ func TestVerifyPdEndpoint(t *testing.T) {
 }
 
 func TestStrictDecodeValidFile(t *testing.T) {
-	dataDir, err := ioutil.TempDir("", "data")
-	require.NoError(t, err)
-	tmpDir, err := ioutil.TempDir("", "tmp")
-	require.NoError(t, err)
-	defer os.RemoveAll(dataDir)
-	defer os.RemoveAll(tmpDir)
+	dataDir := t.TempDir()
+	tmpDir := t.TempDir()
 
 	configPath := filepath.Join(tmpDir, "ticdc.toml")
 	configContent := fmt.Sprintf(`
@@ -142,7 +141,7 @@ cert-path = "bb"
 key-path = "cc"
 cert-allowed-cn = ["dd","ee"]
 `, dataDir)
-	err = os.WriteFile(configPath, []byte(configContent), 0o644)
+	err := os.WriteFile(configPath, []byte(configContent), 0o644)
 	require.Nil(t, err)
 
 	conf := config.GetDefaultServerConfig()
@@ -151,24 +150,20 @@ cert-allowed-cn = ["dd","ee"]
 }
 
 func TestStrictDecodeInvalidFile(t *testing.T) {
-	dataDir, err := ioutil.TempDir("", "data")
-	require.NoError(t, err)
-	tmpDir, err := ioutil.TempDir("", "tmp")
-	require.NoError(t, err)
-	defer os.RemoveAll(dataDir)
-	defer os.RemoveAll(tmpDir)
+	dataDir := t.TempDir()
+	tmpDir := t.TempDir()
 
 	configPath := filepath.Join(tmpDir, "ticdc.toml")
 	configContent := fmt.Sprintf(`
-unknown = "128.0.0.1:1234"
-data-dir = "%+v"
+	unknown = "128.0.0.1:1234"
+	data-dir = "%+v"
 
-[log.unkown]
-max-size = 200
-max-days = 1
-max-backups = 1
-`, dataDir)
-	err = os.WriteFile(configPath, []byte(configContent), 0o644)
+	[log.unkown]
+	max-size = 200
+	max-days = 1
+	max-backups = 1
+	`, dataDir)
+	err := os.WriteFile(configPath, []byte(configContent), 0o644)
 	require.Nil(t, err)
 
 	conf := config.GetDefaultServerConfig()
@@ -189,8 +184,12 @@ func TestAndWriteExampleReplicaTOML(t *testing.T) {
 	require.Equal(t, &config.MounterConfig{
 		WorkerNum: 16,
 	}, cfg.Mounter)
-	err = cfg.ValidateAndAdjust(nil)
-	require.Nil(t, err)
+
+	sinkURL, err := url.Parse("kafka://127.0.0.1:9092")
+	require.NoError(t, err)
+
+	err = cfg.ValidateAndAdjust(sinkURL)
+	require.NoError(t, err)
 	require.Equal(t, &config.SinkConfig{
 		EncoderConcurrency: 16,
 		DispatchRules: []*config.DispatchRule{
@@ -201,14 +200,47 @@ func TestAndWriteExampleReplicaTOML(t *testing.T) {
 			{Matcher: []string{"test1.*", "test2.*"}, Columns: []string{"column1", "column2"}},
 			{Matcher: []string{"test3.*", "test4.*"}, Columns: []string{"!a", "column3"}},
 		},
-		Protocol: "open-protocol",
+		CSVConfig: &config.CSVConfig{
+			Quote:                string(config.DoubleQuoteChar),
+			Delimiter:            string(config.Comma),
+			NullString:           config.NULL,
+			BinaryEncodingMethod: config.BinaryEncodingBase64,
+		},
+		Terminator:               "\r\n",
+		DateSeparator:            config.DateSeparatorDay.String(),
+		EnablePartitionSeparator: true,
+		Protocol:                 "open-protocol",
+		AdvanceTimeoutInSec:      util.AddressOf(uint(150)),
 	}, cfg.Sink)
-	require.Equal(t, &config.CyclicConfig{
-		Enable:          false,
-		ReplicaID:       1,
-		FilterReplicaID: []uint64{2, 3},
-		SyncDDL:         true,
-	}, cfg.Cyclic)
+}
+
+func TestAndWriteStorageSinkTOML(t *testing.T) {
+	cfg := config.GetDefaultReplicaConfig()
+	err := StrictDecodeFile("changefeed_storage_sink.toml", "cdc", &cfg)
+	require.NoError(t, err)
+
+	sinkURL, err := url.Parse("s3://127.0.0.1:9092")
+	require.NoError(t, err)
+
+	cfg.Sink.Protocol = config.ProtocolCanalJSON.String()
+	err = cfg.ValidateAndAdjust(sinkURL)
+	require.NoError(t, err)
+	require.Equal(t, &config.SinkConfig{
+		Protocol:                 config.ProtocolCanalJSON.String(),
+		EncoderConcurrency:       16,
+		Terminator:               "\r\n",
+		DateSeparator:            "day",
+		EnablePartitionSeparator: true,
+		FileIndexWidth:           config.DefaultFileIndexWidth,
+		CSVConfig: &config.CSVConfig{
+			Delimiter:            ",",
+			Quote:                "\"",
+			NullString:           "\\N",
+			IncludeCommitTs:      false,
+			BinaryEncodingMethod: config.BinaryEncodingBase64,
+		},
+		AdvanceTimeoutInSec: util.AddressOf(uint(150)),
+	}, cfg.Sink)
 }
 
 func TestAndWriteExampleServerTOML(t *testing.T) {
@@ -245,12 +277,8 @@ func TestJSONPrint(t *testing.T) {
 }
 
 func TestIgnoreStrictCheckItem(t *testing.T) {
-	dataDir, err := ioutil.TempDir("", "data")
-	require.NoError(t, err)
-	tmpDir, err := ioutil.TempDir("", "tmp")
-	require.NoError(t, err)
-	defer os.RemoveAll(dataDir)
-	defer os.RemoveAll(tmpDir)
+	dataDir := t.TempDir()
+	tmpDir := t.TempDir()
 
 	configPath := filepath.Join(tmpDir, "ticdc.toml")
 	configContent := fmt.Sprintf(`
@@ -260,7 +288,7 @@ max-size = 200
 max-days = 1
 max-backups = 1
 `, dataDir)
-	err = os.WriteFile(configPath, []byte(configContent), 0o644)
+	err := os.WriteFile(configPath, []byte(configContent), 0o644)
 	require.Nil(t, err)
 
 	conf := config.GetDefaultServerConfig()
@@ -294,4 +322,55 @@ unknown = 1
 
 	err = StrictDecodeFile(configPath, "test", conf, "debug")
 	require.Nil(t, err)
+}
+
+func TestInitSignalHandlingGracefulShutdown(t *testing.T) {
+	shutdownCh := make(chan struct{}, 1)
+	shutdown := func() <-chan struct{} { return shutdownCh }
+	cancelCh := make(chan struct{}, 1)
+	cancel := func() { cancelCh <- struct{}{} }
+	InitSignalHandling(shutdown, cancel)
+	self, err := os.FindProcess(os.Getpid())
+	require.Nil(t, err)
+
+	// First signal for preparing shutdown.
+	err = self.Signal(syscall.SIGTERM)
+	require.Nil(t, err)
+	select {
+	case <-shutdownCh:
+		require.Fail(t, "unexpected")
+	case <-cancelCh:
+		require.Fail(t, "unexpected")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Graceful shutdown complete.
+	shutdownCh <- struct{}{}
+	select {
+	case <-cancelCh:
+	case <-time.After(100 * time.Millisecond):
+		require.Fail(t, "timeout")
+	}
+}
+
+func TestInitSignalHandlingForceShutdown(t *testing.T) {
+	shutdownCh := make(chan struct{}, 1)
+	shutdown := func() <-chan struct{} { return shutdownCh }
+	cancelCh := make(chan struct{}, 1)
+	cancel := func() { cancelCh <- struct{}{} }
+	InitSignalHandling(shutdown, cancel)
+	self, err := os.FindProcess(os.Getpid())
+	require.Nil(t, err)
+	err = self.Signal(syscall.SIGTERM)
+	require.Nil(t, err)
+	// Second signal for force shutdown.
+	// We use another signal, to avoid lost signal, because sending a signal
+	// is setting a bit in Unix.
+	err = self.Signal(syscall.SIGQUIT)
+	require.Nil(t, err)
+	select {
+	case <-cancelCh:
+	case <-time.After(1 * time.Second):
+		require.Fail(t, "timeout")
+	}
 }

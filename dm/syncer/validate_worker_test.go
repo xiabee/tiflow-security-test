@@ -22,19 +22,18 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	gmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tidb/util/filter"
-	"github.com/stretchr/testify/require"
-
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/dm/dm/config"
-	"github.com/pingcap/tiflow/dm/dm/pb"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/pkg/sqlmodel"
+	"github.com/stretchr/testify/require"
 )
 
 func genRowChangeJob(tbl filter.Table, tblInfo *model.TableInfo, key string, tp rowChangeJobType, data []interface{}) *rowValidationJob {
@@ -59,6 +58,10 @@ func genRowChangeJob(tbl filter.Table, tblInfo *model.TableInfo, key string, tp 
 }
 
 func TestValidatorWorkerValidateTableChanges(t *testing.T) {
+	require.Nil(t, failpoint.Enable("github.com/pingcap/tiflow/dm/syncer/ValidatorMockUpstreamTZ", `return()`))
+	defer func() {
+		require.Nil(t, failpoint.Disable("github.com/pingcap/tiflow/dm/syncer/ValidatorMockUpstreamTZ"))
+	}()
 	testFunc := func(t *testing.T, mode string) {
 		t.Helper()
 		tbl1 := filter.Table{Schema: "test", Name: "tbl1"}
@@ -79,9 +82,9 @@ func TestValidatorWorkerValidateTableChanges(t *testing.T) {
 		syncerObj := NewSyncer(cfg, nil, nil)
 		validator := NewContinuousDataValidator(cfg, syncerObj, false)
 		validator.persistHelper.schemaInitialized.Store(true)
-		validator.Start(pb.Stage_Stopped)
+		require.NoError(t, validator.initialize())
 		defer validator.cancel()
-		validator.reachedSyncer.Store(true)
+		validator.markErrorStarted.Store(true)
 
 		worker := newValidateWorker(validator, 0)
 
@@ -268,8 +271,8 @@ func TestValidatorWorkerValidateTableChanges(t *testing.T) {
 			checkInitStatus()
 		}
 
-		// set reachedSyncer = false, there should not be any errors and failedCount=0
-		validator.reachedSyncer.Store(false)
+		// set markErrorStarted = false, there should not be any errors and failedCount=0
+		validator.markErrorStarted.Store(false)
 		worker.updateRowChange(genRowChangeJob(tbl1, tableInfo1, "1", rowInsert, []interface{}{1, "a"}))
 
 		mock.ExpectQuery("SELECT .* FROM .*tbl1.* WHERE .*").WillReturnRows(
@@ -298,8 +301,8 @@ func TestValidatorWorkerValidateTableChanges(t *testing.T) {
 		// everything is validated successfully, no error rows
 		checkInitStatus()
 
-		// set reachedSyncer=true, rowErrorDelayInSec = 0, failed rows became error directly
-		validator.reachedSyncer.Store(true)
+		// set markErrorStarted=true, rowErrorDelayInSec = 0, failed rows became error directly
+		validator.markErrorStarted.Store(true)
 		worker.rowErrorDelayInSec = 0
 		worker.updateRowChange(genRowChangeJob(tbl1, tableInfo1, "1", rowInsert, []interface{}{1, "a"}))
 		mock.ExpectQuery("SELECT .* FROM .*tbl1.* WHERE .*").WillReturnRows(
@@ -464,7 +467,7 @@ func TestValidatorWorkerGetTargetRows(t *testing.T) {
 
 		worker := &validateWorker{
 			ctx: context.Background(),
-			db:  conn.NewBaseDB(db, func() {}),
+			db:  conn.NewBaseDBForTest(db, func() {}),
 			L:   log.L(),
 		}
 		targetRows, err2 := worker.getTargetRows(cond)
@@ -496,7 +499,7 @@ func TestValidatorWorkerGetTargetRows(t *testing.T) {
 	}
 	worker := &validateWorker{
 		ctx: context.Background(),
-		db:  conn.NewBaseDB(db, func() {}),
+		db:  conn.NewBaseDBForTest(db, func() {}),
 		L:   log.L(),
 	}
 
@@ -525,7 +528,39 @@ func TestValidatorWorkerGetSourceRowsForCompare(t *testing.T) {
 func TestValidatorIsRetryableDBError(t *testing.T) {
 	require.True(t, isRetryableDBError(&gmysql.MySQLError{Number: errno.ErrPDServerTimeout}))
 	require.True(t, isRetryableDBError(gmysql.ErrInvalidConn))
-	require.True(t, isRetryableDBError(context.DeadlineExceeded))
 	require.True(t, isRetryableDBError(driver.ErrBadConn))
 	require.True(t, isRetryableDBError(errors.Annotate(driver.ErrBadConn, "test")))
+	require.True(t, isRetryableDBError(errors.New("Error 9005: Region is unavailable")))
+}
+
+func TestValidatorRowCountAndSize(t *testing.T) {
+	cfg := genSubtaskConfig(t)
+	cfg.ValidatorCfg.Mode = config.ValidationFull
+	syncerObj := NewSyncer(cfg, nil, nil)
+	validator := NewContinuousDataValidator(cfg, syncerObj, false)
+	validator.persistHelper.schemaInitialized.Store(true)
+	validator.markErrorStarted.Store(true)
+
+	worker := newValidateWorker(validator, 0)
+	worker.newJobAdded(&rowValidationJob{Tp: rowInsert, size: 100})
+	worker.newJobAdded(&rowValidationJob{Tp: rowUpdated, size: 200})
+	worker.newJobAdded(&rowValidationJob{Tp: rowDeleted, size: 400})
+	worker.newJobAdded(&rowValidationJob{Tp: rowInsert, size: 800})
+	require.Equal(t, int64(2), worker.pendingRowCounts[rowInsert])
+	require.Equal(t, int64(1), worker.pendingRowCounts[rowUpdated])
+	require.Equal(t, int64(1), worker.pendingRowCounts[rowDeleted])
+	require.Equal(t, int64(1500), worker.pendingRowSize)
+	require.Equal(t, int64(2), validator.pendingRowCounts[rowInsert].Load())
+	require.Equal(t, int64(1), validator.pendingRowCounts[rowUpdated].Load())
+	require.Equal(t, int64(1), validator.pendingRowCounts[rowDeleted].Load())
+	require.Equal(t, int64(1500), validator.pendingRowSize.Load())
+	worker.setPendingRowCountsAndSize([]int64{0, 0, 0}, 300)
+	require.Equal(t, int64(0), worker.pendingRowCounts[rowInsert])
+	require.Equal(t, int64(0), worker.pendingRowCounts[rowUpdated])
+	require.Equal(t, int64(0), worker.pendingRowCounts[rowDeleted])
+	require.Equal(t, int64(300), worker.pendingRowSize)
+	require.Equal(t, int64(0), validator.pendingRowCounts[rowInsert].Load())
+	require.Equal(t, int64(0), validator.pendingRowCounts[rowUpdated].Load())
+	require.Equal(t, int64(0), validator.pendingRowCounts[rowDeleted].Load())
+	require.Equal(t, int64(300), validator.pendingRowSize.Load())
 }

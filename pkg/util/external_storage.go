@@ -15,6 +15,8 @@ package util
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -29,6 +31,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // GetExternalStorageFromURI creates a new storage.ExternalStorage from a uri.
@@ -64,15 +67,38 @@ func GetExternalStorage(
 		return nil, errors.Trace(err)
 	}
 
-	// Note that retryer can not be customized in relase-6.1.
 	ret, err := storage.New(ctx, backEnd, &storage.ExternalStorageOptions{
 		SendCredentials: false,
+		S3Retryer:       retryer,
 	})
 	if err != nil {
 		retErr := errors.ErrFailToCreateExternalStorage.Wrap(errors.Trace(err))
 		return nil, retErr.GenWithStackByArgs("creating ExternalStorage for s3")
 	}
+
+	// Check the connection and ignore the returned bool value, since we don't care if the file exists.
+	_, err = ret.FileExists(ctx, "test")
+	if err != nil {
+		retErr := errors.ErrFailToCreateExternalStorage.Wrap(errors.Trace(err))
+		return nil, retErr.GenWithStackByArgs("creating ExternalStorage for s3")
+	}
 	return ret, nil
+}
+
+// GetTestExtStorage creates a test storage.ExternalStorage from a uri.
+func GetTestExtStorage(
+	ctx context.Context, tmpDir string,
+) (storage.ExternalStorage, *url.URL, error) {
+	uriStr := fmt.Sprintf("file://%s", tmpDir)
+	ret, err := GetExternalStorageFromURI(ctx, uriStr)
+	if err != nil {
+		return nil, nil, err
+	}
+	uri, err := storage.ParseRawURL(uriStr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ret, uri, nil
 }
 
 // retryerWithLog wraps the client.DefaultRetryer, and logs when retrying.
@@ -167,11 +193,15 @@ func (s *extStorageWithTimeout) WalkDir(
 
 // Create opens a file writer by path. path is relative path to storage base path
 func (s *extStorageWithTimeout) Create(
-	ctx context.Context, path string,
+	ctx context.Context, path string, option *storage.WriterOption,
 ) (storage.ExternalFileWriter, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	return s.ExternalStorage.Create(ctx, path)
+	if option != nil && option.Concurrency <= 1 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+	}
+	// multipart uploading spawns a background goroutine, can't set timeout
+	return s.ExternalStorage.Create(ctx, path, option)
 }
 
 // Rename file name from oldFileName to newFileName
@@ -211,4 +241,62 @@ func IsNotExistInExtStorage(err error) bool {
 		}
 	}
 	return false
+}
+
+// RemoveFilesIf removes files from external storage if the path matches the predicate.
+func RemoveFilesIf(
+	ctx context.Context,
+	extStorage storage.ExternalStorage,
+	pred func(path string) bool,
+	opt *storage.WalkOption,
+) error {
+	var toRemoveFiles []string
+	err := extStorage.WalkDir(ctx, opt, func(path string, _ int64) error {
+		path = strings.TrimPrefix(path, "/")
+		if pred(path) {
+			toRemoveFiles = append(toRemoveFiles, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return errors.ErrExternalStorageAPI.Wrap(err).GenWithStackByArgs("RemoveTemporaryFiles")
+	}
+
+	log.Debug("Removing files", zap.Any("toRemoveFiles", toRemoveFiles))
+	return DeleteFilesInExtStorage(ctx, extStorage, toRemoveFiles)
+}
+
+// DeleteFilesInExtStorage deletes files in external storage concurrently.
+// TODO: Add a test for this function to cover batch delete.
+func DeleteFilesInExtStorage(
+	ctx context.Context, extStorage storage.ExternalStorage, toRemoveFiles []string,
+) error {
+	limit := make(chan struct{}, 32)
+	batch := 3000
+	eg, egCtx := errgroup.WithContext(ctx)
+	for len(toRemoveFiles) > 0 {
+		select {
+		case <-egCtx.Done():
+			return egCtx.Err()
+		case limit <- struct{}{}:
+		}
+
+		if len(toRemoveFiles) < batch {
+			batch = len(toRemoveFiles)
+		}
+		files := toRemoveFiles[:batch]
+		eg.Go(func() error {
+			defer func() { <-limit }()
+			for _, file := range files {
+				err := extStorage.DeleteFile(egCtx, file)
+				if err != nil && !IsNotExistInExtStorage(err) {
+					// if fail then retry, may end up with notExit err, ignore the error
+					return errors.ErrExternalStorageAPI.Wrap(err)
+				}
+			}
+			return nil
+		})
+		toRemoveFiles = toRemoveFiles[batch:]
+	}
+	return eg.Wait()
 }

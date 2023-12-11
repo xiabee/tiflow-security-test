@@ -1,0 +1,25 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Schedule
+metadata:
+  name: pod-failure-dataflow
+  labels:
+    app: pod-failure-dataflow
+spec:
+  schedule: '@every 2m'
+  type: PodChaos
+  historyLimit: 5
+  concurrencyPolicy: Forbid
+  podChaos:
+    action: pod-failure
+    mode: one
+    duration: 30s
+    selector:
+      pods:
+        default:
+        - chaos-server-master-0
+        - chaos-server-master-1
+        - chaos-server-master-2
+        - chaos-executor-0
+        - chaos-executor-1
+        - chaos-executor-2
+        - chaos-executor-3

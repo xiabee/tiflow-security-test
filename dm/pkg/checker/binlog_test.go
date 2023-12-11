@@ -18,6 +18,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,7 +116,7 @@ func TestBinlogDB(t *testing.T) {
 	}
 
 	for _, cs := range cases {
-		binlogDBChecker := NewBinlogDBChecker(db, &dbutil.DBConfig{}, cs.schemas, cs.caseSensitive)
+		binlogDBChecker := NewBinlogDBChecker(conn.NewBaseDBForTest(db), &dbutil.DBConfig{}, cs.schemas, cs.caseSensitive)
 		versionRow := sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("version", "mysql")
 		masterStatusRow := sqlmock.NewRows([]string{"File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set"}).
 			AddRow("", 0, cs.doDB, cs.ignoreDB, "")
@@ -125,6 +126,10 @@ func TestBinlogDB(t *testing.T) {
 		r := binlogDBChecker.Check(ctx)
 		require.Nil(t, mock.ExpectationsWereMet())
 		require.Equal(t, cs.state, r.State)
+		// the error message is moved to Errors
+		if r.State == StateFailure {
+			require.Equal(t, 1, len(r.Errors))
+		}
 	}
 }
 

@@ -18,23 +18,20 @@ import (
 	"fmt"
 
 	"github.com/pingcap/errors"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
 
 // AdminJobType represents for admin job type, both used in owner and processor
 type AdminJobType int
 
-// AdminJobOption records addition options of an admin job
-type AdminJobOption struct {
-	ForceRemove bool
-}
-
 // AdminJob holds an admin job
 type AdminJob struct {
-	CfID  ChangeFeedID
-	Type  AdminJobType
-	Opts  *AdminJobOption
-	Error *RunningError
+	CfID                  ChangeFeedID
+	Type                  AdminJobType
+	Error                 *RunningError
+	OverwriteCheckpointTs uint64
 }
 
 // All AdminJob types
@@ -72,6 +69,14 @@ func (t AdminJobType) IsStopState() bool {
 	return false
 }
 
+// DDLJobEntry is the DDL job entry.
+type DDLJobEntry struct {
+	Job    *timodel.Job
+	OpType OpType
+	CRTs   uint64
+	Err    error
+}
+
 // TaskPosition records the process information of a capture
 type TaskPosition struct {
 	// The maximum event CommitTs that has been synchronized. This is updated by corresponding processor.
@@ -87,8 +92,10 @@ type TaskPosition struct {
 	// Deprecated: only used in API. TODO: remove API usage.
 	Count uint64 `json:"count"`
 
-	// Error when error happens
+	// Error when changefeed error happens
 	Error *RunningError `json:"error"`
+	// Warning when module error happens
+	Warning *RunningError `json:"warning"`
 }
 
 // Marshal returns the json marshal format of a TaskStatus
@@ -119,9 +126,18 @@ func (tp *TaskPosition) Clone() *TaskPosition {
 	}
 	if tp.Error != nil {
 		ret.Error = &RunningError{
+			Time:    tp.Error.Time,
 			Addr:    tp.Error.Addr,
 			Code:    tp.Error.Code,
 			Message: tp.Error.Message,
+		}
+	}
+	if tp.Warning != nil {
+		ret.Warning = &RunningError{
+			Time:    tp.Warning.Time,
+			Addr:    tp.Warning.Addr,
+			Code:    tp.Warning.Code,
+			Message: tp.Warning.Message,
 		}
 	}
 	return ret
@@ -172,35 +188,9 @@ func (o *TableOperation) Clone() *TableOperation {
 	return &clone
 }
 
-// TaskWorkload records the workloads of a task
-// the value of the struct is the workload
-type TaskWorkload map[TableID]WorkloadInfo
-
-// WorkloadInfo records the workload info of a table
-type WorkloadInfo struct {
-	Workload uint64 `json:"workload"`
-}
-
-// Unmarshal unmarshals into *TaskWorkload from json marshal byte slice
-func (w *TaskWorkload) Unmarshal(data []byte) error {
-	err := json.Unmarshal(data, w)
-	return errors.Annotatef(
-		cerror.WrapError(cerror.ErrUnmarshalFailed, err), "Unmarshal data: %v", data)
-}
-
-// Marshal returns the json marshal format of a TaskWorkload
-func (w *TaskWorkload) Marshal() (string, error) {
-	if w == nil {
-		return "{}", nil
-	}
-	data, err := json.Marshal(w)
-	return string(data), cerror.WrapError(cerror.ErrMarshalFailed, err)
-}
-
 // TableReplicaInfo records the table replica info
 type TableReplicaInfo struct {
-	StartTs     Ts      `json:"start-ts"`
-	MarkTableID TableID `json:"mark-table-id"`
+	StartTs Ts `json:"start-ts"`
 }
 
 // Clone clones a TableReplicaInfo
@@ -258,13 +248,10 @@ func (ts *TaskStatus) Clone() *TaskStatus {
 }
 
 // TableID is the ID of the table
-type TableID = int64
-
-// SchemaID is the ID of the schema
-type SchemaID = int64
+type TableID = tablepb.TableID
 
 // Ts is the timestamp with a logical count
-type Ts = uint64
+type Ts = tablepb.Ts
 
 // ProcessorsInfos maps from capture IDs to TaskStatus
 type ProcessorsInfos map[CaptureID]*TaskStatus
@@ -282,9 +269,15 @@ func (p ProcessorsInfos) String() string {
 }
 
 // ChangeFeedStatus stores information about a ChangeFeed
+// It is stored in etcd.
 type ChangeFeedStatus struct {
-	ResolvedTs   uint64       `json:"resolved-ts"`
-	CheckpointTs uint64       `json:"checkpoint-ts"`
+	CheckpointTs uint64 `json:"checkpoint-ts"`
+	// minTableBarrierTs is the minimum commitTs of all DDL events and is only
+	// used to check whether there is a pending DDL job at the checkpointTs when
+	// initializing the changefeed.
+	MinTableBarrierTs uint64 `json:"min-table-barrier-ts"`
+	// TODO: remove this filed after we don't use ChangeFeedStatus to
+	// control processor. This is too ambiguous.
 	AdminJobType AdminJobType `json:"admin-job-type"`
 }
 

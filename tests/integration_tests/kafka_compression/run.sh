@@ -18,9 +18,6 @@ function test_compression() {
 	run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=canal-json&version=${KAFKA_VERSION}&enable-tidb-extension=true"
 	run_sql_file $CUR/data/$1_data.sql ${UP_TIDB_HOST} ${UP_TIDB_PORT}
 
-	# sleep 10 seconds to wait for the data being sent to kafka.
-	sleep 10
-
 	compression_algorithm=$(grep "Kafka producer uses $1 compression algorithm" "$WORK_DIR/cdc.log")
 	if [[ "$compression_algorithm" -ne 1 ]]; then
 		echo "can't found producer compression algorithm"
@@ -33,7 +30,7 @@ function test_compression() {
 }
 
 function run() {
-	if [ "$SINK_TYPE" == "mysql" ]; then
+	if [ "$SINK_TYPE" != "kafka" ]; then
 		return
 	fi
 

@@ -20,11 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/parser/model"
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/pkg/config"
-	cerror "github.com/pingcap/tiflow/pkg/errors"
-	cerrors "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 )
@@ -35,9 +33,6 @@ func TestFillV1(t *testing.T) {
 	v1Config := `
 {
     "sink-uri":"blackhole://",
-    "opts":{
-
-    },
     "start-ts":417136892416622595,
     "target-ts":0,
     "admin-job-type":0,
@@ -77,8 +72,7 @@ func TestFillV1(t *testing.T) {
             "ignore-txn-start-ts":[
                 1,
                 2
-            ],
-            "ddl-allow-list":"AQI="
+            ]
         },
         "mounter":{
             "worker-num":64
@@ -96,16 +90,6 @@ func TestFillV1(t *testing.T) {
                     "rule":"rowid"
                 }
             ]
-        },
-        "cyclic-replication":{
-            "enable":true,
-            "replica-id":1,
-            "filter-replica-ids":[
-                2,
-                3
-            ],
-            "id-buckets":4,
-            "sync-ddl":true
         }
     }
 }
@@ -115,9 +99,6 @@ func TestFillV1(t *testing.T) {
 	require.Nil(t, err)
 	require.Equal(t, &ChangeFeedInfo{
 		SinkURI: "blackhole://",
-		Opts: map[string]string{
-			"_cyclic_relax_sql_mode": `{"enable":true,"replica-id":1,"filter-replica-ids":[2,3],"id-buckets":4,"sync-ddl":true}`,
-		},
 		StartTs: 417136892416622595,
 		Engine:  "memory",
 		SortDir: ".",
@@ -143,7 +124,6 @@ func TestFillV1(t *testing.T) {
 					IgnoreDBs: []string{"test", "sys"},
 				},
 				IgnoreTxnStartTs: []uint64{1, 2},
-				DDLAllowlist:     []model.ActionType{1, 2},
 			},
 			Mounter: &config.MounterConfig{
 				WorkerNum: 64,
@@ -154,13 +134,6 @@ func TestFillV1(t *testing.T) {
 					{Matcher: []string{"test.tbl4"}, DispatcherRule: "rowid"},
 				},
 			},
-			Cyclic: &config.CyclicConfig{
-				Enable:          true,
-				ReplicaID:       1,
-				FilterReplicaID: []uint64{2, 3},
-				IDBuckets:       4,
-				SyncDDL:         true,
-			},
 		},
 	}, cfg)
 }
@@ -170,17 +143,18 @@ func TestVerifyAndComplete(t *testing.T) {
 
 	info := &ChangeFeedInfo{
 		SinkURI: "blackhole://",
-		Opts:    map[string]string{},
 		StartTs: 417257993615179777,
 		Config: &config.ReplicaConfig{
-			CaseSensitive:    true,
-			EnableOldValue:   true,
-			CheckGCSafePoint: true,
+			MemoryQuota:        1073741824,
+			CaseSensitive:      false,
+			EnableOldValue:     true,
+			CheckGCSafePoint:   true,
+			SyncPointInterval:  time.Minute * 10,
+			SyncPointRetention: time.Hour * 24,
 		},
 	}
 
-	err := info.VerifyAndComplete()
-	require.Nil(t, err)
+	info.VerifyAndComplete()
 	require.Equal(t, SortUnified, info.Engine)
 
 	marshalConfig1, err := info.Config.Marshal()
@@ -354,13 +328,12 @@ func TestFixSinkProtocolIncompatible(t *testing.T) {
 		if tc.expectedProtocolStr != "" {
 			require.Equal(t, tc.expectedProtocolStr, tc.info.Config.Sink.Protocol)
 		} else {
-			var protocol config.Protocol
-			err := protocol.FromString(tc.info.Config.Sink.Protocol)
+			_, err := config.ParseSinkProtocolFromString(tc.info.Config.Sink.Protocol)
 			if strings.Contains(tc.info.SinkURI, "kafka") {
 				require.NoError(t, err)
 			} else {
 				require.Error(t, err)
-				require.Contains(t, err.Error(), "ErrMQSinkUnknownProtocol")
+				require.Contains(t, err.Error(), "ErrSinkUnknownProtocol")
 			}
 		}
 	}
@@ -489,40 +462,20 @@ func TestFixState(t *testing.T) {
 				AdminJobType: AdminNone,
 				State:        StateNormal,
 				Error: &RunningError{
-					Code: string(cerrors.ErrGCTTLExceeded.RFCCode()),
+					Code: string(errors.ErrClusterIDMismatch.RFCCode()),
 				},
 			},
-			expectedState: StateFailed,
+			expectedState: StateWarning,
 		},
 		{
 			info: &ChangeFeedInfo{
 				AdminJobType: AdminResume,
 				State:        StateNormal,
 				Error: &RunningError{
-					Code: string(cerrors.ErrGCTTLExceeded.RFCCode()),
+					Code: string(errors.ErrClusterIDMismatch.RFCCode()),
 				},
 			},
-			expectedState: StateFailed,
-		},
-		{
-			info: &ChangeFeedInfo{
-				AdminJobType: AdminNone,
-				State:        StateNormal,
-				Error: &RunningError{
-					Code: string(cerrors.ErrClusterIDMismatch.RFCCode()),
-				},
-			},
-			expectedState: StateError,
-		},
-		{
-			info: &ChangeFeedInfo{
-				AdminJobType: AdminResume,
-				State:        StateNormal,
-				Error: &RunningError{
-					Code: string(cerrors.ErrClusterIDMismatch.RFCCode()),
-				},
-			},
-			expectedState: StateError,
+			expectedState: StateWarning,
 		},
 		{
 			info: &ChangeFeedInfo{
@@ -665,8 +618,7 @@ func TestFixMQSinkProtocol(t *testing.T) {
 
 	for _, tc := range configTestCases {
 		tc.info.fixMQSinkProtocol()
-		var protocol config.Protocol
-		err := protocol.FromString(tc.info.Config.Sink.Protocol)
+		protocol, err := config.ParseSinkProtocolFromString(tc.info.Config.Sink.Protocol)
 		require.Nil(t, err)
 		require.Equal(t, tc.expectedProtocol, protocol)
 	}
@@ -705,21 +657,23 @@ func TestFixMQSinkProtocol(t *testing.T) {
 		},
 		{
 			info: &ChangeFeedInfo{
-				SinkURI: "kafka://127.0.0.1:9092/ticdc-test2?protocol=random&max-message-size=15",
+				SinkURI: "kafka://127.0.0.1:9092/ticdc-test2?protocol=random&max-message-bytes=15",
 				Config: &config.ReplicaConfig{
 					Sink: &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
 				},
 			},
-			expectedSinkURI: "kafka://127.0.0.1:9092/ticdc-test2?max-message-size=15&protocol=open-protocol",
+			expectedSinkURI: "kafka://127.0.0.1:9092/ticdc-test2?max-message-bytes=15&" +
+				"protocol=open-protocol",
 		},
 		{
 			info: &ChangeFeedInfo{
-				SinkURI: "kafka://127.0.0.1:9092/ticdc-test2?protocol=default&max-message-size=15",
+				SinkURI: "kafka://127.0.0.1:9092/ticdc-test2?protocol=default&max-message-bytes=15",
 				Config: &config.ReplicaConfig{
 					Sink: &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
 				},
 			},
-			expectedSinkURI: "kafka://127.0.0.1:9092/ticdc-test2?max-message-size=15&protocol=open-protocol",
+			expectedSinkURI: "kafka://127.0.0.1:9092/ticdc-test2?max-message-bytes=15&" +
+				"protocol=open-protocol",
 		},
 	}
 
@@ -729,12 +683,133 @@ func TestFixMQSinkProtocol(t *testing.T) {
 	}
 }
 
+func TestFixMemoryQuotaIncompatible(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		info                *ChangeFeedInfo
+		expectedMemoryQuota uint64
+	}{
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Sink: &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedMemoryQuota: config.DefaultChangefeedMemoryQuota,
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.5.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					MemoryQuota: 0,
+					Sink:        &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedMemoryQuota: config.DefaultChangefeedMemoryQuota,
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.5.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					MemoryQuota: 10485760,
+					Sink:        &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedMemoryQuota: 10485760,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc.info.FixIncompatible()
+		require.Equal(t, tc.expectedMemoryQuota, tc.info.Config.MemoryQuota)
+	}
+}
+
+func TestFixSchedulerIncompatible(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		info              *ChangeFeedInfo
+		expectedScheduler *config.ChangefeedSchedulerConfig
+	}{
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Sink: &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: config.GetDefaultReplicaConfig().Clone().Scheduler,
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.5.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Scheduler: &config.ChangefeedSchedulerConfig{},
+					Sink:      &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: &config.ChangefeedSchedulerConfig{},
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.6.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Scheduler: &config.ChangefeedSchedulerConfig{},
+					Sink:      &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: &config.ChangefeedSchedulerConfig{},
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.6.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Scheduler: &config.ChangefeedSchedulerConfig{RegionPerSpan: 1000},
+					Sink:      &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: &config.ChangefeedSchedulerConfig{
+				RegionThreshold: 1000, EnableTableAcrossNodes: true,
+			},
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.7.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Scheduler: &config.ChangefeedSchedulerConfig{
+						RegionThreshold: 1000, WriteKeyThreshold: 1000,
+					},
+					Sink: &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: &config.ChangefeedSchedulerConfig{
+				RegionThreshold: 1000, WriteKeyThreshold: 1000,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc.info.FixIncompatible()
+		require.EqualValues(t, tc.expectedScheduler, tc.info.Config.Scheduler)
+	}
+}
+
 func TestChangeFeedInfoClone(t *testing.T) {
 	t.Parallel()
 
 	info := &ChangeFeedInfo{
 		SinkURI: "blackhole://",
-		Opts:    map[string]string{},
 		StartTs: 417257993615179777,
 		Config: &config.ReplicaConfig{
 			CaseSensitive:    true,
@@ -877,7 +952,91 @@ func TestValidateChangefeedID(t *testing.T) {
 		if !tt.wantErr {
 			require.Nil(t, err, fmt.Sprintf("case:%s", tt.name))
 		} else {
-			require.True(t, cerror.ErrInvalidChangefeedID.Equal(err), fmt.Sprintf("case:%s", tt.name))
+			require.True(t, errors.ErrInvalidChangefeedID.Equal(err),
+				fmt.Sprintf("case:%s", tt.name))
+		}
+	}
+}
+
+func TestValidateNamespace(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		{
+			name:    "alphabet",
+			id:      "testTtTT",
+			wantErr: false,
+		},
+		{
+			name:    "number",
+			id:      "01131323",
+			wantErr: false,
+		},
+		{
+			name:    "mixed",
+			id:      "9ff52acaA-aea6-4022-8eVc4-fbee3fD2c7890",
+			wantErr: false,
+		},
+		{
+			name: "len==128",
+			id: "1234567890-1234567890-1234567890-1234567890-" +
+				"1234567890-1234567890-1234567890-1234567890-" +
+				"1234567890123456789012345678901234567890",
+			wantErr: false,
+		},
+		{
+			name:    "empty string 1",
+			id:      "",
+			wantErr: true,
+		},
+		{
+			name:    "empty string 2",
+			id:      "   ",
+			wantErr: true,
+		},
+		{
+			name:    "test_task",
+			id:      "test_task ",
+			wantErr: true,
+		},
+		{
+			name:    "job$",
+			id:      "job$ ",
+			wantErr: true,
+		},
+		{
+			name:    "test-",
+			id:      "test-",
+			wantErr: true,
+		},
+		{
+			name:    "-",
+			id:      "-",
+			wantErr: true,
+		},
+		{
+			name:    "-sfsdfdf1",
+			id:      "-sfsdfdf1",
+			wantErr: true,
+		},
+		{
+			name: "len==129",
+			id: "1234567890-1234567890-1234567890-1234567890-1234567890-1234567890-" +
+				"1234567890-1234567890-1234567890-123456789012345678901234567890",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		err := ValidateNamespace(tt.id)
+		if !tt.wantErr {
+			require.Nil(t, err, fmt.Sprintf("case:%s", tt.name))
+		} else {
+			require.True(t, errors.ErrInvalidNamespace.Equal(err),
+				fmt.Sprintf("case:%s", tt.name))
 		}
 	}
 }

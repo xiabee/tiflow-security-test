@@ -21,11 +21,11 @@ import (
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/dbutil"
 	"github.com/pingcap/tidb/util/filter"
-	"go.uber.org/zap"
-
-	"github.com/pingcap/tiflow/dm/dm/config"
+	"github.com/pingcap/tiflow/dm/config"
+	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"go.uber.org/zap"
 )
 
 // ExprFilterGroup groups many related fields about expression filter.
@@ -40,11 +40,12 @@ type ExprFilterGroup struct {
 	hasUpdateFilter map[string]struct{} // set(tableName)
 	hasDeleteFilter map[string]struct{} // set(tableName)
 
-	ctx sessionctx.Context
+	tidbCtx sessionctx.Context
+	logCtx  *tcontext.Context
 }
 
 // NewExprFilterGroup creates an ExprFilterGroup.
-func NewExprFilterGroup(ctx sessionctx.Context, exprConfig []*config.ExpressionFilter) *ExprFilterGroup {
+func NewExprFilterGroup(logCtx *tcontext.Context, tidbCtx sessionctx.Context, exprConfig []*config.ExpressionFilter) *ExprFilterGroup {
 	ret := &ExprFilterGroup{
 		configs:         map[string][]*config.ExpressionFilter{},
 		insertExprs:     map[string][]expression.Expression{},
@@ -54,7 +55,8 @@ func NewExprFilterGroup(ctx sessionctx.Context, exprConfig []*config.ExpressionF
 		hasInsertFilter: map[string]struct{}{},
 		hasUpdateFilter: map[string]struct{}{},
 		hasDeleteFilter: map[string]struct{}{},
-		ctx:             ctx,
+		tidbCtx:         tidbCtx,
+		logCtx:          logCtx,
 	}
 	for _, c := range exprConfig {
 		tableName := dbutil.TableName(c.Schema, c.Table)
@@ -87,7 +89,7 @@ func (g *ExprFilterGroup) GetInsertExprs(table *filter.Table, ti *model.TableInf
 
 	for _, c := range g.configs[tableID] {
 		if c.InsertValueExpr != "" {
-			expr, err2 := getSimpleExprOfTable(g.ctx, c.InsertValueExpr, ti)
+			expr, err2 := getSimpleExprOfTable(g.tidbCtx, c.InsertValueExpr, ti, g.logCtx.L())
 			if err2 != nil {
 				// TODO: terror
 				return nil, err2
@@ -116,7 +118,7 @@ func (g *ExprFilterGroup) GetUpdateExprs(table *filter.Table, ti *model.TableInf
 				continue
 			}
 			if c.UpdateOldValueExpr != "" {
-				expr, err := getSimpleExprOfTable(g.ctx, c.UpdateOldValueExpr, ti)
+				expr, err := getSimpleExprOfTable(g.tidbCtx, c.UpdateOldValueExpr, ti, g.logCtx.L())
 				if err != nil {
 					// TODO: terror
 					return nil, nil, err
@@ -127,7 +129,7 @@ func (g *ExprFilterGroup) GetUpdateExprs(table *filter.Table, ti *model.TableInf
 			}
 
 			if c.UpdateNewValueExpr != "" {
-				expr, err := getSimpleExprOfTable(g.ctx, c.UpdateNewValueExpr, ti)
+				expr, err := getSimpleExprOfTable(g.tidbCtx, c.UpdateNewValueExpr, ti, g.logCtx.L())
 				if err != nil {
 					// TODO: terror
 					return nil, nil, err
@@ -156,7 +158,7 @@ func (g *ExprFilterGroup) GetDeleteExprs(table *filter.Table, ti *model.TableInf
 
 	for _, c := range g.configs[tableID] {
 		if c.DeleteValueExpr != "" {
-			expr, err2 := getSimpleExprOfTable(g.ctx, c.DeleteValueExpr, ti)
+			expr, err2 := getSimpleExprOfTable(g.tidbCtx, c.DeleteValueExpr, ti, g.logCtx.L())
 			if err2 != nil {
 				// TODO: terror
 				return nil, err2
@@ -178,7 +180,7 @@ func (g *ExprFilterGroup) ResetExprs(table *filter.Table) {
 
 // SkipDMLByExpression returns true when given row matches the expr, which means this row should be skipped.
 func SkipDMLByExpression(ctx sessionctx.Context, row []interface{}, expr expression.Expression, upstreamCols []*model.ColumnInfo) (bool, error) {
-	// TODO: add metrics
+	// TODO: add MetricsProxies
 	log.L().Debug("will evaluate the expression", zap.Stringer("expression", expr), zap.Any("raw row", row))
 	data, err := utils.AdjustBinaryProtocolForDatum(ctx, row, upstreamCols)
 	if err != nil {
@@ -194,13 +196,13 @@ func SkipDMLByExpression(ctx sessionctx.Context, row []interface{}, expr express
 }
 
 // getSimpleExprOfTable returns an expression of given `expr` string, using the table structure that is tracked before.
-func getSimpleExprOfTable(ctx sessionctx.Context, expr string, ti *model.TableInfo) (expression.Expression, error) {
+func getSimpleExprOfTable(ctx sessionctx.Context, expr string, ti *model.TableInfo, logger log.Logger) (expression.Expression, error) {
 	// TODO: use upstream timezone?
 	e, err := expression.ParseSimpleExprWithTableInfo(ctx, expr, ti)
 	if err != nil {
 		// if expression contains an unknown column, we return an expression that skips nothing
 		if core.ErrUnknownColumn.Equal(err) {
-			log.L().Warn("meet unknown column when generating expression, return a FALSE expression instead",
+			logger.Warn("meet unknown column when generating expression, return a FALSE expression instead",
 				zap.String("expression", expr),
 				zap.Error(err))
 			e = expression.NewZero()

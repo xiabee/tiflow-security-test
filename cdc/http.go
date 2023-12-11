@@ -19,38 +19,41 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tiflow/cdc/api"
+	"github.com/pingcap/tiflow/cdc/api/owner"
+	"github.com/pingcap/tiflow/cdc/api/status"
+	v1 "github.com/pingcap/tiflow/cdc/api/v1"
+	v2 "github.com/pingcap/tiflow/cdc/api/v2"
 	"github.com/pingcap/tiflow/cdc/capture"
+	_ "github.com/pingcap/tiflow/docs/swagger" // use for OpenAPI online docs
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
-
-	// use for OpenAPI online docs
-	_ "github.com/pingcap/tiflow/docs/swagger"
 )
 
 // RegisterRoutes create a router for OpenAPI
 func RegisterRoutes(
 	router *gin.Engine,
-	capture *capture.Capture,
+	capture capture.Capture,
 	registry prometheus.Gatherer,
 ) {
 	// online docs
 	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
-	// Open API
-	api.RegisterOpenAPIRoutes(router, api.NewOpenAPI(capture))
+	// Open API V1
+	v1.RegisterOpenAPIRoutes(router, v1.NewOpenAPI(capture))
+	// Open API V2
+	v2.RegisterOpenAPIV2Routes(router, v2.NewOpenAPIV2(capture))
 
 	// Owner API
-	api.RegisterOwnerAPIRoutes(router, capture)
+	owner.RegisterOwnerAPIRoutes(router, capture)
 
 	// Status API
-	api.RegisterStatusAPIRoutes(router, capture)
+	status.RegisterStatusAPIRoutes(router, capture)
 
 	// Log API
-	router.POST("/admin/log", gin.WrapF(api.HandleAdminLogLevel))
+	router.POST("/admin/log", gin.WrapF(owner.HandleAdminLogLevel))
 
 	// pprof debug API
 	pprofGroup := router.Group("/debug/pprof/")

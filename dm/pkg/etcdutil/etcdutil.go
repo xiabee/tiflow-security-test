@@ -22,17 +22,16 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	v3rpc "go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/retry"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/pkg/errorutil"
+	v3rpc "go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -138,7 +137,7 @@ func FullOpFunc(cmps []clientv3.Cmp, opsThen, opsElse []clientv3.Op) EtcdOpFunc 
 }
 
 // IsRetryableError returns true if the etcd error is retryable to write ** repeatable **.
-// // https://github.com/etcd-io/etcd/blob/v3.5.2/client/v3/retry.go#L53
+// https://github.com/etcd-io/etcd/blob/v3.5.2/client/v3/retry.go#L53
 func IsRetryableError(err error) bool {
 	err = errors.Cause(err)
 	switch err {

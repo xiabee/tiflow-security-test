@@ -15,16 +15,17 @@ package syncer
 
 import (
 	"context"
+	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
-	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/errno"
-
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
+	"github.com/pingcap/tiflow/dm/syncer/metrics"
+	"github.com/stretchr/testify/require"
 )
 
 func newMysqlErr(number uint16, message string) *mysql.MySQLError {
@@ -34,11 +35,12 @@ func newMysqlErr(number uint16, message string) *mysql.MySQLError {
 	}
 }
 
-func (s *testSyncerSuite) TestHandleSpecialDDLError(c *C) {
+func TestHandleSpecialDDLError(t *testing.T) {
 	var (
-		syncer              = NewSyncer(s.cfg, nil, nil)
+		cfg                 = genDefaultSubTaskConfig4Test()
+		syncer              = NewSyncer(cfg, nil, nil)
 		tctx                = tcontext.Background()
-		conn2               = dbconn.NewDBConn(s.cfg, nil)
+		conn2               = dbconn.NewDBConn(cfg, nil)
 		customErr           = errors.New("custom error")
 		invalidDDL          = "SQL CAN NOT BE PARSED"
 		insertDML           = "INSERT INTO tbl VALUES (1)"
@@ -141,12 +143,15 @@ func (s *testSyncerSuite) TestHandleSpecialDDLError(c *C) {
 	conn2.ResetBaseConnFn = func(*tcontext.Context, *conn.BaseConn) (*conn.BaseConn, error) {
 		return nil, nil
 	}
+
+	syncer.metricsProxies = metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source")
+
 	for _, cs := range cases {
-		err2 := syncer.handleSpecialDDLError(tctx, cs.err, cs.ddls, cs.index, conn2)
+		err2 := syncer.handleSpecialDDLError(tctx, cs.err, cs.ddls, cs.index, conn2, -1)
 		if cs.handled {
-			c.Assert(err2, IsNil)
+			require.NoError(t, err2)
 		} else {
-			c.Assert(err2, Equals, cs.err)
+			require.Equal(t, cs.err, err2)
 		}
 	}
 
@@ -156,14 +161,14 @@ func (s *testSyncerSuite) TestHandleSpecialDDLError(c *C) {
 	)
 
 	db, mock, err := sqlmock.New()
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	conn1, err := db.Conn(context.Background())
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	conn2.ResetBaseConnFn = func(_ *tcontext.Context, _ *conn.BaseConn) (*conn.BaseConn, error) {
-		return conn.NewBaseConn(conn1, nil), nil
+		return conn.NewBaseConnForTest(conn1, nil), nil
 	}
 	err = conn2.ResetConn(tctx)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// dropColumnF test successful
 	mock.ExpectQuery("SELECT INDEX_NAME FROM information_schema.statistics WHERE.*").WillReturnRows(
@@ -177,9 +182,9 @@ func (s *testSyncerSuite) TestHandleSpecialDDLError(c *C) {
 	mock.ExpectExec(dropColumnWithIndex).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	handledErr := syncer.handleSpecialDDLError(tctx, execErr, ddls, 0, conn2)
-	c.Assert(mock.ExpectationsWereMet(), IsNil)
-	c.Assert(handledErr, IsNil)
+	handledErr := syncer.handleSpecialDDLError(tctx, execErr, ddls, 0, conn2, -1)
+	require.NoError(t, mock.ExpectationsWereMet())
+	require.NoError(t, handledErr)
 
 	// dropColumnF test failed because multi-column index
 	mock.ExpectQuery("SELECT INDEX_NAME FROM information_schema.statistics WHERE.*").WillReturnRows(
@@ -187,7 +192,18 @@ func (s *testSyncerSuite) TestHandleSpecialDDLError(c *C) {
 	mock.ExpectQuery("SELECT count\\(\\*\\) FROM information_schema.statistics WHERE.*").WillReturnRows(
 		sqlmock.NewRows([]string{"count(*)"}).AddRow(2))
 
-	handledErr = syncer.handleSpecialDDLError(tctx, execErr, ddls, 0, conn2)
-	c.Assert(mock.ExpectationsWereMet(), IsNil)
-	c.Assert(handledErr, Equals, execErr)
+	handledErr = syncer.handleSpecialDDLError(tctx, execErr, ddls, 0, conn2, -1)
+	require.NoError(t, mock.ExpectationsWereMet())
+	require.Error(t, execErr, handledErr)
+}
+
+func TestIsConnectionRefusedError(t *testing.T) {
+	isConnRefusedErr := isConnectionRefusedError(nil)
+	require.False(t, isConnRefusedErr)
+
+	isConnRefusedErr = isConnectionRefusedError(errors.New("timeout"))
+	require.False(t, isConnRefusedErr)
+
+	isConnRefusedErr = isConnectionRefusedError(errors.New("connect: connection refused"))
+	require.True(t, isConnRefusedErr)
 }

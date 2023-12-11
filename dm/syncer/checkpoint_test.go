@@ -22,27 +22,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-mysql-org/go-mysql/mysql"
+	. "github.com/pingcap/check"
+	"github.com/pingcap/log"
 	tidbddl "github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/stretchr/testify/require"
-
-	"github.com/pingcap/tiflow/dm/dm/config"
+	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/util/filter"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/cputil"
 	"github.com/pingcap/tiflow/dm/pkg/gtid"
+	dlog "github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/retry"
 	"github.com/pingcap/tiflow/dm/pkg/schema"
-	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
-
-	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/go-mysql-org/go-mysql/mysql"
-	. "github.com/pingcap/check"
-	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/util/dbutil"
-	"github.com/pingcap/tidb/util/filter"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -74,21 +72,14 @@ func (s *testCheckpointSuite) SetUpSuite(c *C) {
 	}
 
 	log.SetLevel(zapcore.ErrorLevel)
-	var (
-		err                   error
-		defaultTestSessionCfg = map[string]string{
-			"sql_mode":             "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
-			"tidb_skip_utf8_check": "0",
-		}
-	)
+	var err error
 
-	s.tracker, err = schema.NewTracker(context.Background(), s.cfg.Name, defaultTestSessionCfg, nil)
+	s.tracker, err = schema.NewTestTracker(context.Background(), s.cfg.Name, nil, dlog.L())
 	c.Assert(err, IsNil)
 }
 
 func (s *testCheckpointSuite) TestUpTest(c *C) {
-	err := s.tracker.Reset()
-	c.Assert(err, IsNil)
+	s.tracker.Reset()
 }
 
 func (s *testCheckpointSuite) prepareCheckPointSQL() {
@@ -105,7 +96,7 @@ func (s *testCheckpointSuite) prepareCheckPointSQL() {
 func (s *testCheckpointSuite) TestCheckPoint(c *C) {
 	tctx := tcontext.Background()
 
-	cp := NewRemoteCheckPoint(tctx, s.cfg, cpid)
+	cp := NewRemoteCheckPoint(tctx, s.cfg, nil, cpid)
 	defer func() {
 		s.mock.ExpectClose()
 		cp.Close()
@@ -130,7 +121,7 @@ func (s *testCheckpointSuite) TestCheckPoint(c *C) {
 
 	dbConn, err := db.Conn(tcontext.Background().Context())
 	c.Assert(err, IsNil)
-	conn := dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
+	conn := dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
 	cp.(*RemoteCheckPoint).dbConn = conn
 	err = cp.(*RemoteCheckPoint).prepare(tctx)
 	c.Assert(err, IsNil)
@@ -265,9 +256,7 @@ func (s *testCheckpointSuite) testGlobalCheckPoint(c *C, cp CheckPoint) {
 	c.Assert(cp.FlushedGlobalPoint().Position, Equals, binlog.MinPosition)
 
 	// try load from mydumper's output
-	dir, err := os.MkdirTemp("", "test_global_checkpoint")
-	c.Assert(err, IsNil)
-	defer os.RemoveAll(dir)
+	dir := c.MkDir()
 
 	filename := filepath.Join(dir, "metadata")
 	err = os.WriteFile(filename, []byte(
@@ -404,7 +393,9 @@ func (s *testCheckpointSuite) testTableCheckPoint(c *C, cp CheckPoint) {
 
 	// test save with table info and rollback
 	c.Assert(s.tracker.CreateSchemaIfNotExists(schemaName), IsNil)
-	err = s.tracker.Exec(ctx, schemaName, "create table "+tableName+" (c int);")
+	stmt, err := parseSQL("create table " + tableName + " (c int);")
+	c.Assert(err, IsNil)
+	err = s.tracker.Exec(ctx, schemaName, stmt)
 	c.Assert(err, IsNil)
 	ti, err := s.tracker.GetTableInfo(table)
 	c.Assert(err, IsNil)
@@ -429,7 +420,9 @@ func (s *testCheckpointSuite) testTableCheckPoint(c *C, cp CheckPoint) {
 	c.Assert(cp.FlushPointsExcept(tctx, cp.Snapshot(true).id, nil, nil, nil), IsNil)
 	c.Assert(cp.GlobalPoint(), Equals, lastGlobalPoint)
 	c.Assert(cp.GlobalPointSaveTime(), Equals, lastGlobalPointSavedTime)
-	err = s.tracker.Exec(ctx, schemaName, "alter table "+tableName+" add c2 int;")
+	stmt, err = parseSQL("alter table " + tableName + " add c2 int;")
+	c.Assert(err, IsNil)
+	err = s.tracker.Exec(ctx, schemaName, stmt)
 	c.Assert(err, IsNil)
 	ti2, err := s.tracker.GetTableInfo(table)
 	c.Assert(err, IsNil)
@@ -486,11 +479,11 @@ func (s *testCheckpointSuite) testTableCheckPoint(c *C, cp CheckPoint) {
 			AddRow(schemaName, tableName, pos2.Name, pos2.Pos, gs.String(), "", 0, "", tiBytes, false))
 	err = cp.Load(tctx)
 	c.Assert(err, IsNil)
-	c.Assert(cp.GlobalPoint(), DeepEquals, binlog.InitLocation(pos2, gs))
+	c.Assert(cp.GlobalPoint(), DeepEquals, binlog.NewLocation(pos2, gs))
 	rcp = cp.(*RemoteCheckPoint)
 	c.Assert(rcp.points[schemaName][tableName].TableInfo(), NotNil)
 	c.Assert(rcp.points[schemaName][tableName].flushedPoint.ti, NotNil)
-	c.Assert(*rcp.safeModeExitPoint, DeepEquals, binlog.InitLocation(pos2, gs))
+	c.Assert(*rcp.safeModeExitPoint, DeepEquals, binlog.NewLocation(pos2, gs))
 }
 
 func TestRemoteCheckPointLoadIntoSchemaTracker(t *testing.T) {
@@ -502,8 +495,8 @@ func TestRemoteCheckPointLoadIntoSchemaTracker(t *testing.T) {
 	require.NoError(t, err)
 	dbConn, err := db.Conn(ctx)
 	require.NoError(t, err)
-	downstreamTrackConn := dbconn.NewDBConn(cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
-	schemaTracker, err := schema.NewTracker(ctx, cfg.Name, defaultTestSessionCfg, downstreamTrackConn)
+	downstreamTrackConn := dbconn.NewDBConn(cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
+	schemaTracker, err := schema.NewTestTracker(ctx, cfg.Name, downstreamTrackConn, dlog.L())
 	require.NoError(t, err)
 	defer schemaTracker.Close() //nolint
 
@@ -516,10 +509,10 @@ func TestRemoteCheckPointLoadIntoSchemaTracker(t *testing.T) {
 	_, err = schemaTracker.GetTableInfo(tbl2)
 	require.Error(t, err)
 
-	cp := NewRemoteCheckPoint(tcontext.Background(), cfg, "1")
+	cp := NewRemoteCheckPoint(tcontext.Background(), cfg, nil, "1")
 	checkpoint := cp.(*RemoteCheckPoint)
 
-	parser, err := utils.GetParserFromSQLModeStr("")
+	parser, err := conn.GetParserFromSQLModeStr("")
 	require.NoError(t, err)
 	createNode, err := parser.ParseOneStmt("create table tbl1(id int)", "", "")
 	require.NoError(t, err)
@@ -565,7 +558,7 @@ func TestLastFlushOutdated(t *testing.T) {
 	cfg.WorkerCount = 0
 	cfg.CheckpointFlushInterval = 1
 
-	cp := NewRemoteCheckPoint(tcontext.Background(), cfg, "1")
+	cp := NewRemoteCheckPoint(tcontext.Background(), cfg, nil, "1")
 	checkpoint := cp.(*RemoteCheckPoint)
 	checkpoint.globalPointSaveTime = time.Now().Add(-2 * time.Second)
 

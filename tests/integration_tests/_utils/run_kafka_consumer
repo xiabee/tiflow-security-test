@@ -12,10 +12,14 @@ sink_uri=$2
 consumer_replica_config=$3
 log_suffix=$4
 pwd=$pwd
-downstream_uri="mysql://root@127.0.0.1:3306/?safe-mode=true&batch-dml-enable=false"
 
 echo "[$(date)] <<<<<< START kafka consumer in $TEST_NAME case >>>>>>"
 cd $workdir
+
+# Because there is no transaction concept in Kafka,
+# we need to set `batch-dml-enable` to false to avoid data inconsistency.
+downstream_uri="mysql://root@127.0.0.1:3306/?safe-mode=true&batch-dml-enable=false"
+
 # some consumer may require `consumer_replica_config`, set it separately
 if [ "$consumer_replica_config" != "" ]; then
 	echo "consumer replica config found: $consumer_replica_config"

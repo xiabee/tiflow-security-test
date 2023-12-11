@@ -14,13 +14,14 @@
 package binlog
 
 import (
-	"context"
-	"database/sql"
 	"path"
+	"strconv"
 	"time"
 
 	gmysql "github.com/go-mysql-org/go-mysql/mysql"
-
+	"github.com/pingcap/tidb/dumpling/export"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
+	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 )
@@ -43,35 +44,25 @@ type binlogSize struct {
 type FileSizes []binlogSize
 
 // GetBinaryLogs returns binlog filename and size of upstream.
-func GetBinaryLogs(ctx context.Context, db *sql.DB) (FileSizes, error) {
+func GetBinaryLogs(ctx *tcontext.Context, db *conn.BaseDB) (FileSizes, error) {
 	query := "SHOW BINARY LOGS"
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, terror.DBErrorAdapt(err, terror.ErrDBDriverError)
+		return nil, terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
 	}
 	defer rows.Close()
-
-	rowColumns, err := rows.Columns()
-	if err != nil {
-		return nil, terror.DBErrorAdapt(err, terror.ErrDBDriverError)
-	}
 	files := make([]binlogSize, 0, 10)
-	for rows.Next() {
-		var file string
-		var pos int64
-		var nullPtr interface{}
-		if len(rowColumns) == 2 {
-			err = rows.Scan(&file, &pos)
-		} else {
-			err = rows.Scan(&file, &pos, &nullPtr)
-		}
-		if err != nil {
-			return nil, terror.DBErrorAdapt(err, terror.ErrDBDriverError)
-		}
-		files = append(files, binlogSize{name: file, size: pos})
+	var rowsResult [][]string
+	rowsResult, err = export.GetSpecifiedColumnValuesAndClose(rows, "Log_name", "File_size")
+	if err != nil {
+		return nil, terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
 	}
-	if rows.Err() != nil {
-		return nil, terror.DBErrorAdapt(rows.Err(), terror.ErrDBDriverError)
+	for _, rowResult := range rowsResult {
+		pos, err := strconv.ParseInt(rowResult[1], 10, 64)
+		if err != nil {
+			return nil, terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
+		}
+		files = append(files, binlogSize{name: rowResult[0], size: pos})
 	}
 	return files, nil
 }
@@ -116,4 +107,25 @@ type SourceStatus struct {
 	Location   Location
 	Binlogs    FileSizes
 	UpdateTime time.Time
+}
+
+func GetSourceStatus(tctx *tcontext.Context, db *conn.BaseDB, flavor string) (*SourceStatus, error) {
+	ret := &SourceStatus{}
+	ctx, cancel := tctx.WithTimeout(conn.DefaultDBTimeout)
+	defer cancel()
+	pos, gtidSet, err := conn.GetPosAndGs(ctx, db, flavor)
+	if err != nil {
+		return nil, err
+	}
+	ret.Location = NewLocation(pos, gtidSet)
+	ctx2, cancel2 := tctx.WithTimeout(conn.DefaultDBTimeout)
+	defer cancel2()
+	binlogs, err := GetBinaryLogs(ctx2, db)
+	if err != nil {
+		return nil, err
+	}
+	ret.Binlogs = binlogs
+
+	ret.UpdateTime = time.Now()
+	return ret, nil
 }

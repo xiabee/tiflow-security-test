@@ -25,6 +25,10 @@ import (
 	"github.com/pingcap/tidb-tools/pkg/utils"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/format"
+	"github.com/pingcap/tiflow/dm/pkg/log"
+	"github.com/pingcap/tiflow/dm/pkg/terror"
+	"go.uber.org/zap"
 )
 
 // MySQLVersion represents MySQL version number.
@@ -127,12 +131,26 @@ func IsTiDBFromVersion(version string) bool {
 
 func markCheckError(result *Result, err error) {
 	if err != nil {
-		var state State
+		state := StateFailure
 		if utils.OriginError(err) == context.Canceled {
 			state = StateWarning
-		} else {
-			state = StateFailure
 		}
+		// `StateWarning` can't cover `StateFailure`.
+		if result.State != StateFailure {
+			result.State = state
+		}
+		if err2, ok := err.(*terror.Error); ok {
+			result.Errors = append(result.Errors, &Error{Severity: state, ShortErr: err2.ErrorWithoutWorkaround()})
+			result.Instruction = err2.Workaround()
+		} else {
+			result.Errors = append(result.Errors, &Error{Severity: state, ShortErr: err.Error()})
+		}
+	}
+}
+
+func markCheckErrorFromParser(result *Result, err error) {
+	if err != nil {
+		state := StateWarning
 		// `StateWarning` can't cover `StateFailure`.
 		if result.State != StateFailure {
 			result.State = state
@@ -141,6 +159,7 @@ func markCheckError(result *Result, err error) {
 	}
 }
 
+//nolint:unparam
 func isMySQLError(err error, code uint16) bool {
 	err = errors.Cause(err)
 	e, ok := err.(*mysql.MySQLError)
@@ -158,4 +177,98 @@ func getCreateTableStmt(p *parser.Parser, statement string) (*ast.CreateTableStm
 		return nil, errors.Errorf("Expect CreateTableStmt but got %T", stmt)
 	}
 	return ctStmt, nil
+}
+
+func getCharset(stmt *ast.CreateTableStmt) string {
+	if stmt.Options != nil {
+		for _, option := range stmt.Options {
+			if option.Tp == ast.TableOptionCharset {
+				return option.StrValue
+			}
+		}
+	}
+	return ""
+}
+
+func getCollation(stmt *ast.CreateTableStmt) string {
+	if stmt.Options != nil {
+		for _, option := range stmt.Options {
+			if option.Tp == ast.TableOptionCollate {
+				return option.StrValue
+			}
+		}
+	}
+	return ""
+}
+
+// getPKAndUK returns a map of INDEX_NAME -> set of COLUMN_NAMEs.
+func getPKAndUK(stmt *ast.CreateTableStmt) map[string]map[string]struct{} {
+	ret := make(map[string]map[string]struct{})
+	var sb strings.Builder
+	restoreCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &sb)
+
+	for _, constraint := range stmt.Constraints {
+		switch constraint.Tp {
+		case ast.ConstraintPrimaryKey:
+			ret["PRIMARY"] = make(map[string]struct{})
+			for _, key := range constraint.Keys {
+				ret["PRIMARY"][key.Column.Name.L] = struct{}{}
+			}
+		case ast.ConstraintUniq, ast.ConstraintUniqKey, ast.ConstraintUniqIndex:
+			ret[constraint.Name] = make(map[string]struct{})
+			for _, key := range constraint.Keys {
+				if key.Column != nil {
+					ret[constraint.Name][key.Column.Name.L] = struct{}{}
+				} else {
+					sb.Reset()
+					err := key.Expr.Restore(restoreCtx)
+					if err != nil {
+						log.L().Warn("failed to restore expression", zap.Error(err))
+						continue
+					}
+					ret[constraint.Name][sb.String()] = struct{}{}
+				}
+			}
+		}
+	}
+	return ret
+}
+
+func stringSetEqual(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// getColumnsAndIgnorable return a map of COLUMN_NAME -> if this columns can be
+// ignored when inserting data, which means it has default value or can be null.
+func getColumnsAndIgnorable(stmt *ast.CreateTableStmt) map[string]bool {
+	ret := make(map[string]bool)
+	for _, col := range stmt.Cols {
+		notNull := false
+		hasDefaultValue := false
+		for _, opt := range col.Options {
+			switch opt.Tp {
+			case ast.ColumnOptionNotNull:
+				notNull = true
+			case ast.ColumnOptionDefaultValue,
+				ast.ColumnOptionAutoIncrement,
+				ast.ColumnOptionAutoRandom,
+				ast.ColumnOptionGenerated:
+				// if the generated column has NOT NULL, its referring columns
+				// must not be NULL. But even if we mark the referring columns
+				// as not ignorable, the data may still be NULL so replication
+				// is still failed. For simplicity, we just ignore this case.
+				hasDefaultValue = true
+			}
+		}
+		ret[col.Name.Name.L] = !notNull || hasDefaultValue
+	}
+	return ret
 }

@@ -16,13 +16,13 @@ package syncer
 import (
 	"testing"
 
+	"github.com/go-mysql-org/go-mysql/mysql"
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/util/filter"
-	"github.com/stretchr/testify/require"
-
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/pkg/sqlmodel"
+	"github.com/stretchr/testify/require"
 )
 
 var _ = Suite(&testJobSuite{})
@@ -72,8 +72,8 @@ func TestJob(t *testing.T) {
 		targetTables: []*filter.Table{{Schema: "test2", Name: "t2"}},
 	}
 	table := &cdcmodel.TableName{Schema: "test", Table: "t1"}
-	location := binlog.NewLocation("")
-	ec := &eventContext{startLocation: &location, currentLocation: &location, lastLocation: &location, safeMode: true}
+	location := binlog.MustZeroLocation(mysql.MySQLFlavor)
+	ec := &eventContext{startLocation: location, endLocation: location, lastLocation: location, safeMode: true}
 	qec := &queryEventContext{
 		eventContext:    ec,
 		originSQL:       "create database test",
@@ -97,7 +97,7 @@ func TestJob(t *testing.T) {
 			newDDLJob(qec),
 			"tp: ddl, flushSeq: 0, dml: [], safemode: false, ddls: [create database test], last_location: position: (, 4), gtid-set: , start_location: position: (, 4), gtid-set: , current_location: position: (, 4), gtid-set: ",
 		}, {
-			newXIDJob(binlog.NewLocation(""), binlog.NewLocation(""), binlog.NewLocation("")),
+			newXIDJob(binlog.MustZeroLocation(mysql.MySQLFlavor), binlog.MustZeroLocation(mysql.MySQLFlavor), binlog.MustZeroLocation(mysql.MySQLFlavor)),
 			"tp: xid, flushSeq: 0, dml: [], safemode: false, ddls: [], last_location: position: (, 4), gtid-set: , start_location: position: (, 4), gtid-set: , current_location: position: (, 4), gtid-set: ",
 		}, {
 			newFlushJob(16, 1),

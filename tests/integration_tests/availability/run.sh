@@ -9,6 +9,7 @@ source $CUR/capture.sh
 source $CUR/processor.sh
 WORK_DIR=$OUT_DIR/$TEST_NAME
 CDC_BINARY=cdc.test
+SINK_TYPE=$1
 
 export DOWN_TIDB_HOST
 export DOWN_TIDB_PORT
@@ -19,23 +20,14 @@ function prepare() {
 	start_tidb_cluster --workdir $WORK_DIR
 
 	cd $WORK_DIR
-
-	# record tso before we create tables to skip the system table DDLs
-	start_ts=$(run_cdc_cli_tso_query ${UP_PD_HOST_1} ${UP_PD_PORT_1})
-
-	run_sql "CREATE table test.availability1(id int primary key, val int);"
-	run_sql "CREATE table test.availability2(id int primary key, val int);"
-	run_sql "CREATE table test.availability3(id int primary key, val int);"
-
-	run_cdc_cli changefeed create --start-ts=$start_ts \
-		--sink-uri="mysql://normal:123456@127.0.0.1:3306/" \
-		--disable-version-check
 }
 
 trap stop_tidb_cluster EXIT
-prepare $*
-test_owner_ha $*
-test_capture_ha $*
-test_processor_ha $*
+if [ "$SINK_TYPE" == "mysql" ]; then
+	prepare $*
+	test_owner_ha $*
+	test_capture_ha $*
+	test_processor_ha $*
+fi
 check_logs $WORK_DIR
 echo "[$(date)] <<<<<< run test case $TEST_NAME success! >>>>>>"

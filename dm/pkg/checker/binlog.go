@@ -20,6 +20,9 @@ import (
 	"strings"
 
 	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
+	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
+	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 )
 
@@ -50,7 +53,7 @@ func (pc *MySQLBinlogEnableChecker) Check(ctx context.Context) *Result {
 	}
 	if strings.ToUpper(value) != "ON" {
 		result.Errors = append(result.Errors, NewError("log_bin is %s, and should be ON", value))
-		result.Instruction = "ref document: https://dev.mysql.com/doc/refman/5.7/en/replication-howto-masterbaseconfig.html"
+		result.Instruction = "MySQL as source: please refer to the document to enable the binlog https://dev.mysql.com/doc/refman/5.7/en/replication-howto-masterbaseconfig.html"
 		return result
 	}
 	result.State = StateSuccess
@@ -91,7 +94,7 @@ func (pc *MySQLBinlogFormatChecker) Check(ctx context.Context) *Result {
 	}
 	if strings.ToUpper(value) != "ROW" {
 		result.Errors = append(result.Errors, NewError("binlog_format is %s, and should be ROW", value))
-		result.Instruction = "please execute 'set global binlog_format=ROW;'"
+		result.Instruction = "MySQL as source: please execute 'set global binlog_format=ROW;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_format=row: https://docs.aws.amazon.com/zh_cn/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html. Then modify the instance to use the new DB parameter group and restart the instance to take effect."
 		return result
 	}
 	result.State = StateSuccess
@@ -157,7 +160,7 @@ func (pc *MySQLBinlogRowImageChecker) Check(ctx context.Context) *Result {
 	}
 
 	// for mariadb.version < 10.1.6.,  we don't need to check binlog_row_image.
-	if utils.IsMariaDB(value) && !version.Ge(mariaDBBinlogRowImageRequired) {
+	if conn.IsMariaDB(value) && !version.Ge(mariaDBBinlogRowImageRequired) {
 		result.State = StateSuccess
 		return result
 	}
@@ -169,7 +172,7 @@ func (pc *MySQLBinlogRowImageChecker) Check(ctx context.Context) *Result {
 	}
 	if strings.ToUpper(value) != "FULL" {
 		result.Errors = append(result.Errors, NewError("binlog_row_image is %s, and should be FULL", value))
-		result.Instruction = "please execute 'set global binlog_row_image = FULL;'"
+		result.Instruction = "MySQL as source: please execute 'set global binlog_row_image = FULL;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_row_image = FULL: https://docs.aws.amazon.com/zh_cn/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html Then modify the instance to use the new DB parameter group and restart the instance to take effect."
 		return result
 	}
 	result.State = StateSuccess
@@ -183,14 +186,14 @@ func (pc *MySQLBinlogRowImageChecker) Name() string {
 
 // BinlogDBChecker checks if migrated dbs are in binlog_do_db or binlog_ignore_db.
 type BinlogDBChecker struct {
-	db            *sql.DB
+	db            *conn.BaseDB
 	dbinfo        *dbutil.DBConfig
 	schemas       map[string]struct{}
 	caseSensitive bool
 }
 
 // NewBinlogDBChecker returns a RealChecker.
-func NewBinlogDBChecker(db *sql.DB, dbinfo *dbutil.DBConfig, schemas map[string]struct{}, caseSensitive bool) RealChecker {
+func NewBinlogDBChecker(db *conn.BaseDB, dbinfo *dbutil.DBConfig, schemas map[string]struct{}, caseSensitive bool) RealChecker {
 	newSchemas := make(map[string]struct{}, len(schemas))
 	for schema := range schemas {
 		newSchemas[schema] = struct{}{}
@@ -207,12 +210,13 @@ func (c *BinlogDBChecker) Check(ctx context.Context) *Result {
 		Extra: fmt.Sprintf("address of db instance - %s:%d", c.dbinfo.Host, c.dbinfo.Port),
 	}
 
-	flavor, err := utils.GetFlavor(ctx, c.db)
+	flavor, err := conn.GetFlavor(ctx, c.db)
 	if err != nil {
 		markCheckError(result, err)
 		return result
 	}
-	binlogDoDB, binlogIgnoreDB, err := utils.GetBinlogDB(ctx, c.db, flavor)
+	tctx := tcontext.NewContext(ctx, log.L())
+	binlogDoDB, binlogIgnoreDB, err := conn.GetBinlogDB(tctx, c.db, flavor)
 	if err != nil {
 		markCheckError(result, err)
 		return result
@@ -233,7 +237,8 @@ func (c *BinlogDBChecker) Check(ctx context.Context) *Result {
 		}
 		if len(c.schemas) > 0 {
 			dbs := utils.SetToSlice(c.schemas)
-			result.Extra = fmt.Sprintf("these dbs [%s] are not in binlog_do_db[%s]", strings.Join(dbs, ","), binlogDoDB)
+			result.Errors = append(result.Errors, NewWarn("these dbs [%s] are not in binlog_do_db[%s]", strings.Join(dbs, ","), binlogDoDB))
+			result.Instruction = "Ensure that the do_dbs contains the dbs you want to migrate"
 			return result
 		}
 	} else {
@@ -244,7 +249,8 @@ func (c *BinlogDBChecker) Check(ctx context.Context) *Result {
 			}
 		}
 		if len(ignoreDBs) > 0 {
-			result.Extra = fmt.Sprintf("db [%s] is in binlog_ignore_db[%s]", strings.Join(ignoreDBs, ","), binlogIgnoreDB)
+			result.Errors = append(result.Errors, NewWarn("these dbs [%s] are in binlog_ignore_db[%s]", strings.Join(ignoreDBs, ","), binlogIgnoreDB))
+			result.Instruction = "Ensure that the ignore_dbs does not contain the dbs you want to migrate"
 			return result
 		}
 	}

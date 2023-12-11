@@ -19,12 +19,12 @@ import (
 	"strings"
 
 	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/tablecodec"
-	"go.uber.org/zap"
-
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"go.uber.org/zap"
 )
 
 // CausalityKeys returns all string representation of causality keys. If two row
@@ -40,6 +40,19 @@ func (r *RowChange) CausalityKeys() []string {
 		ret = append(ret, r.getCausalityString(r.postValues)...)
 	}
 	return ret
+}
+
+func columnNeeds2LowerCase(col *timodel.ColumnInfo) bool {
+	switch col.GetType() {
+	case mysql.TypeVarchar, mysql.TypeString, mysql.TypeVarString, mysql.TypeTinyBlob,
+		mysql.TypeMediumBlob, mysql.TypeBlob, mysql.TypeLongBlob:
+		return collationNeeds2LowerCase(col.GetCollate())
+	}
+	return false
+}
+
+func collationNeeds2LowerCase(collation string) bool {
+	return strings.HasSuffix(collation, "_ci")
 }
 
 func columnValue2String(value interface{}) string {
@@ -100,7 +113,12 @@ func genKeyString(
 			continue // ignore `null` value.
 		}
 		// one column key looks like:`column_val.column_name.`
-		buf.WriteString(columnValue2String(data))
+
+		val := columnValue2String(data)
+		if columnNeeds2LowerCase(columns[i]) {
+			val = strings.ToLower(val)
+		}
+		buf.WriteString(val)
 		buf.WriteString(".")
 		buf.WriteString(columns[i].Name.L)
 		buf.WriteString(".")
@@ -145,6 +163,11 @@ func (r *RowChange) getCausalityString(values []interface{}) []string {
 	ret := make([]string, 0, len(pkAndUks))
 
 	for _, indexCols := range pkAndUks {
+		// TODO: should not support multi value index and generate the value
+		// TODO: also fix https://github.com/pingcap/tiflow/issues/3286#issuecomment-971264282
+		if indexCols.MVIndex {
+			continue
+		}
 		cols, vals := getColsAndValuesOfIdx(r.sourceTableInfo.Columns, indexCols, values)
 		// handle prefix index
 		truncVals := truncateIndexValues(r.tiSessionCtx, r.sourceTableInfo, indexCols, cols, vals)

@@ -11,11 +11,9 @@ RUN ./download-integration-test-binaries.sh master
 RUN ls ./bin
 
 # Download go into /usr/local dir.
-ENV GOLANG_VERSION 1.18
+ENV GOLANG_VERSION 1.20
 ENV GOLANG_DOWNLOAD_URL https://dl.google.com/go/go$GOLANG_VERSION.linux-amd64.tar.gz
-ENV GOLANG_DOWNLOAD_SHA256 e85278e98f57cdb150fe8409e6e5df5343ecb13cebf03a5d5ff12bd55a80264f
 RUN curl -fsSL "$GOLANG_DOWNLOAD_URL" -o golang.tar.gz \
-	&& echo "$GOLANG_DOWNLOAD_SHA256  golang.tar.gz" | sha256sum -c - \
 	&& tar -C /usr/local -xzf golang.tar.gz \
 	&& rm golang.tar.gz
 
@@ -35,6 +33,8 @@ RUN yum install -y \
     curl \
     tar \
     musl-dev \
+	sudo \
+	python3 \
     psmisc
 RUN wget http://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
 RUN yum install -y epel-release-latest-7.noarch.rpm
@@ -57,6 +57,6 @@ COPY . .
 # Clean bin dir and build TiCDC.
 # We always need to clean before we build, please don't adjust its order.
 RUN make clean
-RUN make integration_test_build kafka_consumer cdc
+RUN make integration_test_build cdc
 COPY --from=downloader /root/download/bin/* ./bin/
 RUN make check_third_party_binary

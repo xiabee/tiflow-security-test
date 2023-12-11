@@ -17,12 +17,11 @@ import (
 	"sync"
 
 	"github.com/pingcap/tidb/util/filter"
-	"go.uber.org/zap"
-
-	"github.com/pingcap/tiflow/dm/dm/config"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"go.uber.org/zap"
 )
 
 // OptShardingGroup represents a optimistic sharding DDL sync group.
@@ -115,12 +114,6 @@ func NewOptShardingGroupKeeper(tctx *tcontext.Context, cfg *config.SubTaskConfig
 		tctx:            tctx.WithLogger(tctx.L().WithFields(zap.String("component", "optimistic shard group keeper"))),
 		shardingReSyncs: make(map[string]binlog.Location),
 	}
-}
-
-func (k *OptShardingGroupKeeper) reset() {
-	k.Lock()
-	defer k.Unlock()
-	k.groups = make(map[string]*OptShardingGroup)
 }
 
 func (k *OptShardingGroupKeeper) resolveGroup(targetTable *filter.Table) (map[string]binlog.Location, binlog.Location) {
@@ -229,7 +222,6 @@ func (k *OptShardingGroupKeeper) RemoveGroup(targetTable *filter.Table, sourceTa
 			delete(k.groups, targetTableID)
 		}
 	}
-	return
 }
 
 func (k *OptShardingGroupKeeper) RemoveSchema(schema string) {
@@ -240,4 +232,12 @@ func (k *OptShardingGroupKeeper) RemoveSchema(schema string) {
 			delete(k.groups, targetTableID)
 		}
 	}
+}
+
+// Reset resets the keeper.
+func (k *OptShardingGroupKeeper) Reset() {
+	k.Lock()
+	defer k.Unlock()
+	k.groups = make(map[string]*OptShardingGroup)
+	k.shardingReSyncs = make(map[string]binlog.Location)
 }

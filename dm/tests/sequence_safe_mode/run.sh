@@ -27,6 +27,8 @@ function run() {
 	dmctl_operate_source create $WORK_DIR/source1.yaml $SOURCE_ID1
 	dmctl_operate_source create $WORK_DIR/source2.yaml $SOURCE_ID2
 
+	run_sql_tidb "create database if not exists sequence_safe_mode_target;"
+	run_sql_tidb "create table sequence_safe_mode_target.t_target (id bigint auto_increment, uid int, name varchar(80), c_table varchar(255), c_source varchar(255), primary key (id, c_table, c_source), unique key(uid)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;"
 	dmctl_start_task "$cur/conf/dm-task.yaml" "--remove-meta"
 	check_sync_diff $WORK_DIR $cur/conf/diff_config.toml
 
@@ -50,7 +52,7 @@ function run() {
 	pkill -hup dm-worker.test 2>/dev/null || true
 	wait_process_exit dm-worker.test
 
-	export GO_FAILPOINTS='github.com/pingcap/tiflow/dm/syncer/SequenceShardSyncedExecutionExit=return(true);github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds=return(300)'
+	export GO_FAILPOINTS="github.com/pingcap/tiflow/dm/syncer/SequenceShardSyncedExecutionExit=return(true);github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds=return(\"300s\")"
 
 	echo "restart DM-worker after set SequenceShardSyncedExecutionExit failpoint"
 	run_dm_worker $WORK_DIR/worker1 $WORKER1_PORT $cur/conf/dm-worker1.toml
@@ -71,7 +73,7 @@ function run() {
 		# DM-worker1 is sharding lock owner and exits
 		if [ "$(check_port_return $WORKER1_PORT)" == "0" ]; then
 			echo "DM-worker1 is sharding lock owner and detects it offline"
-			export GO_FAILPOINTS='github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds=return(0)'
+			export GO_FAILPOINTS="github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds=return(\"0s\")"
 			run_dm_worker $WORK_DIR/worker1 $WORKER1_PORT $cur/conf/dm-worker1.toml
 			check_rpc_alive $cur/../bin/check_worker_online 127.0.0.1:$WORKER1_PORT
 			check_instance_id="1"
@@ -81,7 +83,7 @@ function run() {
 		# DM-worker2 is sharding lock owner and exits
 		if [ "$(check_port_return $WORKER2_PORT)" == "0" ]; then
 			echo "DM-worker2 is sharding lock owner and detects it offline"
-			export GO_FAILPOINTS='github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds=return(0)'
+			export GO_FAILPOINTS="github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds=return(\"0s\")"
 			run_dm_worker $WORK_DIR/worker2 $WORKER2_PORT $cur/conf/dm-worker2.toml
 			check_rpc_alive $cur/../bin/check_worker_online 127.0.0.1:$WORKER2_PORT
 			check_instance_id="2"

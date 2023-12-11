@@ -1775,6 +1775,11 @@ components:
           enum:
             - "pessimistic"
             - "optimistic"
+        strict_optimistic_shard_mode:
+          type: boolean
+          example: true
+          description: "whether to enable strict optimistic shard mode"
+          default: false
         meta_schema:
           type: string
           example: "dm-meta"
@@ -1864,7 +1869,7 @@ components:
         bound_source_name:
           type: string
           example: "mysql-01"
-          description: "bound source name of this worker node"
+          description: "source name bound to this worker node"
       required:
         - "name"
         - "addr"

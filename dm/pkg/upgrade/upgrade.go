@@ -19,17 +19,17 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb/util/dbutil"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
-
-	"github.com/pingcap/tiflow/dm/dm/common"
-	"github.com/pingcap/tiflow/dm/dm/config"
+	"github.com/pingcap/tiflow/dm/common"
+	"github.com/pingcap/tiflow/dm/config"
+	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/cputil"
 	"github.com/pingcap/tiflow/dm/pkg/etcdutil"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
 )
 
 // upgrades records all functions used to upgrade from one version to the later version.
@@ -169,7 +169,7 @@ func upgradeToVer2(cli *clientv3.Client, uctx Context) error {
 	}
 
 	// tableName -> DBConfig
-	dbConfigs := map[string]config.DBConfig{}
+	dbConfigs := map[string]dbconfig.DBConfig{}
 	for task, m := range uctx.SubTaskConfigs {
 		for sourceID, subCfg := range m {
 			tableName := dbutil.TableName(subCfg.MetaSchema, cputil.SyncerCheckpoint(subCfg.Name))
@@ -197,7 +197,7 @@ func upgradeToVer2(cli *clientv3.Client, uctx Context) error {
 	defer cancel()
 
 	for tableName, cfg := range dbConfigs {
-		targetDB, err := conn.DefaultDBProvider.Apply(&cfg)
+		targetDB, err := conn.GetDownstreamDB(&cfg)
 		if err != nil {
 			logger.Error("target DB error when upgrading", zap.String("table name", tableName))
 			return err

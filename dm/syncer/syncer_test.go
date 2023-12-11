@@ -25,26 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tiflow/dm/dm/config"
-	"github.com/pingcap/tiflow/dm/dm/pb"
-	"github.com/pingcap/tiflow/dm/pkg/binlog"
-	"github.com/pingcap/tiflow/dm/pkg/binlog/event"
-	"github.com/pingcap/tiflow/dm/pkg/binlog/reader"
-	"github.com/pingcap/tiflow/dm/pkg/conn"
-	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
-	"github.com/pingcap/tiflow/dm/pkg/cputil"
-	"github.com/pingcap/tiflow/dm/pkg/gtid"
-	"github.com/pingcap/tiflow/dm/pkg/log"
-	parserpkg "github.com/pingcap/tiflow/dm/pkg/parser"
-	"github.com/pingcap/tiflow/dm/pkg/retry"
-	"github.com/pingcap/tiflow/dm/pkg/schema"
-	"github.com/pingcap/tiflow/dm/pkg/terror"
-	"github.com/pingcap/tiflow/dm/pkg/utils"
-	"github.com/pingcap/tiflow/dm/syncer/dbconn"
-	"github.com/pingcap/tiflow/pkg/errorutil"
-	"github.com/pingcap/tiflow/pkg/sqlmodel"
-	"github.com/stretchr/testify/require"
-
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
@@ -60,15 +40,31 @@ import (
 	"github.com/pingcap/tidb/util/filter"
 	regexprrouter "github.com/pingcap/tidb/util/regexpr-router"
 	router "github.com/pingcap/tidb/util/table-router"
+	"github.com/pingcap/tiflow/dm/config"
+	"github.com/pingcap/tiflow/dm/pb"
+	"github.com/pingcap/tiflow/dm/pkg/binlog"
+	"github.com/pingcap/tiflow/dm/pkg/binlog/event"
+	"github.com/pingcap/tiflow/dm/pkg/binlog/reader"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
+	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
+	"github.com/pingcap/tiflow/dm/pkg/cputil"
+	"github.com/pingcap/tiflow/dm/pkg/gtid"
+	"github.com/pingcap/tiflow/dm/pkg/log"
+	parserpkg "github.com/pingcap/tiflow/dm/pkg/parser"
+	"github.com/pingcap/tiflow/dm/pkg/retry"
+	"github.com/pingcap/tiflow/dm/pkg/schema"
+	"github.com/pingcap/tiflow/dm/pkg/terror"
+	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/pingcap/tiflow/dm/syncer/binlogstream"
+	"github.com/pingcap/tiflow/dm/syncer/dbconn"
+	"github.com/pingcap/tiflow/dm/syncer/metrics"
+	"github.com/pingcap/tiflow/pkg/errorutil"
+	"github.com/pingcap/tiflow/pkg/sqlmodel"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
 var _ = Suite(&testSyncerSuite{})
-
-var defaultTestSessionCfg = map[string]string{
-	"sql_mode":             "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
-	"tidb_skip_utf8_check": "0",
-}
 
 func TestSuite(t *testing.T) {
 	TestingT(t)
@@ -127,7 +123,7 @@ type MockStreamProducer struct {
 	events []*replication.BinlogEvent
 }
 
-func (mp *MockStreamProducer) generateStreamer(location binlog.Location) (reader.Streamer, error) {
+func (mp *MockStreamProducer) GenerateStreamFrom(location binlog.Location) (reader.Streamer, error) {
 	if location.Position.Pos == 4 {
 		return &MockStreamer{mp.events, 0, false}, nil
 	}
@@ -271,6 +267,7 @@ func (s *testSyncerSuite) TestSelectDB(c *C) {
 	}
 
 	statusVars := []byte{4, 0, 0, 0, 0, 46, 0}
+	ddlWorker := NewDDLWorker(&syncer.tctx.Logger, syncer)
 	for _, cs := range cases {
 		e, err := event.GenQueryEvent(header, 123, 0, 0, 0, statusVars, cs.schema, cs.query)
 		c.Assert(err, IsNil)
@@ -285,7 +282,7 @@ func (s *testSyncerSuite) TestSelectDB(c *C) {
 			ddlSchema:       schema,
 			eventStatusVars: ev.StatusVars,
 		}
-		ddlInfo, err := syncer.genDDLInfo(qec, sql)
+		ddlInfo, err := ddlWorker.genDDLInfo(qec, sql)
 		c.Assert(err, IsNil)
 
 		qec.originSQL = sql
@@ -372,6 +369,7 @@ func (s *testSyncerSuite) TestSelectTable(c *C) {
 	c.Assert(err, IsNil)
 	syncer := NewSyncer(cfg, nil, nil)
 	syncer.baList, err = filter.New(syncer.cfg.CaseSensitive, syncer.cfg.BAList)
+	syncer.metricsProxies = metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source")
 	c.Assert(err, IsNil)
 	c.Assert(syncer.genRouter(), IsNil)
 
@@ -412,6 +410,7 @@ func (s *testSyncerSuite) TestIgnoreDB(c *C) {
 	c.Assert(syncer.genRouter(), IsNil)
 	i := 0
 
+	ddlWorker := NewDDLWorker(&syncer.tctx.Logger, syncer)
 	statusVars := []byte{4, 0, 0, 0, 0, 46, 0}
 	for _, e := range allEvents {
 		ev, ok := e.Event.(*replication.QueryEvent)
@@ -425,7 +424,7 @@ func (s *testSyncerSuite) TestIgnoreDB(c *C) {
 			ddlSchema:       schema,
 			eventStatusVars: statusVars,
 		}
-		ddlInfo, err := syncer.genDDLInfo(qec, sql)
+		ddlInfo, err := ddlWorker.genDDLInfo(qec, sql)
 		c.Assert(err, IsNil)
 
 		qec.originSQL = sql
@@ -508,6 +507,7 @@ func (s *testSyncerSuite) TestIgnoreTable(c *C) {
 	c.Assert(err, IsNil)
 	syncer := NewSyncer(cfg, nil, nil)
 	syncer.baList, err = filter.New(syncer.cfg.CaseSensitive, syncer.cfg.BAList)
+	syncer.metricsProxies = metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source")
 	c.Assert(err, IsNil)
 	c.Assert(syncer.genRouter(), IsNil)
 
@@ -727,11 +727,10 @@ func (s *testSyncerSuite) TestcheckpointID(c *C) {
 // TODO: add `TestSharding` later.
 
 func (s *testSyncerSuite) TestRun(c *C) {
-	// 1. run syncer with column mapping
-	// 2. execute some sqls which will trigger causality
-	// 3. check the generated jobs
-	// 4. update config, add route rules, and update syncer
-	// 5. execute some sqls and then check jobs generated
+	// 1. execute some sqls which will trigger causality
+	// 2. check the generated jobs
+	// 3. update config, add route rules, and update syncer
+	// 4. execute some sqls and then check jobs generated
 
 	db, mock, err := sqlmock.New()
 	c.Assert(err, IsNil)
@@ -753,17 +752,6 @@ func (s *testSyncerSuite) TestRun(c *C) {
 		},
 	}
 
-	s.cfg.ColumnMappingRules = []*cm.Rule{
-		{
-			PatternSchema: "test_*",
-			PatternTable:  "t_*",
-			SourceColumn:  "id",
-			TargetColumn:  "id",
-			Expression:    cm.PartitionID,
-			Arguments:     []string{"1", "test_", "t_"},
-		},
-	}
-
 	s.cfg.Batch = 1000
 	s.cfg.WorkerCount = 2
 	s.cfg.MaxRetry = 1
@@ -775,15 +763,20 @@ func (s *testSyncerSuite) TestRun(c *C) {
 	cfg, err := s.cfg.Clone()
 	c.Assert(err, IsNil)
 	syncer := NewSyncer(cfg, nil, nil)
-	syncer.cfg.CheckpointFlushInterval = 30
-	syncer.fromDB = &dbconn.UpStreamConn{BaseDB: conn.NewBaseDB(db)}
+	syncer.cfg.CheckpointFlushInterval = 30 // defaultCheckpointFlushInterval
+	syncer.cfg.SafeModeDuration = "60s"     // defaultCheckpointFlushInterval * 2
+	syncer.fromDB = &dbconn.UpStreamConn{BaseDB: conn.NewBaseDBForTest(db)}
 	syncer.toDBConns = []*dbconn.DBConn{
-		dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})),
-		dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})),
+		dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{})),
+		dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{})),
 	}
-	syncer.ddlDBConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
-	syncer.downstreamTrackConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
-	syncer.schemaTracker, err = schema.NewTracker(context.Background(), s.cfg.Name, defaultTestSessionCfg, syncer.downstreamTrackConn)
+	syncer.ddlDBConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
+	syncer.downstreamTrackConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
+	syncer.schemaTracker, err = schema.NewTestTracker(context.Background(), s.cfg.Name, syncer.downstreamTrackConn, log.L())
+	c.Assert(err, IsNil)
+
+	syncer.metricsProxies = metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source")
+
 	mock.ExpectBegin()
 	mock.ExpectExec(fmt.Sprintf("SET SESSION SQL_MODE = '%s'", pmysql.DefaultSQLMode)).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
@@ -794,13 +787,12 @@ func (s *testSyncerSuite) TestRun(c *C) {
 		sqlmock.NewRows([]string{"Table", "Create Table"}).
 			AddRow("t_1", "create table t_1(id int primary key, name varchar(24), KEY `index1` (`name`))"))
 
-	syncer.exprFilterGroup = NewExprFilterGroup(utils.NewSessionCtx(nil), nil)
-	c.Assert(err, IsNil)
+	syncer.exprFilterGroup = NewExprFilterGroup(tcontext.Background(), utils.NewSessionCtx(nil), nil)
 	c.Assert(syncer.Type(), Equals, pb.UnitType_Sync)
 
-	syncer.columnMapping, err = cm.NewMapping(s.cfg.CaseSensitive, s.cfg.ColumnMappingRules)
-	c.Assert(err, IsNil)
 	c.Assert(syncer.genRouter(), IsNil)
+
+	syncer.metricsProxies = metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source")
 
 	syncer.setupMockCheckpoint(c, checkPointDBConn, checkPointMock)
 
@@ -822,12 +814,12 @@ func (s *testSyncerSuite) TestRun(c *C) {
 	}
 
 	mockStreamerProducer := &MockStreamProducer{s.generateEvents(events1, c)}
-	mockStreamer, err := mockStreamerProducer.generateStreamer(binlog.NewLocation(""))
+	mockStreamer, err := mockStreamerProducer.GenerateStreamFrom(binlog.MustZeroLocation(mysql.MySQLFlavor))
 	c.Assert(err, IsNil)
-	syncer.streamerController = &StreamerController{
-		streamerProducer: mockStreamerProducer,
-		streamer:         mockStreamer,
-	}
+	syncer.streamerController = binlogstream.NewStreamerController4Test(
+		mockStreamerProducer,
+		mockStreamer,
+	)
 	syncer.checkpointFlushWorker = &checkpointFlushWorker{
 		input:              make(chan *checkpointFlushTask, 16),
 		cp:                 syncer.checkpoint,
@@ -837,6 +829,7 @@ func (s *testSyncerSuite) TestRun(c *C) {
 	}
 
 	syncer.handleJobFunc = syncer.addJobToMemory
+	syncer.ddlWorker = NewDDLWorker(&syncer.tctx.Logger, syncer)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan pb.ProcessResult)
@@ -872,7 +865,7 @@ func (s *testSyncerSuite) TestRun(c *C) {
 		}, {
 			dml,
 			[]string{"REPLACE INTO `test_1`.`t_1` (`id`,`name`) VALUES (?,?)"},
-			[][]interface{}{{int64(580981944116838401), "a"}},
+			[][]interface{}{{int64(1), "a"}},
 		}, {
 			flush,
 			nil,
@@ -884,16 +877,16 @@ func (s *testSyncerSuite) TestRun(c *C) {
 		}, {
 			dml,
 			[]string{"REPLACE INTO `test_1`.`t_1` (`id`,`name`) VALUES (?,?)"},
-			[][]interface{}{{int64(580981944116838402), "b"}},
+			[][]interface{}{{int64(2), "b"}},
 		}, {
 			dml,
 			[]string{"DELETE FROM `test_1`.`t_1` WHERE `id` = ? LIMIT 1"},
-			[][]interface{}{{int64(580981944116838401)}},
+			[][]interface{}{{int64(1)}},
 		}, {
 			// safe mode is true, will split update to delete + replace
 			dml,
 			[]string{"DELETE FROM `test_1`.`t_1` WHERE `id` = ? LIMIT 1", "REPLACE INTO `test_1`.`t_1` (`id`,`name`) VALUES (?,?)"},
-			[][]interface{}{{int64(580981944116838402)}, {int64(580981944116838401), "b"}},
+			[][]interface{}{{int64(2)}, {int64(1), "b"}},
 		}, {
 			flush,
 			nil,
@@ -953,11 +946,6 @@ func (s *testSyncerSuite) TestRun(c *C) {
 	mockDBProvider.ExpectQuery("SELECT cast\\(TIMEDIFF\\(NOW\\(6\\), UTC_TIMESTAMP\\(6\\)\\) as time\\);").
 		WillReturnRows(sqlmock.NewRows([]string{""}).AddRow("01:00:00"))
 	mockGetServerUnixTS(mock)
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(
-		sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	mock.ExpectQuery("SHOW CREATE TABLE " + "`test_1`.`t_2`").WillReturnRows(
-		sqlmock.NewRows([]string{"Table", "Create Table"}).
-			AddRow("t_2", "create table t_2(id int primary key, name varchar(24))"))
 	mock.ExpectBegin()
 	mock.ExpectExec(fmt.Sprintf("SET SESSION SQL_MODE = '%s'", pmysql.DefaultSQLMode)).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
@@ -976,14 +964,18 @@ func (s *testSyncerSuite) TestRun(c *C) {
 	ctx, cancel = context.WithCancel(context.Background())
 	resultCh = make(chan pb.ProcessResult)
 	// simulate `syncer.Resume` here, but doesn't reset database conns
+	syncer.secondsBehindMaster.Store(100)
+	syncer.workerJobTSArray[ddlJobIdx].Store(100)
 	syncer.reset()
+	c.Assert(syncer.secondsBehindMaster.Load(), Equals, int64(0))
+	c.Assert(syncer.workerJobTSArray[ddlJobIdx].Load(), Equals, int64(0))
 	mockStreamerProducer = &MockStreamProducer{s.generateEvents(events2, c)}
-	mockStreamer, err = mockStreamerProducer.generateStreamer(binlog.NewLocation(""))
+	mockStreamer, err = mockStreamerProducer.GenerateStreamFrom(binlog.MustZeroLocation(mysql.MySQLFlavor))
 	c.Assert(err, IsNil)
-	syncer.streamerController = &StreamerController{
-		streamerProducer: mockStreamerProducer,
-		streamer:         mockStreamer,
-	}
+	syncer.streamerController = binlogstream.NewStreamerController4Test(
+		mockStreamerProducer,
+		mockStreamer,
+	)
 	syncer.checkpointFlushWorker = &checkpointFlushWorker{
 		input:              make(chan *checkpointFlushTask, 16),
 		cp:                 syncer.checkpoint,
@@ -1110,13 +1102,13 @@ func (s *testSyncerSuite) TestExitSafeModeByConfig(c *C) {
 	cfg, err := s.cfg.Clone()
 	c.Assert(err, IsNil)
 	syncer := NewSyncer(cfg, nil, nil)
-	syncer.fromDB = &dbconn.UpStreamConn{BaseDB: conn.NewBaseDB(db)}
+	syncer.fromDB = &dbconn.UpStreamConn{BaseDB: conn.NewBaseDBForTest(db)}
 	syncer.toDBConns = []*dbconn.DBConn{
-		dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})),
-		dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})),
+		dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{})),
+		dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{})),
 	}
-	syncer.ddlDBConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
-	syncer.downstreamTrackConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
+	syncer.ddlDBConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
+	syncer.downstreamTrackConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
 	mock.ExpectBegin()
 	mock.ExpectExec(fmt.Sprintf("SET SESSION SQL_MODE = '%s'", pmysql.DefaultSQLMode)).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
@@ -1125,12 +1117,14 @@ func (s *testSyncerSuite) TestExitSafeModeByConfig(c *C) {
 		sqlmock.NewRows([]string{"Table", "Create Table"}).
 			AddRow("t_1", "create table t_1(id int primary key, name varchar(24))"))
 
-	syncer.schemaTracker, err = schema.NewTracker(context.Background(), s.cfg.Name, defaultTestSessionCfg, syncer.ddlDBConn)
-	syncer.exprFilterGroup = NewExprFilterGroup(utils.NewSessionCtx(nil), nil)
+	syncer.schemaTracker, err = schema.NewTestTracker(context.Background(), s.cfg.Name, syncer.ddlDBConn, log.L())
 	c.Assert(err, IsNil)
 	c.Assert(syncer.Type(), Equals, pb.UnitType_Sync)
 
+	syncer.exprFilterGroup = NewExprFilterGroup(tcontext.Background(), utils.NewSessionCtx(nil), nil)
 	c.Assert(syncer.genRouter(), IsNil)
+
+	syncer.metricsProxies = metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source")
 
 	syncer.setupMockCheckpoint(c, checkPointDBConn, checkPointMock)
 
@@ -1148,7 +1142,7 @@ func (s *testSyncerSuite) TestExitSafeModeByConfig(c *C) {
 	generatedEvents1 := s.generateEvents(events1, c)
 	// make sure [18] is last event, and use [18]'s position as safeModeExitLocation
 	c.Assert(len(generatedEvents1), Equals, 19)
-	safeModeExitLocation := binlog.NewLocation("")
+	safeModeExitLocation := binlog.MustZeroLocation(mysql.MySQLFlavor)
 	safeModeExitLocation.Position.Pos = generatedEvents1[18].Header.LogPos
 	syncer.checkpoint.SaveSafeModeExitPoint(&safeModeExitLocation)
 
@@ -1164,12 +1158,12 @@ func (s *testSyncerSuite) TestExitSafeModeByConfig(c *C) {
 	generatedEvents = append(generatedEvents, generatedEvents2...)
 
 	mockStreamerProducer := &MockStreamProducer{generatedEvents}
-	mockStreamer, err := mockStreamerProducer.generateStreamer(binlog.NewLocation(""))
+	mockStreamer, err := mockStreamerProducer.GenerateStreamFrom(binlog.MustZeroLocation(mysql.MySQLFlavor))
 	c.Assert(err, IsNil)
-	syncer.streamerController = &StreamerController{
-		streamerProducer: mockStreamerProducer,
-		streamer:         mockStreamer,
-	}
+	syncer.streamerController = binlogstream.NewStreamerController4Test(
+		mockStreamerProducer,
+		mockStreamer,
+	)
 	syncer.checkpointFlushWorker = &checkpointFlushWorker{
 		input:              make(chan *checkpointFlushTask, 16),
 		cp:                 syncer.checkpoint,
@@ -1179,6 +1173,7 @@ func (s *testSyncerSuite) TestExitSafeModeByConfig(c *C) {
 	}
 
 	syncer.handleJobFunc = syncer.addJobToMemory
+	syncer.ddlWorker = NewDDLWorker(&syncer.tctx.Logger, syncer)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan pb.ProcessResult)
@@ -1188,7 +1183,7 @@ func (s *testSyncerSuite) TestExitSafeModeByConfig(c *C) {
 	checkPointMock.ExpectExec(".*INSERT INTO .* VALUES.* ON DUPLICATE KEY UPDATE.*").WillReturnResult(sqlmock.NewResult(0, 1))
 	checkPointMock.ExpectCommit()
 	// disable 1-minute safe mode
-	c.Assert(failpoint.Enable("github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds", "return(0)"), IsNil)
+	c.Assert(failpoint.Enable("github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds", `return("10ms")`), IsNil)
 	go syncer.Process(ctx, resultCh)
 	go func() {
 		for r := range resultCh {
@@ -1324,15 +1319,15 @@ func (s *testSyncerSuite) TestTrackDDL(c *C) {
 	c.Assert(err, IsNil)
 	syncer := NewSyncer(cfg, nil, nil)
 	syncer.toDBConns = []*dbconn.DBConn{
-		dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})),
-		dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})),
+		dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{})),
+		dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{})),
 	}
-	syncer.ddlDBConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
-	syncer.checkpoint.(*RemoteCheckPoint).dbConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(checkPointDBConn, &retry.FiniteRetryStrategy{}))
-	syncer.schemaTracker, err = schema.NewTracker(context.Background(), s.cfg.Name, defaultTestSessionCfg, syncer.ddlDBConn)
+	syncer.ddlDBConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
+	syncer.checkpoint.(*RemoteCheckPoint).dbConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(checkPointDBConn, &retry.FiniteRetryStrategy{}))
+	syncer.schemaTracker, err = schema.NewTestTracker(context.Background(), s.cfg.Name, syncer.ddlDBConn, log.L())
 	c.Assert(err, IsNil)
 	defer syncer.schemaTracker.Close()
-	syncer.exprFilterGroup = NewExprFilterGroup(utils.NewSessionCtx(nil), nil)
+	syncer.exprFilterGroup = NewExprFilterGroup(tcontext.Background(), utils.NewSessionCtx(nil), nil)
 	c.Assert(syncer.genRouter(), IsNil)
 
 	cases := []struct {
@@ -1409,13 +1404,14 @@ func (s *testSyncerSuite) TestTrackDDL(c *C) {
 		}},
 	}
 
+	ddlWorker := NewDDLWorker(&syncer.tctx.Logger, syncer)
 	for _, ca := range cases {
-		ddlInfo, err := syncer.genDDLInfo(qec, ca.sql)
+		ddlInfo, err := ddlWorker.genDDLInfo(qec, ca.sql)
 		c.Assert(err, IsNil)
 		ca.callback()
 
 		c.Assert(syncer.trackDDL(testDB, ddlInfo, ec), IsNil)
-		c.Assert(syncer.schemaTracker.Reset(), IsNil)
+		syncer.schemaTracker.Reset()
 		c.Assert(mock.ExpectationsWereMet(), IsNil)
 		c.Assert(checkPointMock.ExpectationsWereMet(), IsNil)
 	}
@@ -1428,6 +1424,7 @@ func checkEventWithTableResult(c *C, syncer *Syncer, allEvents []*replication.Bi
 		tctx: tctx,
 	}
 	statusVars := []byte{4, 0, 0, 0, 0, 46, 0}
+	ddlWorker := NewDDLWorker(&syncer.tctx.Logger, syncer)
 	for _, e := range allEvents {
 		switch ev := e.Event.(type) {
 		case *replication.QueryEvent:
@@ -1447,7 +1444,7 @@ func checkEventWithTableResult(c *C, syncer *Syncer, allEvents []*replication.Bi
 			qec.splitDDLs, err = parserpkg.SplitDDL(stmt, qec.ddlSchema)
 			c.Assert(err, IsNil)
 			for _, sql := range qec.splitDDLs {
-				sqls, err := syncer.processOneDDL(qec, sql)
+				sqls, err := ddlWorker.processOneDDL(qec, sql)
 				c.Assert(err, IsNil)
 				qec.appliedDDLs = append(qec.appliedDDLs, sqls...)
 			}
@@ -1459,7 +1456,7 @@ func checkEventWithTableResult(c *C, syncer *Syncer, allEvents []*replication.Bi
 			}
 
 			for j, sql := range qec.appliedDDLs {
-				ddlInfo, err := syncer.genDDLInfo(qec, sql)
+				ddlInfo, err := ddlWorker.genDDLInfo(qec, sql)
 				c.Assert(err, IsNil)
 
 				needSkip, err := syncer.skipQueryEvent(qec, ddlInfo)
@@ -1621,7 +1618,7 @@ func (s *Syncer) setupMockCheckpoint(c *C, checkPointDBConn *sql.Conn, checkPoin
 	checkPointMock.ExpectCommit()
 
 	// mock syncer.checkpoint.Init() function
-	s.checkpoint.(*RemoteCheckPoint).dbConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(checkPointDBConn, &retry.FiniteRetryStrategy{}))
+	s.checkpoint.(*RemoteCheckPoint).dbConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(checkPointDBConn, &retry.FiniteRetryStrategy{}))
 	// mock syncer.flushCpWorker init
 	s.checkpointFlushWorker = &checkpointFlushWorker{
 		input:              nil,
@@ -1635,20 +1632,29 @@ func (s *Syncer) setupMockCheckpoint(c *C, checkPointDBConn *sql.Conn, checkPoin
 	s.checkpoint.(*RemoteCheckPoint).globalPointSaveTime = time.Now()
 }
 
-func (s *testSyncerSuite) TestTrackDownstreamTableWontOverwrite(c *C) {
+func parseSQL(sql string) (ast.StmtNode, error) {
+	stmt, err := parser.New().ParseOneStmt(sql, "", "")
+	if err != nil {
+		return nil, err
+	}
+	return stmt, nil
+}
+
+func TestTrackDownstreamTableWontOverwrite(t *testing.T) {
 	syncer := Syncer{}
 	ctx := context.Background()
 	tctx := tcontext.Background()
+	cfg := genDefaultSubTaskConfig4Test()
 
 	db, mock, err := sqlmock.New()
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	dbConn, err := db.Conn(ctx)
-	c.Assert(err, IsNil)
-	baseConn := conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})
-	syncer.ddlDBConn = dbconn.NewDBConn(s.cfg, baseConn)
-	syncer.downstreamTrackConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
-	syncer.schemaTracker, err = schema.NewTracker(ctx, s.cfg.Name, defaultTestSessionCfg, syncer.downstreamTrackConn)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
+	baseConn := conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{})
+	syncer.ddlDBConn = dbconn.NewDBConn(cfg, baseConn)
+	syncer.downstreamTrackConn = dbconn.NewDBConn(cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
+	syncer.schemaTracker, err = schema.NewTestTracker(ctx, cfg.Name, syncer.downstreamTrackConn, log.L())
+	require.NoError(t, err)
 	defer syncer.schemaTracker.Close()
 
 	upTable := &filter.Table{
@@ -1660,6 +1666,8 @@ func (s *testSyncerSuite) TestTrackDownstreamTableWontOverwrite(c *C) {
 		Name:   "down",
 	}
 	createTableSQL := "CREATE TABLE up (c1 int, c2 int);"
+	createTableStmt, err := parseSQL(createTableSQL)
+	require.NoError(t, err)
 
 	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(
 		sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
@@ -1667,33 +1675,23 @@ func (s *testSyncerSuite) TestTrackDownstreamTableWontOverwrite(c *C) {
 		sqlmock.NewRows([]string{"Table", "Create Table"}).
 			AddRow(downTable.Name, " CREATE TABLE `"+downTable.Name+"` (\n  `c` int(11) DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
 
-	c.Assert(syncer.schemaTracker.CreateSchemaIfNotExists(upTable.Schema), IsNil)
-	c.Assert(syncer.schemaTracker.Exec(ctx, "test", createTableSQL), IsNil)
+	require.NoError(t, syncer.schemaTracker.CreateSchemaIfNotExists(upTable.Schema))
+	require.NoError(t, syncer.schemaTracker.Exec(ctx, "test", createTableStmt))
 	ti, err := syncer.getTableInfo(tctx, upTable, downTable)
-	c.Assert(err, IsNil)
-	c.Assert(ti.Columns, HasLen, 2)
-	c.Assert(syncer.trackTableInfoFromDownstream(tctx, upTable, downTable), IsNil)
+	require.NoError(t, err)
+	require.Len(t, ti.Columns, 2)
+	require.NoError(t, syncer.trackTableInfoFromDownstream(tctx, upTable, downTable))
 	newTi, err := syncer.getTableInfo(tctx, upTable, downTable)
-	c.Assert(err, IsNil)
-	c.Assert(newTi, DeepEquals, ti)
-	c.Assert(mock.ExpectationsWereMet(), IsNil)
+	require.NoError(t, err)
+	require.Equal(t, ti, newTi)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-func (s *testSyncerSuite) TestDownstreamTableHasAutoRandom(c *C) {
+func TestDownstreamTableHasAutoRandom(t *testing.T) {
 	syncer := Syncer{}
 	ctx := context.Background()
 	tctx := tcontext.Background()
-
-	db, mock, err := sqlmock.New()
-	c.Assert(err, IsNil)
-	dbConn, err := db.Conn(ctx)
-	c.Assert(err, IsNil)
-	baseConn := conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})
-	syncer.ddlDBConn = dbconn.NewDBConn(s.cfg, baseConn)
-	syncer.downstreamTrackConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
-	syncer.schemaTracker, err = schema.NewTracker(ctx, s.cfg.Name, defaultTestSessionCfg, syncer.downstreamTrackConn)
-	c.Assert(err, IsNil)
-
+	cfg := genDefaultSubTaskConfig4Test()
 	schemaName := "test"
 	tableName := "tbl"
 	table := &filter.Table{
@@ -1701,121 +1699,69 @@ func (s *testSyncerSuite) TestDownstreamTableHasAutoRandom(c *C) {
 		Name:   "tbl",
 	}
 
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(
-		sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	// create table t (c bigint primary key auto_random);
-	mock.ExpectQuery("SHOW CREATE TABLE.*").WillReturnRows(
-		sqlmock.NewRows([]string{"Table", "Create Table"}).
-			AddRow(tableName, " CREATE TABLE `"+tableName+"` (\n  `c` bigint(20) NOT NULL /*T![auto_rand] AUTO_RANDOM(5) */,\n  PRIMARY KEY (`c`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
-
-	c.Assert(syncer.schemaTracker.CreateSchemaIfNotExists(schemaName), IsNil)
-	c.Assert(syncer.trackTableInfoFromDownstream(tctx, table, table), IsNil)
-	ti, err := syncer.getTableInfo(tctx, table, table)
-	c.Assert(err, IsNil)
-	c.Assert(mock.ExpectationsWereMet(), IsNil)
-
-	c.Assert(syncer.schemaTracker.DropTable(table), IsNil)
-	sql := "create table tbl (c bigint primary key);"
-	c.Assert(syncer.schemaTracker.Exec(ctx, schemaName, sql), IsNil)
-	ti2, err := syncer.getTableInfo(tctx, table, table)
-	c.Assert(err, IsNil)
-
-	ti.ID = ti2.ID
-	ti.UpdateTS = ti2.UpdateTS
-
-	c.Assert(ti, DeepEquals, ti2)
-
-	// test if user set ON clustered index, no need to modify
-	sessionCfg := map[string]string{
-		"sql_mode":                "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
-		"tidb_skip_utf8_check":    "0",
-		schema.TiDBClusteredIndex: "ON",
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{
+			"CREATE TABLE `" + tableName + "` (\n" +
+				"  `c` bigint(20) NOT NULL /*T![auto_rand] AUTO_RANDOM(5) */,\n" +
+				"  PRIMARY KEY (`c`)\n" +
+				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
+			"create table tbl (c bigint primary key)",
+		},
+		// test no error, input and expected are same
+		{
+			"CREATE TABLE `" + tableName + "` (\n" +
+				"  `c` bigint(20) NOT NULL,\n" +
+				"  PRIMARY KEY (`c`)\n" +
+				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![placement] PLACEMENT POLICY=`on_ssd` */",
+			"create table tbl (c bigint primary key) /*T![placement] PLACEMENT POLICY=`on_ssd` */",
+		},
 	}
-	c.Assert(syncer.schemaTracker.Close(), IsNil)
-	syncer.schemaTracker, err = schema.NewTracker(ctx, s.cfg.Name, sessionCfg, syncer.downstreamTrackConn)
-	c.Assert(err, IsNil)
-	defer syncer.schemaTracker.Close()
-	v, ok := syncer.schemaTracker.GetSystemVar(schema.TiDBClusteredIndex)
-	c.Assert(v, Equals, "ON")
-	c.Assert(ok, IsTrue)
-
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(
-		sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	// create table t (c bigint primary key auto_random);
-	mock.ExpectQuery("SHOW CREATE TABLE.*").WillReturnRows(
-		sqlmock.NewRows([]string{"Table", "Create Table"}).
-			AddRow(tableName, " CREATE TABLE `"+tableName+"` (\n  `c` bigint(20) NOT NULL /*T![auto_rand] AUTO_RANDOM(5) */,\n  PRIMARY KEY (`c`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
-
-	c.Assert(syncer.schemaTracker.CreateSchemaIfNotExists(schemaName), IsNil)
-	c.Assert(syncer.trackTableInfoFromDownstream(tctx, table, table), IsNil)
-	ti, err = syncer.getTableInfo(tctx, table, table)
-	c.Assert(err, IsNil)
-	c.Assert(mock.ExpectationsWereMet(), IsNil)
-
-	c.Assert(syncer.schemaTracker.DropTable(table), IsNil)
-	sql = "create table tbl (c bigint primary key auto_random);"
-	c.Assert(syncer.schemaTracker.Exec(ctx, schemaName, sql), IsNil)
-	ti2, err = syncer.getTableInfo(tctx, table, table)
-	c.Assert(err, IsNil)
-
-	ti.ID = ti2.ID
-	ti.UpdateTS = ti2.UpdateTS
-
-	c.Assert(ti, DeepEquals, ti2)
-}
-
-func (s *testSyncerSuite) TestDownstreamTableHasPlacementRule(c *C) {
-	syncer := Syncer{}
-	ctx := context.Background()
-	tctx := tcontext.Background()
 
 	db, mock, err := sqlmock.New()
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	dbConn, err := db.Conn(ctx)
-	c.Assert(err, IsNil)
-	baseConn := conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})
-	syncer.ddlDBConn = dbconn.NewDBConn(s.cfg, baseConn)
-	syncer.downstreamTrackConn = dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
-	syncer.schemaTracker, err = schema.NewTracker(ctx, s.cfg.Name, defaultTestSessionCfg, syncer.downstreamTrackConn)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
+	baseConn := conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{})
+	syncer.ddlDBConn = dbconn.NewDBConn(cfg, baseConn)
+	syncer.downstreamTrackConn = dbconn.NewDBConn(cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
 
-	schemaName := "test"
-	tableName := "tbl"
-	table := &filter.Table{
-		Schema: "test",
-		Name:   "tbl",
+	for _, c := range cases {
+		syncer.schemaTracker, err = schema.NewTestTracker(ctx, cfg.Name, syncer.downstreamTrackConn, log.L())
+		require.NoError(t, err)
+
+		mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(
+			sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
+		mock.ExpectQuery("SHOW CREATE TABLE.*").WillReturnRows(
+			sqlmock.NewRows([]string{"Table", "Create Table"}).
+				AddRow(tableName, c.input))
+		require.NoError(t, syncer.schemaTracker.CreateSchemaIfNotExists(schemaName))
+		require.NoError(t, syncer.trackTableInfoFromDownstream(tctx, table, table))
+		ti, err := syncer.getTableInfo(tctx, table, table)
+		require.NoError(t, err)
+		require.NoError(t, mock.ExpectationsWereMet())
+
+		require.NoError(t, syncer.schemaTracker.DropTable(table))
+		stmt, err := parseSQL(c.expected)
+		require.NoError(t, err)
+		require.NoError(t, syncer.schemaTracker.Exec(ctx, schemaName, stmt))
+		ti2, err := syncer.getTableInfo(tctx, table, table)
+		require.NoError(t, err)
+
+		ti.ID = ti2.ID
+		ti.UpdateTS = ti2.UpdateTS
+
+		require.Equal(t, ti, ti2)
 	}
-
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(
-		sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	// create table t (c bigint primary key auto_random);
-	mock.ExpectQuery("SHOW CREATE TABLE.*").WillReturnRows(
-		sqlmock.NewRows([]string{"Table", "Create Table"}).
-			AddRow(tableName, " CREATE TABLE `"+tableName+"` (\n  `c` bigint(20) NOT NULL,\n  PRIMARY KEY (`c`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![placement] PLACEMENT POLICY=`on_ssd` */"))
-
-	c.Assert(syncer.schemaTracker.CreateSchemaIfNotExists(schemaName), IsNil)
-	c.Assert(syncer.trackTableInfoFromDownstream(tctx, table, table), IsNil)
-	ti, err := syncer.getTableInfo(tctx, table, table)
-	c.Assert(err, IsNil)
-	c.Assert(mock.ExpectationsWereMet(), IsNil)
-
-	c.Assert(syncer.schemaTracker.DropTable(table), IsNil)
-	sql := "create table tbl (c bigint primary key);"
-	c.Assert(syncer.schemaTracker.Exec(ctx, schemaName, sql), IsNil)
-	ti2, err := syncer.getTableInfo(tctx, table, table)
-	c.Assert(err, IsNil)
-
-	ti.ID = ti2.ID
-	ti.UpdateTS = ti2.UpdateTS
-
-	c.Assert(ti, DeepEquals, ti2)
 }
 
-func (s *testSyncerSuite) TestExecuteSQLSWithIgnore(c *C) {
+func TestExecuteSQLSWithIgnore(t *testing.T) {
 	db, mock, err := sqlmock.New()
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	dbConn, err := db.Conn(context.Background())
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	conn := dbconn.NewDBConn(&config.SubTaskConfig{
 		Name: "test",
 	}, &conn.BaseConn{
@@ -1832,20 +1778,20 @@ func (s *testSyncerSuite) TestExecuteSQLSWithIgnore(c *C) {
 	mock.ExpectCommit()
 
 	tctx := tcontext.Background().WithLogger(log.With(zap.String("test", "TestExecuteSQLSWithIgnore")))
-	n, err := conn.ExecuteSQLWithIgnore(tctx, errorutil.IsIgnorableMySQLDDLError, sqls)
-	c.Assert(err, IsNil)
-	c.Assert(n, Equals, 2)
+	n, err := conn.ExecuteSQLWithIgnore(tctx, nil, errorutil.IsIgnorableMySQLDDLError, sqls)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
 
 	// will return error when execute the first sql
 	mock.ExpectBegin()
 	mock.ExpectExec(sqls[0]).WillReturnError(newMysqlErr(uint16(infoschema.ErrColumnExists.Code()), "column a already exists"))
 	mock.ExpectRollback()
 
-	n, err = conn.ExecuteSQL(tctx, sqls)
-	c.Assert(err, ErrorMatches, ".*column a already exists.*")
-	c.Assert(n, Equals, 0)
+	n, err = conn.ExecuteSQL(tctx, nil, sqls)
+	require.ErrorContains(t, err, "column a already exists")
+	require.Equal(t, 0, n)
 
-	c.Assert(mock.ExpectationsWereMet(), IsNil)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func genDefaultSubTaskConfig4Test() *config.SubTaskConfig {
@@ -1885,23 +1831,25 @@ func TestWaitBeforeRunExit(t *testing.T) {
 		"tidb_skip_utf8_check": "0",
 	}
 	syncer := NewSyncer(cfg, nil, nil)
+	syncer.metricsProxies = metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source")
 
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	mockGetServerUnixTS(mock)
 
-	syncer.fromDB = &dbconn.UpStreamConn{BaseDB: conn.NewBaseDB(db)}
+	syncer.fromDB = &dbconn.UpStreamConn{BaseDB: conn.NewBaseDBForTest(db)}
 	syncer.reset()
 	require.NoError(t, syncer.genRouter())
 
 	mockStreamerProducer := &MockStreamProducer{}
-	mockStreamer, err := mockStreamerProducer.generateStreamer(binlog.NewLocation(""))
+	mockStreamer, err := mockStreamerProducer.GenerateStreamFrom(binlog.MustZeroLocation(mysql.MySQLFlavor))
 	require.NoError(t, err)
 	// let getEvent pending until ctx.Done()
 	mockStreamer.(*MockStreamer).pending = true
-	syncer.streamerController = &StreamerController{
-		streamerProducer: mockStreamerProducer, streamer: mockStreamer, closed: false,
-	}
+	syncer.streamerController = binlogstream.NewStreamerController4Test(
+		mockStreamerProducer,
+		mockStreamer,
+	)
 
 	wg := &sync.WaitGroup{}
 	errCh := make(chan error, 1)
@@ -1956,10 +1904,10 @@ func TestSyncerGetTableInfo(t *testing.T) {
 	require.NoError(t, err)
 	dbConn, err := db.Conn(ctx)
 	require.NoError(t, err)
-	baseConn := conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{})
+	baseConn := conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{})
 	syncer.ddlDBConn = dbconn.NewDBConn(cfg, baseConn)
-	syncer.downstreamTrackConn = dbconn.NewDBConn(cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
-	syncer.schemaTracker, err = schema.NewTracker(ctx, cfg.Name, defaultTestSessionCfg, syncer.downstreamTrackConn)
+	syncer.downstreamTrackConn = dbconn.NewDBConn(cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
+	syncer.schemaTracker, err = schema.NewTestTracker(ctx, cfg.Name, syncer.downstreamTrackConn, log.L())
 	require.NoError(t, err)
 	defer syncer.schemaTracker.Close()
 

@@ -152,6 +152,7 @@ function run() {
 	start_tidb_cluster --workdir $WORK_DIR
 
 	cd $WORK_DIR
+	run_sql "SET GLOBAL tidb_enable_external_ts_read = on;" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 	run_sql "CREATE DATABASE testSync;"
 	run_sql "CREATE DATABASE testSync;" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 
@@ -160,8 +161,10 @@ function run() {
 	start_ts=$(run_cdc_cli_tso_query ${UP_PD_HOST_1} ${UP_PD_PORT_1})
 	run_cdc_server --workdir $WORK_DIR --binary $CDC_BINARY
 
-	SINK_URI="mysql://normal:123456@127.0.0.1:3306/?max-txn-row=1"
-	run_cdc_cli changefeed create --start-ts=$start_ts --sink-uri="$SINK_URI" --sync-point --sync-interval=10s
+	# this test contains `set global tidb_external_ts = ?` , which requires super privilege, so we
+	# can't use the normal user
+	SINK_URI="mysql://root@127.0.0.1:3306/?max-txn-row=1"
+	run_cdc_cli changefeed create --start-ts=$start_ts --sink-uri="$SINK_URI" --config="$CUR/conf/changefeed.toml"
 
 	goSql
 
@@ -169,6 +172,7 @@ function run() {
 	check_table_exists "testSync.simple1" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 	check_table_exists "testSync.simple2" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 
+	run_sql "SET GLOBAL tidb_enable_external_ts_read = off;" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 	sleep 60
 
 	run_sql "SELECT primary_ts, secondary_ts FROM tidb_cdc.syncpoint_v1;" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}

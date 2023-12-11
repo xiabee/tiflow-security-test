@@ -16,28 +16,18 @@ package etcd
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
-	"net/url"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/pkg/config"
+	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
-	"go.etcd.io/etcd/server/v3/embed"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"golang.org/x/sync/errgroup"
-
-	"github.com/pingcap/errors"
-	"github.com/pingcap/tiflow/cdc/model"
-	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/util"
 )
 
 type Captures []*model.CaptureInfo
@@ -46,59 +36,11 @@ func (c Captures) Len() int           { return len(c) }
 func (c Captures) Less(i, j int) bool { return c[i].ID < c[j].ID }
 func (c Captures) Swap(i, j int)      { c[i], c[j] = c[j], c[i] }
 
-type etcdTester struct {
-	dir       string
-	etcd      *embed.Etcd
-	clientURL *url.URL
-	client    CDCEtcdClient
-	ctx       context.Context
-	cancel    context.CancelFunc
-	errg      *errgroup.Group
-}
-
-func (s *etcdTester) setUpTest(t *testing.T) {
-	var err error
-	s.dir, err = ioutil.TempDir("", "etcd-testing")
-	require.Nil(t, err)
-	s.clientURL, s.etcd, err = SetupEmbedEtcd(s.dir)
-	require.Nil(t, err)
-	logConfig := logutil.DefaultZapLoggerConfig
-	logConfig.Level = zap.NewAtomicLevelAt(zapcore.ErrorLevel)
-	client, err := clientv3.New(clientv3.Config{
-		Endpoints:   []string{s.clientURL.String()},
-		DialTimeout: 3 * time.Second,
-		LogConfig:   &logConfig,
-	})
-	require.NoError(t, err)
-	s.client = NewCDCEtcdClient(context.TODO(), client)
-	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.errg = util.HandleErrWithErrGroup(s.ctx, s.etcd.Err(), func(e error) { t.Log(e) })
-}
-
-func (s *etcdTester) tearDownTest(t *testing.T) {
-	s.etcd.Close()
-	s.cancel()
-logEtcdError:
-	for {
-		select {
-		case err, ok := <-s.etcd.Err():
-			if !ok {
-				break logEtcdError
-			}
-			t.Logf("etcd server error: %v", err)
-		default:
-			break logEtcdError
-		}
-	}
-	s.client.Close() //nolint:errcheck
-	os.RemoveAll(s.dir)
-}
-
 func TestEmbedEtcd(t *testing.T) {
-	s := &etcdTester{}
-	s.setUpTest(t)
-	defer s.tearDownTest(t)
-	curl := s.clientURL.String()
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
+	curl := s.ClientURL.String()
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   []string{curl},
 		DialTimeout: 3 * time.Second,
@@ -119,9 +61,9 @@ func TestEmbedEtcd(t *testing.T) {
 }
 
 func TestGetChangeFeeds(t *testing.T) {
-	s := &etcdTester{}
-	s.setUpTest(t)
-	defer s.tearDownTest(t)
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
 	testCases := []struct {
 		ids     []string
 		details []string
@@ -132,8 +74,9 @@ func TestGetChangeFeeds(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		for i := 0; i < len(tc.ids); i++ {
-			_, err := s.client.Client.Put(context.Background(),
-				GetEtcdKeyChangeFeedInfo(model.DefaultChangeFeedID(tc.ids[i])),
+			_, err := s.client.GetEtcdClient().Put(context.Background(),
+				GetEtcdKeyChangeFeedInfo(DefaultCDCClusterID,
+					model.DefaultChangeFeedID(tc.ids[i])),
 				tc.details[i])
 			require.NoError(t, err)
 		}
@@ -160,9 +103,9 @@ func TestGetChangeFeeds(t *testing.T) {
 }
 
 func TestOpChangeFeedDetail(t *testing.T) {
-	s := &etcdTester{}
-	s.setUpTest(t)
-	defer s.tearDownTest(t)
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
 	ctx := context.Background()
 	detail := &model.ChangeFeedInfo{
 		SinkURI: "root@tcp(127.0.0.1:3306)/mysql",
@@ -186,9 +129,9 @@ func TestOpChangeFeedDetail(t *testing.T) {
 }
 
 func TestGetAllChangeFeedInfo(t *testing.T) {
-	s := &etcdTester{}
-	s.setUpTest(t)
-	defer s.tearDownTest(t)
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
 	ctx := context.Background()
 	infos := []struct {
 		id   string
@@ -227,66 +170,94 @@ func TestGetAllChangeFeedInfo(t *testing.T) {
 	}
 }
 
-func putChangeFeedStatus(
-	ctx context.Context,
-	c CDCEtcdClient,
-	changefeedID model.ChangeFeedID,
-	status *model.ChangeFeedStatus,
-) error {
-	key := GetEtcdKeyJob(changefeedID)
-	value, err := status.Marshal()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	_, err = c.Client.Put(ctx, key, value)
-	return cerror.WrapError(cerror.ErrPDEtcdAPIError, err)
-}
+func TestCheckMultipleCDCClusterExist(t *testing.T) {
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
 
-func TestGetAllChangeFeedStatus(t *testing.T) {
-	s := &etcdTester{}
-	s.setUpTest(t)
-	defer s.tearDownTest(t)
+	ctx := context.Background()
+	rawEtcdClient := s.client.GetEtcdClient().cli
+	defaultClusterKey := DefaultClusterAndNamespacePrefix + "/test-key"
+	_, err := rawEtcdClient.Put(ctx, defaultClusterKey, "test-value")
+	require.NoError(t, err)
 
-	changefeeds := map[model.ChangeFeedID]*model.ChangeFeedStatus{
-		model.DefaultChangeFeedID("cf1"): {
-			ResolvedTs:   100,
-			CheckpointTs: 90,
-		},
-		model.DefaultChangeFeedID("cf2"): {
-			ResolvedTs:   100,
-			CheckpointTs: 70,
-		},
-	}
-	for id, cf := range changefeeds {
-		err := putChangeFeedStatus(context.Background(), s.client, id, cf)
+	err = s.client.CheckMultipleCDCClusterExist(ctx)
+	require.NoError(t, err)
+
+	for _, reserved := range config.ReservedClusterIDs {
+		newClusterKey := "/tidb/cdc/" + reserved
+		_, err = rawEtcdClient.Put(ctx, newClusterKey, "test-value")
+		require.NoError(t, err)
+		err = s.client.CheckMultipleCDCClusterExist(ctx)
 		require.NoError(t, err)
 	}
-	statuses, err := s.client.GetAllChangeFeedStatus(context.Background())
+
+	newClusterKey := NamespacedPrefix("new-cluster", "new-namespace") +
+		"/test-key"
+	_, err = rawEtcdClient.Put(ctx, newClusterKey, "test-value")
 	require.NoError(t, err)
-	require.Equal(t, statuses, changefeeds)
+
+	err = s.client.CheckMultipleCDCClusterExist(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ErrMultipleCDCClustersExist")
 }
 
 func TestCreateChangefeed(t *testing.T) {
-	s := &etcdTester{}
-	s.setUpTest(t)
-	defer s.tearDownTest(t)
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
 
 	ctx := context.Background()
 	detail := &model.ChangeFeedInfo{
 		SinkURI: "root@tcp(127.0.0.1:3306)/mysql",
 	}
 
-	err := s.client.CreateChangefeedInfo(ctx, detail, model.DefaultChangeFeedID("test-id"))
+	upstreamInfo := &model.UpstreamInfo{ID: 1}
+	err := s.client.CreateChangefeedInfo(ctx,
+		upstreamInfo, detail, model.DefaultChangeFeedID("test-id"))
 	require.NoError(t, err)
 
-	err = s.client.CreateChangefeedInfo(ctx, detail, model.DefaultChangeFeedID("test-id"))
+	err = s.client.CreateChangefeedInfo(ctx,
+		upstreamInfo, detail, model.DefaultChangeFeedID("test-id"))
 	require.True(t, cerror.ErrChangeFeedAlreadyExists.Equal(err))
 }
 
+func TestUpdateChangefeedAndUpstream(t *testing.T) {
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
+
+	ctx := context.Background()
+	upstreamInfo := &model.UpstreamInfo{
+		ID:          1,
+		PDEndpoints: "http://127.0.0.1:2385",
+	}
+	changeFeedID := model.DefaultChangeFeedID("test-update-cf-and-up")
+	changeFeedInfo := &model.ChangeFeedInfo{
+		ID:        changeFeedID.ID,
+		Namespace: changeFeedID.Namespace,
+		SinkURI:   "blackhole://",
+	}
+
+	err := s.client.UpdateChangefeedAndUpstream(ctx, upstreamInfo, changeFeedInfo, changeFeedID)
+	require.NoError(t, err)
+
+	var upstreamResult *model.UpstreamInfo
+	var changefeedResult *model.ChangeFeedInfo
+
+	upstreamResult, err = s.client.GetUpstreamInfo(ctx, 1, changeFeedID.Namespace)
+	require.NoError(t, err)
+	require.Equal(t, upstreamInfo.PDEndpoints, upstreamResult.PDEndpoints)
+
+	changefeedResult, err = s.client.GetChangeFeedInfo(ctx, changeFeedID)
+	require.NoError(t, err)
+	require.Equal(t, changeFeedInfo.SinkURI, changefeedResult.SinkURI)
+}
+
 func TestGetAllCaptureLeases(t *testing.T) {
-	s := &etcdTester{}
-	s.setUpTest(t)
-	defer s.tearDownTest(t)
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -307,7 +278,7 @@ func TestGetAllCaptureLeases(t *testing.T) {
 	leases := make(map[string]int64)
 
 	for _, cinfo := range testCases {
-		sess, err := concurrency.NewSession(s.client.Client.Unwrap(),
+		sess, err := concurrency.NewSession(s.client.GetEtcdClient().Unwrap(),
 			concurrency.WithTTL(10), concurrency.WithContext(ctx))
 		require.NoError(t, err)
 		err = s.client.PutCaptureInfo(ctx, cinfo, sess.Lease())
@@ -339,9 +310,9 @@ const (
 )
 
 func TestGetOwnerRevision(t *testing.T) {
-	s := &etcdTester{}
-	s.setUpTest(t)
-	defer s.tearDownTest(t)
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -357,7 +328,7 @@ func TestGetOwnerRevision(t *testing.T) {
 		wg       sync.WaitGroup
 	)
 
-	// We will create 3 mock captures and they take turns to be the owner.
+	// We will create 3 mock captures, and they will become the owner one by one.
 	// While each is the owner, it tries to get its owner revision, and
 	// checks that the global monotonicity is guaranteed.
 
@@ -366,10 +337,11 @@ func TestGetOwnerRevision(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			sess, err := concurrency.NewSession(s.client.Client.Unwrap(),
+			sess, err := concurrency.NewSession(s.client.GetEtcdClient().Unwrap(),
 				concurrency.WithTTL(10 /* seconds */))
 			require.Nil(t, err)
-			election := concurrency.NewElection(sess, CaptureOwnerKey)
+			election := concurrency.NewElection(sess,
+				CaptureOwnerKey(DefaultCDCClusterID))
 
 			mockCaptureID := fmt.Sprintf("capture-%d", i)
 
@@ -430,35 +402,42 @@ func TestExtractKeySuffix(t *testing.T) {
 	}
 }
 
+func TestMigrateBackupKey(t *testing.T) {
+	key := MigrateBackupKey(1, "/tidb/cdc/capture/abcd")
+	require.Equal(t, "/tidb/cdc/__backup__/1/tidb/cdc/capture/abcd", key)
+	key = MigrateBackupKey(1, "abcdc")
+	require.Equal(t, "/tidb/cdc/__backup__/1/abcdc", key)
+}
+
 func TestDeleteCaptureInfo(t *testing.T) {
-	s := &etcdTester{}
-	s.setUpTest(t)
-	defer s.tearDownTest(t)
+	s := &Tester{}
+	s.SetUpTest(t)
+	defer s.TearDownTest(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	captureID := "test-capture-id"
 
 	changefeedStatus := map[model.ChangeFeedID]model.ChangeFeedStatus{
-		model.DefaultChangeFeedID("test-cf-1"): {ResolvedTs: 1},
+		model.DefaultChangeFeedID("test-cf-1"): {CheckpointTs: 1},
 	}
 
 	for id, status := range changefeedStatus {
 		val, err := status.Marshal()
 		require.NoError(t, err)
-		statusKey := fmt.Sprintf("%s/%s", JobKeyPrefix, id.ID)
+		statusKey := fmt.Sprintf("%s/%s", ChangefeedStatusKeyPrefix(DefaultCDCClusterID, id.Namespace), id.ID)
 		_, err = s.client.Client.Put(ctx, statusKey, val)
 		require.NoError(t, err)
 
 		_, err = s.client.Client.Put(
-			ctx, GetEtcdKeyTaskPosition(id.ID, captureID),
+			ctx, GetEtcdKeyTaskPosition(DefaultCDCClusterID, id, captureID),
 			fmt.Sprintf("task-%s", id.ID))
 		require.NoError(t, err)
 	}
 	err := s.client.DeleteCaptureInfo(ctx, captureID)
 	require.NoError(t, err)
 	for id := range changefeedStatus {
-		taskPositionKey := GetEtcdKeyTaskPosition(id.ID, captureID)
+		taskPositionKey := GetEtcdKeyTaskPosition(DefaultCDCClusterID, id, captureID)
 		v, err := s.client.Client.Get(ctx, taskPositionKey)
 		require.NoError(t, err)
 		require.Equal(t, 0, len(v.Kvs))

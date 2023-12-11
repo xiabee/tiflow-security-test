@@ -18,16 +18,16 @@ import (
 	"time"
 
 	"github.com/pingcap/failpoint"
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/pingcap/tiflow/dm/pkg/log"
-	"github.com/pingcap/tiflow/dm/pkg/metricsproxy"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/pingcap/tiflow/engine/pkg/promutil"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 var (
-	relayLogPosGauge = metricsproxy.NewGaugeVec(
+	f                = &promutil.PromFactory{}
+	relayLogPosGauge = f.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "dm",
 			Subsystem: "relay",
@@ -35,7 +35,7 @@ var (
 			Help:      "current binlog pos in current binlog file",
 		}, []string{"node"})
 
-	relayLogFileGauge = metricsproxy.NewGaugeVec(
+	relayLogFileGauge = f.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "dm",
 			Subsystem: "relay",
@@ -45,7 +45,7 @@ var (
 
 	// split sub directory info from relayLogPosGauge / relayLogFileGauge
 	// to make compare relayLogFileGauge for master / relay more easier.
-	relaySubDirIndex = metricsproxy.NewGaugeVec(
+	relaySubDirIndex = f.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "dm",
 			Subsystem: "relay",
@@ -54,7 +54,7 @@ var (
 		}, []string{"node", "uuid"})
 
 	// should alert if available space < 10G.
-	relayLogSpaceGauge = metricsproxy.NewGaugeVec(
+	relayLogSpaceGauge = f.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "dm",
 			Subsystem: "relay",
@@ -126,13 +126,13 @@ var (
 		})
 
 	// should alert.
-	relayExitWithErrorCounter = prometheus.NewCounter(
+	relayExitWithErrorCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "dm",
 			Subsystem: "relay",
 			Name:      "exit_with_error_count",
 			Help:      "counter of relay unit exits with error",
-		})
+		}, []string{"resumable_err"})
 )
 
 // RegisterMetrics register metrics.

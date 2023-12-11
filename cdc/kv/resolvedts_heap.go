@@ -19,18 +19,13 @@ import (
 )
 
 type tsItem struct {
-	sortByEvTime bool
-	resolvedTs   uint64
-	eventTime    time.Time
-	penalty      int
+	resolvedTs uint64
+	eventTime  time.Time
+	penalty    int
 }
 
 func newResolvedTsItem(ts uint64) tsItem {
 	return tsItem{resolvedTs: ts, eventTime: time.Now()}
-}
-
-func newEventTimeItem() tsItem {
-	return tsItem{sortByEvTime: true, eventTime: time.Now()}
 }
 
 // regionTsInfo contains region resolvedTs information
@@ -45,9 +40,6 @@ type regionTsHeap []*regionTsInfo
 func (rh regionTsHeap) Len() int { return len(rh) }
 
 func (rh regionTsHeap) Less(i, j int) bool {
-	if rh[i].ts.sortByEvTime {
-		return rh[i].ts.eventTime.Before(rh[j].ts.eventTime)
-	}
 	return rh[i].ts.resolvedTs < rh[j].ts.resolvedTs
 }
 
@@ -88,7 +80,6 @@ func newRegionTsManager() *regionTsManager {
 	}
 }
 
-// Upsert implements insert	and update on duplicated key
 // Upsert implements insert	and update on duplicated key
 // if the region is exists update the resolvedTs, eventTime, penalty, and fixed heap order
 // otherwise, insert a new regionTsInfo with penalty 0

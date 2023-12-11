@@ -19,11 +19,10 @@ import (
 	"time"
 
 	"github.com/pingcap/failpoint"
-	"go.uber.org/zap"
-
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/syncer/metrics"
 	"github.com/pingcap/tiflow/pkg/sqlmodel"
+	"go.uber.org/zap"
 )
 
 // compactor compacts multiple statements into one statement.
@@ -37,9 +36,10 @@ type compactor struct {
 	keyMap map[string]map[string]int // table -> key(pk or (uk + not null)) -> index in buffer
 	buffer []*job
 
-	// for metrics
+	// for MetricsProxies
 	task               string
 	source             string
+	metricProxies      *metrics.Proxies
 	updateJobMetricsFn func(bool, string, *job)
 }
 
@@ -57,6 +57,7 @@ func compactorWrap(inCh chan *job, syncer *Syncer) chan *job {
 		buffer:             make([]*job, 0, bufferSize),
 		task:               syncer.cfg.Name,
 		source:             syncer.cfg.SourceID,
+		metricProxies:      syncer.metricsProxies,
 		updateJobMetricsFn: syncer.updateJobMetrics,
 	}
 	go func() {
@@ -74,7 +75,7 @@ func (c *compactor) run() {
 			if !ok {
 				return
 			}
-			metrics.QueueSizeGauge.WithLabelValues(c.task, "compactor_input", c.source).Set(float64(len(c.inCh)))
+			c.metricProxies.QueueSizeGauge.WithLabelValues(c.task, "compactor_input", c.source).Set(float64(len(c.inCh)))
 
 			if j.tp == flush || j.tp == asyncFlush {
 				c.flushBuffer()

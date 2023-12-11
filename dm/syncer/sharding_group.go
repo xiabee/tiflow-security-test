@@ -74,8 +74,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/pingcap/tiflow/dm/dm/config"
-	"github.com/pingcap/tiflow/dm/dm/pb"
+	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/util/filter"
+	"github.com/pingcap/tiflow/dm/config"
+	"github.com/pingcap/tiflow/dm/config/dbconfig"
+	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
@@ -84,10 +87,8 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
+	"github.com/pingcap/tiflow/dm/syncer/metrics"
 	shardmeta "github.com/pingcap/tiflow/dm/syncer/sharding-meta"
-
-	"github.com/pingcap/tidb/util/dbutil"
-	"github.com/pingcap/tidb/util/filter"
 	"go.uber.org/zap"
 )
 
@@ -243,7 +244,7 @@ func (sg *ShardingGroup) CheckSyncing(source string, location binlog.Location) (
 	}
 	// this function only affects dml
 	// activeDDLItem.FirstLocation is ddl's startLocation
-	// location is dml's currentLocation
+	// location is dml's endLocation
 	// dml should be synced when the comparation is equal
 	return binlog.CompareLocation(activeDDLItem.FirstLocation, location, sg.enableGTID) >= 0
 }
@@ -374,8 +375,9 @@ func (sg *ShardingGroup) FlushData(targetTableID string) ([]string, [][]interfac
 // ShardingGroupKeeper used to keep ShardingGroup.
 type ShardingGroupKeeper struct {
 	sync.RWMutex
-	groups map[string]*ShardingGroup // target table ID -> ShardingGroup
-	cfg    *config.SubTaskConfig
+	groups        map[string]*ShardingGroup // target table ID -> ShardingGroup
+	cfg           *config.SubTaskConfig
+	metricProxies *metrics.Proxies
 
 	shardMetaSchema    string
 	shardMetaTable     string
@@ -388,11 +390,16 @@ type ShardingGroupKeeper struct {
 }
 
 // NewShardingGroupKeeper creates a new ShardingGroupKeeper.
-func NewShardingGroupKeeper(tctx *tcontext.Context, cfg *config.SubTaskConfig) *ShardingGroupKeeper {
+func NewShardingGroupKeeper(
+	tctx *tcontext.Context,
+	cfg *config.SubTaskConfig,
+	metricProxies *metrics.Proxies,
+) *ShardingGroupKeeper {
 	k := &ShardingGroupKeeper{
-		groups: make(map[string]*ShardingGroup),
-		cfg:    cfg,
-		tctx:   tctx.WithLogger(tctx.L().WithFields(zap.String("component", "shard group keeper"))),
+		groups:        make(map[string]*ShardingGroup),
+		cfg:           cfg,
+		metricProxies: metricProxies,
+		tctx:          tctx.WithLogger(tctx.L().WithFields(zap.String("component", "shard group keeper"))),
 	}
 	k.shardMetaSchema = cfg.MetaSchema
 	k.shardMetaTable = cputil.SyncerShardMeta(cfg.Name)
@@ -447,8 +454,8 @@ func (k *ShardingGroupKeeper) Init() (err error) {
 
 	k.clear()
 	sgkDB := k.cfg.To
-	sgkDB.RawDBCfg = config.DefaultRawDBConfig().SetReadTimeout(maxCheckPointTimeout)
-	db, dbConns, err = dbconn.CreateConns(k.tctx, k.cfg, &sgkDB, 1)
+	sgkDB.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(maxCheckPointTimeout)
+	db, dbConns, err = dbconn.CreateConns(k.tctx, k.cfg, conn.DownstreamDBConfig(&sgkDB), 1, k.cfg.IOTotalBytes, k.cfg.UUID)
 	if err != nil {
 		return
 	}
@@ -644,7 +651,6 @@ func (k *ShardingGroupKeeper) ResolveShardingDDL(targetTable *filter.Table) (boo
 
 // ActiveDDLFirstLocation returns the binlog position of active DDL.
 func (k *ShardingGroupKeeper) ActiveDDLFirstLocation(targetTable *filter.Table) (binlog.Location, error) {
-	// nolint:ifshort
 	group := k.Group(targetTable)
 	k.Lock()
 	defer k.Unlock()
@@ -694,7 +700,7 @@ func (k *ShardingGroupKeeper) Close() {
 
 func (k *ShardingGroupKeeper) createSchema() error {
 	stmt := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS `%s`", k.shardMetaSchema)
-	_, err := k.dbConn.ExecuteSQL(k.tctx, []string{stmt})
+	_, err := k.dbConn.ExecuteSQL(k.tctx, k.metricProxies, []string{stmt})
 	k.tctx.L().Info("execute sql", zap.String("statement", stmt))
 	return terror.WithScope(err, terror.ScopeDownstream)
 }
@@ -711,7 +717,7 @@ func (k *ShardingGroupKeeper) createTable() error {
 		update_time timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 		UNIQUE KEY uk_source_id_table_id_source (source_id, target_table_id, source_table_id)
 	)`, k.shardMetaTableName)
-	_, err := k.dbConn.ExecuteSQL(k.tctx, []string{stmt})
+	_, err := k.dbConn.ExecuteSQL(k.tctx, k.metricProxies, []string{stmt})
 	k.tctx.L().Info("execute sql", zap.String("statement", stmt))
 	return terror.WithScope(err, terror.ScopeDownstream)
 }
@@ -719,7 +725,7 @@ func (k *ShardingGroupKeeper) createTable() error {
 // LoadShardMeta implements CheckPoint.LoadShardMeta.
 func (k *ShardingGroupKeeper) LoadShardMeta(flavor string, enableGTID bool) (map[string]*shardmeta.ShardingMeta, error) {
 	query := fmt.Sprintf("SELECT `target_table_id`, `source_table_id`, `active_index`, `is_global`, `data` FROM %s WHERE `source_id`='%s'", k.shardMetaTableName, k.cfg.SourceID)
-	rows, err := k.dbConn.QuerySQL(k.tctx, query)
+	rows, err := k.dbConn.QuerySQL(k.tctx, k.metricProxies, query)
 	if err != nil {
 		return nil, terror.WithScope(err, terror.ScopeDownstream)
 	}
@@ -736,7 +742,7 @@ func (k *ShardingGroupKeeper) LoadShardMeta(flavor string, enableGTID bool) (map
 	for rows.Next() {
 		err := rows.Scan(&targetTableID, &sourceTableID, &activeIndex, &isGlobal, &data)
 		if err != nil {
-			return nil, terror.WithScope(terror.DBErrorAdapt(err, terror.ErrDBDriverError), terror.ScopeDownstream)
+			return nil, terror.DBErrorAdapt(err, k.dbConn.Scope(), terror.ErrDBDriverError)
 		}
 		if _, ok := meta[targetTableID]; !ok {
 			meta[targetTableID] = shardmeta.NewShardingMeta(k.shardMetaSchema, k.shardMetaTable, enableGTID)
@@ -746,7 +752,7 @@ func (k *ShardingGroupKeeper) LoadShardMeta(flavor string, enableGTID bool) (map
 			return nil, err
 		}
 	}
-	return meta, terror.WithScope(terror.DBErrorAdapt(rows.Err(), terror.ErrDBDriverError), terror.ScopeDownstream)
+	return meta, terror.DBErrorAdapt(rows.Err(), k.dbConn.Scope(), terror.ErrDBDriverError)
 }
 
 // CheckAndFix try to check and fix the schema/table case-sensitive issue.
@@ -756,11 +762,11 @@ func (k *ShardingGroupKeeper) CheckAndFix(metas map[string]*shardmeta.ShardingMe
 	k.Lock()
 	defer k.Unlock()
 	for targetID, meta := range metas {
-		sqls, args, err := meta.CheckAndUpdate(targetID, schemaMap, tablesMap)
+		sqls, args, err := meta.CheckAndUpdate(k.tctx.L(), targetID, schemaMap, tablesMap)
 		if err != nil {
 			return err
 		}
-		_, err = k.dbConn.ExecuteSQL(k.tctx, sqls, args...)
+		_, err = k.dbConn.ExecuteSQL(k.tctx, k.metricProxies, sqls, args...)
 		if err != nil {
 			return err
 		}

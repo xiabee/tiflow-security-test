@@ -23,9 +23,8 @@ import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/util/dbutil"
 	"github.com/pingcap/tidb/util/filter"
-
-	"github.com/pingcap/tiflow/dm/dm/config"
-	"github.com/pingcap/tiflow/dm/dm/pb"
+	"github.com/pingcap/tiflow/dm/config"
+	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
@@ -79,7 +78,7 @@ func (t *testShardingGroupSuite) SetUpSuite(c *C) {
 }
 
 func (t *testShardingGroupSuite) TestLowestFirstPosInGroups(c *C) {
-	k := NewShardingGroupKeeper(tcontext.Background(), t.cfg)
+	k := NewShardingGroupKeeper(tcontext.Background(), t.cfg, nil)
 
 	g1 := NewShardingGroup(k.cfg.SourceID, k.shardMetaSchema, k.shardMetaTable, []string{"db1.tbl1", "db1.tbl2"}, nil, false, "", false)
 	// nolint:dogsled
@@ -105,7 +104,7 @@ func (t *testShardingGroupSuite) TestLowestFirstPosInGroups(c *C) {
 }
 
 func (t *testShardingGroupSuite) TestMergeAndLeave(c *C) {
-	k := NewShardingGroupKeeper(tcontext.Background(), t.cfg)
+	k := NewShardingGroupKeeper(tcontext.Background(), t.cfg, nil)
 	g1 := NewShardingGroup(k.cfg.SourceID, k.shardMetaSchema, k.shardMetaTable, []string{source1, source2}, nil, false, "", false)
 	c.Assert(g1.Sources(), DeepEquals, map[string]bool{source1: false, source2: false})
 
@@ -146,7 +145,7 @@ func (t *testShardingGroupSuite) TestMergeAndLeave(c *C) {
 }
 
 func (t *testShardingGroupSuite) TestSync(c *C) {
-	k := NewShardingGroupKeeper(tcontext.Background(), t.cfg)
+	k := NewShardingGroupKeeper(tcontext.Background(), t.cfg, nil)
 	g1 := NewShardingGroup(k.cfg.SourceID, k.shardMetaSchema, k.shardMetaTable, []string{source1, source2}, nil, false, "", false)
 	synced, active, remain, err := g1.TrySync(source1, pos11, endPos11, ddls1)
 	c.Assert(err, IsNil)
@@ -235,14 +234,14 @@ func (t *testShardingGroupSuite) TestTableID(c *C) {
 }
 
 func (t *testShardingGroupSuite) TestKeeper(c *C) {
-	k := NewShardingGroupKeeper(tcontext.Background(), t.cfg)
+	k := NewShardingGroupKeeper(tcontext.Background(), t.cfg, nil)
 	k.clear()
 	db, mock, err := sqlmock.New()
 	c.Assert(err, IsNil)
 	dbConn, err := db.Conn(context.Background())
 	c.Assert(err, IsNil)
-	k.db = conn.NewBaseDB(db)
-	k.dbConn = dbconn.NewDBConn(t.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
+	k.db = conn.NewBaseDBForTest(db)
+	k.dbConn = dbconn.NewDBConn(t.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
 	mock.ExpectBegin()
 	mock.ExpectExec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS `%s`", t.cfg.MetaSchema)).WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()

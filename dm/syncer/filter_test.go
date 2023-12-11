@@ -24,11 +24,11 @@ import (
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/util/filter"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
-
-	"github.com/pingcap/tiflow/dm/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
+	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/schema"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
@@ -48,7 +48,7 @@ func (s *testFilterSuite) SetUpSuite(c *C) {
 	mock.ExpectClose()
 	con, err := db.Conn(context.Background())
 	c.Assert(err, IsNil)
-	s.baseConn = conn.NewBaseConn(con, nil)
+	s.baseConn = conn.NewBaseConnForTest(con, nil)
 }
 
 func (s *testFilterSuite) TearDownSuite(c *C) {
@@ -58,6 +58,7 @@ func (s *testFilterSuite) TearDownSuite(c *C) {
 
 func (s *testFilterSuite) TestSkipQueryEvent(c *C) {
 	cfg := &config.SubTaskConfig{
+		Flavor: mysql.MySQLFlavor,
 		BAList: &filter.Rules{
 			IgnoreTables: []*filter.Table{{Schema: "s1", Name: "test"}},
 		},
@@ -69,10 +70,10 @@ func (s *testFilterSuite) TestSkipQueryEvent(c *C) {
 	c.Assert(err, IsNil)
 
 	syncer.ddlDBConn = dbconn.NewDBConn(syncer.cfg, s.baseConn)
-	syncer.schemaTracker, err = schema.NewTracker(context.Background(), syncer.cfg.Name, defaultTestSessionCfg, syncer.ddlDBConn)
+	syncer.schemaTracker, err = schema.NewTestTracker(context.Background(), syncer.cfg.Name, syncer.ddlDBConn, log.L())
 	c.Assert(err, IsNil)
 	defer syncer.schemaTracker.Close()
-	syncer.exprFilterGroup = NewExprFilterGroup(utils.NewSessionCtx(nil), nil)
+	syncer.exprFilterGroup = NewExprFilterGroup(tcontext.Background(), utils.NewSessionCtx(nil), nil)
 
 	// test binlog filter
 	filterRules := []*bf.BinlogEventRule{
@@ -129,18 +130,19 @@ func (s *testFilterSuite) TestSkipQueryEvent(c *C) {
 	}
 	p := parser.New()
 
-	loc := binlog.NewLocation(mysql.MySQLFlavor)
+	loc := binlog.MustZeroLocation(mysql.MySQLFlavor)
 
+	ddlWorker := NewDDLWorker(&syncer.tctx.Logger, syncer)
 	for _, ca := range cases {
 		qec := &queryEventContext{
 			eventContext: &eventContext{
 				tctx:         tcontext.Background(),
-				lastLocation: &loc,
+				lastLocation: loc,
 			},
 			p:         p,
 			ddlSchema: ca.schema,
 		}
-		ddlInfo, err := syncer.genDDLInfo(qec, ca.sql)
+		ddlInfo, err := ddlWorker.genDDLInfo(qec, ca.sql)
 		c.Assert(err, IsNil)
 		qec.ddlSchema = ca.schema
 		qec.originSQL = ca.sql
@@ -201,6 +203,7 @@ func (s *testFilterSuite) TestSkipRowsEvent(c *C) {
 
 func (s *testFilterSuite) TestSkipByFilter(c *C) {
 	cfg := &config.SubTaskConfig{
+		Flavor: mysql.MySQLFlavor,
 		BAList: &filter.Rules{
 			IgnoreDBs: []string{"s1"},
 		},
@@ -271,6 +274,7 @@ func (s *testFilterSuite) TestSkipByFilter(c *C) {
 
 func (s *testFilterSuite) TestSkipByTable(c *C) {
 	cfg := &config.SubTaskConfig{
+		Flavor: mysql.MySQLFlavor,
 		BAList: &filter.Rules{
 			IgnoreDBs: []string{"s1"},
 		},

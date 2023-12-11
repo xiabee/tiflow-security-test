@@ -26,7 +26,6 @@ func TestServerConfigMarshal(t *testing.T) {
 
 	conf := GetDefaultServerConfig()
 	conf.Addr = "192.155.22.33:8887"
-	conf.Sorter.ChunkSizeLimit = 999
 	b, err := conf.Marshal()
 	require.Nil(t, err)
 
@@ -41,17 +40,21 @@ func TestServerConfigClone(t *testing.T) {
 	t.Parallel()
 	conf := GetDefaultServerConfig()
 	conf.Addr = "192.155.22.33:8887"
-	conf.Sorter.ChunkSizeLimit = 999
+	conf.Sorter.SortDir = "/tmp"
 	conf2 := conf.Clone()
 	require.Equal(t, conf, conf2)
-	conf.Sorter.ChunkSizeLimit = 99
-	require.Equal(t, uint64(99), conf.Sorter.ChunkSizeLimit)
+	conf2.Sorter.SortDir = "/tmp/sorter"
+	require.Equal(t, "/tmp", conf.Sorter.SortDir)
 }
 
 func TestServerConfigValidateAndAdjust(t *testing.T) {
 	t.Parallel()
 	conf := new(ServerConfig)
 
+	require.Regexp(t, ".*bad cluster-id.*", conf.ValidateAndAdjust())
+	conf.ClusterID = "__backup__"
+	require.Regexp(t, ".*bad cluster-id.*", conf.ValidateAndAdjust())
+	conf.ClusterID = "default"
 	require.Regexp(t, ".*empty address", conf.ValidateAndAdjust())
 	conf.Addr = "cdc:1234"
 	require.Regexp(t, ".*empty GC TTL is not allowed", conf.ValidateAndAdjust())
@@ -69,12 +72,6 @@ func TestServerConfigValidateAndAdjust(t *testing.T) {
 	conf.AdvertiseAddr = "advertise"
 	require.Regexp(t, ".*does not contain a port", conf.ValidateAndAdjust())
 	conf.AdvertiseAddr = "advertise:1234"
-	conf.PerTableMemoryQuota = 1
-	require.Nil(t, conf.ValidateAndAdjust())
-	require.EqualValues(t, 1, conf.PerTableMemoryQuota)
-	conf.PerTableMemoryQuota = 0
-	require.Nil(t, conf.ValidateAndAdjust())
-	require.EqualValues(t, GetDefaultServerConfig().PerTableMemoryQuota, conf.PerTableMemoryQuota)
 	conf.Debug.Messages.ServerWorkerPoolSize = 0
 	require.Nil(t, conf.ValidateAndAdjust())
 	require.EqualValues(t, GetDefaultServerConfig().Debug.Messages.ServerWorkerPoolSize, conf.Debug.Messages.ServerWorkerPoolSize)
@@ -102,4 +99,63 @@ func TestKVClientConfigValidateAndAdjust(t *testing.T) {
 	require.Nil(t, conf.ValidateAndAdjust())
 	conf.RegionRetryDuration = -TomlDuration(time.Second)
 	require.Error(t, conf.ValidateAndAdjust())
+}
+
+func TestSchedulerConfigValidateAndAdjust(t *testing.T) {
+	t.Parallel()
+	conf := GetDefaultServerConfig().Clone().Debug.Scheduler
+	require.Nil(t, conf.ValidateAndAdjust())
+
+	conf = GetDefaultServerConfig().Clone().Debug.Scheduler
+	conf.HeartbeatTick = -1
+	require.Error(t, conf.ValidateAndAdjust())
+	conf.HeartbeatTick = 0
+	require.Error(t, conf.ValidateAndAdjust())
+
+	conf = GetDefaultServerConfig().Clone().Debug.Scheduler
+	conf.CollectStatsTick = -1
+	require.Error(t, conf.ValidateAndAdjust())
+	conf.CollectStatsTick = 0
+	require.Error(t, conf.ValidateAndAdjust())
+
+	conf = GetDefaultServerConfig().Clone().Debug.Scheduler
+	conf.MaxTaskConcurrency = -1
+	require.Error(t, conf.ValidateAndAdjust())
+	conf.MaxTaskConcurrency = 0
+	require.Error(t, conf.ValidateAndAdjust())
+
+	conf = GetDefaultServerConfig().Clone().Debug.Scheduler
+	conf.CheckBalanceInterval = -1
+	require.Error(t, conf.ValidateAndAdjust())
+	conf.CheckBalanceInterval = TomlDuration(time.Second)
+	require.Error(t, conf.ValidateAndAdjust())
+
+	conf = GetDefaultServerConfig().Clone().Debug.Scheduler
+	conf.AddTableBatchSize = 0
+	require.Error(t, conf.ValidateAndAdjust())
+}
+
+func TestIsValidClusterID(t *testing.T) {
+	cases := []struct {
+		id    string
+		valid bool
+	}{
+		{"owner", false},
+		{"capture", false},
+		{"task", false},
+		{"changefeed", false},
+		{"job", false},
+		{"meta", false},
+		{"__backup__", false},
+		{"", false},
+		{"12345678901234567890123456789012345678901234567890123456789012345678901234567890" +
+			"1234567890123456789012345678901234567890123456789", false},
+		{"12345678901234567890123456789012345678901234567890123456789012345678901234567890" +
+			"123456789012345678901234567890123456789012345678", true},
+		{"default", true},
+	}
+	for _, c := range cases {
+		t.Log(c.id)
+		require.Equal(t, c.valid, isValidClusterID(c.id))
+	}
 }

@@ -27,12 +27,10 @@ import (
 	gmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/errno"
-	"go.uber.org/zap"
-	"golang.org/x/net/http/httpproxy"
-
-	"github.com/pingcap/tiflow/dm/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	"go.uber.org/zap"
+	"golang.org/x/net/http/httpproxy"
 )
 
 var (
@@ -99,16 +97,11 @@ var (
 		"^SET\\s+PASSWORD",
 	}
 	builtInSkipDDLPatterns *regexp.Regexp
-
-	passwordPatterns = `(password: (\\")?)(.*?)((\\")?\\n)`
-	passwordRegexp   *regexp.Regexp
 )
 
 func init() {
 	OsExit = os.Exit
 	builtInSkipDDLPatterns = regexp.MustCompile("(?i)" + strings.Join(builtInSkipDDLs, "|"))
-	passwordRegexp = regexp.MustCompile(passwordPatterns)
-	pb.HidePwdFunc = HidePassword
 }
 
 // DecodeBinlogPosition parses a mysql.Position from string format.
@@ -170,12 +163,6 @@ func IgnoreErrorCheckpoint(err error) bool {
 // IsBuildInSkipDDL return true when checked sql that will be skipped for syncer.
 func IsBuildInSkipDDL(sql string) bool {
 	return builtInSkipDDLPatterns.FindStringIndex(sql) != nil
-}
-
-// HidePassword replace password with ******.
-func HidePassword(input string) string {
-	output := passwordRegexp.ReplaceAllString(input, "$1******$4")
-	return output
 }
 
 // UnwrapScheme removes http or https scheme from input.

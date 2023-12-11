@@ -20,7 +20,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/coreos/go-semver/semver"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
@@ -94,6 +93,11 @@ type cdcPeer struct {
 	// necessary information on the stream.
 	sender *streamHandle
 
+	// valid says whether the peer is valid.
+	// Note that it does not need to be thread-safe
+	// because it should only be accessed in MessageServer.run().
+	valid bool
+
 	metricsAckCount prometheus.Counter
 }
 
@@ -102,16 +106,24 @@ func newCDCPeer(senderID NodeID, epoch int64, sender *streamHandle) *cdcPeer {
 		PeerID: senderID,
 		Epoch:  epoch,
 		sender: sender,
+		valid:  true,
 		metricsAckCount: serverAckCount.With(prometheus.Labels{
 			"to": senderID,
 		}),
 	}
 }
 
-func (p *cdcPeer) abortWithError(ctx context.Context, err error) {
-	if err1 := p.sender.Send(ctx, errorToRPCResponse(err)); err1 != nil {
+func (p *cdcPeer) abort(ctx context.Context, err error) {
+	if !p.valid {
+		log.Panic("p2p: aborting invalid peer", zap.String("peer", p.PeerID))
+	}
+
+	defer func() {
+		p.valid = false
+	}()
+	if sendErr := p.sender.Send(ctx, errorToRPCResponse(err)); sendErr != nil {
 		log.Warn("could not send error to peer", zap.Error(err),
-			zap.NamedError("sendErr", err1))
+			zap.NamedError("sendErr", sendErr))
 		return
 	}
 	log.Debug("sent error to peer", zap.Error(err))
@@ -157,6 +169,10 @@ type taskOnMessageBatch struct {
 type taskOnRegisterPeer struct {
 	sender     *streamHandle
 	clientAddr string // for logging
+}
+
+type taskOnDeregisterPeer struct {
+	peerID string
 }
 
 type taskOnRegisterHandler struct {
@@ -229,9 +245,7 @@ func (m *MessageServer) run(ctx context.Context) error {
 			switch task := task.(type) {
 			case taskOnMessageBatch:
 				for _, entry := range task.messageEntries {
-					if err := m.handleMessage(ctx, task.streamMeta, entry); err != nil {
-						return errors.Trace(err)
-					}
+					m.handleMessage(ctx, task.streamMeta, entry)
 				}
 			case taskOnRegisterHandler:
 				// FIXME better error handling here.
@@ -239,10 +253,7 @@ func (m *MessageServer) run(ctx context.Context) error {
 				// The current error handling here will cause the server to exit, which is not ideal,
 				// but will not cause service to be interrupted because the `ctx` involved here will not
 				// be cancelled unless the server is exiting.
-				if err := m.registerHandler(ctx, task.topic, task.handler, task.done); err != nil {
-					log.Warn("registering handler failed", zap.Error(err))
-					return errors.Trace(err)
-				}
+				m.registerHandler(ctx, task.topic, task.handler, task.done)
 				log.Debug("handler registered", zap.String("topic", task.topic))
 			case taskOnDeregisterHandler:
 				if handler, ok := m.handlers[task.topic]; ok {
@@ -289,6 +300,9 @@ func (m *MessageServer) run(ctx context.Context) error {
 					}
 					return errors.Trace(err)
 				}
+			case taskOnDeregisterPeer:
+				log.Info("taskOnDeregisterPeer", zap.String("peerID", task.peerID))
+				m.deregisterPeerByID(ctx, task.peerID)
 			case taskDebugDelay:
 				log.Info("taskDebugDelay started")
 				select {
@@ -354,8 +368,24 @@ func (m *MessageServer) deregisterPeer(ctx context.Context, peer *cdcPeer, err e
 	delete(m.peers, peer.PeerID)
 	m.peerLock.Unlock()
 	if err != nil {
-		peer.abortWithError(ctx, err)
+		peer.abort(ctx, err)
 	}
+}
+
+func (m *MessageServer) deregisterPeerByID(ctx context.Context, peerID string) {
+	m.peerLock.Lock()
+	peer, ok := m.peers[peerID]
+	m.peerLock.Unlock()
+	if !ok {
+		log.Warn("peer not found", zap.String("peerID", peerID))
+		return
+	}
+	m.deregisterPeer(ctx, peer, nil)
+}
+
+// ScheduleDeregisterPeerTask schedules a task to deregister a peer.
+func (m *MessageServer) ScheduleDeregisterPeerTask(ctx context.Context, peerID string) error {
+	return m.scheduleTask(ctx, taskOnDeregisterPeer{peerID: peerID})
 }
 
 // We use an empty interface to hold the information on the type of the object
@@ -419,7 +449,6 @@ func (m *MessageServer) AddHandler(
 				zap.Int64("lastAck", lastAck))
 			return nil
 		}
-
 		if lastAck != initAck && entry.Sequence > lastAck+1 {
 			// We detected a message loss at seq = (lastAck+1).
 			// Note that entry.Sequence == lastAck+1 is actual a requirement
@@ -500,7 +529,7 @@ func (m *MessageServer) RemoveHandler(ctx context.Context, topic string) (chan s
 	return doneCh, nil
 }
 
-func (m *MessageServer) registerHandler(ctx context.Context, topic string, handler workerpool.EventHandle, doneCh chan struct{}) error {
+func (m *MessageServer) registerHandler(ctx context.Context, topic string, handler workerpool.EventHandle, doneCh chan struct{}) {
 	defer close(doneCh)
 
 	if _, ok := m.handlers[topic]; ok {
@@ -512,29 +541,22 @@ func (m *MessageServer) registerHandler(ctx context.Context, topic string, handl
 	}
 
 	m.handlers[topic] = handler
-	if err := m.handlePendingMessages(ctx, topic); err != nil {
-		return errors.Trace(err)
-	}
-	return nil
+	m.handlePendingMessages(ctx, topic)
 }
 
 // handlePendingMessages must be called with `handlerLock` taken exclusively.
-func (m *MessageServer) handlePendingMessages(ctx context.Context, topic string) error {
+func (m *MessageServer) handlePendingMessages(ctx context.Context, topic string) {
 	for key, entries := range m.pendingMessages {
 		if key.Topic != topic {
 			continue
 		}
 
 		for _, entry := range entries {
-			if err := m.handleMessage(ctx, entry.StreamMeta, entry.Entry); err != nil {
-				return errors.Trace(err)
-			}
+			m.handleMessage(ctx, entry.StreamMeta, entry.Entry)
 		}
 
 		delete(m.pendingMessages, key)
 	}
-
-	return nil
 }
 
 func (m *MessageServer) registerPeer(
@@ -634,16 +656,21 @@ func (m *MessageServer) SendMessage(stream p2p.CDCPeerToPeer_SendMessageServer) 
 	streamHandle := newStreamHandle(packet.Meta, sendCh)
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
-	errg, ctx := errgroup.WithContext(ctx)
+	errg, egCtx := errgroup.WithContext(ctx)
 
+	// receive messages from the sender
 	errg.Go(func() error {
 		defer streamHandle.Close()
-		if err := m.receive(stream, streamHandle); err != nil {
+		clientSocketAddr := unknownPeerLabel
+		if p, ok := gRPCPeer.FromContext(egCtx); ok {
+			clientSocketAddr = p.Addr.String()
+		}
+		if err := m.receive(egCtx, clientSocketAddr, stream, streamHandle); err != nil {
 			log.Warn("peer-to-peer message handler error", zap.Error(err))
 			select {
-			case <-ctx.Done():
-				log.Warn("error receiving from peer", zap.Error(ctx.Err()))
-				return errors.Trace(ctx.Err())
+			case <-egCtx.Done():
+				log.Warn("error receiving from peer", zap.Error(egCtx.Err()))
+				return errors.Trace(egCtx.Err())
 			case sendCh <- errorToRPCResponse(err):
 			default:
 				log.Warn("sendCh congested, could not send error", zap.Error(err))
@@ -652,6 +679,8 @@ func (m *MessageServer) SendMessage(stream p2p.CDCPeerToPeer_SendMessageServer) 
 		}
 		return nil
 	})
+
+	// send acks to the sender
 	errg.Go(func() error {
 		rl := rate.NewLimiter(rate.Limit(m.config.SendRateLimitPerStream), 1)
 		for {
@@ -685,7 +714,7 @@ func (m *MessageServer) SendMessage(stream p2p.CDCPeerToPeer_SendMessageServer) 
 	case <-ctx.Done():
 		return status.New(codes.Canceled, "context canceled").Err()
 	case <-m.closeCh:
-		return status.New(codes.Aborted, "CDC capture closing").Err()
+		return status.New(codes.Aborted, "message server is closing").Err()
 	}
 
 	// NB: `errg` will NOT be waited on because due to the limitation of grpc-go, we cannot cancel Send & Recv
@@ -693,17 +722,18 @@ func (m *MessageServer) SendMessage(stream p2p.CDCPeerToPeer_SendMessageServer) 
 	// namely this function.
 }
 
-func (m *MessageServer) receive(stream p2p.CDCPeerToPeer_SendMessageServer, streamHandle *streamHandle) error {
-	clientIP := unknownPeerLabel
-	if p, ok := gRPCPeer.FromContext(stream.Context()); ok {
-		clientIP = p.Addr.String()
-	}
+func (m *MessageServer) receive(
+	ctx context.Context,
+	clientSocketAddr string,
+	stream serverStream,
+	streamHandle *streamHandle,
+) error {
 	// We use scheduleTaskBlocking because blocking here is acceptable.
 	// Blocking here will cause grpc-go to back propagate the pressure
 	// to the client, which is what we want.
-	if err := m.scheduleTaskBlocking(stream.Context(), taskOnRegisterPeer{
+	if err := m.scheduleTaskBlocking(ctx, taskOnRegisterPeer{
 		sender:     streamHandle,
-		clientAddr: clientIP,
+		clientAddr: clientSocketAddr,
 	}); err != nil {
 		return errors.Trace(err)
 	}
@@ -756,7 +786,7 @@ func (m *MessageServer) receive(stream p2p.CDCPeerToPeer_SendMessageServer, stre
 			}
 
 			// See the comment above on why use scheduleTaskBlocking.
-			if err := m.scheduleTaskBlocking(stream.Context(), taskOnMessageBatch{
+			if err := m.scheduleTaskBlocking(ctx, taskOnMessageBatch{
 				streamMeta:     streamHandle.GetStreamMeta(),
 				messageEntries: packet.GetEntries(),
 			}); err != nil {
@@ -766,7 +796,22 @@ func (m *MessageServer) receive(stream p2p.CDCPeerToPeer_SendMessageServer, stre
 	}
 }
 
-func (m *MessageServer) handleMessage(ctx context.Context, streamMeta *p2p.StreamMeta, entry *p2p.MessageEntry) error {
+func (m *MessageServer) handleMessage(ctx context.Context, streamMeta *p2p.StreamMeta, entry *p2p.MessageEntry) {
+	m.peerLock.RLock()
+	peer, ok := m.peers[streamMeta.SenderId]
+	m.peerLock.RUnlock()
+	if !ok || peer.Epoch != streamMeta.GetEpoch() {
+		log.Debug("p2p: message without corresponding peer",
+			zap.String("topic", entry.GetTopic()),
+			zap.Int64("seq", entry.GetSequence()))
+		return
+	}
+
+	// Drop messages from invalid peers
+	if !peer.valid {
+		return
+	}
+
 	topic := entry.GetTopic()
 	pendingMessageKey := topicSenderPair{
 		Topic:    topic,
@@ -779,20 +824,15 @@ func (m *MessageServer) handleMessage(ctx context.Context, streamMeta *p2p.Strea
 		if len(pendingEntries) > m.config.MaxPendingMessageCountPerTopic {
 			log.Warn("Topic congested because no handler has been registered", zap.String("topic", topic))
 			delete(m.pendingMessages, pendingMessageKey)
-			m.peerLock.RLock()
-			peer, ok := m.peers[streamMeta.SenderId]
-			m.peerLock.RUnlock()
-			if ok {
-				m.deregisterPeer(ctx, peer, cerror.ErrPeerMessageTopicCongested.FastGenByArgs())
-			}
-			return nil
+			m.deregisterPeer(ctx, peer, cerror.ErrPeerMessageTopicCongested.FastGenByArgs())
+			return
 		}
 		m.pendingMessages[pendingMessageKey] = append(pendingEntries, pendingMessageEntry{
 			StreamMeta: streamMeta,
 			Entry:      entry,
 		})
 
-		return nil
+		return
 	}
 
 	// handler is found
@@ -800,10 +840,10 @@ func (m *MessageServer) handleMessage(ctx context.Context, streamMeta *p2p.Strea
 		streamMeta: streamMeta,
 		entry:      entry,
 	}); err != nil {
-		return errors.Trace(err)
+		log.Warn("Failed to process message due to a handler error",
+			zap.Error(err), zap.String("topic", topic))
+		m.deregisterPeer(ctx, peer, err)
 	}
-
-	return nil
 }
 
 func (m *MessageServer) verifyStreamMeta(streamMeta *p2p.StreamMeta) error {
@@ -816,26 +856,6 @@ func (m *MessageServer) verifyStreamMeta(streamMeta *p2p.StreamMeta) error {
 			m.serverID,            // expected
 			streamMeta.ReceiverId, // actual
 		)
-	}
-
-	if m.config.ServerVersion == "" || streamMeta.ClientVersion == "" {
-		// skip checking versions
-		return nil
-	}
-
-	clientVer, err := semver.NewVersion(streamMeta.ClientVersion)
-	if err != nil {
-		log.Error("MessageServer: semver failed to parse",
-			zap.String("ver", streamMeta.ClientVersion),
-			zap.Error(err))
-		return cerror.ErrPeerMessageIllegalClientVersion.GenWithStackByArgs(streamMeta.ClientVersion)
-	}
-
-	serverVer := semver.New(m.config.ServerVersion)
-
-	// Only allow clients with the same Major and Minor.
-	if serverVer.Major != clientVer.Major || serverVer.Minor != clientVer.Minor {
-		return cerror.ErrVersionIncompatible.GenWithStackByArgs(m.config.ServerVersion)
 	}
 
 	return nil

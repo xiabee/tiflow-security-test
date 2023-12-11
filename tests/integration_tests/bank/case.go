@@ -16,8 +16,11 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -80,7 +83,7 @@ const (
 type testcase interface {
 	prepare(ctx context.Context, db *sql.DB, accounts int, tableID int, concurrency int) error
 	workload(ctx context.Context, tx *sql.Tx, accounts int, tableID int) error
-	verify(ctx context.Context, db *sql.DB, accounts, tableID int, tag string, endTs string) error
+	verify(ctx context.Context, db *sql.DB, accounts, tableID int, tag string, endTs uint64) error
 	cleanup(ctx context.Context, db *sql.DB, accounts, tableID int, force bool) bool
 }
 
@@ -140,16 +143,27 @@ func (s *sequenceTest) prepare(ctx context.Context, db *sql.DB, accounts, tableI
 	return nil
 }
 
-func (*sequenceTest) verify(ctx context.Context, db *sql.DB, accounts, tableID int, tag string, endTs string) error {
-	return retry.Do(ctx, func() error {
-		query := fmt.Sprintf("set @@tidb_snapshot='%s'", endTs)
-		if _, err := db.ExecContext(ctx, query); err != nil {
+func (*sequenceTest) verify(ctx context.Context, db *sql.DB, accounts, tableID int, tag string, endTs uint64) error {
+	return retry.Do(ctx, func() (err error) {
+		defer func() {
+			if err != nil {
+				log.Warn("sequence test verify failed", zap.Error(err))
+			}
+		}()
+		query := fmt.Sprintf("set @@tidb_snapshot=%d", endTs)
+		// use a single connection to keep the same database session.
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(ctx, query); err != nil {
 			log.Error("sequenceTest set tidb_snapshot failed", zap.String("query", query), zap.Error(err))
 			return errors.Trace(err)
 		}
 
 		query = fmt.Sprintf("SELECT sequence FROM accounts_seq%d ORDER BY sequence", tableID)
-		rows, err := db.QueryContext(ctx, query)
+		rows, err := conn.QueryContext(ctx, query)
 		if err != nil {
 			log.Warn("select sequence err", zap.String("query", query), zap.Error(err), zap.String("tag", tag))
 			return nil
@@ -171,7 +185,7 @@ func (*sequenceTest) verify(ctx context.Context, db *sql.DB, accounts, tableID i
 
 		log.Info("sequence verify pass", zap.String("tag", tag))
 
-		if _, err := db.ExecContext(ctx, "set @@tidb_snapshot=''"); err != nil {
+		if _, err := conn.ExecContext(ctx, "set @@tidb_snapshot=''"); err != nil {
 			log.Warn("sequenceTest reset tidb_snapshot failed")
 		}
 
@@ -245,18 +259,29 @@ func (s *bankTest) prepare(ctx context.Context, db *sql.DB, accounts, tableID, c
 	return nil
 }
 
-func (*bankTest) verify(ctx context.Context, db *sql.DB, accounts, tableID int, tag string, endTs string) error {
+func (*bankTest) verify(ctx context.Context, db *sql.DB, accounts, tableID int, tag string, endTs uint64) error {
 	return retry.Do(ctx,
-		func() error {
-			if _, err := db.ExecContext(ctx, fmt.Sprintf("set @@tidb_snapshot='%s'", endTs)); err != nil {
-				log.Error("bank set tidb_snapshot failed", zap.String("endTs", endTs))
+		func() (err error) {
+			defer func() {
+				if err != nil {
+					log.Error("bank test verify failed", zap.Error(err))
+				}
+			}()
+			// use a single connection to keep the same database session.
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			defer conn.Close()
+			if _, err := conn.ExecContext(ctx, fmt.Sprintf("set @@tidb_snapshot=%d", endTs)); err != nil {
+				log.Error("bank set tidb_snapshot failed", zap.Uint64("endTs", endTs))
 				return errors.Trace(err)
 			}
 
 			var obtained, expect int
 
 			query := fmt.Sprintf("SELECT SUM(balance) as total FROM accounts%d", tableID)
-			if err := db.QueryRowContext(ctx, query).Scan(&obtained); err != nil {
+			if err := conn.QueryRowContext(ctx, query).Scan(&obtained); err != nil {
 				log.Warn("query failed", zap.String("query", query), zap.Error(err), zap.String("tag", tag))
 				return errors.Trace(err)
 			}
@@ -267,7 +292,7 @@ func (*bankTest) verify(ctx context.Context, db *sql.DB, accounts, tableID int, 
 			}
 
 			query = fmt.Sprintf("SELECT COUNT(*) as count FROM accounts%d", tableID)
-			if err := db.QueryRowContext(ctx, query).Scan(&obtained); err != nil {
+			if err := conn.QueryRowContext(ctx, query).Scan(&obtained); err != nil {
 				log.Warn("query failed", zap.String("query", query), zap.Error(err), zap.String("tag", tag))
 				return errors.Trace(err)
 			}
@@ -277,7 +302,7 @@ func (*bankTest) verify(ctx context.Context, db *sql.DB, accounts, tableID int, 
 
 			log.Info("bank verify pass", zap.String("tag", tag))
 
-			if _, err := db.ExecContext(ctx, "set @@tidb_snapshot=''"); err != nil {
+			if _, err := conn.ExecContext(ctx, "set @@tidb_snapshot=''"); err != nil {
 				log.Warn("bank reset tidb_snapshot failed")
 			}
 
@@ -370,7 +395,7 @@ func cleanupImpl(ctx context.Context, test testcase, tableName string, db *sql.D
 		return true
 	}
 
-	if err := test.verify(ctx, db, accounts, tableID, "tryDropDB", ""); err != nil {
+	if err := test.verify(ctx, db, accounts, tableID, "tryDropDB", 0); err != nil {
 		dropTable(ctx, db, tableName)
 		return true
 	}
@@ -422,7 +447,8 @@ func openDB(ctx context.Context, dsn string) *sql.DB {
 }
 
 func run(
-	ctx context.Context, upstream, downstream string, accounts, tables, concurrency int,
+	ctx context.Context, upstream, downstream string, downstreamAPIEndpoint string,
+	accounts, tables, concurrency int,
 	interval, testRound int64, cleanupOnly bool,
 ) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
@@ -464,12 +490,12 @@ func run(
 	// all previous DDL and DML are replicated too.
 	mustExec(ctx, upstreamDB, `CREATE TABLE IF NOT EXISTS finishmark (foo BIGINT PRIMARY KEY)`)
 	waitCtx, waitCancel := context.WithTimeout(ctx, 15*time.Minute)
-	endTs, err := getDownStreamSyncedEndTs(waitCtx, downstreamDB, "finishmark")
+	endTs, err := getDownStreamSyncedEndTs(waitCtx, downstreamDB, downstreamAPIEndpoint, "finishmark")
 	waitCancel()
 	if err != nil {
 		log.Panic("wait for table finishmark failed", zap.Error(err))
 	}
-	log.Info("all tables synced", zap.String("endTs", endTs))
+	log.Info("all tables synced", zap.Uint64("endTs", endTs))
 
 	var (
 		counts       int64 = 0
@@ -544,7 +570,8 @@ func run(
 				case tblName := <-tblChan:
 					log.Info("downstream start wait for table", zap.String("tblName", tblName))
 					waitCtx, waitCancel := context.WithTimeout(ctx, 15*time.Minute)
-					endTs, err := getDownStreamSyncedEndTs(waitCtx, downstreamDB, tblName)
+					endTs, err := getDownStreamSyncedEndTs(
+						waitCtx, downstreamDB, downstreamAPIEndpoint, tblName)
 					waitCancel()
 					log.Info("ddl synced", zap.String("table", tblName))
 					if err != nil {
@@ -552,16 +579,16 @@ func run(
 					}
 
 					atomic.AddInt64(&tried, 1)
-					log.Info("downstream sync success", zap.String("endTs", endTs))
+					log.Info("downstream sync success", zap.Uint64("endTs", endTs))
 
-					if endTs == "" {
+					if endTs == 0 {
 						continue
 					}
 					atomic.AddInt64(&valid, 1)
 
 					for _, test := range tests {
 						verifyCtx, verifyCancel := context.WithTimeout(ctx, 2*time.Minute)
-						if err := test.verify(verifyCtx, upstreamDB, accounts, tableID, upstream, ""); err != nil {
+						if err := test.verify(verifyCtx, upstreamDB, accounts, tableID, upstream, 0); err != nil {
 							log.Panic("upstream verify failed", zap.Error(err))
 						}
 						verifyCancel()
@@ -589,14 +616,14 @@ func run(
 	}
 }
 
-func getDownStreamSyncedEndTs(ctx context.Context, db *sql.DB, tableName string) (result string, err error) {
+func getDownStreamSyncedEndTs(ctx context.Context, db *sql.DB, tidbAPIEndpoint, tableName string) (result uint64, err error) {
 	for {
 		select {
 		case <-ctx.Done():
 			log.Error("get downstream sync end ts failed due to timeout", zap.String("table", tableName), zap.Error(ctx.Err()))
-			return "", ctx.Err()
+			return 0, ctx.Err()
 		case <-time.After(2 * time.Second):
-			result, ok := tryGetEndTs(db, tableName)
+			result, ok := tryGetEndTs(db, tidbAPIEndpoint, tableName)
 			if ok {
 				return result, nil
 			}
@@ -604,17 +631,47 @@ func getDownStreamSyncedEndTs(ctx context.Context, db *sql.DB, tableName string)
 	}
 }
 
-func tryGetEndTs(db *sql.DB, tableName string) (result string, ok bool) {
-	query := "select END_TIME from information_schema.ddl_jobs where table_name = ?"
-	log.Info("try get end ts", zap.String("query", query))
-	var endTime string
+func tryGetEndTs(db *sql.DB, tidbAPIEndpoint, tableName string) (result uint64, ok bool) {
+	// Note: We should not use `END_TS` in the table, because it is encoded in
+	// the format `2023-03-16 18:12:51`, it's not precise enough.
+	query := "SELECT JOB_ID FROM information_schema.ddl_jobs WHERE table_name = ?"
+	log.Info("try get end ts", zap.String("query", query), zap.String("tableName", tableName))
+	var jobID uint64
 	row := db.QueryRow(query, tableName)
-	if err := row.Scan(&endTime); err != nil {
+	if err := row.Scan(&jobID); err != nil {
 		if err != sql.ErrNoRows {
 			log.Info("rows scan failed", zap.Error(err))
 		}
-		return "", false
+		return 0, false
 	}
-
-	return endTime, true
+	ddlJobURL := fmt.Sprintf(
+		"http://%s/ddl/history?start_job_id=%d&limit=1", tidbAPIEndpoint, jobID)
+	ddlJobResp, err := http.Get(ddlJobURL)
+	if err != nil {
+		log.Warn("fail to get DDL history",
+			zap.String("URL", ddlJobURL), zap.Error(err))
+		return 0, false
+	}
+	defer ddlJobResp.Body.Close()
+	ddlJobJSON, err := io.ReadAll(ddlJobResp.Body)
+	if err != nil {
+		log.Warn("fail to read DDL history",
+			zap.String("URL", ddlJobURL), zap.Error(err))
+		return 0, false
+	}
+	ddlJob := []struct {
+		Binlog struct {
+			FinishedTS uint64 `json:"FinishedTS"`
+		} `json:"binlog"`
+	}{{}}
+	err = json.Unmarshal(ddlJobJSON, &ddlJob)
+	if err != nil {
+		log.Warn("fail to unmarshal DDL history",
+			zap.String("URL", ddlJobURL), zap.String("resp", string(ddlJobJSON)), zap.Error(err))
+		return 0, false
+	}
+	log.Info("get end ts",
+		zap.String("tableName", tableName),
+		zap.Uint64("ts", ddlJob[0].Binlog.FinishedTS))
+	return ddlJob[0].Binlog.FinishedTS, true
 }

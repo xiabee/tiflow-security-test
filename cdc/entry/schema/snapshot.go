@@ -22,12 +22,12 @@ import (
 	"github.com/google/btree"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/model"
-	"go.uber.org/zap"
-
 	timeta "github.com/pingcap/tidb/meta"
 	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/filter"
+	"go.uber.org/zap"
 )
 
 // Snapshot stores the source TiDB all schema information.
@@ -55,15 +55,19 @@ func (s *Snapshot) PreTableInfo(job *timodel.Job) (*model.TableInfo, error) {
 	case timodel.ActionRenameTables:
 		// DDL on multiple tables, ignore pre table info
 		return nil, nil
+	case timodel.ActionExchangeTablePartition:
+		// get the table will be exchanged
+		table, _, err := s.inner.getSourceTable(job.BinlogInfo.TableInfo)
+		return table, err
 	default:
 		binlogInfo := job.BinlogInfo
 		if binlogInfo == nil {
-			log.Warn("ignore a invalid DDL job", zap.Reflect("job", job))
+			log.Warn("ignore a invalid DDL job", zap.Any("job", job))
 			return nil, nil
 		}
 		tbInfo := binlogInfo.TableInfo
 		if tbInfo == nil {
-			log.Warn("ignore a invalid DDL job", zap.Reflect("job", job))
+			log.Warn("ignore a invalid DDL job", zap.Any("job", job))
 			return nil, nil
 		}
 		tableID := tbInfo.ID
@@ -81,6 +85,11 @@ func (s *Snapshot) FillSchemaName(job *timodel.Job) error {
 		// DDLs on multiple schema or tables, ignore them.
 		return nil
 	}
+	if job.Type == timodel.ActionRenameTable && job.SchemaName != "" {
+		// DDL on single table with schema name, ignore it.
+		return nil
+	}
+
 	if job.Type == timodel.ActionCreateSchema ||
 		job.Type == timodel.ActionDropSchema {
 		job.SchemaName = job.BinlogInfo.DBInfo.Name.O
@@ -94,19 +103,47 @@ func (s *Snapshot) FillSchemaName(job *timodel.Job) error {
 	return nil
 }
 
+// GetSchemaVersion returns the schema version of the meta.
+func GetSchemaVersion(meta *timeta.Meta) (int64, error) {
+	// After we get the schema version at startTs, if the diff corresponding to that version does not exist,
+	// it means that the job is not committed yet, so we should subtract one from the version, i.e., version--.
+	version, err := meta.GetSchemaVersion()
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	diff, err := meta.GetSchemaDiff(version)
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	if diff == nil {
+		version--
+	}
+	return version, nil
+}
+
 // NewSingleSnapshotFromMeta creates a new single schema snapshot from a tidb meta
-func NewSingleSnapshotFromMeta(meta *timeta.Meta, currentTs uint64, forceReplicate bool) (*Snapshot, error) {
+func NewSingleSnapshotFromMeta(
+	meta *timeta.Meta,
+	currentTs uint64,
+	forceReplicate bool,
+	filter filter.Filter,
+) (*Snapshot, error) {
 	// meta is nil only in unit tests
 	if meta == nil {
 		snap := NewEmptySnapshot(forceReplicate)
 		snap.inner.currentTs = currentTs
 		return snap, nil
 	}
-	return NewSnapshotFromMeta(meta, currentTs, forceReplicate)
+	return NewSnapshotFromMeta(meta, currentTs, forceReplicate, filter)
 }
 
 // NewSnapshotFromMeta creates a schema snapshot from meta.
-func NewSnapshotFromMeta(meta *timeta.Meta, currentTs uint64, forceReplicate bool) (*Snapshot, error) {
+func NewSnapshotFromMeta(
+	meta *timeta.Meta,
+	currentTs uint64,
+	forceReplicate bool,
+	filter filter.Filter,
+) (*Snapshot, error) {
 	snap := NewEmptySnapshot(forceReplicate)
 	dbinfos, err := meta.ListDatabases()
 	if err != nil {
@@ -116,6 +153,10 @@ func NewSnapshotFromMeta(meta *timeta.Meta, currentTs uint64, forceReplicate boo
 	tag := negative(currentTs)
 
 	for _, dbinfo := range dbinfos {
+		if filter.ShouldIgnoreSchema(dbinfo.Name.O) {
+			log.Debug("ignore database", zap.String("db", dbinfo.Name.O))
+			continue
+		}
 		vid := newVersionedID(dbinfo.ID, tag)
 		vid.target = dbinfo
 		snap.inner.schemas.ReplaceOrInsert(vid)
@@ -130,6 +171,10 @@ func NewSnapshotFromMeta(meta *timeta.Meta, currentTs uint64, forceReplicate boo
 		}
 		for _, tableInfo := range tableInfos {
 			tableInfo := model.WrapTableInfo(dbinfo.ID, dbinfo.Name.O, currentTs, tableInfo)
+			if filter.ShouldIgnoreTable(tableInfo.TableName.Schema, tableInfo.TableName.Table) {
+				log.Debug("ignore table", zap.String("table", tableInfo.TableName.String()))
+				continue
+			}
 			snap.inner.tables.ReplaceOrInsert(versionedID{
 				id:     tableInfo.ID,
 				tag:    tag,
@@ -158,7 +203,6 @@ func NewSnapshotFromMeta(meta *timeta.Meta, currentTs uint64, forceReplicate boo
 			}
 		}
 	}
-
 	snap.inner.currentTs = currentTs
 	return snap, nil
 }
@@ -166,16 +210,17 @@ func NewSnapshotFromMeta(meta *timeta.Meta, currentTs uint64, forceReplicate boo
 // NewEmptySnapshot creates an empty schema snapshot.
 func NewEmptySnapshot(forceReplicate bool) *Snapshot {
 	inner := snapshot{
-		tableNameToID:    btree.New(16),
-		schemaNameToID:   btree.New(16),
-		schemas:          btree.New(16),
-		tables:           btree.New(16),
-		partitions:       btree.New(16),
-		truncatedTables:  btree.New(16),
-		ineligibleTables: btree.New(16),
+		tableNameToID:    btree.NewG[versionedEntityName](16, versionedEntityNameLess),
+		schemaNameToID:   btree.NewG[versionedEntityName](16, versionedEntityNameLess),
+		schemas:          btree.NewG[versionedID](16, versionedIDLess),
+		tables:           btree.NewG[versionedID](16, versionedIDLess),
+		partitions:       btree.NewG[versionedID](16, versionedIDLess),
+		truncatedTables:  btree.NewG[versionedID](16, versionedIDLess),
+		ineligibleTables: btree.NewG[versionedID](16, versionedIDLess),
 		forceReplicate:   forceReplicate,
 		currentTs:        0,
 	}
+
 	return &Snapshot{inner: inner, rwlock: new(sync.RWMutex)}
 }
 
@@ -324,7 +369,7 @@ func (s *Snapshot) IsTruncateTableID(id int64) bool {
 	s.rwlock.RLock()
 	defer s.rwlock.RUnlock()
 	tag, ok := s.inner.tableTagByID(id, true)
-	return ok && s.inner.truncatedTables.Get(newVersionedID(id, tag)) != nil
+	return ok && s.inner.truncatedTables.Has(newVersionedID(id, tag))
 }
 
 // IsIneligibleTableID returns true if the table is ineligible.
@@ -389,6 +434,12 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
+		// If the schema of a rename table job does not exist,
+		// there is no need to create the table, since this table
+		// will not be replicated in the future.
+		if _, ok := s.inner.schemaByID(job.SchemaID); !ok {
+			return nil
+		}
 		// create table
 		err = s.inner.createTable(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
 		if err != nil {
@@ -416,20 +467,27 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-	case timodel.ActionTruncateTablePartition, timodel.ActionAddTablePartition, timodel.ActionDropTablePartition:
+	case timodel.ActionTruncateTablePartition,
+		timodel.ActionAddTablePartition,
+		timodel.ActionDropTablePartition,
+		timodel.ActionReorganizePartition:
 		err := s.inner.updatePartition(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	case timodel.ActionExchangeTablePartition:
+		err := s.inner.exchangePartition(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
 		if err != nil {
 			return errors.Trace(err)
 		}
 	default:
 		binlogInfo := job.BinlogInfo
 		if binlogInfo == nil {
-			log.Warn("ignore a invalid DDL job", zap.Reflect("job", job))
+			log.Warn("ignore a invalid DDL job", zap.Any("job", job))
 			return nil
 		}
-		tbInfo := binlogInfo.TableInfo
-		if tbInfo == nil {
-			log.Warn("ignore a invalid DDL job", zap.Reflect("job", job))
+		if binlogInfo.TableInfo == nil {
+			log.Warn("ignore a invalid DDL job", zap.Any("job", job))
 			return nil
 		}
 		err := s.inner.replaceTable(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
@@ -444,8 +502,14 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 }
 
 // TableCount counts tables in the snapshot. It's only for tests.
-func (s *Snapshot) TableCount(includeIneligible bool) (count int) {
-	s.IterTables(includeIneligible, func(i *model.TableInfo) { count += 1 })
+func (s *Snapshot) TableCount(includeIneligible bool,
+	filter func(schema, table string) bool,
+) (count int) {
+	s.IterTables(includeIneligible, func(i *model.TableInfo) {
+		if filter(i.TableName.Schema, i.TableName.Table) {
+			count++
+		}
+	})
 	return
 }
 
@@ -482,7 +546,6 @@ func (s *Snapshot) DumpToString() string {
 		schema, _ := s.inner.schemaByID(schemaID)
 		tableNames = append(tableNames, fmt.Sprintf("%s.%s:%d", schema.Name.O, table, target))
 	})
-
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s",
 		strings.Join(schemas, "\t"),
 		strings.Join(tables, "\t"),
@@ -494,29 +557,29 @@ func (s *Snapshot) DumpToString() string {
 type snapshot struct {
 	// map[versionedEntityName] -> int64
 	// The ID can be `-1` which means the table is deleted.
-	tableNameToID *btree.BTree
+	tableNameToID *btree.BTreeG[versionedEntityName]
 
 	// map[versionedEntityName] -> int64
 	// The ID can be `-1` which means the table is deleted.
-	schemaNameToID *btree.BTree
+	schemaNameToID *btree.BTreeG[versionedEntityName]
 
 	// map[versionedID] -> *timodel.DBInfo
 	// The target can be `nil` which means the entity is deleted.
-	schemas *btree.BTree
+	schemas *btree.BTreeG[versionedID]
 
 	// map[versionedID] -> *model.TableInfo
 	// The target can be `nil` which means the entity is deleted.
-	tables *btree.BTree
+	tables *btree.BTreeG[versionedID]
 
 	// map[versionedID] -> *model.TableInfo
-	partitions *btree.BTree
+	partitions *btree.BTreeG[versionedID]
 
 	// map[versionedID] -> struct{}
-	truncatedTables *btree.BTree
+	truncatedTables *btree.BTreeG[versionedID]
 
 	// map[versionedID] -> struct{}
 	// Partitions and tables share ineligibleTables because their IDs won't conflict.
-	ineligibleTables *btree.BTree
+	ineligibleTables *btree.BTreeG[versionedID]
 
 	// if forceReplicate is true, treat ineligible tables as eligible.
 	forceReplicate bool
@@ -528,8 +591,8 @@ func (s *snapshot) schemaByID(id int64) (val *timodel.DBInfo, ok bool) {
 	tag := negative(s.currentTs)
 	start := versionedID{id: id, tag: tag, target: nil}
 	end := versionedID{id: id, tag: negative(uint64(0)), target: nil}
-	s.schemas.AscendRange(start, end, func(i btree.Item) bool {
-		val = targetToDBInfo(i.(versionedID).target)
+	s.schemas.AscendRange(start, end, func(i versionedID) bool {
+		val = targetToDBInfo(i.target)
 		ok = val != nil
 		return false
 	})
@@ -540,15 +603,15 @@ func (s *snapshot) physicalTableByID(id int64) (tableInfo *model.TableInfo, ok b
 	tag := negative(s.currentTs)
 	start := versionedID{id: id, tag: tag, target: nil}
 	end := versionedID{id: id, tag: negative(uint64(0)), target: nil}
-	s.tables.AscendRange(start, end, func(i btree.Item) bool {
-		tableInfo = targetToTableInfo(i.(versionedID).target)
+	s.tables.AscendRange(start, end, func(i versionedID) bool {
+		tableInfo = targetToTableInfo(i.target)
 		ok = tableInfo != nil
 		return false
 	})
 	if !ok {
 		// Try partition, it could be a partition table.
-		s.partitions.AscendRange(start, end, func(i btree.Item) bool {
-			tableInfo = targetToTableInfo(i.(versionedID).target)
+		s.partitions.AscendRange(start, end, func(i versionedID) bool {
+			tableInfo = targetToTableInfo(i.target)
 			ok = tableInfo != nil
 			return false
 		})
@@ -560,8 +623,8 @@ func (s *snapshot) schemaIDByName(schema string) (id int64, ok bool) {
 	tag := negative(s.currentTs)
 	start := newVersionedEntityName(-1, schema, tag)
 	end := newVersionedEntityName(-1, schema, negative(uint64(0)))
-	s.schemaNameToID.AscendRange(start, end, func(i btree.Item) bool {
-		id = i.(versionedEntityName).target
+	s.schemaNameToID.AscendRange(start, end, func(i versionedEntityName) bool {
+		id = i.target
 		ok = id >= 0 // negative values are treated as invalid.
 		return false
 	})
@@ -575,8 +638,8 @@ func (s *snapshot) tableIDByName(schema string, table string) (id int64, ok bool
 		tag := negative(s.currentTs)
 		start := newVersionedEntityName(prefix, table, tag)
 		end := newVersionedEntityName(prefix, table, negative(uint64(0)))
-		s.tableNameToID.AscendRange(start, end, func(i btree.Item) bool {
-			id = i.(versionedEntityName).target
+		s.tableNameToID.AscendRange(start, end, func(i versionedEntityName) bool {
+			id = i.target
 			ok = id >= 0 // negative values are treated as invalid.
 			return false
 		})
@@ -594,27 +657,27 @@ func (s *snapshot) tableByName(schema, table string) (info *model.TableInfo, ok 
 
 func (s *snapshot) isIneligibleTableID(id int64) (ok bool) {
 	tag, ok := s.tableTagByID(id, false)
-	return ok && s.ineligibleTables.Get(newVersionedID(id, tag)) != nil
+	return ok && s.ineligibleTables.Has(newVersionedID(id, tag))
 }
 
 func (s *snapshot) tableTagByID(id int64, nilAcceptable bool) (foundTag uint64, ok bool) {
 	tag := negative(s.currentTs)
 	start := newVersionedID(id, tag)
 	end := newVersionedID(id, negative(uint64(0)))
-	s.tables.AscendRange(start, end, func(i btree.Item) bool {
-		tableInfo := targetToTableInfo(i.(versionedID).target)
+	s.tables.AscendRange(start, end, func(i versionedID) bool {
+		tableInfo := targetToTableInfo(i.target)
 		if nilAcceptable || tableInfo != nil {
-			foundTag = i.(versionedID).tag
+			foundTag = i.tag
 			ok = true
 		}
 		return false
 	})
 	if !ok {
 		// Try partition, it could be a partition table.
-		s.partitions.AscendRange(start, end, func(i btree.Item) bool {
-			tableInfo := targetToTableInfo(i.(versionedID).target)
+		s.partitions.AscendRange(start, end, func(i versionedID) bool {
+			tableInfo := targetToTableInfo(i.target)
 			if nilAcceptable || tableInfo != nil {
-				foundTag = i.(versionedID).tag
+				foundTag = i.tag
 				ok = true
 			}
 			return false
@@ -642,7 +705,7 @@ func (s *snapshot) dropSchema(id int64, currentTs uint64) error {
 	return nil
 }
 
-// Create a new schema in the snapshot. `dbInfo` will be deep copied.
+// Create a new schema in the snapshot. `dbInfo` will be deeply copied.
 func (s *snapshot) createSchema(dbInfo *timodel.DBInfo, currentTs uint64) error {
 	x, ok := s.schemaByID(dbInfo.ID)
 	if ok {
@@ -657,7 +720,7 @@ func (s *snapshot) createSchema(dbInfo *timodel.DBInfo, currentTs uint64) error 
 	return nil
 }
 
-// Replace a schema. dbInfo will be deep copied.
+// Replace a schema. dbInfo will be deeply copied.
 // Callers should ensure `dbInfo` information not conflict with other schemas.
 func (s *snapshot) replaceSchema(dbInfo *timodel.DBInfo, currentTs uint64) error {
 	old, ok := s.schemaByID(dbInfo.ID)
@@ -730,7 +793,7 @@ func (s *snapshot) truncateTable(id int64, tbInfo *model.TableInfo, currentTs ui
 	return
 }
 
-// Create a new table in the snapshot. `tbInfo` will be deep copied.
+// Create a new table in the snapshot. `tbInfo` will be deeply copied.
 func (s *snapshot) createTable(tbInfo *model.TableInfo, currentTs uint64) error {
 	if _, ok := s.schemaByID(tbInfo.SchemaID); !ok {
 		return cerror.ErrSnapshotSchemaNotFound.GenWithStack("table's schema(%d)", tbInfo.SchemaID)
@@ -828,10 +891,116 @@ func (s *snapshot) updatePartition(tbInfo *model.TableInfo, currentTs uint64) er
 		}
 	}
 	s.currentTs = currentTs
-	// TODO: is it necessary to print changes detailly?
+
 	log.Debug("adjust partition success",
 		zap.String("schema", tbInfo.TableName.Schema),
-		zap.String("table", tbInfo.TableName.Table))
+		zap.String("table", tbInfo.TableName.Table),
+		zap.Any("partitions", newPi.Definitions),
+	)
+	return nil
+}
+
+func (s *snapshot) getSourceTable(targetTable *timodel.TableInfo) (*model.TableInfo, int64, error) {
+	oldTable, ok := s.physicalTableByID(targetTable.ID)
+	if !ok {
+		return nil, 0, cerror.ErrSnapshotTableNotFound.GenWithStackByArgs(targetTable.ID)
+	}
+
+	oldPartitions := oldTable.GetPartitionInfo()
+	if oldPartitions == nil {
+		return nil, 0, cerror.ErrSnapshotTableNotFound.
+			GenWithStack("table %d is not a partitioned table", oldTable.ID)
+	}
+
+	newPartitions := targetTable.GetPartitionInfo()
+	if newPartitions == nil {
+		return nil, 0, cerror.ErrSnapshotTableNotFound.
+			GenWithStack("table %d is not a partitioned table", targetTable.ID)
+	}
+
+	oldIDs := make(map[int64]struct{}, len(oldPartitions.Definitions))
+	for _, p := range oldPartitions.Definitions {
+		oldIDs[p.ID] = struct{}{}
+	}
+
+	newIDs := make(map[int64]struct{}, len(oldPartitions.Definitions))
+	for _, p := range newPartitions.Definitions {
+		newIDs[p.ID] = struct{}{}
+	}
+
+	// 1. find the source table info
+	var diff []int64
+	for id := range newIDs {
+		if _, ok := oldIDs[id]; !ok {
+			diff = append(diff, id)
+		}
+	}
+	if len(diff) != 1 {
+		return nil, 0, cerror.ErrExchangePartition.
+			GenWithStackByArgs(fmt.Sprintf("The exchanged source table number must be 1, but found %v", diff))
+	}
+	sourceTable, ok := s.physicalTableByID(diff[0])
+	if !ok {
+		return nil, 0, cerror.ErrSnapshotTableNotFound.GenWithStackByArgs(diff[0])
+	}
+	// 3.find the exchanged partition info
+	diff = diff[:0]
+	for id := range oldIDs {
+		if _, ok := newIDs[id]; !ok {
+			diff = append(diff, id)
+		}
+	}
+	if len(diff) != 1 {
+		return nil, 0, cerror.ErrExchangePartition.
+			GenWithStackByArgs(fmt.Sprintf("The exchanged source table number must be 1, but found %v", diff))
+	}
+
+	exchangedPartitionID := diff[0]
+	return sourceTable, exchangedPartitionID, nil
+}
+
+// exchangePartition find the partition's id in the old table info of targetTable,
+// and find the sourceTable's id in the new table info of targetTable.
+// Then set sourceTable's id to the partition's id, which make the exchange happen in snapshot.
+// Finally, update both the targetTable's info and the sourceTable's info in snapshot.
+func (s *snapshot) exchangePartition(targetTable *model.TableInfo, currentTS uint64) error {
+	var sourceTable *model.TableInfo
+	sourceTable, exchangedPartitionID, err := s.getSourceTable(targetTable.TableInfo)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// 4.update the targetTable
+	oldTable, ok := s.physicalTableByID(targetTable.ID)
+	if !ok {
+		return cerror.ErrSnapshotTableNotFound.GenWithStackByArgs(targetTable.ID)
+	}
+	// TODO: remove this after job is fixed by TiDB.
+	// ref: https://github.com/pingcap/tidb/issues/43819
+	targetTable.SchemaID = oldTable.SchemaID
+	targetTable.TableName = oldTable.TableName
+	err = s.updatePartition(targetTable, currentTS)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	newSourceTable := model.WrapTableInfo(sourceTable.SchemaID, sourceTable.TableName.Schema,
+		currentTS, sourceTable.TableInfo.Clone())
+	// 5.update the sourceTable
+	err = s.dropTable(sourceTable.ID, currentTS)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	newSourceTable.ID = exchangedPartitionID
+	err = s.createTable(newSourceTable, currentTS)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	log.Info("handle exchange partition success",
+		zap.String("sourceTable", sourceTable.TableName.String()),
+		zap.Int64("exchangedPartition", exchangedPartitionID),
+		zap.String("targetTable", targetTable.TableName.String()),
+		zap.Any("partition", targetTable.GetPartitionInfo().Definitions))
 	return nil
 }
 
@@ -856,7 +1025,7 @@ func (s *snapshot) renameTables(job *timodel.Job, currentTs uint64) error {
 		if !ok {
 			return cerror.ErrSnapshotSchemaNotFound.GenWithStackByArgs(newSchemaIDs[i])
 		}
-		newSchemaName := newSchema.Name.L
+		newSchemaName := newSchema.Name.O
 		tbInfo := model.WrapTableInfo(newSchemaIDs[i], newSchemaName, job.BinlogInfo.FinishedTS, tableInfo)
 		err = s.createTable(tbInfo, currentTs)
 		if err != nil {
@@ -869,40 +1038,37 @@ func (s *snapshot) renameTables(job *timodel.Job, currentTs uint64) error {
 func (s *snapshot) iterTables(includeIneligible bool, f func(i *model.TableInfo)) {
 	tag := negative(s.currentTs)
 	var tableID int64 = -1
-	s.tables.Ascend(func(i btree.Item) bool {
-		x := i.(versionedID)
+	s.tables.Ascend(func(x versionedID) bool {
 		if x.id != tableID && x.tag >= tag {
 			tableID = x.id
-			if x.target != nil && (includeIneligible || s.ineligibleTables.Get(newVersionedID(x.id, x.tag)) == nil) {
+			if x.target != nil && (includeIneligible ||
+				!s.ineligibleTables.Has(newVersionedID(x.id, x.tag))) {
 				f(targetToTableInfo(x.target))
 			}
 		}
 		return true
 	})
-	return
 }
 
 func (s *snapshot) iterPartitions(includeIneligible bool, f func(id int64, i *model.TableInfo)) {
 	tag := negative(s.currentTs)
 	var partitionID int64 = -1
-	s.partitions.Ascend(func(i btree.Item) bool {
-		x := i.(versionedID)
+	s.partitions.Ascend(func(x versionedID) bool {
 		if x.id != partitionID && x.tag >= tag {
 			partitionID = x.id
-			if x.target != nil && (includeIneligible || s.ineligibleTables.Get(newVersionedID(x.id, x.tag)) == nil) {
+			if x.target != nil && (includeIneligible ||
+				!s.ineligibleTables.Has(newVersionedID(x.id, x.tag))) {
 				f(partitionID, targetToTableInfo(x.target))
 			}
 		}
 		return true
 	})
-	return
 }
 
 func (s *snapshot) iterSchemas(f func(i *timodel.DBInfo)) {
 	tag := negative(s.currentTs)
 	var schemaID int64 = -1
-	s.schemas.Ascend(func(i btree.Item) bool {
-		x := i.(versionedID)
+	s.schemas.Ascend(func(x versionedID) bool {
 		if x.id != schemaID && x.tag >= tag {
 			schemaID = x.id
 			if x.target != nil {
@@ -917,8 +1083,7 @@ func (s *snapshot) iterTableNames(f func(schema int64, table string, target int6
 	tag := negative(s.currentTs)
 	var prefix int64 = -1
 	entity := ""
-	s.tableNameToID.Ascend(func(i btree.Item) bool {
-		x := i.(versionedEntityName)
+	s.tableNameToID.Ascend(func(x versionedEntityName) bool {
 		if (x.prefix != prefix || x.entity != entity) && x.tag >= tag {
 			prefix = x.prefix
 			entity = x.entity
@@ -933,8 +1098,7 @@ func (s *snapshot) iterTableNames(f func(schema int64, table string, target int6
 func (s *snapshot) iterSchemaNames(f func(schema string, target int64)) {
 	tag := negative(s.currentTs)
 	entity := ""
-	s.schemaNameToID.Ascend(func(i btree.Item) bool {
-		x := i.(versionedEntityName)
+	s.schemaNameToID.Ascend(func(x versionedEntityName) bool {
 		if x.entity != entity && x.tag >= tag {
 			entity = x.entity
 			if x.target > 0 {
@@ -954,8 +1118,7 @@ func (s *snapshot) tablesInSchema(schema string) (tables []int64) {
 	end := newVersionedEntityName(schemaID+1, "", 0)
 	tag := negative(s.currentTs)
 	currTable := ""
-	s.tableNameToID.AscendRange(start, end, func(i btree.Item) bool {
-		x := i.(versionedEntityName)
+	s.tableNameToID.AscendRange(start, end, func(x versionedEntityName) bool {
 		if x.tag >= tag && x.entity != currTable {
 			currTable = x.entity
 			if x.target > 0 {
@@ -972,9 +1135,8 @@ func (s *snapshot) drop() {
 
 	schemas := make([]versionedID, 0, s.schemas.Len())
 	var schemaID int64 = -1
-	var schemaDroped bool = false
-	s.schemas.Ascend(func(i btree.Item) bool {
-		x := i.(versionedID)
+	schemaDroped := false
+	s.schemas.Ascend(func(x versionedID) bool {
 		if x.tag >= tag {
 			if x.id != schemaID {
 				schemaID = x.id
@@ -993,9 +1155,8 @@ func (s *snapshot) drop() {
 
 	tables := make([]versionedID, 0, s.tables.Len())
 	var tableID int64 = -1
-	var tableDroped bool = false
-	s.tables.Ascend(func(i btree.Item) bool {
-		x := i.(versionedID)
+	tableDroped := false
+	s.tables.Ascend(func(x versionedID) bool {
 		if x.tag >= tag {
 			if x.id != tableID {
 				tableID = x.id
@@ -1009,7 +1170,7 @@ func (s *snapshot) drop() {
 		return true
 	})
 	for _, vid := range tables {
-		x := s.tables.Delete(vid).(versionedID)
+		x, _ := s.tables.Delete(vid)
 		info := targetToTableInfo(x.target)
 		if info != nil {
 			ineligible := !info.IsEligible(s.forceReplicate)
@@ -1024,9 +1185,8 @@ func (s *snapshot) drop() {
 
 	partitions := make([]versionedID, 0, s.partitions.Len())
 	var partitionID int64 = -1
-	var partitionDroped bool = false
-	s.partitions.Ascend(func(i btree.Item) bool {
-		x := i.(versionedID)
+	partitionDroped := false
+	s.partitions.Ascend(func(x versionedID) bool {
 		if x.tag >= tag {
 			if x.id != partitionID {
 				partitionID = x.id
@@ -1040,7 +1200,7 @@ func (s *snapshot) drop() {
 		return true
 	})
 	for _, vid := range partitions {
-		x := s.partitions.Delete(vid).(versionedID)
+		x, _ := s.partitions.Delete(vid)
 		info := targetToTableInfo(x.target)
 		if info != nil {
 			ineligible := !info.IsEligible(s.forceReplicate)
@@ -1051,10 +1211,9 @@ func (s *snapshot) drop() {
 	}
 
 	schemaNames := make([]versionedEntityName, 0, s.schemaNameToID.Len())
-	var schemaName string = ""
-	var schemaNameDroped bool = false
-	s.schemaNameToID.Ascend(func(i btree.Item) bool {
-		x := i.(versionedEntityName)
+	schemaName := ""
+	schemaNameDroped := false
+	s.schemaNameToID.Ascend(func(x versionedEntityName) bool {
 		if x.tag >= tag {
 			if x.entity != schemaName {
 				schemaName = x.entity
@@ -1073,10 +1232,9 @@ func (s *snapshot) drop() {
 
 	tableNames := make([]versionedEntityName, 0, s.tableNameToID.Len())
 	schemaID = -1
-	var tableName string = ""
-	var tableNameDroped bool = false
-	s.tableNameToID.Ascend(func(i btree.Item) bool {
-		x := i.(versionedEntityName)
+	tableName := ""
+	tableNameDroped := false
+	s.tableNameToID.Ascend(func(x versionedEntityName) bool {
 		if x.tag >= tag {
 			if x.prefix != schemaID || x.entity != tableName {
 				schemaID = x.prefix
@@ -1112,13 +1270,12 @@ type versionedID struct {
 	target interface{}
 }
 
-func (v1 versionedEntityName) Less(than btree.Item) bool {
-	v2 := than.(versionedEntityName)
-	return v1.prefix < v2.prefix || (v1.prefix == v2.prefix && v1.entity < v2.entity) || (v1.prefix == v2.prefix && v1.entity == v2.entity && v1.tag < v2.tag)
+func versionedEntityNameLess(v1, v2 versionedEntityName) bool {
+	return v1.prefix < v2.prefix || (v1.prefix == v2.prefix && v1.entity < v2.entity) ||
+		(v1.prefix == v2.prefix && v1.entity == v2.entity && v1.tag < v2.tag)
 }
 
-func (v1 versionedID) Less(than btree.Item) bool {
-	v2 := than.(versionedID)
+func versionedIDLess(v1, v2 versionedID) bool {
 	return v1.id < v2.id || (v1.id == v2.id && v1.tag < v2.tag)
 }
 

@@ -20,7 +20,6 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/pingcap/tidb/util/filter"
-
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/pkg/sqlmodel"
 )
@@ -92,6 +91,8 @@ type job struct {
 	jobAddTime  time.Time       // job commit time
 	flushSeq    int64           // sequence number for sync and async flush job
 	flushWg     *sync.WaitGroup // wait group for sync, async and conflict job
+	timestamp   uint32
+	timezone    string
 }
 
 func (j *job) clone() *job {
@@ -125,9 +126,9 @@ func newDMLJob(rowChange *sqlmodel.RowChange, ec *eventContext) *job {
 		retry:       true,
 		safeMode:    ec.safeMode,
 
-		location:        *ec.lastLocation,
-		startLocation:   *ec.startLocation,
-		currentLocation: *ec.currentLocation,
+		location:        ec.lastLocation,
+		startLocation:   ec.startLocation,
+		currentLocation: ec.endLocation,
 		eventHeader:     ec.header,
 		jobAddTime:      time.Now(),
 	}
@@ -143,9 +144,9 @@ func newDDLJob(qec *queryEventContext) *job {
 		ddls:        qec.needHandleDDLs,
 		originSQL:   qec.originSQL,
 
-		location:        *qec.lastLocation,
-		startLocation:   *qec.startLocation,
-		currentLocation: *qec.currentLocation,
+		location:        qec.lastLocation,
+		startLocation:   qec.startLocation,
+		currentLocation: qec.endLocation,
 		eventHeader:     qec.header,
 		jobAddTime:      time.Now(),
 	}
@@ -166,13 +167,16 @@ func newDDLJob(qec *queryEventContext) *job {
 		j.targetTable = ddlInfo.targetTables[0]
 	}
 
+	j.timestamp = qec.timestamp
+	j.timezone = qec.timezone
+
 	return j
 }
 
 func newSkipJob(ec *eventContext) *job {
 	return &job{
 		tp:          skip,
-		location:    *ec.lastLocation,
+		location:    ec.lastLocation,
 		eventHeader: ec.header,
 		jobAddTime:  time.Now(),
 	}
@@ -233,7 +237,7 @@ func newConflictJob(workerCount int) *job {
 	}
 }
 
-// newCompactJob is only used for metrics.
+// newCompactJob is only used for MetricsProxies.
 func newCompactJob(targetTable *filter.Table) *job {
 	return &job{
 		tp:          compact,

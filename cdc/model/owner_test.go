@@ -14,9 +14,9 @@
 package model
 
 import (
+	"strings"
 	"testing"
 
-	"github.com/pingcap/check"
 	"github.com/stretchr/testify/require"
 )
 
@@ -54,7 +54,7 @@ func TestTaskPositionMarshal(t *testing.T) {
 		ResolvedTs:   420875942036766723,
 		CheckPointTs: 420875940070686721,
 	}
-	expected := `{"checkpoint-ts":420875940070686721,"resolved-ts":420875942036766723,"count":0,"error":null}`
+	expected := `{"checkpoint-ts":420875940070686721,"resolved-ts":420875942036766723,"count":0,"error":null,"warning":null}`
 
 	data, err := pos.Marshal()
 	require.Nil(t, err)
@@ -71,10 +71,11 @@ func TestChangeFeedStatusMarshal(t *testing.T) {
 	t.Parallel()
 
 	status := &ChangeFeedStatus{
-		ResolvedTs:   420875942036766723,
 		CheckpointTs: 420875940070686721,
 	}
-	expected := `{"resolved-ts":420875942036766723,"checkpoint-ts":420875940070686721,"admin-job-type":0}`
+	expected := `{"checkpoint-ts":420875940070686721,
+"min-table-barrier-ts":0,"admin-job-type":0}`
+	expected = strings.ReplaceAll(expected, "\n", "")
 
 	data, err := status.Marshal()
 	require.Nil(t, err)
@@ -114,34 +115,6 @@ func TestTableOperationState(t *testing.T) {
 	var nilTableOper *TableOperation
 	require.Nil(t, nilTableOper.Clone())
 }
-
-func TestTaskWorkloadMarshal(t *testing.T) {
-	t.Parallel()
-
-	workload := &TaskWorkload{
-		12: WorkloadInfo{Workload: uint64(1)},
-		15: WorkloadInfo{Workload: uint64(3)},
-	}
-	expected := `{"12":{"workload":1},"15":{"workload":3}}`
-
-	data, err := workload.Marshal()
-	require.Nil(t, err)
-	require.Equal(t, expected, data)
-
-	newWorkload := &TaskWorkload{}
-	err = newWorkload.Unmarshal([]byte(data))
-	require.Nil(t, err)
-	require.Equal(t, workload, newWorkload)
-
-	workload = nil
-	data, err = workload.Marshal()
-	require.Nil(t, err)
-	require.Equal(t, "{}", data)
-}
-
-type taskStatusSuite struct{}
-
-var _ = check.Suite(&taskStatusSuite{})
 
 func TestShouldBeDeepCopy(t *testing.T) {
 	t.Parallel()
@@ -202,7 +175,7 @@ func TestTaskStatusMarshal(t *testing.T) {
 			1: {StartTs: 420875942036766723},
 		},
 	}
-	expected := `{"tables":{"1":{"start-ts":420875942036766723,"mark-table-id":0}},"operation":null,"admin-job-type":0}`
+	expected := `{"tables":{"1":{"start-ts":420875942036766723}},"operation":null,"admin-job-type":0}`
 
 	data, err := status.Marshal()
 	require.Nil(t, err)

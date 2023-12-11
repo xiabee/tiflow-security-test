@@ -20,67 +20,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestValidateOldValue(t *testing.T) {
-	t.Parallel()
-	testCases := []struct {
-		protocol       string
-		enableOldValue bool
-		expectedErr    string
-	}{
-		{
-			protocol:       "default",
-			enableOldValue: false,
-			expectedErr:    "",
-		},
-		{
-			protocol:       "default",
-			enableOldValue: true,
-			expectedErr:    "",
-		},
-		{
-			protocol:       "canal-json",
-			enableOldValue: false,
-			expectedErr:    ".*canal-json protocol requires old value to be enabled.*",
-		},
-		{
-			protocol:       "canal-json",
-			enableOldValue: true,
-			expectedErr:    "",
-		},
-		{
-			protocol:       "canal",
-			enableOldValue: false,
-			expectedErr:    ".*canal protocol requires old value to be enabled.*",
-		},
-		{
-			protocol:       "canal",
-			enableOldValue: true,
-			expectedErr:    "",
-		},
-		{
-			protocol:       "maxwell",
-			enableOldValue: false,
-			expectedErr:    ".*maxwell protocol requires old value to be enabled.*",
-		},
-		{
-			protocol:       "maxwell",
-			enableOldValue: true,
-			expectedErr:    "",
-		},
-	}
-
-	for _, tc := range testCases {
-		cfg := SinkConfig{
-			Protocol: tc.protocol,
-		}
-		if tc.expectedErr == "" {
-			require.Nil(t, cfg.validateAndAdjust(nil, tc.enableOldValue))
-		} else {
-			require.Regexp(t, tc.expectedErr, cfg.validateAndAdjust(nil, tc.enableOldValue))
-		}
-	}
-}
-
 func TestValidateTxnAtomicity(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
@@ -137,7 +76,7 @@ func TestValidateTxnAtomicity(t *testing.T) {
 		},
 		{
 			sinkURI:     "kafka://127.0.0.1:9092?transaction-atomicity=none",
-			expectedErr: "unknown .* protocol for Message Queue sink",
+			expectedErr: ".*unknown .* message protocol for sink.*",
 		},
 		{
 			sinkURI: "kafka://127.0.0.1:9092?transaction-atomicity=table" +
@@ -156,10 +95,10 @@ func TestValidateTxnAtomicity(t *testing.T) {
 		parsedSinkURI, err := url.Parse(tc.sinkURI)
 		require.Nil(t, err)
 		if tc.expectedErr == "" {
-			require.Nil(t, cfg.validateAndAdjust(parsedSinkURI, true))
+			require.Nil(t, cfg.validateAndAdjust(parsedSinkURI))
 			require.Equal(t, tc.shouldSplitTxn, cfg.TxnAtomicity.ShouldSplitTxn())
 		} else {
-			require.Regexp(t, tc.expectedErr, cfg.validateAndAdjust(parsedSinkURI, true))
+			require.Regexp(t, tc.expectedErr, cfg.validateAndAdjust(parsedSinkURI))
 		}
 	}
 }
@@ -260,7 +199,6 @@ func TestApplyParameterBySinkURI(t *testing.T) {
 		} else {
 			require.ErrorContains(t, err, tc.expectedErr)
 		}
-
 	}
 }
 
@@ -330,4 +268,113 @@ func TestCheckCompatibilityWithSinkURI(t *testing.T) {
 		require.Equal(t, tc.expectedProtocol, tc.newSinkConfig.Protocol)
 		require.Equal(t, tc.expectedTxnAtomicity, tc.newSinkConfig.TxnAtomicity)
 	}
+}
+
+func TestValidateAndAdjustCSVConfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		config  *CSVConfig
+		wantErr string
+	}{
+		{
+			name: "valid quote",
+			config: &CSVConfig{
+				Quote:                "\"",
+				Delimiter:            ",",
+				BinaryEncodingMethod: BinaryEncodingBase64,
+			},
+			wantErr: "",
+		},
+		{
+			name: "quote has multiple characters",
+			config: &CSVConfig{
+				Quote: "***",
+			},
+			wantErr: "csv config quote contains more than one character",
+		},
+		{
+			name: "quote contains line break character",
+			config: &CSVConfig{
+				Quote: "\n",
+			},
+			wantErr: "csv config quote cannot be line break character",
+		},
+		{
+			name: "valid delimiter1",
+			config: &CSVConfig{
+				Quote:                "\"",
+				Delimiter:            ",",
+				BinaryEncodingMethod: BinaryEncodingHex,
+			},
+			wantErr: "",
+		},
+		{
+			name: "delimiter is empty",
+			config: &CSVConfig{
+				Quote:     "'",
+				Delimiter: "",
+			},
+			wantErr: "csv config delimiter cannot be empty",
+		},
+		{
+			name: "delimiter contains line break character",
+			config: &CSVConfig{
+				Quote:     "'",
+				Delimiter: "\r",
+			},
+			wantErr: "csv config delimiter contains line break characters",
+		},
+		{
+			name: "delimiter and quote are same",
+			config: &CSVConfig{
+				Quote:     "'",
+				Delimiter: "'",
+			},
+			wantErr: "csv config quote and delimiter cannot be the same",
+		},
+		{
+			name: "invalid binary encoding method",
+			config: &CSVConfig{
+				Quote:                "\"",
+				Delimiter:            ",",
+				BinaryEncodingMethod: "invalid",
+			},
+			wantErr: "csv config binary-encoding-method can only be hex or base64",
+		},
+	}
+	for _, c := range tests {
+		tc := c
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := &SinkConfig{
+				CSVConfig: tc.config,
+			}
+			if tc.wantErr == "" {
+				require.Nil(t, s.CSVConfig.validateAndAdjust())
+			} else {
+				require.Regexp(t, tc.wantErr, s.CSVConfig.validateAndAdjust())
+			}
+		})
+	}
+}
+
+func TestValidateAndAdjustStorageConfig(t *testing.T) {
+	t.Parallel()
+
+	sinkURI, err := url.Parse("s3://bucket?protocol=csv")
+	require.NoError(t, err)
+	s := GetDefaultReplicaConfig()
+	err = s.ValidateAndAdjust(sinkURI)
+	require.NoError(t, err)
+	require.Equal(t, DefaultFileIndexWidth, s.Sink.FileIndexWidth)
+
+	err = s.ValidateAndAdjust(sinkURI)
+	require.NoError(t, err)
+	require.Equal(t, DefaultFileIndexWidth, s.Sink.FileIndexWidth)
+
+	s.Sink.FileIndexWidth = 16
+	err = s.ValidateAndAdjust(sinkURI)
+	require.NoError(t, err)
+	require.Equal(t, 16, s.Sink.FileIndexWidth)
 }

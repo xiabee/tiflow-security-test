@@ -1,4 +1,4 @@
-// Copyright 2021 PingCAP, Inc.
+// Copyright 2023 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@ package redo
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -22,15 +23,31 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
-	"github.com/pingcap/tiflow/pkg/chann"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/redo"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
+
+func checkResolvedTs(t *testing.T, mgr *logManager, expectedRts uint64) {
+	time.Sleep(time.Duration(redo.MinFlushIntervalInMs+200) * time.Millisecond)
+	resolvedTs := uint64(math.MaxUint64)
+	mgr.rtsMap.Range(func(span tablepb.Span, value any) bool {
+		v, ok := value.(*statefulRts)
+		require.True(t, ok)
+		ts := v.getFlushed()
+		if ts < resolvedTs {
+			resolvedTs = ts
+		}
+		return true
+	})
+	require.Equal(t, expectedRts, resolvedTs)
+}
 
 func TestConsistentConfig(t *testing.T) {
 	t.Parallel()
@@ -88,86 +105,113 @@ func TestConsistentConfig(t *testing.T) {
 	}
 }
 
-// TestLogManagerInProcessor tests how redo log manager is used in processor,
-// where the redo log manager needs to handle DMLs and redo log meta data
+// TestLogManagerInProcessor tests how redo log manager is used in processor.
 func TestLogManagerInProcessor(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logMgr, err := NewMockManager(ctx)
-	require.Nil(t, err)
-	defer logMgr.Cleanup(ctx)
+	testWriteDMLs := func(storage string, useFileBackend bool) {
+		ctx, cancel := context.WithCancel(ctx)
+		cfg := &config.ConsistentConfig{
+			Level:                 string(redo.ConsistentLevelEventual),
+			MaxLogSize:            redo.DefaultMaxLogSize,
+			Storage:               storage,
+			FlushIntervalInMs:     redo.MinFlushIntervalInMs,
+			MetaFlushIntervalInMs: redo.MinFlushIntervalInMs,
+			EncodingWorkerNum:     redo.DefaultEncodingWorkerNum,
+			FlushWorkerNum:        redo.DefaultFlushWorkerNum,
+			UseFileBackend:        useFileBackend,
+		}
+		dmlMgr := NewDMLManager(model.DefaultChangeFeedID("test"), cfg)
+		var eg errgroup.Group
+		eg.Go(func() error {
+			return dmlMgr.Run(ctx)
+		})
+		// check emit row changed events can move forward resolved ts
+		spans := []tablepb.Span{
+			spanz.TableIDToComparableSpan(53),
+			spanz.TableIDToComparableSpan(55),
+			spanz.TableIDToComparableSpan(57),
+			spanz.TableIDToComparableSpan(59),
+		}
 
-	checkResolvedTs := func(mgr LogManager, expectedRts uint64) {
-		time.Sleep(time.Duration(config.DefaultFlushIntervalInMs+200) * time.Millisecond)
-		resolvedTs := mgr.GetMinResolvedTs()
-		require.Equal(t, expectedRts, resolvedTs)
+		startTs := uint64(100)
+		for _, span := range spans {
+			dmlMgr.AddTable(span, startTs)
+		}
+		testCases := []struct {
+			span tablepb.Span
+			rows []*model.RowChangedEvent
+		}{
+			{
+				span: spanz.TableIDToComparableSpan(53),
+				rows: []*model.RowChangedEvent{
+					{CommitTs: 120, Table: &model.TableName{TableID: 53}},
+					{CommitTs: 125, Table: &model.TableName{TableID: 53}},
+					{CommitTs: 130, Table: &model.TableName{TableID: 53}},
+				},
+			},
+			{
+				span: spanz.TableIDToComparableSpan(55),
+				rows: []*model.RowChangedEvent{
+					{CommitTs: 130, Table: &model.TableName{TableID: 55}},
+					{CommitTs: 135, Table: &model.TableName{TableID: 55}},
+				},
+			},
+			{
+				span: spanz.TableIDToComparableSpan(57),
+				rows: []*model.RowChangedEvent{
+					{CommitTs: 130, Table: &model.TableName{TableID: 57}},
+				},
+			},
+			{
+				span: spanz.TableIDToComparableSpan(59),
+				rows: []*model.RowChangedEvent{
+					{CommitTs: 128, Table: &model.TableName{TableID: 59}},
+					{CommitTs: 130, Table: &model.TableName{TableID: 59}},
+					{CommitTs: 133, Table: &model.TableName{TableID: 59}},
+				},
+			},
+		}
+		for _, tc := range testCases {
+			err := dmlMgr.EmitRowChangedEvents(ctx, tc.span, nil, tc.rows...)
+			require.NoError(t, err)
+		}
+
+		// check UpdateResolvedTs can move forward the resolved ts when there is not row event.
+		flushResolvedTs := uint64(150)
+		for _, span := range spans {
+			checkResolvedTs(t, dmlMgr.logManager, startTs)
+			err := dmlMgr.UpdateResolvedTs(ctx, span, flushResolvedTs)
+			require.NoError(t, err)
+		}
+		checkResolvedTs(t, dmlMgr.logManager, flushResolvedTs)
+
+		// check remove table can work normally
+		removeTable := spans[len(spans)-1]
+		spans = spans[:len(spans)-1]
+		dmlMgr.RemoveTable(removeTable)
+		flushResolvedTs = uint64(200)
+		for _, span := range spans {
+			err := dmlMgr.UpdateResolvedTs(ctx, span, flushResolvedTs)
+			require.NoError(t, err)
+		}
+		checkResolvedTs(t, dmlMgr.logManager, flushResolvedTs)
+
+		cancel()
+		require.ErrorIs(t, eg.Wait(), context.Canceled)
 	}
 
-	// check emit row changed events can move forward resolved ts
-	tables := []model.TableID{53, 55, 57, 59}
-	startTs := uint64(100)
-	for _, tableID := range tables {
-		logMgr.AddTable(tableID, startTs)
+	testWriteDMLs("blackhole://", true)
+	storages := []string{
+		fmt.Sprintf("file://%s", t.TempDir()),
+		fmt.Sprintf("nfs://%s", t.TempDir()),
 	}
-	testCases := []struct {
-		tableID model.TableID
-		rows    []*model.RowChangedEvent
-	}{
-		{
-			tableID: 53,
-			rows: []*model.RowChangedEvent{
-				{CommitTs: 120, Table: &model.TableName{TableID: 53}},
-				{CommitTs: 125, Table: &model.TableName{TableID: 53}},
-				{CommitTs: 130, Table: &model.TableName{TableID: 53}},
-			},
-		},
-		{
-			tableID: 55,
-			rows: []*model.RowChangedEvent{
-				{CommitTs: 130, Table: &model.TableName{TableID: 55}},
-				{CommitTs: 135, Table: &model.TableName{TableID: 55}},
-			},
-		},
-		{
-			tableID: 57,
-			rows: []*model.RowChangedEvent{
-				{CommitTs: 130, Table: &model.TableName{TableID: 57}},
-			},
-		},
-		{
-			tableID: 59,
-			rows: []*model.RowChangedEvent{
-				{CommitTs: 128, Table: &model.TableName{TableID: 59}},
-				{CommitTs: 130, Table: &model.TableName{TableID: 59}},
-				{CommitTs: 133, Table: &model.TableName{TableID: 59}},
-			},
-		},
+	for _, storage := range storages {
+		testWriteDMLs(storage, true)
+		testWriteDMLs(storage, false)
 	}
-	for _, tc := range testCases {
-		err := logMgr.EmitRowChangedEvents(ctx, tc.tableID, tc.rows...)
-		require.Nil(t, err)
-	}
-
-	// check UpdateResolvedTs can move forward the resolved ts when there is not row event.
-	flushResolvedTs := uint64(150)
-	for _, tableID := range tables {
-		err := logMgr.UpdateResolvedTs(ctx, tableID, flushResolvedTs)
-		require.Nil(t, err)
-	}
-	checkResolvedTs(logMgr, flushResolvedTs)
-
-	// check remove table can work normally
-	removeTable := tables[len(tables)-1]
-	tables = tables[:len(tables)-1]
-	logMgr.RemoveTable(removeTable)
-	flushResolvedTs = uint64(200)
-	for _, tableID := range tables {
-		err := logMgr.UpdateResolvedTs(ctx, tableID, flushResolvedTs)
-		require.Nil(t, err)
-	}
-	checkResolvedTs(logMgr, flushResolvedTs)
 }
 
 // TestLogManagerInOwner tests how redo log manager is used in owner,
@@ -177,250 +221,192 @@ func TestLogManagerInOwner(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logMgr, err := NewMockManager(ctx)
-	require.Nil(t, err)
-	defer logMgr.Cleanup(ctx)
-
-	ddl := &model.DDLEvent{StartTs: 100, CommitTs: 120, Query: "CREATE TABLE `TEST.T1`"}
-	err = logMgr.EmitDDLEvent(ctx, ddl)
-	require.Nil(t, err)
-
-	err = logMgr.writer.DeleteAllLogs(ctx)
-	require.Nil(t, err)
-}
-
-func BenchmarkRedoManager(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runBenchTest(ctx, b)
-}
-
-func BenchmarkRedoManagerWaitFlush(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	logMgr, maxTsMap := runBenchTest(ctx, b)
-
-	var minResolvedTs model.Ts = math.MaxUint64
-	for _, tp := range maxTsMap {
-		if *tp < minResolvedTs {
-			minResolvedTs = *tp
+	testWriteDDLs := func(storage string, useFileBackend bool) {
+		ctx, cancel := context.WithCancel(ctx)
+		cfg := &config.ConsistentConfig{
+			Level:                 string(redo.ConsistentLevelEventual),
+			MaxLogSize:            redo.DefaultMaxLogSize,
+			Storage:               storage,
+			FlushIntervalInMs:     redo.MinFlushIntervalInMs,
+			MetaFlushIntervalInMs: redo.DefaultMetaFlushIntervalInMs,
+			EncodingWorkerNum:     redo.DefaultEncodingWorkerNum,
+			FlushWorkerNum:        redo.DefaultFlushWorkerNum,
+			UseFileBackend:        useFileBackend,
 		}
+		startTs := model.Ts(10)
+		ddlMgr := NewDDLManager(model.DefaultChangeFeedID("test"), cfg, startTs)
+
+		var eg errgroup.Group
+		eg.Go(func() error {
+			return ddlMgr.Run(ctx)
+		})
+
+		require.Equal(t, startTs, ddlMgr.GetResolvedTs())
+		ddl := &model.DDLEvent{StartTs: 100, CommitTs: 120, Query: "CREATE TABLE `TEST.T1`"}
+		err := ddlMgr.EmitDDLEvent(ctx, ddl)
+		require.NoError(t, err)
+		require.Equal(t, startTs, ddlMgr.GetResolvedTs())
+
+		ddlMgr.UpdateResolvedTs(ctx, ddl.CommitTs)
+		checkResolvedTs(t, ddlMgr.logManager, ddl.CommitTs)
+
+		cancel()
+		require.ErrorIs(t, eg.Wait(), context.Canceled)
 	}
 
-	for t := logMgr.GetMinResolvedTs(); t != minResolvedTs; {
-		time.Sleep(time.Millisecond * 200)
-		log.Debug("", zap.Uint64("targetTs", minResolvedTs), zap.Uint64("minResolvedTs", t))
-		t = logMgr.GetMinResolvedTs()
+	testWriteDDLs("blackhole://", true)
+	storages := []string{
+		fmt.Sprintf("file://%s", t.TempDir()),
+		fmt.Sprintf("nfs://%s", t.TempDir()),
 	}
-}
-
-func runBenchTest(ctx context.Context, b *testing.B) (LogManager, map[model.TableID]*model.Ts) {
-	logMgr, err := NewMockManager(ctx)
-	require.Nil(b, err)
-
-	// Init tables
-	numOfTables := 200
-	tables := make([]model.TableID, 0, numOfTables)
-	maxTsMap := make(map[model.TableID]*model.Ts, numOfTables)
-	startTs := uint64(100)
-	for i := 0; i < numOfTables; i++ {
-		tableID := model.TableID(i)
-		tables = append(tables, tableID)
-		ts := startTs
-		maxTsMap[tableID] = &ts
-		logMgr.AddTable(tableID, startTs)
+	for _, storage := range storages {
+		testWriteDDLs(storage, true)
+		testWriteDDLs(storage, false)
 	}
-
-	maxRowCount := 100000
-	wg := sync.WaitGroup{}
-	b.ResetTimer()
-	for _, tableID := range tables {
-		wg.Add(1)
-		go func(tableID model.TableID) {
-			defer wg.Done()
-			maxCommitTs := maxTsMap[tableID]
-			rows := []*model.RowChangedEvent{}
-			for i := 0; i < maxRowCount; i++ {
-				if i%100 == 0 {
-					logMgr.UpdateResolvedTs(ctx, tableID, *maxCommitTs)
-					// prepare new row change events
-					b.StopTimer()
-					*maxCommitTs += rand.Uint64() % 10
-					rows = []*model.RowChangedEvent{
-						{CommitTs: *maxCommitTs, Table: &model.TableName{TableID: tableID}},
-						{CommitTs: *maxCommitTs, Table: &model.TableName{TableID: tableID}},
-						{CommitTs: *maxCommitTs, Table: &model.TableName{TableID: tableID}},
-					}
-
-					b.StartTimer()
-				}
-				logMgr.EmitRowChangedEvents(ctx, tableID, rows...)
-			}
-		}(tableID)
-	}
-
-	wg.Wait()
-	return logMgr, maxTsMap
-}
-
-// TestManagerRtsMap tests whether Manager's internal rtsMap is managed correctly.
-func TestManagerRtsMap(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	logMgr, err := NewMockManager(ctx)
-	require.Nil(t, err)
-	defer logMgr.Cleanup(ctx)
-
-	var tables map[model.TableID]model.Ts
-	var minTs model.Ts
-
-	tables, minTs = logMgr.prepareForFlush()
-	require.Equal(t, 0, len(tables))
-	require.Equal(t, uint64(0), minTs)
-	logMgr.postFlush(tables, minTs)
-	require.Equal(t, uint64(math.MaxInt64), logMgr.GetMinResolvedTs())
-
-	// Add a table.
-	logMgr.AddTable(model.TableID(1), model.Ts(10))
-	logMgr.AddTable(model.TableID(2), model.Ts(20))
-	tables, minTs = logMgr.prepareForFlush()
-	require.Equal(t, 2, len(tables))
-	require.Equal(t, uint64(10), minTs)
-	logMgr.postFlush(tables, minTs)
-	require.Equal(t, uint64(10), logMgr.GetMinResolvedTs())
-
-	// Remove a table.
-	logMgr.RemoveTable(model.TableID(1))
-	require.Equal(t, uint64(20), logMgr.GetMinResolvedTs())
-
-	// Add the table back, GetMinResolvedTs can regress.
-	logMgr.AddTable(model.TableID(1), model.Ts(10))
-	require.Equal(t, uint64(10), logMgr.GetMinResolvedTs())
-
-	// Received some timestamps, some tables may not be updated.
-	logMgr.onResolvedTsMsg(model.TableID(1), model.Ts(30))
-	tables, minTs = logMgr.prepareForFlush()
-	require.Equal(t, 2, len(tables))
-	require.Equal(t, uint64(20), minTs)
-	logMgr.postFlush(tables, minTs)
-	require.Equal(t, uint64(20), logMgr.GetMinResolvedTs())
-
-	// Remove all tables.
-	logMgr.RemoveTable(model.TableID(1))
-	logMgr.RemoveTable(model.TableID(2))
-	require.Equal(t, uint64(math.MaxInt64), logMgr.GetMinResolvedTs())
 }
 
 // TestManagerError tests whether internal error in bgUpdateLog could be managed correctly.
-func TestManagerError(t *testing.T) {
+func TestLogManagerError(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
 	cfg := &config.ConsistentConfig{
-		Level:             string(redo.ConsistentLevelEventual),
-		Storage:           "blackhole://",
-		FlushIntervalInMs: config.DefaultFlushIntervalInMs,
+		Level:                 string(redo.ConsistentLevelEventual),
+		MaxLogSize:            redo.DefaultMaxLogSize,
+		Storage:               "blackhole-invalid://",
+		FlushIntervalInMs:     redo.MinFlushIntervalInMs,
+		MetaFlushIntervalInMs: redo.MinFlushIntervalInMs,
+		EncodingWorkerNum:     redo.DefaultEncodingWorkerNum,
+		FlushWorkerNum:        redo.DefaultFlushWorkerNum,
 	}
-
-	errCh := make(chan error, 1)
-	opts := newMockManagerOptions(errCh)
-	opts.EnableBgRunner = false
-	opts.EnableGCRunner = false
-	logMgr, err := NewManager(ctx, cfg, opts)
-	require.Nil(t, err)
-	logMgr.writer = writer.NewInvalidBlackHoleWriter(logMgr.writer)
-	logMgr.logBuffer = chann.New[cacheEvents]()
-	go logMgr.bgUpdateLog(ctx, cfg.FlushIntervalInMs, errCh)
+	logMgr := NewDMLManager(model.DefaultChangeFeedID("test"), cfg)
+	var eg errgroup.Group
+	eg.Go(func() error {
+		return logMgr.Run(ctx)
+	})
 
 	testCases := []struct {
-		tableID model.TableID
-		rows    []*model.RowChangedEvent
+		span tablepb.Span
+		rows []writer.RedoEvent
 	}{
 		{
-			tableID: 53,
-			rows: []*model.RowChangedEvent{
-				{CommitTs: 120, Table: &model.TableName{TableID: 53}},
-				{CommitTs: 125, Table: &model.TableName{TableID: 53}},
-				{CommitTs: 130, Table: &model.TableName{TableID: 53}},
+			span: spanz.TableIDToComparableSpan(53),
+			rows: []writer.RedoEvent{
+				&model.RowChangedEvent{CommitTs: 120, Table: &model.TableName{TableID: 53}},
+				&model.RowChangedEvent{CommitTs: 125, Table: &model.TableName{TableID: 53}},
+				&model.RowChangedEvent{CommitTs: 130, Table: &model.TableName{TableID: 53}},
 			},
 		},
 	}
 	for _, tc := range testCases {
-		err := logMgr.EmitRowChangedEvents(ctx, tc.tableID, tc.rows...)
-		require.Nil(t, err)
+		err := logMgr.emitRedoEvents(ctx, tc.span, nil, tc.rows...)
+		require.NoError(t, err)
 	}
 
-	// bgUpdateLog exists because of writer.WriteLog failure.
-	select {
-	case <-ctx.Done():
-		t.Fatal("bgUpdateLog should return error before context is done")
-	case err := <-errCh:
-		require.Regexp(t, ".*invalid black hole writer.*", err)
-		require.Regexp(t, ".*WriteLog.*", err)
-	}
-
-	logMgr, err = NewManager(ctx, cfg, opts)
-	require.Nil(t, err)
-	logMgr.writer = writer.NewInvalidBlackHoleWriter(logMgr.writer)
-	logMgr.logBuffer = chann.New[cacheEvents]()
-	go logMgr.bgUpdateLog(ctx, cfg.FlushIntervalInMs, errCh)
-
-	// bgUpdateLog exists because of writer.FlushLog failure.
-	select {
-	case <-ctx.Done():
-		t.Fatal("bgUpdateLog should return error before context is done")
-	case err := <-errCh:
-		require.Regexp(t, ".*invalid black hole writer.*", err)
-		require.Regexp(t, ".*FlushLog.*", err)
-	}
+	err := eg.Wait()
+	require.Regexp(t, ".*invalid black hole writer.*", err)
+	require.Regexp(t, ".*WriteLog.*", err)
 }
 
-func TestReuseWritter(t *testing.T) {
-	ctxs := make([]context.Context, 0, 2)
-	cancels := make([]func(), 0, 2)
-	mgrs := make([]*ManagerImpl, 0, 2)
+func BenchmarkBlackhole(b *testing.B) {
+	runBenchTest(b, "blackhole://", false)
+}
 
-	dir := t.TempDir()
+func BenchmarkMemoryWriter(b *testing.B) {
+	storage := fmt.Sprintf("file://%s", b.TempDir())
+	runBenchTest(b, storage, false)
+}
+
+func BenchmarkFileWriter(b *testing.B) {
+	storage := fmt.Sprintf("file://%s", b.TempDir())
+	runBenchTest(b, storage, true)
+}
+
+func runBenchTest(b *testing.B, storage string, useFileBackend bool) {
+	ctx, cancel := context.WithCancel(context.Background())
 	cfg := &config.ConsistentConfig{
-		Level:             string(redo.ConsistentLevelEventual),
-		Storage:           "local://" + dir,
-		FlushIntervalInMs: config.DefaultFlushIntervalInMs,
+		Level:                 string(redo.ConsistentLevelEventual),
+		MaxLogSize:            redo.DefaultMaxLogSize,
+		Storage:               storage,
+		FlushIntervalInMs:     redo.MinFlushIntervalInMs,
+		MetaFlushIntervalInMs: redo.MinFlushIntervalInMs,
+		EncodingWorkerNum:     redo.DefaultEncodingWorkerNum,
+		FlushWorkerNum:        redo.DefaultFlushWorkerNum,
+		UseFileBackend:        useFileBackend,
+	}
+	dmlMgr := NewDMLManager(model.DefaultChangeFeedID("test"), cfg)
+	var eg errgroup.Group
+	eg.Go(func() error {
+		return dmlMgr.Run(ctx)
+	})
+
+	// Init tables
+	numOfTables := 200
+	tables := make([]model.TableID, 0, numOfTables)
+	maxTsMap := spanz.NewHashMap[*model.Ts]()
+	startTs := uint64(100)
+	for i := 0; i < numOfTables; i++ {
+		tableID := model.TableID(i)
+		tables = append(tables, tableID)
+		span := spanz.TableIDToComparableSpan(tableID)
+		ts := startTs
+		maxTsMap.ReplaceOrInsert(span, &ts)
+		dmlMgr.AddTable(span, startTs)
 	}
 
-	errCh := make(chan error, 1)
-	opts := newMockManagerOptions(errCh)
-	for i := 0; i < 2; i++ {
-		ctx, cancel := context.WithCancel(context.Background())
-		ctx = contextutil.PutChangefeedIDInCtx(ctx, model.ChangeFeedID{
-			Namespace: "default", ID: "test-reuse-writter",
+	// write rows
+	maxRowCount := 100000
+	wg := sync.WaitGroup{}
+	b.ResetTimer()
+	for _, tableID := range tables {
+		wg.Add(1)
+		go func(span tablepb.Span) {
+			defer wg.Done()
+			maxCommitTs := maxTsMap.GetV(span)
+			var rows []*model.RowChangedEvent
+			for i := 0; i < maxRowCount; i++ {
+				if i%100 == 0 {
+					// prepare new row change events
+					b.StopTimer()
+					*maxCommitTs += rand.Uint64() % 10
+					rows = []*model.RowChangedEvent{
+						{CommitTs: *maxCommitTs, Table: &model.TableName{TableID: span.TableID}},
+						{CommitTs: *maxCommitTs, Table: &model.TableName{TableID: span.TableID}},
+						{CommitTs: *maxCommitTs, Table: &model.TableName{TableID: span.TableID}},
+					}
+
+					b.StartTimer()
+				}
+				dmlMgr.EmitRowChangedEvents(ctx, span, nil, rows...)
+				if i%100 == 0 {
+					dmlMgr.UpdateResolvedTs(ctx, span, *maxCommitTs)
+				}
+			}
+		}(spanz.TableIDToComparableSpan(tableID))
+	}
+	wg.Wait()
+
+	// wait flushed
+	for {
+		ok := true
+		maxTsMap.Range(func(span tablepb.Span, targetp *uint64) bool {
+			flushed := dmlMgr.GetResolvedTs(span)
+			if flushed != *targetp {
+				ok = false
+				log.Info("", zap.Uint64("targetTs", *targetp),
+					zap.Uint64("flushed", flushed),
+					zap.Any("tableID", span.TableID))
+				return false
+			}
+			return true
 		})
-		mgr, err := NewManager(ctx, cfg, opts)
-		require.Nil(t, err)
-
-		ctxs = append(ctxs, ctx)
-		cancels = append(cancels, cancel)
-		mgrs = append(mgrs, mgr)
+		if ok {
+			break
+		}
+		time.Sleep(time.Millisecond * 500)
 	}
+	cancel()
 
-	// Cancel one redo manager and wait for a while.
-	cancels[0]()
-	time.Sleep(time.Duration(100) * time.Millisecond)
-
-	// The another redo manager shouldn't be influenced.
-	var workTimeSlice time.Duration
-	mgrs[1].flushLog(ctxs[1], func(err error) { opts.ErrCh <- err }, &workTimeSlice)
-	select {
-	case x := <-errCh:
-		log.Panic("shouldn't get an error", zap.Error(x))
-	case <-time.NewTicker(time.Duration(100) * time.Millisecond).C:
-	}
-
-	// After the manager is closed, APIs can return errors instead of panic.
-	cancels[1]()
-	time.Sleep(time.Duration(100) * time.Millisecond)
-	err := mgrs[1].UpdateResolvedTs(context.Background(), 1, 1)
-	require.Error(t, err)
+	require.ErrorIs(b, eg.Wait(), context.Canceled)
 }

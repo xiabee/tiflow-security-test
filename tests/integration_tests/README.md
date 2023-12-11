@@ -67,6 +67,38 @@ We recommend that you provide docker with at least 6+ cores and 8G+ memory. Of c
 
 ### Integration Test
 
+#### Run integration tests in docker
+
+> **Warning:**
+> These scripts and files may not work under the arm architecture,
+> and we have not tested against it.
+> Also, we currently use the PingCAP intranet address in our download scripts,
+> so if you do not have access to the PingCAP intranet you will not be able to use these scripts.
+> We will try to resolve these issues as soon as possible.
+
+1. If you want to run kafka tests,
+   run `START_AT="clustered_index" make kafka_docker_integration_test_with_build`
+
+2. If you want to run MySQL tests,
+   run `CASE="clustered_index" make mysql_docker_integration_test_with_build`
+
+3. Use the command `make clean_integration_test_images`
+   to clean up the corresponding environment.
+
+Some useful tips:
+
+1. The log files for the test are mounted in the `./deployments/ticdc/docker-compose/logs` directory.
+
+2. You can specify multiple tests to run in CASE, for example: `CASE="clustered_index kafka_messages"`. You can even
+   use `CASE="*"` to indicate that you are running all tests。
+
+3. You can specify in the [integration-test.Dockerfile](../../deployments/ticdc/docker/integration-test.Dockerfile)
+   the version of other dependencies that you want to download, such as tidb, tikv, pd, etc.
+   > For example, you can change `RUN ./download-integration-test-binaries.sh master`
+   to `RUN ./download-integration-test-binaries.sh release-5.2`
+   > to use the release-5.2 dependency.
+   > Then rebuild the image with `make build_mysql_integration_test_images`.
+
 #### Run integration tests locally
 
 1. Run `make integration_test_build` to generate TiCDC related binaries for integration test
@@ -86,38 +118,13 @@ We recommend that you provide docker with at least 6+ cores and 8G+ memory. Of c
 
 3. After executing the tests, run `make coverage` to get a coverage report at `/tmp/tidb_cdc_test/all_cov.html`.
 
-#### Run integration tests in docker
-
-> **Warning:**
-> These scripts and files may not work under the arm architecture,
-> and we have not tested against it.
-> Also, we currently use the PingCAP intranet address in our download scripts,
-> so if you do not have access to the PingCAP intranet you will not be able to use these scripts.
-> We will try to resolve these issues as soon as possible.
-
-1. If you want to run kafka tests,
-   run `START_AT="clustered_index" docker-compose -f ./deployments/ticdc/docker-compose/docker-compose-kafka-integration.yml up --build`
-
-2. If you want to run MySQL tests,
-   run `CASE="clustered_index" docker-compose -f ./deployments/ticdc/docker-compose/docker-compose-mysql-integration.yml up --build`
-
-3. Use the command `docker-compose -f ./deployments/ticdc/docker-compose/docker-compose-kafka-integration.yml down -v`
-   to clean up the corresponding environment.
-
-Some useful tips:
-
-1. The log files for the test are mounted in the `./deployments/ticdc/docker-compose/logs` directory.
-
-2. You can specify multiple tests to run in CASE, for example: `CASE="clustered_index kafka_messages"`. You can even
-   use `CASE="*"` to indicate that you are running all tests。
-
-3. You can specify in the [integration-test.Dockerfile](../../deployments/ticdc/docker/integration-test.Dockerfile)
-   the version of other dependencies that you want to download, such as tidb, tikv, pd, etc.
-   > For example, you can change `RUN ./download-integration-test-binaries.sh master` to `RUN ./download-integration-test-binaries.sh release-5.2`
-   > to use the release-5.2 dependency.
-   > Then rebuild the image with the [--no-cache](https://docs.docker.com/compose/reference/build/) flag.
-
 ## Writing new tests
 
-New integration tests can be written as shell scripts in `tests/integration_tests/TEST_NAME/run.sh`. The script should
+1. New integration tests can be written as shell scripts in `tests/integration_tests/TEST_NAME/run.sh`. The script should
 exit with a nonzero error code on failure.
+
+2. Add TEST_NAME to existing group in [run_group.sh](./run_group.sh), or add a new group for it.
+
+3. If you add a new group, the name of the new group must be added to CI.
+   * [cdc-integration-kafka-test](https://github.com/PingCAP-QE/ci/blob/main/pipelines/pingcap/tiflow/latest/pod-pull_cdc_integration_kafka_test.yaml)
+   * [cdc-integration-mysql-test](https://github.com/PingCAP-QE/ci/blob/main/pipelines/pingcap/tiflow/latest/pull_cdc_integration_test.groovy)

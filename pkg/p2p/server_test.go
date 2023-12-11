@@ -25,10 +25,9 @@ import (
 	"time"
 
 	"github.com/phayes/freeport"
+	"github.com/pingcap/tiflow/proto/p2p"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
-
-	"github.com/pingcap/tiflow/proto/p2p"
 )
 
 const (
@@ -377,7 +376,7 @@ func TestServerClosed(t *testing.T) {
 		_, clientErr = stream.Recv()
 		return clientErr != nil
 	}, time.Second*1, time.Millisecond*10)
-	require.Regexp(t, ".*CDC capture closing.*", clientErr.Error())
+	require.Regexp(t, ".*message server is closing.*", clientErr.Error())
 
 	wg.Wait()
 }
@@ -597,14 +596,15 @@ func TestServerRepeatedMessages(t *testing.T) {
 	}()
 
 	var lastIndex int64
-	_ = mustAddHandler(ctx, t, server, "test-topic-1", &testTopicContent{}, func(senderID string, i interface{}) error {
-		require.Equal(t, "test-client-1", senderID)
-		require.IsType(t, &testTopicContent{}, i)
-		content := i.(*testTopicContent)
-		require.Equal(t, content.Index-1, atomic.LoadInt64(&lastIndex))
-		atomic.StoreInt64(&lastIndex, content.Index)
-		return nil
-	})
+	_ = mustAddHandler(ctx, t, server, "test-topic-1",
+		&testTopicContent{}, func(senderID string, i interface{}) error {
+			require.Equal(t, "test-client-1", senderID)
+			require.IsType(t, &testTopicContent{}, i)
+			content := i.(*testTopicContent)
+			require.Equal(t, content.Index-1, atomic.LoadInt64(&lastIndex))
+			atomic.StoreInt64(&lastIndex, content.Index)
+			return nil
+		})
 
 	client, closeClient := newClient()
 	defer closeClient()
@@ -774,49 +774,6 @@ func TestServerExitWhileRemovingHandler(t *testing.T) {
 	wg.Wait()
 }
 
-func TestServerVersionsIncompatible(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.TODO(), defaultTimeout)
-	defer cancel()
-
-	server, newClient, closer := newServerForTesting(t, "test-server-1")
-	defer closer()
-
-	// enables version check
-	server.config.ServerVersion = "5.2.0"
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err := server.Run(ctx)
-		require.Regexp(t, ".*context canceled.*", err.Error())
-	}()
-
-	client, closeClient := newClient()
-	defer closeClient()
-
-	stream, err := client.SendMessage(ctx)
-	require.NoError(t, err)
-
-	err = stream.Send(&p2p.MessagePacket{
-		Meta: &p2p.StreamMeta{
-			SenderId:      "test-client-1",
-			ReceiverId:    "test-server-1",
-			Epoch:         0,
-			ClientVersion: "5.1.0",
-		},
-	})
-	require.NoError(t, err)
-
-	resp, err := stream.Recv()
-	require.NoError(t, err)
-	require.Equal(t, p2p.ExitReason_UNKNOWN, resp.ExitReason)
-	require.Regexp(t, ".*incompatible.*", resp.String())
-
-	cancel()
-	wg.Wait()
-}
-
 func TestReceiverIDMismatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.TODO(), defaultTimeout)
 	defer cancel()
@@ -952,6 +909,59 @@ func TestServerDataLossAfterUnregisterHandle(t *testing.T) {
 	require.Error(t, err)
 	require.Regexp(t, "ErrPeerMessageDataLost", err.Error())
 
+	cancel()
+	wg.Wait()
+}
+
+func TestServerDeregisterPeer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.TODO(), defaultTimeout)
+	defer cancel()
+
+	server, newClient, closer := newServerForTesting(t, "test-server-2")
+	defer closer()
+
+	// Avoids server returning error due to congested topic.
+	server.config.MaxPendingMessageCountPerTopic = math.MaxInt64
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := server.Run(ctx)
+		require.Regexp(t, ".*context canceled.*", err)
+	}()
+
+	var sendGroup sync.WaitGroup
+	sendGroup.Add(1)
+	client, closeClient := newClient()
+	go func() {
+		defer sendGroup.Done()
+		stream, err := client.SendMessage(ctx)
+		require.NoError(t, err)
+
+		err = stream.Send(&p2p.MessagePacket{
+			Meta: &p2p.StreamMeta{
+				SenderId:   "test-client-1",
+				ReceiverId: "test-server-2",
+				Epoch:      0,
+			},
+		})
+		require.NoError(t, err)
+	}()
+	sendGroup.Wait()
+	time.Sleep(1 * time.Second)
+
+	server.peerLock.Lock()
+	require.Equal(t, 1, len(server.peers))
+	server.peerLock.Unlock()
+	require.Nil(t, server.ScheduleDeregisterPeerTask(ctx, "test-client-1"))
+	time.Sleep(1 * time.Second)
+	server.peerLock.Lock()
+	require.Equal(t, 0, len(server.peers))
+	server.peerLock.Unlock()
+
+	closeClient()
+	closer()
 	cancel()
 	wg.Wait()
 }

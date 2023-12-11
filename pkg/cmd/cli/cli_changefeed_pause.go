@@ -14,19 +14,16 @@
 package cli
 
 import (
-	"github.com/pingcap/tiflow/cdc/model"
+	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
 	"github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
-	"github.com/pingcap/tiflow/pkg/etcd"
-	"github.com/pingcap/tiflow/pkg/security"
+	"github.com/pingcap/tiflow/pkg/cmd/util"
 	"github.com/spf13/cobra"
 )
 
 // pauseChangefeedOptions defines flags for the `cli changefeed pause` command.
 type pauseChangefeedOptions struct {
-	etcdClient *etcd.CDCEtcdClient
-
-	credential *security.Credential
+	apiClient apiv2client.APIV2Interface
 
 	changefeedID string
 }
@@ -45,28 +42,19 @@ func (o *pauseChangefeedOptions) addFlags(cmd *cobra.Command) {
 
 // complete adapts from the command line args to the data and client required.
 func (o *pauseChangefeedOptions) complete(f factory.Factory) error {
-	etcdClient, err := f.EtcdClient()
+	apiClient, err := f.APIV2Client()
 	if err != nil {
 		return err
 	}
 
-	o.etcdClient = etcdClient
-
-	o.credential = f.GetCredential()
-
+	o.apiClient = apiClient
 	return nil
 }
 
 // run the `cli changefeed pause` command.
 func (o *pauseChangefeedOptions) run() error {
-	job := model.AdminJob{
-		CfID: model.DefaultChangeFeedID(o.changefeedID),
-		Type: model.AdminStop,
-	}
-
 	ctx := context.GetDefaultContext()
-
-	return sendOwnerAdminChangeQuery(ctx, o.etcdClient, job, o.credential)
+	return o.apiClient.Changefeeds().Pause(ctx, o.changefeedID)
 }
 
 // newCmdPauseChangefeed creates the `cli changefeed pause` command.
@@ -77,13 +65,9 @@ func newCmdPauseChangefeed(f factory.Factory) *cobra.Command {
 		Use:   "pause",
 		Short: "Pause a replication task (changefeed)",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			err := o.complete(f)
-			if err != nil {
-				return err
-			}
-
-			return o.run()
+		Run: func(cmd *cobra.Command, args []string) {
+			util.CheckErr(o.complete(f))
+			util.CheckErr(o.run())
 		},
 	}
 

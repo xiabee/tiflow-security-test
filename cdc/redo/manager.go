@@ -1,4 +1,4 @@
-// Copyright 2021 PingCAP, Inc.
+// Copyright 2023 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,60 +15,144 @@ package redo
 
 import (
 	"context"
-	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/redo/common"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
+	"github.com/pingcap/tiflow/cdc/redo/writer/factory"
 	"github.com/pingcap/tiflow/pkg/chann"
 	"github.com/pingcap/tiflow/pkg/config"
-	cerror "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/redo"
+	"github.com/pingcap/tiflow/pkg/spanz"
+	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
-const redoFlushWarnDuration = time.Second * 20
+var (
+	_ DDLManager = (*ddlManager)(nil)
+	_ DMLManager = (*dmlManager)(nil)
+)
 
-// Redo Manager GC interval. It can be changed in tests.
-var defaultGCIntervalInMs = 5000 // 5 seconds
+type redoManager interface {
+	util.Runnable
 
-// LogManager defines an interface that is used to manage redo log
-type LogManager interface {
-	// Enabled returns whether the log manager is enabled
+	// Enabled returns whether the manager is enabled
 	Enabled() bool
+}
 
-	// The following APIs are called from processor only.
-	AddTable(tableID model.TableID, startTs uint64)
-	RemoveTable(tableID model.TableID)
-	GetResolvedTs(tableID model.TableID) model.Ts
-	// Min resolvedTs for all tables. If there is no tables, return math.MaxInt64.
-	GetMinResolvedTs() uint64
-	EmitRowChangedEvents(ctx context.Context, tableID model.TableID, rows ...*model.RowChangedEvent) error
-	UpdateResolvedTs(ctx context.Context, tableID model.TableID, resolvedTs uint64) error
-	// Update checkpoint so that it can GC stale files.
-	UpdateCheckpointTs(checkpointTs model.Ts)
-
-	// The following APIs are called from owner only.
+// DDLManager defines an interface that is used to manage ddl logs in owner.
+type DDLManager interface {
+	redoManager
 	EmitDDLEvent(ctx context.Context, ddl *model.DDLEvent) error
-	UpdateMeta(checkpointTs, resolvedTs model.Ts)
-	GetFlushedMeta(checkpointTs, resolvedTs *model.Ts)
+	UpdateResolvedTs(ctx context.Context, resolvedTs uint64) error
+	GetResolvedTs() model.Ts
+}
 
-	// Cleanup removes all redo logs. Only called from owner.
-	Cleanup(ctx context.Context) error
+// NewDisabledDDLManager creates a disabled ddl Manager.
+func NewDisabledDDLManager() *ddlManager {
+	return &ddlManager{
+		logManager: &logManager{enabled: false},
+	}
+}
+
+// NewDDLManager creates a new ddl Manager.
+func NewDDLManager(
+	changefeedID model.ChangeFeedID,
+	cfg *config.ConsistentConfig, ddlStartTs model.Ts,
+) *ddlManager {
+	m := newLogManager(changefeedID, cfg, redo.RedoDDLLogFileType)
+	span := spanz.TableIDToComparableSpan(0)
+	m.AddTable(span, ddlStartTs)
+	return &ddlManager{
+		logManager: m,
+		// The current fakeSpan is meaningless, find a meaningful span in the future.
+		fakeSpan: span,
+	}
+}
+
+type ddlManager struct {
+	*logManager
+	fakeSpan tablepb.Span
+}
+
+func (m *ddlManager) EmitDDLEvent(ctx context.Context, ddl *model.DDLEvent) error {
+	return m.logManager.emitRedoEvents(ctx, m.fakeSpan, nil, ddl)
+}
+
+func (m *ddlManager) UpdateResolvedTs(ctx context.Context, resolvedTs uint64) error {
+	return m.logManager.UpdateResolvedTs(ctx, m.fakeSpan, resolvedTs)
+}
+
+func (m *ddlManager) GetResolvedTs() model.Ts {
+	return m.logManager.GetResolvedTs(m.fakeSpan)
+}
+
+// DMLManager defines an interface that is used to manage dml logs in processor.
+type DMLManager interface {
+	redoManager
+	AddTable(span tablepb.Span, startTs uint64)
+	StartTable(span tablepb.Span, startTs uint64)
+	RemoveTable(span tablepb.Span)
+	UpdateResolvedTs(ctx context.Context, span tablepb.Span, resolvedTs uint64) error
+	GetResolvedTs(span tablepb.Span) model.Ts
+	EmitRowChangedEvents(
+		ctx context.Context,
+		span tablepb.Span,
+		releaseRowsMemory func(),
+		rows ...*model.RowChangedEvent,
+	) error
+}
+
+// NewDMLManager creates a new dml Manager.
+func NewDMLManager(
+	changefeedID model.ChangeFeedID, cfg *config.ConsistentConfig,
+) *dmlManager {
+	return &dmlManager{
+		logManager: newLogManager(changefeedID, cfg, redo.RedoRowLogFileType),
+	}
+}
+
+// NewDisabledDMLManager creates a disabled dml Manager.
+func NewDisabledDMLManager() *dmlManager {
+	return &dmlManager{
+		logManager: &logManager{enabled: false},
+	}
+}
+
+type dmlManager struct {
+	*logManager
+}
+
+// EmitRowChangedEvents emits row changed events to the redo log.
+func (m *dmlManager) EmitRowChangedEvents(
+	ctx context.Context,
+	span tablepb.Span,
+	releaseRowsMemory func(),
+	rows ...*model.RowChangedEvent,
+) error {
+	var events []writer.RedoEvent
+	for _, row := range rows {
+		events = append(events, row)
+	}
+	return m.logManager.emitRedoEvents(ctx, span, releaseRowsMemory, events...)
 }
 
 type cacheEvents struct {
-	tableID    model.TableID
-	rows       []*model.RowChangedEvent
-	resolvedTs model.Ts
-	eventType  model.MessageType
+	span            tablepb.Span
+	events          []writer.RedoEvent
+	resolvedTs      model.Ts
+	isResolvedEvent bool
+
+	// releaseMemory is used to track memory usage of the events.
+	releaseMemory func()
 }
 
 type statefulRts struct {
@@ -84,54 +168,53 @@ func (s *statefulRts) getUnflushed() model.Ts {
 	return atomic.LoadUint64(&s.unflushed)
 }
 
-func (s *statefulRts) setFlushed(flushed model.Ts) {
-	atomic.StoreUint64(&s.flushed, flushed)
-}
-
-func (s *statefulRts) checkAndSetUnflushed(unflushed model.Ts) {
+func (s *statefulRts) checkAndSetUnflushed(unflushed model.Ts) (changed bool) {
 	for {
 		old := atomic.LoadUint64(&s.unflushed)
 		if old > unflushed {
-			return
+			return false
 		}
 		if atomic.CompareAndSwapUint64(&s.unflushed, old, unflushed) {
 			break
 		}
 	}
+	return true
 }
 
-// ManagerImpl manages redo log writer, buffers un-persistent redo logs, calculates
-// redo log resolved ts. It implements LogManager interface.
-type ManagerImpl struct {
-	changeFeedID model.ChangeFeedID
-	enabled      bool
+func (s *statefulRts) checkAndSetFlushed(flushed model.Ts) (changed bool) {
+	for {
+		old := atomic.LoadUint64(&s.flushed)
+		if old > flushed {
+			return false
+		}
+		if atomic.CompareAndSwapUint64(&s.flushed, old, flushed) {
+			break
+		}
+	}
+	return true
+}
 
-	opts *ManagerOptions
+// logManager manages redo log writer, buffers un-persistent redo logs, calculates
+// redo log resolved ts. It implements DDLManager and DMLManager interface.
+type logManager struct {
+	enabled bool
+	cfg     *writer.LogWriterConfig
+	writer  writer.RedoLogWriter
 
-	// rtsMap stores flushed and unflushed resolved timestamps for all tables.
-	// it's just like map[tableID]*statefulRts.
-	// For a given statefulRts, unflushed is updated in routine bgUpdateLog,
-	// and flushed is updated in flushLog.
-	rtsMap sync.Map
-
-	// A fast way to get min flushed timestamp in rtsMap. It can be updated
-	// in redo-flush goroutine and AddTable/RemoveTable.
-	minResolvedTs uint64
-
-	// Updated by `UpdateResolvedTs`. It's required by some internal places,
-	// such as GC.
-	checkpointTs uint64
-
-	metaCheckpointTs statefulRts
-	metaResolvedTs   statefulRts
-
-	rwlock    sync.RWMutex
-	writer    writer.RedoLogWriter
-	logBuffer *chann.Chann[cacheEvents]
+	rwlock sync.RWMutex
+	// TODO: remove logBuffer and use writer directly after file logWriter is deprecated.
+	logBuffer *chann.DrainableChann[cacheEvents]
 	closed    int32
 
-	flushing      int64
-	lastFlushTime time.Time
+	// rtsMap stores flushed and unflushed resolved timestamps for all tables.
+	// it's just like map[span]*statefulRts.
+	// For a given statefulRts, unflushed is updated in routine bgUpdateLog,
+	// and flushed is updated in flushLog.
+	rtsMap spanz.SyncMap
+
+	flushing         int64
+	lastFlushTime    time.Time
+	releaseMemoryCbs []func()
 
 	metricWriteLogDuration    prometheus.Observer
 	metricFlushLogDuration    prometheus.Observer
@@ -139,300 +222,202 @@ type ManagerImpl struct {
 	metricRedoWorkerBusyRatio prometheus.Counter
 }
 
-// NewManager creates a new Manager
-func NewManager(ctx context.Context, cfg *config.ConsistentConfig, opts *ManagerOptions) (*ManagerImpl, error) {
+func newLogManager(
+	changefeedID model.ChangeFeedID,
+	cfg *config.ConsistentConfig, logType string,
+) *logManager {
 	// return a disabled Manager if no consistent config or normal consistent level
 	if cfg == nil || !redo.IsConsistentEnabled(cfg.Level) {
-		return &ManagerImpl{enabled: false}, nil
+		return &logManager{enabled: false}
 	}
 
-	writer, err := writer.NewRedoLogWriter(ctx, cfg, opts.FileTypeConfig)
+	return &logManager{
+		enabled: true,
+		cfg: &writer.LogWriterConfig{
+			ConsistentConfig:  *cfg,
+			LogType:           logType,
+			CaptureID:         config.GetGlobalServerConfig().AdvertiseAddr,
+			ChangeFeedID:      changefeedID,
+			MaxLogSizeInBytes: cfg.MaxLogSize * redo.Megabyte,
+		},
+		logBuffer: chann.NewAutoDrainChann[cacheEvents](),
+		rtsMap:    spanz.SyncMap{},
+		metricWriteLogDuration: common.RedoWriteLogDurationHistogram.
+			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
+		metricFlushLogDuration: common.RedoFlushLogDurationHistogram.
+			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
+		metricTotalRowsCount: common.RedoTotalRowsCountGauge.
+			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
+		metricRedoWorkerBusyRatio: common.RedoWorkerBusyRatio.
+			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
+	}
+}
+
+// Run implements pkg/util.Runnable.
+func (m *logManager) Run(ctx context.Context, _ ...chan<- error) error {
+	failpoint.Inject("ChangefeedNewRedoManagerError", func() {
+		failpoint.Return(errors.New("changefeed new redo manager injected error"))
+	})
+	if !m.Enabled() {
+		return nil
+	}
+
+	defer m.close()
+	start := time.Now()
+	w, err := factory.NewRedoLogWriter(ctx, m.cfg)
 	if err != nil {
-		return nil, err
+		log.Error("redo: failed to create redo log writer",
+			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
+			zap.String("changefeed", m.cfg.ChangeFeedID.ID),
+			zap.Duration("duration", time.Since(start)),
+			zap.Error(err))
+		return err
 	}
-
-	m := &ManagerImpl{
-		changeFeedID:  contextutil.ChangefeedIDFromCtx(ctx),
-		enabled:       true,
-		opts:          opts,
-		rtsMap:        sync.Map{},
-		minResolvedTs: math.MaxInt64,
-		writer:        writer,
-	}
-
-	if m.opts.EmitMeta {
-		checkpointTs, resolvedTs := m.writer.GetMeta()
-		m.metaCheckpointTs.flushed = checkpointTs
-		m.metaCheckpointTs.unflushed = checkpointTs
-		m.metaResolvedTs.flushed = resolvedTs
-		m.metaResolvedTs.unflushed = resolvedTs
-	}
-
-	m.metricWriteLogDuration = common.RedoWriteLogDurationHistogram.
-		WithLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
-	m.metricFlushLogDuration = common.RedoFlushLogDurationHistogram.
-		WithLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
-	m.metricTotalRowsCount = common.RedoTotalRowsCountGauge.
-		WithLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
-	m.metricRedoWorkerBusyRatio = common.RedoWorkerBusyRatio.
-		WithLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
-
-	// TODO: better to wait background goroutines after the context is canceled.
-	if m.opts.EnableBgRunner {
-		m.logBuffer = chann.New[cacheEvents]()
-		go m.bgUpdateLog(ctx, cfg.FlushIntervalInMs, opts.ErrCh)
-	}
-	if m.opts.EnableGCRunner {
-		go m.bgGC(ctx)
-	}
-
-	return m, nil
+	m.writer = w
+	return m.bgUpdateLog(ctx, m.getFlushDuration())
 }
 
-// NewDisabledManager returns a disabled log manger instance, used in test only
-func NewDisabledManager() *ManagerImpl {
-	return &ManagerImpl{enabled: false}
+func (m *logManager) getFlushDuration() time.Duration {
+	flushIntervalInMs := m.cfg.FlushIntervalInMs
+	defaultFlushIntervalInMs := redo.DefaultFlushIntervalInMs
+	if m.cfg.LogType == redo.RedoDDLLogFileType {
+		flushIntervalInMs = m.cfg.MetaFlushIntervalInMs
+		defaultFlushIntervalInMs = redo.DefaultMetaFlushIntervalInMs
+	}
+	if flushIntervalInMs < redo.MinFlushIntervalInMs {
+		log.Warn("redo flush interval is too small, use default value",
+			zap.Stringer("namespace", m.cfg.ChangeFeedID),
+			zap.Int("default", defaultFlushIntervalInMs),
+			zap.String("logType", m.cfg.LogType),
+			zap.Int64("interval", flushIntervalInMs))
+		flushIntervalInMs = int64(defaultFlushIntervalInMs)
+	}
+	return time.Duration(flushIntervalInMs) * time.Millisecond
 }
 
-// NewMockManager returns a mock redo manager instance, used in test only
-func NewMockManager(ctx context.Context) (*ManagerImpl, error) {
-	cfg := &config.ConsistentConfig{
-		Level:             string(redo.ConsistentLevelEventual),
-		Storage:           "blackhole://",
-		FlushIntervalInMs: config.DefaultFlushIntervalInMs,
-	}
+// WaitForReady implements pkg/util.Runnable.
+func (m *logManager) WaitForReady(_ context.Context) {}
 
-	errCh := make(chan error, 1)
-	logMgr, err := NewManager(ctx, cfg, newMockManagerOptions(errCh))
-	if err != nil {
-		return nil, err
-	}
-
-	go func() {
-		select {
-		case <-ctx.Done():
-			return
-		case err := <-errCh:
-			log.Panic("log manager error: ", zap.Error(err))
-		}
-	}()
-
-	return logMgr, err
-}
+// Close implements pkg/util.Runnable.
+func (m *logManager) Close() {}
 
 // Enabled returns whether this log manager is enabled
-func (m *ManagerImpl) Enabled() bool {
+func (m *logManager) Enabled() bool {
 	return m.enabled
 }
 
-// EmitRowChangedEvents sends row changed events to a log buffer, the log buffer
+// emitRedoEvents sends row changed events to a log buffer, the log buffer
 // will be consumed by a background goroutine, which converts row changed events
 // to redo logs and sends to log writer.
-// TODO: After buffer sink in sink node is removed, there is no batch mechanism
-// before sending row changed events to redo manager, the original log buffer
-// design may have performance issue.
-func (m *ManagerImpl) EmitRowChangedEvents(
+func (m *logManager) emitRedoEvents(
 	ctx context.Context,
-	tableID model.TableID,
-	rows ...*model.RowChangedEvent,
+	span tablepb.Span,
+	releaseRowsMemory func(),
+	events ...writer.RedoEvent,
 ) error {
-	return m.withLock(func(m *ManagerImpl) error {
+	return m.withLock(func(m *logManager) error {
 		select {
 		case <-ctx.Done():
 			return errors.Trace(ctx.Err())
 		case m.logBuffer.In() <- cacheEvents{
-			tableID:   tableID,
-			rows:      rows,
-			eventType: model.MessageTypeRow,
+			span:            span,
+			events:          events,
+			releaseMemory:   releaseRowsMemory,
+			isResolvedEvent: false,
 		}:
 		}
 		return nil
 	})
 }
 
-// UpdateResolvedTs asynchronously updates resolved ts of a single table.
-func (m *ManagerImpl) UpdateResolvedTs(
-	ctx context.Context,
-	tableID model.TableID,
-	resolvedTs uint64,
-) error {
-	return m.withLock(func(m *ManagerImpl) error {
-		select {
-		case <-ctx.Done():
-			return errors.Trace(ctx.Err())
-		case m.logBuffer.In() <- cacheEvents{
-			tableID:    tableID,
-			resolvedTs: resolvedTs,
-			eventType:  model.MessageTypeResolved,
-		}:
-		}
-		return nil
-	})
-}
+// StartTable starts a table, which means the table is ready to emit redo events.
+// Note that this function should only be called once when adding a new table to processor.
+func (m *logManager) StartTable(span tablepb.Span, resolvedTs uint64) {
+	// advance unflushed resolved ts
+	m.onResolvedTsMsg(span, resolvedTs)
 
-// UpdateCheckpointTs updates checkpoint to the manager.
-func (m *ManagerImpl) UpdateCheckpointTs(ckpt model.Ts) {
-	for {
-		curr := atomic.LoadUint64(&m.checkpointTs)
-		if ckpt <= curr || atomic.CompareAndSwapUint64(&m.checkpointTs, curr, ckpt) {
-			break
-		}
+	// advance flushed resolved ts
+	if value, loaded := m.rtsMap.Load(span); loaded {
+		value.(*statefulRts).checkAndSetFlushed(resolvedTs)
 	}
 }
 
-// EmitDDLEvent sends DDL event to redo log writer
-func (m *ManagerImpl) EmitDDLEvent(ctx context.Context, ddl *model.DDLEvent) error {
-	return m.withLock(func(m *ManagerImpl) error {
-		return m.writer.SendDDL(ctx, common.DDLToRedo(ddl))
+// UpdateResolvedTs asynchronously updates resolved ts of a single table.
+func (m *logManager) UpdateResolvedTs(
+	ctx context.Context,
+	span tablepb.Span,
+	resolvedTs uint64,
+) error {
+	return m.withLock(func(m *logManager) error {
+		select {
+		case <-ctx.Done():
+			return errors.Trace(ctx.Err())
+		case m.logBuffer.In() <- cacheEvents{
+			span:            span,
+			resolvedTs:      resolvedTs,
+			isResolvedEvent: true,
+		}:
+		}
+		return nil
 	})
 }
 
 // GetResolvedTs returns the resolved ts of a table
-func (m *ManagerImpl) GetResolvedTs(tableID model.TableID) model.Ts {
-	if value, ok := m.rtsMap.Load(tableID); ok {
+func (m *logManager) GetResolvedTs(span tablepb.Span) model.Ts {
+	if value, ok := m.rtsMap.Load(span); ok {
 		return value.(*statefulRts).getFlushed()
 	}
 	panic("GetResolvedTs is called on an invalid table")
 }
 
-// GetMinResolvedTs returns the minimum resolved ts of all tables in this redo log manager
-func (m *ManagerImpl) GetMinResolvedTs() model.Ts {
-	return atomic.LoadUint64(&m.minResolvedTs)
-}
-
-// UpdateMeta updates meta.
-func (m *ManagerImpl) UpdateMeta(checkpointTs, resolvedTs model.Ts) {
-	m.metaResolvedTs.checkAndSetUnflushed(resolvedTs)
-	m.metaCheckpointTs.checkAndSetUnflushed(checkpointTs)
-}
-
-// GetFlushedMeta gets flushed meta.
-func (m *ManagerImpl) GetFlushedMeta(checkpointTs, resolvedTs *model.Ts) {
-	*checkpointTs = m.metaCheckpointTs.getFlushed()
-	*resolvedTs = m.metaResolvedTs.getFlushed()
-}
-
 // AddTable adds a new table in redo log manager
-func (m *ManagerImpl) AddTable(tableID model.TableID, startTs uint64) {
-	_, loaded := m.rtsMap.LoadOrStore(tableID, &statefulRts{flushed: startTs, unflushed: startTs})
+func (m *logManager) AddTable(span tablepb.Span, startTs uint64) {
+	_, loaded := m.rtsMap.LoadOrStore(span, &statefulRts{flushed: startTs, unflushed: startTs})
 	if loaded {
-		log.Warn("add duplicated table in redo log manager", zap.Int64("tableID", tableID))
+		log.Warn("add duplicated table in redo log manager", zap.Stringer("span", &span))
 		return
-	}
-
-	for {
-		currMin := m.GetMinResolvedTs()
-		if currMin < startTs || atomic.CompareAndSwapUint64(&m.minResolvedTs, currMin, startTs) {
-			break
-		}
 	}
 }
 
 // RemoveTable removes a table from redo log manager
-func (m *ManagerImpl) RemoveTable(tableID model.TableID) {
-	var v interface{}
-	var ok bool
-	if v, ok = m.rtsMap.LoadAndDelete(tableID); !ok {
-		log.Warn("remove a table not maintained in redo log manager", zap.Int64("tableID", tableID))
+func (m *logManager) RemoveTable(span tablepb.Span) {
+	if _, ok := m.rtsMap.LoadAndDelete(span); !ok {
+		log.Warn("remove a table not maintained in redo log manager", zap.Stringer("span", &span))
 		return
-	}
-
-	removedTs := v.(*statefulRts).getFlushed()
-	for {
-		currMin := m.GetMinResolvedTs()
-		if currMin > removedTs {
-			break
-		}
-		newMin := uint64(math.MaxInt64)
-		m.rtsMap.Range(func(key interface{}, value interface{}) bool {
-			rts := value.(*statefulRts)
-			flushed := rts.getFlushed()
-			if flushed < newMin {
-				newMin = flushed
-			}
-			return true
-		})
-		if atomic.CompareAndSwapUint64(&m.minResolvedTs, currMin, newMin) {
-			break
-		}
 	}
 }
 
-// Cleanup removes all redo logs of this manager, it is called when changefeed is removed
-// only owner should call this method.
-func (m *ManagerImpl) Cleanup(ctx context.Context) error {
-	common.RedoWriteLogDurationHistogram.
-		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
-	common.RedoFlushLogDurationHistogram.
-		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
-	common.RedoTotalRowsCountGauge.
-		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
-	common.RedoWorkerBusyRatio.
-		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
-	return m.withLock(func(m *ManagerImpl) error { return m.writer.DeleteAllLogs(ctx) })
-}
-
-func (m *ManagerImpl) prepareForFlush() (tableRtsMap map[model.TableID]model.Ts, minResolvedTs model.Ts) {
-	if !m.opts.EmitRowEvents {
-		return
-	}
-
-	tableRtsMap = make(map[model.TableID]model.Ts)
-	minResolvedTs = math.MaxUint64
-	m.rtsMap.Range(func(key interface{}, value interface{}) bool {
-		tableID := key.(model.TableID)
+func (m *logManager) prepareForFlush() *spanz.HashMap[model.Ts] {
+	tableRtsMap := spanz.NewHashMap[model.Ts]()
+	m.rtsMap.Range(func(span tablepb.Span, value interface{}) bool {
 		rts := value.(*statefulRts)
 		unflushed := rts.getUnflushed()
 		flushed := rts.getFlushed()
 		if unflushed > flushed {
 			flushed = unflushed
 		}
-		tableRtsMap[tableID] = flushed
-		if flushed < minResolvedTs {
-			minResolvedTs = flushed
+		tableRtsMap.ReplaceOrInsert(span, flushed)
+		return true
+	})
+	return tableRtsMap
+}
+
+func (m *logManager) postFlush(tableRtsMap *spanz.HashMap[model.Ts]) {
+	tableRtsMap.Range(func(span tablepb.Span, flushed uint64) bool {
+		if value, loaded := m.rtsMap.Load(span); loaded {
+			changed := value.(*statefulRts).checkAndSetFlushed(flushed)
+			if !changed {
+				log.Debug("flush redo with regressed resolved ts",
+					zap.Stringer("span", &span),
+					zap.Uint64("flushed", flushed),
+					zap.Uint64("current", value.(*statefulRts).getFlushed()))
+			}
 		}
 		return true
 	})
-
-	if minResolvedTs == math.MaxUint64 {
-		minResolvedTs = 0
-	}
-	return
 }
 
-func (m *ManagerImpl) postFlush(tableRtsMap map[model.TableID]model.Ts, minResolvedTs model.Ts) {
-	if !m.opts.EmitRowEvents {
-		return
-	}
-	if minResolvedTs != 0 {
-		// m.minResolvedTs is only updated in flushLog, so no other one can change it.
-		atomic.StoreUint64(&m.minResolvedTs, minResolvedTs)
-	}
-	for tableID, flushed := range tableRtsMap {
-		if value, loaded := m.rtsMap.Load(tableID); loaded {
-			value.(*statefulRts).setFlushed(flushed)
-		}
-	}
-}
-
-func (m *ManagerImpl) prepareForFlushMeta() (metaCheckpoint, metaResolved model.Ts) {
-	if !m.opts.EmitMeta {
-		return
-	}
-	metaCheckpoint = m.metaCheckpointTs.getUnflushed()
-	metaResolved = m.metaResolvedTs.getUnflushed()
-	return
-}
-
-func (m *ManagerImpl) postFlushMeta(metaCheckpoint, metaResolved model.Ts) {
-	if !m.opts.EmitMeta {
-		return
-	}
-	m.metaResolvedTs.setFlushed(metaResolved)
-	m.metaCheckpointTs.setFlushed(metaCheckpoint)
-}
-
-func (m *ManagerImpl) flushLog(
+func (m *logManager) flushLog(
 	ctx context.Context, handleErr func(err error), workTimeSlice *time.Duration,
 ) {
 	start := time.Now()
@@ -442,80 +427,99 @@ func (m *ManagerImpl) flushLog(
 	if !atomic.CompareAndSwapInt64(&m.flushing, 0, 1) {
 		log.Debug("Fail to update flush flag, " +
 			"the previous flush operation hasn't finished yet")
-		if time.Since(m.lastFlushTime) > redoFlushWarnDuration {
+		if time.Since(m.lastFlushTime) > redo.FlushWarnDuration {
 			log.Warn("flushLog blocking too long, the redo manager may be stuck",
 				zap.Duration("duration", time.Since(m.lastFlushTime)),
-				zap.Any("changfeed", m.changeFeedID))
+				zap.Any("changfeed", m.cfg.ChangeFeedID))
 		}
 		return
 	}
 
 	m.lastFlushTime = time.Now()
+	releaseMemoryCbs := m.releaseMemoryCbs
+	m.releaseMemoryCbs = make([]func(), 0, 1024)
 	go func() {
 		defer atomic.StoreInt64(&m.flushing, 0)
 
-		tableRtsMap, minResolvedTs := m.prepareForFlush()
-		metaCheckpoint, metaResolved := m.prepareForFlushMeta()
-		err := m.withLock(func(m *ManagerImpl) error {
-			return m.writer.FlushLog(ctx, metaCheckpoint, metaResolved)
+		tableRtsMap := m.prepareForFlush()
+		log.Debug("Flush redo log",
+			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
+			zap.String("changefeed", m.cfg.ChangeFeedID.ID),
+			zap.String("logType", m.cfg.LogType),
+			zap.Any("tableRtsMap", tableRtsMap))
+		err := m.withLock(func(m *logManager) error {
+			return m.writer.FlushLog(ctx)
 		})
+		for _, releaseMemory := range releaseMemoryCbs {
+			releaseMemory()
+		}
 		m.metricFlushLogDuration.Observe(time.Since(m.lastFlushTime).Seconds())
 		if err != nil {
 			handleErr(err)
 			return
 		}
-		m.postFlush(tableRtsMap, minResolvedTs)
-		m.postFlushMeta(metaCheckpoint, metaResolved)
+		m.postFlush(tableRtsMap)
+	}()
+}
+
+func (m *logManager) handleEvent(
+	ctx context.Context, e cacheEvents, workTimeSlice *time.Duration,
+) error {
+	startHandleEvent := time.Now()
+	defer func() {
+		*workTimeSlice += time.Since(startHandleEvent)
 	}()
 
-	return
-}
+	if e.isResolvedEvent {
+		m.onResolvedTsMsg(e.span, e.resolvedTs)
+	} else {
+		if e.releaseMemory != nil {
+			m.releaseMemoryCbs = append(m.releaseMemoryCbs, e.releaseMemory)
+		}
 
-func (m *ManagerImpl) onResolvedTsMsg(tableID model.TableID, resolvedTs model.Ts) {
-	value, loaded := m.rtsMap.Load(tableID)
-	if !loaded {
-		panic("onResolvedTsMsg is called for an invalid table")
+		start := time.Now()
+		err := m.writer.WriteEvents(ctx, e.events...)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		writeLogElapse := time.Since(start)
+		log.Debug("redo manager writes rows",
+			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
+			zap.String("changefeed", m.cfg.ChangeFeedID.ID),
+			zap.Int("rows", len(e.events)),
+			zap.Error(err),
+			zap.Duration("writeLogElapse", writeLogElapse))
+		m.metricTotalRowsCount.Add(float64(len(e.events)))
+		m.metricWriteLogDuration.Observe(writeLogElapse.Seconds())
 	}
-	value.(*statefulRts).checkAndSetUnflushed(resolvedTs)
+	return nil
 }
 
-func (m *ManagerImpl) bgUpdateLog(
-	ctx context.Context, flushIntervalInMs int64, errCh chan<- error,
-) {
+func (m *logManager) onResolvedTsMsg(span tablepb.Span, resolvedTs model.Ts) {
+	// It's possible that the table is removed while redo log is still in writing.
+	if value, loaded := m.rtsMap.Load(span); loaded {
+		value.(*statefulRts).checkAndSetUnflushed(resolvedTs)
+	}
+}
+
+func (m *logManager) bgUpdateLog(ctx context.Context, flushDuration time.Duration) error {
+	m.releaseMemoryCbs = make([]func(), 0, 1024)
+	ticker := time.NewTicker(flushDuration)
+	defer ticker.Stop()
+	log.Info("redo manager bgUpdateLog is running",
+		zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
+		zap.String("changefeed", m.cfg.ChangeFeedID.ID),
+		zap.Duration("flushIntervalInMs", flushDuration),
+		zap.Int64("maxLogSize", m.cfg.MaxLogSize),
+		zap.Int("encoderWorkerNum", m.cfg.EncodingWorkerNum),
+		zap.Int("flushWorkerNum", m.cfg.FlushWorkerNum))
+
+	var err error
 	// logErrCh is used to retrieve errors from log flushing goroutines.
 	// if the channel is full, it's better to block subsequent flushing goroutines.
 	logErrCh := make(chan error, 1)
 	handleErr := func(err error) { logErrCh <- err }
 
-	log.Info("redo manager bgUpdateLog is running",
-		zap.String("namespace", m.changeFeedID.Namespace),
-		zap.String("changefeed", m.changeFeedID.ID),
-		zap.Int64("flushIntervalInMs", flushIntervalInMs))
-
-	ticker := time.NewTicker(time.Duration(flushIntervalInMs) * time.Millisecond)
-	defer func() {
-		ticker.Stop()
-
-		m.rwlock.Lock()
-		defer m.rwlock.Unlock()
-		atomic.StoreInt32(&m.closed, 1)
-
-		m.logBuffer.Close()
-		for range m.logBuffer.Out() {
-		}
-		if err := m.writer.Close(); err != nil {
-			log.Error("redo manager fails to close writer",
-				zap.String("namespace", m.changeFeedID.Namespace),
-				zap.String("changefeed", m.changeFeedID.ID),
-				zap.Error(err))
-		}
-
-		log.Info("redo manager bgUpdateLog exits",
-			zap.String("namespace", m.changeFeedID.Namespace),
-			zap.String("changefeed", m.changeFeedID.ID))
-	}()
-
-	var err error
 	overseerTicker := time.NewTicker(time.Second * 5)
 	defer overseerTicker.Stop()
 	var workTimeSlice time.Duration
@@ -523,87 +527,55 @@ func (m *ManagerImpl) bgUpdateLog(
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case err = <-logErrCh:
+			return ctx.Err()
+		case <-ticker.C:
+			m.flushLog(ctx, handleErr, &workTimeSlice)
+		case event, ok := <-m.logBuffer.Out():
+			if !ok {
+				return nil // channel closed
+			}
+			err = m.handleEvent(ctx, event, &workTimeSlice)
 		case now := <-overseerTicker.C:
 			busyRatio := int(workTimeSlice.Seconds() / now.Sub(startToWork).Seconds() * 1000)
 			m.metricRedoWorkerBusyRatio.Add(float64(busyRatio))
 			startToWork = now
 			workTimeSlice = 0
-		case <-ticker.C:
-			// interpolate tick message to flush writer if needed
-			m.flushLog(ctx, handleErr, &workTimeSlice)
-		case cache, ok := <-m.logBuffer.Out():
-			if !ok {
-				return // channel closed
-			}
-			switch cache.eventType {
-			case model.MessageTypeRow:
-				start := time.Now()
-				logs := make([]*model.RedoRowChangedEvent, 0, len(cache.rows))
-				for _, row := range cache.rows {
-					logs = append(logs, common.RowToRedo(row))
-				}
-				err = m.writer.WriteLog(ctx, cache.tableID, logs)
-				m.metricWriteLogDuration.Observe(time.Since(start).Seconds())
-				m.metricTotalRowsCount.Add(float64(len(logs)))
-			case model.MessageTypeResolved:
-				m.onResolvedTsMsg(cache.tableID, cache.resolvedTs)
-			default:
-				log.Debug("handle unknown event type")
-			}
+		case err = <-logErrCh:
 		}
 		if err != nil {
 			log.Warn("redo manager writer meets write or flush fail",
-				zap.String("namespace", m.changeFeedID.Namespace),
-				zap.String("changefeed", m.changeFeedID.ID),
+				zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
+				zap.String("changefeed", m.cfg.ChangeFeedID.ID),
 				zap.Error(err))
-			break
-		}
-	}
-
-	// NOTE: the goroutine should never exit until the error is put into errCh successfully
-	// or the context is canceled.
-	select {
-	case <-ctx.Done():
-	case errCh <- err:
-	}
-}
-
-func (m *ManagerImpl) bgGC(ctx context.Context) {
-	ticker := time.NewTicker(time.Duration(defaultGCIntervalInMs) * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			log.Info("redo manager GC exits as context cancelled",
-				zap.String("namespace", m.changeFeedID.Namespace),
-				zap.String("changefeed", m.changeFeedID.ID))
-			return
-		case <-ticker.C:
-			ckpt := atomic.LoadUint64(&m.checkpointTs)
-			if ckpt == 0 {
-				continue
-			}
-			log.Info("redo manager GC is triggered",
-				zap.Uint64("checkpointTs", ckpt),
-				zap.String("namespace", m.changeFeedID.Namespace),
-				zap.String("changefeed", m.changeFeedID.ID))
-			err := m.writer.GC(ctx, ckpt)
-			if err != nil {
-				log.Warn("redo manager log GC fail",
-					zap.String("namespace", m.changeFeedID.Namespace),
-					zap.String("changefeed", m.changeFeedID.ID), zap.Error(err))
-			}
+			return err
 		}
 	}
 }
 
-func (m *ManagerImpl) withLock(action func(m *ManagerImpl) error) error {
+func (m *logManager) withLock(action func(m *logManager) error) error {
 	m.rwlock.RLock()
 	defer m.rwlock.RUnlock()
 	if atomic.LoadInt32(&m.closed) != 0 {
-		return cerror.ErrRedoWriterStopped.GenWithStack("redo manager is stopped")
+		return errors.ErrRedoWriterStopped.GenWithStack("redo manager is closed")
 	}
 	return action(m)
+}
+
+func (m *logManager) close() {
+	m.rwlock.Lock()
+	defer m.rwlock.Unlock()
+	atomic.StoreInt32(&m.closed, 1)
+
+	m.logBuffer.CloseAndDrain()
+	if m.writer != nil {
+		if err := m.writer.Close(); err != nil && errors.Cause(err) != context.Canceled {
+			log.Error("redo manager fails to close writer",
+				zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
+				zap.String("changefeed", m.cfg.ChangeFeedID.ID),
+				zap.Error(err))
+		}
+	}
+	log.Info("redo manager closed",
+		zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
+		zap.String("changefeed", m.cfg.ChangeFeedID.ID))
 }

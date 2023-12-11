@@ -25,9 +25,9 @@ import (
 	"go.uber.org/zap"
 )
 
-//go:generate mockery --name=checkSumChecker --inpackage
+//go:generate mockery --name=checkSumChecker --inpackage --quiet
 type checkSumChecker interface {
-	getCheckSum(ctx context.Context, db string, f *filter.Filter) (map[string]string, error)
+	getCheckSum(ctx context.Context, db string, f filter.Filter) (map[string]string, error)
 	getAllDBs(ctx context.Context) ([]string, error)
 }
 
@@ -35,14 +35,14 @@ type checker struct {
 	db *sql.DB
 }
 
-// nolint:deadcode, will be used in next pr
+// nolint:unused
 func newChecker(db *sql.DB) *checker {
 	return &checker{
 		db: db,
 	}
 }
 
-func (c *checker) getCheckSum(ctx context.Context, db string, f *filter.Filter) (map[string]string, error) {
+func (c *checker) getCheckSum(ctx context.Context, db string, f filter.Filter) (map[string]string, error) {
 	_, err := c.db.ExecContext(ctx, fmt.Sprintf("USE %s", db))
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrMySQLQueryError, err)
@@ -93,7 +93,7 @@ func (c *checker) getAllDBs(ctx context.Context) ([]string, error) {
 	return dbs, nil
 }
 
-func (c *checker) getAllTables(ctx context.Context, db string, f *filter.Filter) ([]string, error) {
+func (c *checker) getAllTables(ctx context.Context, db string, f filter.Filter) ([]string, error) {
 	rows, err := c.db.QueryContext(ctx, "SHOW TABLES")
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrMySQLQueryError, err)
@@ -179,7 +179,7 @@ func (c *checker) doChecksum(ctx context.Context, columns []columnInfo, database
 }
 
 // TODO: use ADMIN CHECKSUM TABLE for tidb if needed
-var compareCheckSum = func(ctx context.Context, upstreamChecker, downstreamChecker checkSumChecker, f *filter.Filter) (bool, error) {
+var compareCheckSum = func(ctx context.Context, upstreamChecker, downstreamChecker checkSumChecker, f filter.Filter) (bool, error) {
 	dbs, err := upstreamChecker.getAllDBs(ctx)
 	if err != nil {
 		return false, err

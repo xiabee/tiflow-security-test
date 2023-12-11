@@ -16,17 +16,14 @@ package syncer
 import (
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/pingcap/failpoint"
-
-	"github.com/pingcap/tiflow/dm/dm/config"
-	"github.com/pingcap/tiflow/dm/dm/pb"
+	"github.com/pingcap/tiflow/dm/config"
+	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/shardddl/optimism"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
-	"github.com/pingcap/tiflow/dm/syncer/metrics"
+	"go.uber.org/zap"
 )
 
 // Status implements Unit.Status.
@@ -34,8 +31,11 @@ func (s *Syncer) Status(sourceStatus *binlog.SourceStatus) interface{} {
 	syncerLocation := s.checkpoint.FlushedGlobalPoint()
 	st := &pb.SyncStatus{
 		TotalEvents:         s.count.Load(),
-		TotalTps:            s.totalTps.Load(),
-		RecentTps:           s.tps.Load(),
+		TotalTps:            s.totalRps.Load(),
+		RecentTps:           s.rps.Load(),
+		TotalRows:           s.count.Load(),
+		TotalRps:            s.totalRps.Load(),
+		RecentRps:           s.rps.Load(),
 		SyncerBinlog:        syncerLocation.Position.String(),
 		SecondsBehindMaster: s.secondsBehindMaster.Load(),
 	}
@@ -64,7 +64,7 @@ func (s *Syncer) Status(sourceStatus *binlog.SourceStatus) interface{} {
 
 	st.BinlogType = "unknown"
 	if s.streamerController != nil {
-		st.BinlogType = binlogTypeToString(s.streamerController.GetBinlogType())
+		st.BinlogType = s.streamerController.GetBinlogType().String()
 	}
 
 	// only support to show `UnresolvedGroups` in pessimistic mode now.
@@ -111,10 +111,11 @@ func (s *Syncer) printStatus(sourceStatus *binlog.SourceStatus) {
 	totalBinlogSize := s.binlogSizeCount.Load()
 	lastBinlogSize := s.lastBinlogSizeCount.Load()
 
-	tps, totalTps := int64(0), int64(0)
+	rps, totalRps := int64(0), int64(0)
 	if seconds > 0 && totalSeconds > 0 {
-		tps = (total - last) / seconds
-		totalTps = total / totalSeconds
+		// todo: use speed recorder count rps
+		rps = (total - last) / seconds
+		totalRps = total / totalSeconds
 
 		s.currentLocationMu.RLock()
 		currentLocation := s.currentLocationMu.currentLocation
@@ -131,24 +132,24 @@ func (s *Syncer) printStatus(sourceStatus *binlog.SourceStatus) {
 				zap.Int64("bytes/Second", bytesPerSec),
 				zap.Int64("unsynced binlog size", remainingSize),
 				zap.Int64("estimate time to catch up", remainingSeconds))
-			metrics.RemainingTimeGauge.WithLabelValues(s.cfg.Name, s.cfg.SourceID, s.cfg.WorkerName).Set(float64(remainingSeconds))
+			s.metricsProxies.Metrics.RemainingTimeGauge.Set(float64(remainingSeconds))
 		}
 	}
 
 	latestMasterPos := sourceStatus.Location.Position
 	latestMasterGTIDSet := sourceStatus.Location.GetGTID()
-	metrics.BinlogPosGauge.WithLabelValues("master", s.cfg.Name, s.cfg.SourceID).Set(float64(latestMasterPos.Pos))
-	index, err := binlog.GetFilenameIndex(latestMasterPos.Name)
+	s.metricsProxies.Metrics.BinlogMasterPosGauge.Set(float64(latestMasterPos.Pos))
+	index, err := utils.GetFilenameIndex(latestMasterPos.Name)
 	if err != nil {
 		s.tctx.L().Error("fail to parse binlog file", log.ShortError(err))
 	} else {
-		metrics.BinlogFileGauge.WithLabelValues("master", s.cfg.Name, s.cfg.SourceID).Set(float64(index))
+		s.metricsProxies.Metrics.BinlogMasterFileGauge.Set(float64(index))
 	}
 
 	s.tctx.L().Info("binlog replication status",
-		zap.Int64("total_events", total),
-		zap.Int64("total_tps", totalTps),
-		zap.Int64("tps", tps),
+		zap.Int64("total_rows", total),
+		zap.Int64("total_rps", totalRps),
+		zap.Int64("rps", rps),
 		zap.Stringer("master_position", latestMasterPos),
 		log.WrapStringerField("master_gtid", latestMasterGTIDSet),
 		zap.Stringer("checkpoint", s.checkpoint))
@@ -156,6 +157,6 @@ func (s *Syncer) printStatus(sourceStatus *binlog.SourceStatus) {
 	s.lastCount.Store(total)
 	s.lastBinlogSizeCount.Store(totalBinlogSize)
 	s.lastTime.Store(time.Now())
-	s.totalTps.Store(totalTps)
-	s.tps.Store(tps)
+	s.totalRps.Store(totalRps)
+	s.rps.Store(rps)
 }

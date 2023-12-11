@@ -13,24 +13,24 @@
 
 package config
 
-import "github.com/pingcap/errors"
+import (
+	"github.com/pingcap/errors"
+)
 
 // DebugConfig represents config for ticdc unexposed feature configurations
 type DebugConfig struct {
-	// identify if the table actor is enabled for table pipeline
-	EnableTableActor bool              `toml:"enable-table-actor" json:"enable-table-actor"`
-	TableActor       *TableActorConfig `toml:"table-actor" json:"table-actor"`
+	DB *DBConfig `toml:"db" json:"db"`
 
-	// EnableDBSorter enables db sorter.
-	//
-	// The default value is true.
-	EnableDBSorter bool      `toml:"enable-db-sorter" json:"enable-db-sorter"`
-	DB             *DBConfig `toml:"db" json:"db"`
+	Messages *MessagesConfig `toml:"messages" json:"messages"`
 
-	// EnableNewScheduler enables the peer-messaging based new scheduler.
-	// The default value is true.
-	EnableNewScheduler bool            `toml:"enable-new-scheduler" json:"enable-new-scheduler"`
-	Messages           *MessagesConfig `toml:"messages" json:"messages"`
+	// Scheduler is the configuration of the two-phase scheduler.
+	Scheduler *SchedulerConfig `toml:"scheduler" json:"scheduler"`
+
+	// EnableKVConnectBackOff enables the backoff for kv connect.
+	EnableKVConnectBackOff bool `toml:"enable-kv-connect-backoff" json:"enable-kv-connect-backoff"`
+
+	// Puller is the configuration of the puller.
+	Puller *PullerConfig `toml:"puller" json:"puller"`
 }
 
 // ValidateAndAdjust validates and adjusts the debug configuration
@@ -41,5 +41,17 @@ func (c *DebugConfig) ValidateAndAdjust() error {
 	if err := c.DB.ValidateAndAdjust(); err != nil {
 		return errors.Trace(err)
 	}
+	if err := c.Scheduler.ValidateAndAdjust(); err != nil {
+		return errors.Trace(err)
+	}
+
 	return nil
+}
+
+// PullerConfig represents config for puller
+type PullerConfig struct {
+	// EnableResolvedTsStuckDetection is used to enable resolved ts stuck detection.
+	EnableResolvedTsStuckDetection bool `toml:"enable-resolved-ts-stuck-detection" json:"enable-resolved-ts-stuck-detection"`
+	// ResolvedTsStuckInterval is the interval of checking resolved ts stuck.
+	ResolvedTsStuckInterval TomlDuration `toml:"resolved-ts-stuck-interval" json:"resolved-ts-stuck-interval"`
 }

@@ -15,8 +15,10 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -29,6 +31,8 @@ import (
 )
 
 const (
+	// clusterIDMaxLen is the max length of cdc server cluster id
+	clusterIDMaxLen = 128
 	// DefaultSortDir is the default value of sort-dir, it will be a subordinate directory of data-dir.
 	DefaultSortDir = "/tmp/sorter"
 
@@ -37,6 +41,25 @@ const (
 
 	// DebugConfigurationItem is the name of debug configurations
 	DebugConfigurationItem = "debug"
+
+	// DefaultChangefeedMemoryQuota is the default memory quota for each changefeed.
+	DefaultChangefeedMemoryQuota = 1024 * 1024 * 1024 // 1GB.
+
+	// DisableMemoryLimit is the default max memory percentage for TiCDC server.
+	// 0 means no memory limit.
+	DisableMemoryLimit = 0
+)
+
+var (
+	clusterIDRe = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
+
+	// ReservedClusterIDs contains a list of reserved cluster id,
+	// these words are the part of old cdc etcd key prefix
+	// like: /tidb/cdc/owner
+	ReservedClusterIDs = []string{
+		"owner", "capture", "task",
+		"changefeed", "job", "meta",
+	}
 )
 
 func init() {
@@ -80,18 +103,14 @@ var defaultServerConfig = &ServerConfig{
 	// default capture session ttl to 10s to increase robust to PD jitter,
 	// however it will decrease RTO when single TiCDC node error happens.
 	CaptureSessionTTL:      10,
-	OwnerFlushInterval:     TomlDuration(200 * time.Millisecond),
-	ProcessorFlushInterval: TomlDuration(100 * time.Millisecond),
+	OwnerFlushInterval:     TomlDuration(50 * time.Millisecond),
+	ProcessorFlushInterval: TomlDuration(50 * time.Millisecond),
 	Sorter: &SorterConfig{
-		NumConcurrentWorker:    4,
-		ChunkSizeLimit:         128 * 1024 * 1024,       // 128MB
-		MaxMemoryPercentage:    30,                      // 30% is safe on machines with memory capacity <= 16GB
-		MaxMemoryConsumption:   16 * 1024 * 1024 * 1024, // 16GB
-		NumWorkerPoolGoroutine: 16,
-		SortDir:                DefaultSortDir,
+		SortDir:             DefaultSortDir,
+		CacheSizeInMB:       128, // By default use 128M memory as sorter cache.
+		MaxMemoryPercentage: 10,  // Deprecated.
 	},
-	Security:            &SecurityConfig{},
-	PerTableMemoryQuota: 10 * 1024 * 1024, // 10MB
+	Security: &SecurityConfig{},
 	KVClient: &KVClientConfig{
 		WorkerConcurrent: 8,
 		WorkerPoolSize:   0, // 0 will use NumCPU() * 2
@@ -101,13 +120,6 @@ var defaultServerConfig = &ServerConfig{
 		RegionRetryDuration: TomlDuration(time.Minute),
 	},
 	Debug: &DebugConfig{
-		EnableTableActor: false,
-		TableActor: &TableActorConfig{
-			EventBatchSize: 32,
-		},
-		EnableNewScheduler: true,
-		// Default leveldb sorter config
-		EnableDBSorter: true,
 		DB: &DBConfig{
 			Count: 8,
 			// Following configs are optimized for write/read throughput.
@@ -115,11 +127,8 @@ var defaultServerConfig = &ServerConfig{
 			Concurrency:                 128,
 			MaxOpenFiles:                10000,
 			BlockSize:                   65536,
-			BlockCacheSize:              4294967296,
 			WriterBufferSize:            8388608,
 			Compression:                 "snappy",
-			TargetFileSizeBase:          8388608,
-			WriteL0SlowdownTrigger:      math.MaxInt32,
 			WriteL0PauseTrigger:         math.MaxInt32,
 			CompactionL0Trigger:         160,
 			CompactionDeletionThreshold: 10485760,
@@ -128,7 +137,16 @@ var defaultServerConfig = &ServerConfig{
 			IteratorSlowReadDuration:    256,
 		},
 		Messages: defaultMessageConfig.Clone(),
+
+		Scheduler:              NewDefaultSchedulerConfig(),
+		EnableKVConnectBackOff: false,
+		Puller: &PullerConfig{
+			EnableResolvedTsStuckDetection: false,
+			ResolvedTsStuckInterval:        TomlDuration(5 * time.Minute),
+		},
 	},
+	ClusterID:              "default",
+	GcTunerMemoryThreshold: DisableMemoryLimit,
 }
 
 // ServerConfig represents a config for server
@@ -150,11 +168,17 @@ type ServerConfig struct {
 	OwnerFlushInterval     TomlDuration `toml:"owner-flush-interval" json:"owner-flush-interval"`
 	ProcessorFlushInterval TomlDuration `toml:"processor-flush-interval" json:"processor-flush-interval"`
 
-	Sorter              *SorterConfig   `toml:"sorter" json:"sorter"`
-	Security            *SecurityConfig `toml:"security" json:"security"`
+	Sorter   *SorterConfig   `toml:"sorter" json:"sorter"`
+	Security *SecurityConfig `toml:"security" json:"security"`
+	// DEPRECATED: after using pull based sink, this config is useless.
+	// Because we do not control the memory usage by table anymore.
 	PerTableMemoryQuota uint64          `toml:"per-table-memory-quota" json:"per-table-memory-quota"`
 	KVClient            *KVClientConfig `toml:"kv-client" json:"kv-client"`
 	Debug               *DebugConfig    `toml:"debug" json:"debug"`
+	ClusterID           string          `toml:"cluster-id" json:"cluster-id"`
+	// Deprecated: we don't use this field anymore.
+	MaxMemoryPercentage    int    `toml:"max-memory-percentage" json:"max-memory-percentage"`
+	GcTunerMemoryThreshold uint64 `toml:"gc-tuner-memory-threshold" json:"gc-tuner-memory-threshold"`
 }
 
 // Marshal returns the json marshal format of a ServerConfig
@@ -199,6 +223,12 @@ func (c *ServerConfig) Clone() *ServerConfig {
 
 // ValidateAndAdjust validates and adjusts the server configuration
 func (c *ServerConfig) ValidateAndAdjust() error {
+	if !isValidClusterID(c.ClusterID) {
+		return cerror.ErrInvalidServerOption.GenWithStack(fmt.Sprintf("bad cluster-id"+
+			"please match the pattern \"^[a-zA-Z0-9]+(\\-[a-zA-Z0-9]+)*$\", and not the list of"+
+			" following reserved world: %s"+
+			"eg, \"simple-cluster-id\"", strings.Join(ReservedClusterIDs, ",")))
+	}
 	if c.Addr == "" {
 		return cerror.ErrInvalidServerOption.GenWithStack("empty address")
 	}
@@ -246,10 +276,6 @@ func (c *ServerConfig) ValidateAndAdjust() error {
 		return err
 	}
 
-	if c.PerTableMemoryQuota == 0 {
-		c.PerTableMemoryQuota = defaultCfg.PerTableMemoryQuota
-	}
-
 	if c.KVClient == nil {
 		c.KVClient = defaultCfg.KVClient
 	}
@@ -263,7 +289,6 @@ func (c *ServerConfig) ValidateAndAdjust() error {
 	if err = c.Debug.ValidateAndAdjust(); err != nil {
 		return errors.Trace(err)
 	}
-
 	return nil
 }
 
@@ -307,4 +332,21 @@ func (d *TomlDuration) UnmarshalJSON(b []byte) error {
 	}
 	*d = TomlDuration(stdDuration)
 	return nil
+}
+
+// isValidClusterID returns true if the cluster ID matches
+// the pattern "^[a-zA-Z0-9]+(\-[a-zA-Z0-9]+)*$", length no more than `clusterIDMaxLen`,
+// eg, "simple-cluster-id".
+func isValidClusterID(clusterID string) bool {
+	valid := clusterID != "" && len(clusterID) <= clusterIDMaxLen &&
+		clusterIDRe.MatchString(clusterID)
+	if !valid {
+		return false
+	}
+	for _, reserved := range ReservedClusterIDs {
+		if reserved == clusterID {
+			return false
+		}
+	}
+	return true
 }

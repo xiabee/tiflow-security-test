@@ -16,13 +16,11 @@ package model
 import (
 	"fmt"
 
-	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/util/rowcodec"
-	"go.uber.org/zap"
 )
 
 const (
@@ -35,12 +33,23 @@ const (
 // TableInfo provides meta data describing a DB table.
 type TableInfo struct {
 	*model.TableInfo
-	SchemaID         int64
-	TableName        TableName
-	TableInfoVersion uint64
-	columnsOffset    map[int64]int
-	indicesOffset    map[int64]int
-	uniqueColumns    map[int64]struct{}
+	SchemaID int64
+	// NOTICE: We probably store the logical ID inside TableName,
+	// not the physical ID.
+	// For normal table, there is only one ID, which is the physical ID.
+	// AKA TIDB_TABLE_ID.
+	// For partitioned table, there are two kinds of ID:
+	// 1. TIDB_PARTITION_ID is the physical ID of the partition.
+	// 2. TIDB_TABLE_ID is the logical ID of the table.
+	// In general, we always use the physical ID to represent a table, but we
+	// record the logical ID from the DDL event(job.BinlogInfo.TableInfo).
+	// So be careful when using the TableInfo.
+	TableName TableName
+	// Version record the tso of create the table info.
+	Version       uint64
+	columnsOffset map[int64]int
+	indicesOffset map[int64]int
+	uniqueColumns map[int64]struct{}
 
 	// It's a mapping from ColumnID to the offset of the columns in row changed events.
 	RowColumnsOffset map[int64]int
@@ -57,17 +66,24 @@ type TableInfo struct {
 	HandleIndexID int64
 
 	IndexColumnsOffset [][]int
-	rowColInfos        []rowcodec.ColInfo
-	rowColFieldTps     map[int64]*types.FieldType
+	// rowColInfos extend the model.ColumnInfo with some extra information
+	// it's the same length and order with the model.TableInfo.Columns
+	rowColInfos    []rowcodec.ColInfo
+	rowColFieldTps map[int64]*types.FieldType
 }
 
 // WrapTableInfo creates a TableInfo from a timodel.TableInfo
 func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *model.TableInfo) *TableInfo {
 	ti := &TableInfo{
-		TableInfo:        info,
-		SchemaID:         schemaID,
-		TableName:        TableName{Schema: schemaName, Table: info.Name.O},
-		TableInfoVersion: version,
+		TableInfo: info,
+		SchemaID:  schemaID,
+		TableName: TableName{
+			Schema:      schemaName,
+			Table:       info.Name.O,
+			TableID:     info.ID,
+			IsPartition: info.GetPartitionInfo() != nil,
+		},
+		Version:          version,
 		columnsOffset:    make(map[int64]int, len(info.Columns)),
 		indicesOffset:    make(map[int64]int, len(info.Indices)),
 		uniqueColumns:    make(map[int64]struct{}),
@@ -137,7 +153,6 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 
 	ti.findHandleIndex()
 	ti.initColumnsFlag()
-	log.Debug("wrapped table info", zap.Reflect("tableInfo", ti))
 	return ti
 }
 
@@ -205,7 +220,7 @@ func (ti *TableInfo) initColumnsFlag() {
 	// See https://dev.mysql.com/doc/refman/5.7/en/show-columns.html.
 	// Yet if an index has multiple columns, we would like to easily determine that all those columns are indexed,
 	// which is crucial for the completeness of the information we pass to the downstream.
-	// Therefore, instead of using the MySql standard,
+	// Therefore, instead of using the MySQL standard,
 	// we made our own decision to mark all columns in an index with the appropriate flag(s).
 	for _, idxInfo := range ti.Indices {
 		for _, idxCol := range idxInfo.Columns {
@@ -241,15 +256,6 @@ func (ti *TableInfo) String() string {
 	return fmt.Sprintf("TableInfo, ID: %d, Name:%s, ColNum: %d, IdxNum: %d, PKIsHandle: %t", ti.ID, ti.TableName, len(ti.Columns), len(ti.Indices), ti.PKIsHandle)
 }
 
-// GetIndexInfo returns the index info by ID
-func (ti *TableInfo) GetIndexInfo(indexID int64) (info *model.IndexInfo, exist bool) {
-	indexOffset, exist := ti.indicesOffset[indexID]
-	if !exist {
-		return nil, false
-	}
-	return ti.Indices[indexOffset], true
-}
-
 // GetRowColInfos returns all column infos for rowcodec
 func (ti *TableInfo) GetRowColInfos() ([]int64, map[int64]*types.FieldType, []rowcodec.ColInfo) {
 	return ti.handleColID, ti.rowColFieldTps, ti.rowColInfos
@@ -261,41 +267,7 @@ func IsColCDCVisible(col *model.ColumnInfo) bool {
 	if col.IsGenerated() && !col.GeneratedStored {
 		return false
 	}
-	return col.State == model.StatePublic
-}
-
-// GetUniqueKeys returns all unique keys of the table as a slice of column names
-func (ti *TableInfo) GetUniqueKeys() [][]string {
-	var uniqueKeys [][]string
-	if ti.PKIsHandle {
-		for _, col := range ti.Columns {
-			if mysql.HasPriKeyFlag(col.GetFlag()) {
-				// Prepend to make sure the primary key ends up at the front
-				uniqueKeys = [][]string{{col.Name.O}}
-				break
-			}
-		}
-	}
-	for _, idx := range ti.Indices {
-		if ti.IsIndexUnique(idx) {
-			colNames := make([]string, 0, len(idx.Columns))
-			for _, col := range idx.Columns {
-				colNames = append(colNames, col.Name.O)
-			}
-			if idx.Primary {
-				uniqueKeys = append([][]string{colNames}, uniqueKeys...)
-			} else {
-				uniqueKeys = append(uniqueKeys, colNames)
-			}
-		}
-	}
-	return uniqueKeys
-}
-
-// IsColumnUnique returns whether the column is unique
-func (ti *TableInfo) IsColumnUnique(colID int64) bool {
-	_, exist := ti.uniqueColumns[colID]
-	return exist
+	return true
 }
 
 // ExistTableUniqueColumn returns whether the table has a unique column
@@ -342,5 +314,5 @@ func (ti *TableInfo) IsIndexUnique(indexInfo *model.IndexInfo) bool {
 
 // Clone clones the TableInfo
 func (ti *TableInfo) Clone() *TableInfo {
-	return WrapTableInfo(ti.SchemaID, ti.TableName.Schema, ti.TableInfoVersion, ti.TableInfo.Clone())
+	return WrapTableInfo(ti.SchemaID, ti.TableName.Schema, ti.Version, ti.TableInfo.Clone())
 }

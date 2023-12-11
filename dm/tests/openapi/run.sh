@@ -113,7 +113,7 @@ function test_relay() {
 	# create source successfully
 	openapi_source_check "create_source1_success"
 
-	# we need make sure that source is bounded by worker1 because we will start relay on worker1
+	# we need make sure that source is bound by worker1 because we will start relay on worker1
 	openapi_source_check "transfer_source_success" "mysql-01" "worker1"
 
 	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
@@ -810,7 +810,7 @@ function test_start_task_with_condition() {
 	openapi_task_check "get_task_list" 0
 
 	# incremental task no duration has error
-	export GO_FAILPOINTS='github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds=return(0)'
+	export GO_FAILPOINTS="github.com/pingcap/tiflow/dm/syncer/SafeModeInitPhaseSeconds=return(\"0s\")"
 	kill_dm_worker
 	check_port_offline $WORKER1_PORT 20
 	check_port_offline $WORKER2_PORT 20

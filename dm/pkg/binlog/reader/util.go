@@ -20,20 +20,18 @@ import (
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"go.uber.org/zap"
-
 	"github.com/pingcap/tiflow/dm/pkg/binlog/event"
 	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/parser"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"go.uber.org/zap"
 )
 
 // GetGTIDsForPosFromStreamer tries to get GTID sets for the specified binlog position (for the corresponding txn) from a Streamer.
-func GetGTIDsForPosFromStreamer(ctx context.Context, r Streamer, endPos gmysql.Position) (gtid.Set, error) {
+func GetGTIDsForPosFromStreamer(ctx context.Context, r Streamer, endPos gmysql.Position) (gmysql.GTIDSet, error) {
 	var (
-		flavor      string
 		latestPos   uint32
 		latestGSet  gmysql.GTIDSet
 		nextGTIDStr string // can be recorded if the coming transaction completed
@@ -96,22 +94,19 @@ func GetGTIDsForPosFromStreamer(ctx context.Context, r Streamer, endPos gmysql.P
 			// if GTID enabled, we can get a PreviousGTIDEvent after the FormatDescriptionEvent
 			// ref: https://github.com/mysql/mysql-server/blob/8cc757da3d87bf4a1f07dcfb2d3c96fed3806870/sql/binlog.cc#L4549
 			// ref: https://github.com/mysql/mysql-server/blob/8cc757da3d87bf4a1f07dcfb2d3c96fed3806870/sql/binlog.cc#L5161
-			var gSet gtid.Set
-			gSet, err = gtid.ParserGTID(gmysql.MySQLFlavor, ev.GTIDSets)
+			latestGSet, err = gtid.ParserGTID(gmysql.MySQLFlavor, ev.GTIDSets)
 			if err != nil {
 				return nil, err
 			}
-			latestGSet = gSet.Origin()
-			flavor = gmysql.MySQLFlavor
+			latestPos = e.Header.LogPos
 		case *replication.MariadbGTIDListEvent:
 			// a MariadbGTIDListEvent logged in every binlog to record the current replication state if GTID enabled
 			// ref: https://mariadb.com/kb/en/library/gtid_list_event/
-			gSet, err2 := event.GTIDsFromMariaDBGTIDListEvent(e)
-			if err2 != nil {
-				return nil, terror.Annotatef(err2, "get GTID set from MariadbGTIDListEvent %+v", e.Header)
+			latestGSet, err = event.GTIDsFromMariaDBGTIDListEvent(e)
+			if err != nil {
+				return nil, terror.Annotatef(err, "get GTID set from MariadbGTIDListEvent %+v", e.Header)
 			}
-			latestGSet = gSet.Origin()
-			flavor = gmysql.MariaDBFlavor
+			latestPos = e.Header.LogPos
 		}
 
 		if latestPos == endPos.Pos {
@@ -119,12 +114,7 @@ func GetGTIDsForPosFromStreamer(ctx context.Context, r Streamer, endPos gmysql.P
 			if latestGSet == nil {
 				return nil, errors.Errorf("no GTIDs get for position %s", endPos)
 			}
-			var latestGTIDs gtid.Set
-			latestGTIDs, err = gtid.ParserGTID(flavor, latestGSet.String())
-			if err != nil {
-				return nil, terror.Annotatef(err, "parse GTID set %s with flavor %s", latestGSet.String(), flavor)
-			}
-			return latestGTIDs, nil
+			return latestGSet, nil
 		} else if latestPos > endPos.Pos {
 			return nil, errors.Errorf("invalid position %s or GTID not enabled in upstream", endPos)
 		}
@@ -134,7 +124,7 @@ func GetGTIDsForPosFromStreamer(ctx context.Context, r Streamer, endPos gmysql.P
 // GetGTIDsForPos tries to get GTID sets for the specified binlog position (for the corresponding txn).
 // NOTE: this method is very similar with `relay/writer/file_util.go/getTxnPosGTIDs`, unify them if needed later.
 // NOTE: this method is not well tested directly, but more tests have already been done for `relay/writer/file_util.go/getTxnPosGTIDs`.
-func GetGTIDsForPos(ctx context.Context, r Reader, endPos gmysql.Position) (gtid.Set, error) {
+func GetGTIDsForPos(ctx context.Context, r Reader, endPos gmysql.Position) (gmysql.GTIDSet, error) {
 	// start to get and parse binlog event from the beginning of the file.
 	startPos := gmysql.Position{
 		Name: endPos.Name,
@@ -151,7 +141,7 @@ func GetGTIDsForPos(ctx context.Context, r Reader, endPos gmysql.Position) (gtid
 
 // GetPreviousGTIDFromGTIDSet tries to get previous GTID sets from Previous_GTID_EVENT GTID for the specified GITD Set.
 // events should be [fake_rotate_event,format_description_event,previous_gtids_event/mariadb_gtid_list_event].
-func GetPreviousGTIDFromGTIDSet(ctx context.Context, r Reader, gset gtid.Set) (gtid.Set, error) {
+func GetPreviousGTIDFromGTIDSet(ctx context.Context, r Reader, gset gmysql.GTIDSet) (gmysql.GTIDSet, error) {
 	failpoint.Inject("MockGetEmptyPreviousGTIDFromGTIDSet", func(_ failpoint.Value) {
 		gset, _ = gtid.ParserGTID("mysql", "")
 		failpoint.Return(gset, nil)

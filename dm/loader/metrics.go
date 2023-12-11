@@ -14,14 +14,14 @@
 package loader
 
 import (
+	"github.com/pingcap/tiflow/engine/pkg/promutil"
 	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/pingcap/tiflow/dm/pkg/metricsproxy"
 )
 
 var (
+	f = &promutil.PromFactory{}
 	// should error.
-	tidbExecutionErrorCounter = metricsproxy.NewCounterVec(
+	tidbExecutionErrorCounter = f.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
@@ -29,7 +29,7 @@ var (
 			Help:      "Total count of tidb execution errors",
 		}, []string{"task", "source_id"})
 
-	queryHistogram = metricsproxy.NewHistogramVec(
+	queryHistogram = f.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
@@ -38,7 +38,7 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(0.000005, 2, 25),
 		}, []string{"task", "source_id"})
 
-	txnHistogram = metricsproxy.NewHistogramVec(
+	txnHistogram = f.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
@@ -47,7 +47,7 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(0.000005, 2, 25),
 		}, []string{"task", "worker", "source_id", "target_schema", "target_table"})
 
-	stmtHistogram = metricsproxy.NewHistogramVec(
+	stmtHistogram = f.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
@@ -56,7 +56,7 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(0.000005, 2, 25),
 		}, []string{"type", "task"})
 
-	dataFileGauge = metricsproxy.NewGaugeVec(
+	dataFileGauge = f.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
@@ -64,7 +64,7 @@ var (
 			Help:      "data files in total",
 		}, []string{"task", "source_id"})
 
-	tableGauge = metricsproxy.NewGaugeVec(
+	tableGauge = f.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
@@ -72,7 +72,7 @@ var (
 			Help:      "tables in total",
 		}, []string{"task", "source_id"})
 
-	dataSizeGauge = metricsproxy.NewGaugeVec(
+	dataSizeGauge = f.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
@@ -80,7 +80,7 @@ var (
 			Help:      "data size in total",
 		}, []string{"task", "source_id"})
 
-	progressGauge = metricsproxy.NewGaugeVec(
+	progressGauge = f.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
@@ -89,15 +89,15 @@ var (
 		}, []string{"task", "source_id"})
 
 	// should alert.
-	loaderExitWithErrorCounter = metricsproxy.NewCounterVec(
+	loaderExitWithErrorCounter = f.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
 			Name:      "exit_with_error_count",
 			Help:      "counter for loader exits with error",
-		}, []string{"task", "source_id"})
+		}, []string{"task", "source_id", "resumable_err"})
 
-	remainingTimeGauge = metricsproxy.NewGaugeVec(
+	remainingTimeGauge = f.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "dm",
 			Subsystem: "loader",
@@ -118,17 +118,4 @@ func RegisterMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(progressGauge)
 	registry.MustRegister(loaderExitWithErrorCounter)
 	registry.MustRegister(remainingTimeGauge)
-}
-
-func (l *Loader) removeLabelValuesWithTaskInMetrics(task string) {
-	tidbExecutionErrorCounter.DeleteAllAboutLabels(prometheus.Labels{"task": task})
-	txnHistogram.DeleteAllAboutLabels(prometheus.Labels{"task": task})
-	queryHistogram.DeleteAllAboutLabels(prometheus.Labels{"task": task})
-	stmtHistogram.DeleteAllAboutLabels(prometheus.Labels{"task": task})
-	dataFileGauge.DeleteAllAboutLabels(prometheus.Labels{"task": task})
-	tableGauge.DeleteAllAboutLabels(prometheus.Labels{"task": task})
-	dataSizeGauge.DeleteAllAboutLabels(prometheus.Labels{"task": task})
-	progressGauge.DeleteAllAboutLabels(prometheus.Labels{"task": task})
-	loaderExitWithErrorCounter.DeleteAllAboutLabels(prometheus.Labels{"task": task})
-	remainingTimeGauge.DeleteAllAboutLabels(prometheus.Labels{"task": task})
 }

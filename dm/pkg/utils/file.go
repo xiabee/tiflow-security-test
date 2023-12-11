@@ -18,12 +18,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
-	"go.uber.org/zap"
-
+	"github.com/docker/go-units"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	"go.uber.org/zap"
 )
 
 // IsFileExists checks if file exists.
@@ -70,6 +71,21 @@ func GetFileSize(file string) (int64, error) {
 		return 0, terror.ErrGetFileSize.Delegate(err, file)
 	}
 	return stat.Size(), nil
+}
+
+// ParseFileSize parses the size in MiB from input.
+func ParseFileSize(fileSizeStr string, defaultSize uint64) (uint64, error) {
+	var fileSize uint64
+	if len(fileSizeStr) == 0 {
+		fileSize = defaultSize
+	} else if fileSizeMB, err := strconv.ParseUint(fileSizeStr, 10, 64); err == nil {
+		fileSize = fileSizeMB * units.MiB
+	} else if size, err := units.RAMInBytes(fileSizeStr); err == nil {
+		fileSize = uint64(size)
+	} else {
+		return 0, err
+	}
+	return fileSize, nil
 }
 
 // WriteFileAtomic writes file to temp and atomically move when everything else succeeds.

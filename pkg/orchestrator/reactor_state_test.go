@@ -25,15 +25,19 @@ import (
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/orchestrator/util"
+	putil "github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCheckCaptureAlive(t *testing.T) {
-	state := NewChangefeedReactorState(model.DefaultChangeFeedID("test"))
+	state := NewChangefeedReactorState(etcd.DefaultCDCClusterID,
+		model.DefaultChangeFeedID("test"))
 	stateTester := NewReactorStateTester(t, state, nil)
 	state.CheckCaptureAlive("6bbc01c8-0605-4f86-a0f9-b3119109b225")
 	require.Contains(t, stateTester.ApplyPatches().Error(), "[CDC:ErrLeaseExpired]")
-	err := stateTester.Update("/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225", []byte(`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225","address":"127.0.0.1:8300"}`))
+	err := stateTester.Update(etcd.DefaultClusterAndMetaPrefix+
+		"/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+		[]byte(`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225","address":"127.0.0.1:8300"}`))
 	require.Nil(t, err)
 	state.CheckCaptureAlive("6bbc01c8-0605-4f86-a0f9-b3119109b225")
 	stateTester.MustApplyPatches()
@@ -59,26 +63,15 @@ func TestChangefeedStateUpdate(t *testing.T) {
             "rules": [
                 "*.*"
             ],
-            "ignore-txn-start-ts": null,
-            "ddl-allow-list": null
+            "ignore-txn-start-ts": null
         },
         "mounter": {
             "worker-num": 16
         },
         "sink": {
             "dispatchers": null,
-            "protocol": "open-protocol"
-        },
-        "cyclic-replication": {
-            "enable": false,
-            "replica-id": 0,
-            "filter-replica-ids": null,
-            "id-buckets": 0,
-            "sync-ddl": false
-        },
-        "consistent": {
-            "level": "normal",
-            "storage": "local"
+            "protocol": "open-protocol",
+            "advance-timeout-in-sec": 150
         }
     },
     "state": "normal",
@@ -99,215 +92,198 @@ func TestChangefeedStateUpdate(t *testing.T) {
 		{ // common case
 			changefeedID: "test1",
 			updateKey: []string{
-				"/tidb/cdc/changefeed/info/test1",
-				"/tidb/cdc/job/test1",
-				"/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/info/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/status/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
 			},
 			updateValue: []string{
 				changefeedInfo,
-				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,"admin-job-type":0}`,
+				`{"checkpoint-ts":421980719742451713,"admin-job-type":0}`,
 				`{"checkpoint-ts":421980720003809281,"resolved-ts":421980720003809281,"count":0,"error":null}`,
-				`{"tables":{"45":{"start-ts":421980685886554116,"mark-table-id":0}},"operation":null,"admin-job-type":0}`,
-				`{"45":{"workload":1}}`,
 				`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225","address":"127.0.0.1:8300"}`,
 			},
 			expected: ChangefeedReactorState{
-				ID: model.DefaultChangeFeedID("test1"),
+				ClusterID: etcd.DefaultCDCClusterID,
+				ID:        model.DefaultChangeFeedID("test1"),
 				Info: &model.ChangeFeedInfo{
-					SinkURI:           "blackhole://",
-					Opts:              map[string]string{},
-					CreateTime:        createTime,
-					StartTs:           421980685886554116,
-					Engine:            model.SortInMemory,
-					State:             "normal",
-					SyncPointInterval: time.Minute * 10,
+					SinkURI:    "blackhole://",
+					CreateTime: createTime,
+					StartTs:    421980685886554116,
+					Engine:     model.SortInMemory,
+					State:      "normal",
 					Config: &config.ReplicaConfig{
 						CaseSensitive:    true,
 						CheckGCSafePoint: true,
 						Filter:           &config.FilterConfig{Rules: []string{"*.*"}},
 						Mounter:          &config.MounterConfig{WorkerNum: 16},
-						Sink:             &config.SinkConfig{Protocol: "open-protocol"},
-						Cyclic:           &config.CyclicConfig{},
-						Consistent:       &config.ConsistentConfig{Level: "normal", Storage: "local"},
+						Scheduler:        config.GetDefaultReplicaConfig().Scheduler,
+						Sink: &config.SinkConfig{
+							Protocol:            "open-protocol",
+							AdvanceTimeoutInSec: putil.AddressOf(uint(150)),
+						},
+						Consistent: config.GetDefaultReplicaConfig().Consistent,
+						Integrity:  config.GetDefaultReplicaConfig().Integrity,
+						ChangefeedErrorStuckDuration: config.
+							GetDefaultReplicaConfig().ChangefeedErrorStuckDuration,
+						SQLMode: config.GetDefaultReplicaConfig().SQLMode,
 					},
 				},
-				Status: &model.ChangeFeedStatus{CheckpointTs: 421980719742451713, ResolvedTs: 421980720003809281},
-				TaskStatuses: map[model.CaptureID]*model.TaskStatus{
-					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {
-						Tables: map[int64]*model.TableReplicaInfo{45: {StartTs: 421980685886554116}},
-					},
-				},
+				Status: &model.ChangeFeedStatus{CheckpointTs: 421980719742451713},
 				TaskPositions: map[model.CaptureID]*model.TaskPosition{
 					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {CheckPointTs: 421980720003809281, ResolvedTs: 421980720003809281},
-				},
-				Workloads: map[model.CaptureID]model.TaskWorkload{
-					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {45: {Workload: 1}},
 				},
 			},
 		},
 		{ // test multiple capture
 			changefeedID: "test1",
 			updateKey: []string{
-				"/tidb/cdc/changefeed/info/test1",
-				"/tidb/cdc/job/test1",
-				"/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
-				"/tidb/cdc/task/position/666777888/test1",
-				"/tidb/cdc/task/status/666777888/test1",
-				"/tidb/cdc/task/workload/666777888/test1",
-				"/tidb/cdc/capture/666777888",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/info/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/status/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/666777888/test1",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/capture/666777888",
 			},
 			updateValue: []string{
 				changefeedInfo,
-				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,"admin-job-type":0}`,
+				`{"checkpoint-ts":421980719742451713,"admin-job-type":0}`,
 				`{"checkpoint-ts":421980720003809281,"resolved-ts":421980720003809281,"count":0,"error":null}`,
-				`{"tables":{"45":{"start-ts":421980685886554116,"mark-table-id":0}},"operation":null,"admin-job-type":0}`,
-				`{"45":{"workload":1}}`,
 				`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225","address":"127.0.0.1:8300"}`,
 				`{"checkpoint-ts":11332244,"resolved-ts":312321,"count":8,"error":null}`,
-				`{"tables":{"46":{"start-ts":412341234,"mark-table-id":0}},"operation":null,"admin-job-type":0}`,
-				`{"46":{"workload":3}}`,
 				`{"id":"666777888","address":"127.0.0.1:8300"}`,
 			},
 			expected: ChangefeedReactorState{
-				ID: model.DefaultChangeFeedID("test1"),
+				ClusterID: etcd.DefaultCDCClusterID,
+				ID:        model.DefaultChangeFeedID("test1"),
 				Info: &model.ChangeFeedInfo{
-					SinkURI:           "blackhole://",
-					Opts:              map[string]string{},
-					CreateTime:        createTime,
-					StartTs:           421980685886554116,
-					Engine:            model.SortInMemory,
-					State:             "normal",
-					SyncPointInterval: time.Minute * 10,
+					SinkURI:    "blackhole://",
+					CreateTime: createTime,
+					StartTs:    421980685886554116,
+					Engine:     model.SortInMemory,
+					State:      "normal",
 					Config: &config.ReplicaConfig{
 						CaseSensitive:    true,
 						CheckGCSafePoint: true,
 						Filter:           &config.FilterConfig{Rules: []string{"*.*"}},
 						Mounter:          &config.MounterConfig{WorkerNum: 16},
-						Sink:             &config.SinkConfig{Protocol: "open-protocol"},
-						Cyclic:           &config.CyclicConfig{},
-						Consistent:       &config.ConsistentConfig{Level: "normal", Storage: "local"},
+						Sink: &config.SinkConfig{
+							Protocol:            "open-protocol",
+							AdvanceTimeoutInSec: putil.AddressOf(uint(150)),
+						},
+						Consistent: config.GetDefaultReplicaConfig().Consistent,
+						Scheduler:  config.GetDefaultReplicaConfig().Scheduler,
+						Integrity:  config.GetDefaultReplicaConfig().Integrity,
+						ChangefeedErrorStuckDuration: config.
+							GetDefaultReplicaConfig().ChangefeedErrorStuckDuration,
+						SQLMode: config.GetDefaultReplicaConfig().SQLMode,
 					},
 				},
-				Status: &model.ChangeFeedStatus{CheckpointTs: 421980719742451713, ResolvedTs: 421980720003809281},
-				TaskStatuses: map[model.CaptureID]*model.TaskStatus{
-					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {
-						Tables: map[int64]*model.TableReplicaInfo{45: {StartTs: 421980685886554116}},
-					},
-					"666777888": {
-						Tables: map[int64]*model.TableReplicaInfo{46: {StartTs: 412341234}},
-					},
-				},
+				Status: &model.ChangeFeedStatus{CheckpointTs: 421980719742451713},
 				TaskPositions: map[model.CaptureID]*model.TaskPosition{
 					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {CheckPointTs: 421980720003809281, ResolvedTs: 421980720003809281},
 					"666777888":                            {CheckPointTs: 11332244, ResolvedTs: 312321, Count: 8},
-				},
-				Workloads: map[model.CaptureID]model.TaskWorkload{
-					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {45: {Workload: 1}},
-					"666777888":                            {46: {Workload: 3}},
 				},
 			},
 		},
 		{ // testing changefeedID not match
 			changefeedID: "test1",
 			updateKey: []string{
-				"/tidb/cdc/changefeed/info/test1",
-				"/tidb/cdc/job/test1",
-				"/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
-				"/tidb/cdc/changefeed/info/test-fake",
-				"/tidb/cdc/job/test-fake",
-				"/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-fake",
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-fake",
-				"/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-fake",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/info/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/status/test1",
+
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/info/test-fake",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/status/test-fake",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test-fake",
 			},
 			updateValue: []string{
 				changefeedInfo,
-				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,"admin-job-type":0}`,
+				`{"checkpoint-ts":421980719742451713,"admin-job-type":0}`,
 				`{"checkpoint-ts":421980720003809281,"resolved-ts":421980720003809281,"count":0,"error":null}`,
-				`{"tables":{"45":{"start-ts":421980685886554116,"mark-table-id":0}},"operation":null,"admin-job-type":0}`,
-				`{"45":{"workload":1}}`,
 				`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225","address":"127.0.0.1:8300"}`,
-				`fake value`,
-				`fake value`,
 				`fake value`,
 				`fake value`,
 				`fake value`,
 			},
 			expected: ChangefeedReactorState{
-				ID: model.DefaultChangeFeedID("test1"),
+				ClusterID: etcd.DefaultCDCClusterID,
+				ID:        model.DefaultChangeFeedID("test1"),
 				Info: &model.ChangeFeedInfo{
-					SinkURI:           "blackhole://",
-					Opts:              map[string]string{},
-					CreateTime:        createTime,
-					StartTs:           421980685886554116,
-					Engine:            model.SortInMemory,
-					State:             "normal",
-					SyncPointInterval: time.Minute * 10,
+					SinkURI:    "blackhole://",
+					CreateTime: createTime,
+					StartTs:    421980685886554116,
+					Engine:     model.SortInMemory,
+					State:      "normal",
 					Config: &config.ReplicaConfig{
 						CaseSensitive:    true,
 						CheckGCSafePoint: true,
 						Filter:           &config.FilterConfig{Rules: []string{"*.*"}},
 						Mounter:          &config.MounterConfig{WorkerNum: 16},
-						Sink:             &config.SinkConfig{Protocol: "open-protocol"},
-						Cyclic:           &config.CyclicConfig{},
-						Consistent:       &config.ConsistentConfig{Level: "normal", Storage: "local"},
+						Sink: &config.SinkConfig{
+							Protocol:            "open-protocol",
+							AdvanceTimeoutInSec: putil.AddressOf(uint(150)),
+						},
+						Consistent: config.GetDefaultReplicaConfig().Consistent,
+						Scheduler:  config.GetDefaultReplicaConfig().Scheduler,
+						Integrity:  config.GetDefaultReplicaConfig().Integrity,
+						ChangefeedErrorStuckDuration: config.
+							GetDefaultReplicaConfig().ChangefeedErrorStuckDuration,
+						SQLMode: config.GetDefaultReplicaConfig().SQLMode,
 					},
 				},
-				Status: &model.ChangeFeedStatus{CheckpointTs: 421980719742451713, ResolvedTs: 421980720003809281},
-				TaskStatuses: map[model.CaptureID]*model.TaskStatus{
-					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {
-						Tables: map[int64]*model.TableReplicaInfo{45: {StartTs: 421980685886554116}},
-					},
-				},
+				Status: &model.ChangeFeedStatus{CheckpointTs: 421980719742451713},
 				TaskPositions: map[model.CaptureID]*model.TaskPosition{
 					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {CheckPointTs: 421980720003809281, ResolvedTs: 421980720003809281},
-				},
-				Workloads: map[model.CaptureID]model.TaskWorkload{
-					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {45: {Workload: 1}},
 				},
 			},
 		},
 		{ // testing value is nil
 			changefeedID: "test1",
 			updateKey: []string{
-				"/tidb/cdc/changefeed/info/test1",
-				"/tidb/cdc/job/test1",
-				"/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
-				"/tidb/cdc/task/position/666777888/test1",
-				"/tidb/cdc/task/status/666777888/test1",
-				"/tidb/cdc/task/workload/666777888/test1",
-				"/tidb/cdc/changefeed/info/test1",
-				"/tidb/cdc/job/test1",
-				"/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
-				"/tidb/cdc/task/workload/666777888/test1",
-				"/tidb/cdc/task/status/666777888/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/info/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/status/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/666777888/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/info/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/changefeed/status/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
 			},
 			updateValue: []string{
 				changefeedInfo,
 				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,"admin-job-type":0}`,
 				`{"checkpoint-ts":421980720003809281,"resolved-ts":421980720003809281,"count":0,"error":null}`,
-				`{"tables":{"45":{"start-ts":421980685886554116,"mark-table-id":0}},"operation":null,"admin-job-type":0}`,
-				`{"45":{"workload":1}}`,
 				`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225","address":"127.0.0.1:8300"}`,
 				`{"checkpoint-ts":11332244,"resolved-ts":312321,"count":8,"error":null}`,
-				`{"tables":{"46":{"start-ts":412341234,"mark-table-id":0}},"operation":null,"admin-job-type":0}`,
-				`{"46":{"workload":3}}`,
-				``,
-				``,
 				``,
 				``,
 				``,
@@ -316,44 +292,19 @@ func TestChangefeedStateUpdate(t *testing.T) {
 				``,
 			},
 			expected: ChangefeedReactorState{
-				ID:           model.DefaultChangeFeedID("test1"),
-				Info:         nil,
-				Status:       nil,
-				TaskStatuses: map[model.CaptureID]*model.TaskStatus{},
+				ClusterID: etcd.DefaultCDCClusterID,
+				ID:        model.DefaultChangeFeedID("test1"),
+				Info:      nil,
+				Status:    nil,
 				TaskPositions: map[model.CaptureID]*model.TaskPosition{
 					"666777888": {CheckPointTs: 11332244, ResolvedTs: 312321, Count: 8},
 				},
-				Workloads: map[model.CaptureID]model.TaskWorkload{},
-			},
-		},
-		{ // testing the same key case
-			changefeedID: "test1",
-			updateKey: []string{
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/status/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-			},
-			updateValue: []string{
-				`{"tables":{"45":{"start-ts":421980685886554116,"mark-table-id":0}},"operation":null,"admin-job-type":0}`,
-				`{"tables":{"46":{"start-ts":421980685886554116,"mark-table-id":0}},"operation":null,"admin-job-type":0}`,
-				``,
-				`{"tables":{"47":{"start-ts":421980685886554116,"mark-table-id":0}},"operation":null,"admin-job-type":0}`,
-			},
-			expected: ChangefeedReactorState{
-				ID: model.DefaultChangeFeedID("test1"),
-				TaskStatuses: map[model.CaptureID]*model.TaskStatus{
-					"6bbc01c8-0605-4f86-a0f9-b3119109b225": {
-						Tables: map[int64]*model.TableReplicaInfo{47: {StartTs: 421980685886554116}},
-					},
-				},
-				TaskPositions: map[model.CaptureID]*model.TaskPosition{},
-				Workloads:     map[model.CaptureID]model.TaskWorkload{},
 			},
 		},
 	}
 	for i, tc := range testCases {
-		state := NewChangefeedReactorState(model.DefaultChangeFeedID(tc.changefeedID))
+		state := NewChangefeedReactorState(etcd.DefaultCDCClusterID,
+			model.DefaultChangeFeedID(tc.changefeedID))
 		for i, k := range tc.updateKey {
 			value := []byte(tc.updateValue[i])
 			if len(value) == 0 {
@@ -368,7 +319,8 @@ func TestChangefeedStateUpdate(t *testing.T) {
 }
 
 func TestPatchInfo(t *testing.T) {
-	state := NewChangefeedReactorState(model.DefaultChangeFeedID("test1"))
+	state := NewChangefeedReactorState(etcd.DefaultCDCClusterID,
+		model.DefaultChangeFeedID("test1"))
 	stateTester := NewReactorStateTester(t, state, nil)
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
 		require.Nil(t, info)
@@ -380,11 +332,14 @@ func TestPatchInfo(t *testing.T) {
 		SinkURI: "123",
 		Engine:  model.SortUnified,
 		Config: &config.ReplicaConfig{
-			Filter:     defaultConfig.Filter,
-			Mounter:    defaultConfig.Mounter,
-			Sink:       defaultConfig.Sink,
-			Cyclic:     defaultConfig.Cyclic,
-			Consistent: defaultConfig.Consistent,
+			Filter:                       defaultConfig.Filter,
+			Mounter:                      defaultConfig.Mounter,
+			Sink:                         defaultConfig.Sink,
+			Consistent:                   defaultConfig.Consistent,
+			Scheduler:                    defaultConfig.Scheduler,
+			Integrity:                    defaultConfig.Integrity,
+			ChangefeedErrorStuckDuration: defaultConfig.ChangefeedErrorStuckDuration,
+			SQLMode:                      defaultConfig.SQLMode,
 		},
 	})
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
@@ -397,11 +352,14 @@ func TestPatchInfo(t *testing.T) {
 		StartTs: 6,
 		Engine:  model.SortUnified,
 		Config: &config.ReplicaConfig{
-			Filter:     defaultConfig.Filter,
-			Mounter:    defaultConfig.Mounter,
-			Sink:       defaultConfig.Sink,
-			Cyclic:     defaultConfig.Cyclic,
-			Consistent: defaultConfig.Consistent,
+			Filter:                       defaultConfig.Filter,
+			Mounter:                      defaultConfig.Mounter,
+			Sink:                         defaultConfig.Sink,
+			Consistent:                   defaultConfig.Consistent,
+			Scheduler:                    defaultConfig.Scheduler,
+			Integrity:                    defaultConfig.Integrity,
+			ChangefeedErrorStuckDuration: defaultConfig.ChangefeedErrorStuckDuration,
+			SQLMode:                      defaultConfig.SQLMode,
 		},
 	})
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
@@ -412,7 +370,8 @@ func TestPatchInfo(t *testing.T) {
 }
 
 func TestPatchStatus(t *testing.T) {
-	state := NewChangefeedReactorState(model.DefaultChangeFeedID("test1"))
+	state := NewChangefeedReactorState(etcd.DefaultCDCClusterID,
+		model.DefaultChangeFeedID("test1"))
 	stateTester := NewReactorStateTester(t, state, nil)
 	state.PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
 		require.Nil(t, status)
@@ -421,11 +380,11 @@ func TestPatchStatus(t *testing.T) {
 	stateTester.MustApplyPatches()
 	require.Equal(t, state.Status, &model.ChangeFeedStatus{CheckpointTs: 5})
 	state.PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		status.ResolvedTs = 6
+		status.CheckpointTs = 6
 		return status, true, nil
 	})
 	stateTester.MustApplyPatches()
-	require.Equal(t, state.Status, &model.ChangeFeedStatus{CheckpointTs: 5, ResolvedTs: 6})
+	require.Equal(t, state.Status, &model.ChangeFeedStatus{CheckpointTs: 6})
 	state.PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
 		return nil, true, nil
 	})
@@ -434,7 +393,8 @@ func TestPatchStatus(t *testing.T) {
 }
 
 func TestPatchTaskPosition(t *testing.T) {
-	state := NewChangefeedReactorState(model.DefaultChangeFeedID("test1"))
+	state := NewChangefeedReactorState(etcd.DefaultCDCClusterID,
+		model.DefaultChangeFeedID("test1"))
 	stateTester := NewReactorStateTester(t, state, nil)
 	captureID1 := "capture1"
 	captureID2 := "capture2"
@@ -497,50 +457,65 @@ func TestPatchTaskPosition(t *testing.T) {
 }
 
 func TestGlobalStateUpdate(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		updateKey   []string
 		updateValue []string
 		expected    GlobalReactorState
+		timeout     int
 	}{
 		{ // common case
 			updateKey: []string{
-				"/tidb/cdc/owner/22317526c4fc9a37",
-				"/tidb/cdc/owner/22317526c4fc9a38",
-				"/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
-				"/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test2",
-				"/tidb/cdc/task/workload/55551111/test2",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/owner/22317526c4fc9a37",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/owner/22317526c4fc9a38",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test2",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/upstream/12345",
 			},
 			updateValue: []string{
 				`6bbc01c8-0605-4f86-a0f9-b3119109b225`,
 				`55551111`,
 				`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225","address":"127.0.0.1:8300"}`,
-				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,"admin-job-type":0}`,
-				`{"45":{"workload":1}}`,
-				`{"46":{"workload":1}}`,
+				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,
+"admin-job-type":0}`,
+				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,
+"admin-job-type":0}`,
+				`{}`,
 			},
 			expected: GlobalReactorState{
-				Owner: map[string]struct{}{"22317526c4fc9a37": {}, "22317526c4fc9a38": {}},
+				ClusterID: etcd.DefaultCDCClusterID,
+				Owner:     map[string]struct{}{"22317526c4fc9a37": {}, "22317526c4fc9a38": {}},
 				Captures: map[model.CaptureID]*model.CaptureInfo{"6bbc01c8-0605-4f86-a0f9-b3119109b225": {
 					ID:            "6bbc01c8-0605-4f86-a0f9-b3119109b225",
 					AdvertiseAddr: "127.0.0.1:8300",
 				}},
+				Upstreams: map[model.UpstreamID]*model.UpstreamInfo{
+					model.UpstreamID(12345): {},
+				},
 				Changefeeds: map[model.ChangeFeedID]*ChangefeedReactorState{
 					model.DefaultChangeFeedID("test1"): {
-						ID:           model.DefaultChangeFeedID("test1"),
-						TaskStatuses: map[string]*model.TaskStatus{},
+						ClusterID: etcd.DefaultCDCClusterID,
+						ID:        model.DefaultChangeFeedID("test1"),
 						TaskPositions: map[model.CaptureID]*model.TaskPosition{
 							"6bbc01c8-0605-4f86-a0f9-b3119109b225": {CheckPointTs: 421980719742451713, ResolvedTs: 421980720003809281},
 						},
-						Workloads: map[string]model.TaskWorkload{},
 					},
 					model.DefaultChangeFeedID("test2"): {
-						ID:            model.DefaultChangeFeedID("test2"),
-						TaskStatuses:  map[string]*model.TaskStatus{},
-						TaskPositions: map[model.CaptureID]*model.TaskPosition{},
-						Workloads: map[model.CaptureID]model.TaskWorkload{
-							"6bbc01c8-0605-4f86-a0f9-b3119109b225": {45: {Workload: 1}},
-							"55551111":                             {46: {Workload: 1}},
+						ClusterID: etcd.DefaultCDCClusterID,
+						ID:        model.DefaultChangeFeedID("test2"),
+						TaskPositions: map[model.CaptureID]*model.TaskPosition{
+							"6bbc01c8-0605-4f86-a0f9-b3119109b225": {
+								CheckPointTs: 421980719742451713,
+								ResolvedTs:   421980720003809281,
+							},
 						},
 					},
 				},
@@ -548,39 +523,50 @@ func TestGlobalStateUpdate(t *testing.T) {
 		},
 		{ // testing remove changefeed
 			updateKey: []string{
-				"/tidb/cdc/owner/22317526c4fc9a37",
-				"/tidb/cdc/owner/22317526c4fc9a38",
-				"/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
-				"/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test2",
-				"/tidb/cdc/task/workload/55551111/test2",
-				"/tidb/cdc/owner/22317526c4fc9a37",
-				"/tidb/cdc/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
-				"/tidb/cdc/task/workload/6bbc01c8-0605-4f86-a0f9-b3119109b225/test2",
-				"/tidb/cdc/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/owner/22317526c4fc9a37",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/owner/22317526c4fc9a38",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test2",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/owner/22317526c4fc9a37",
+				etcd.DefaultClusterAndNamespacePrefix +
+					"/task/position/6bbc01c8-0605-4f86-a0f9-b3119109b225/test1",
+				etcd.DefaultClusterAndMetaPrefix +
+					"/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
 			},
 			updateValue: []string{
 				`6bbc01c8-0605-4f86-a0f9-b3119109b225`,
 				`55551111`,
 				`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225","address":"127.0.0.1:8300"}`,
-				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,"admin-job-type":0}`,
-				`{"45":{"workload":1}}`,
-				`{"46":{"workload":1}}`,
-				``,
+				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,
+		"admin-job-type":0}`,
+				`{"resolved-ts":421980720003809281,"checkpoint-ts":421980719742451713,
+		"admin-job-type":0}`,
 				``,
 				``,
 				``,
 			},
+			timeout: 6,
 			expected: GlobalReactorState{
-				Owner:    map[string]struct{}{"22317526c4fc9a38": {}},
-				Captures: map[model.CaptureID]*model.CaptureInfo{},
+				ClusterID: etcd.DefaultCDCClusterID,
+				Owner:     map[string]struct{}{"22317526c4fc9a38": {}},
+				Captures:  map[model.CaptureID]*model.CaptureInfo{},
+				Upstreams: map[model.UpstreamID]*model.UpstreamInfo{},
 				Changefeeds: map[model.ChangeFeedID]*ChangefeedReactorState{
 					model.DefaultChangeFeedID("test2"): {
-						ID:            model.DefaultChangeFeedID("test2"),
-						TaskStatuses:  map[string]*model.TaskStatus{},
-						TaskPositions: map[model.CaptureID]*model.TaskPosition{},
-						Workloads: map[model.CaptureID]model.TaskWorkload{
-							"55551111": {46: {Workload: 1}},
+						ClusterID: etcd.DefaultCDCClusterID,
+						ID:        model.DefaultChangeFeedID("test2"),
+						TaskPositions: map[model.CaptureID]*model.TaskPosition{
+							"6bbc01c8-0605-4f86-a0f9-b3119109b225": {
+								CheckPointTs: 421980719742451713,
+								ResolvedTs:   421980720003809281,
+							},
 						},
 					},
 				},
@@ -588,7 +574,7 @@ func TestGlobalStateUpdate(t *testing.T) {
 		},
 	}
 	for _, tc := range testCases {
-		state := NewGlobalState()
+		state := NewGlobalState(etcd.DefaultCDCClusterID, 10)
 		for i, k := range tc.updateKey {
 			value := []byte(tc.updateValue[i])
 			if len(value) == 0 {
@@ -597,13 +583,17 @@ func TestGlobalStateUpdate(t *testing.T) {
 			err := state.Update(util.NewEtcdKey(k), value, false)
 			require.Nil(t, err)
 		}
+		time.Sleep(time.Duration(tc.timeout) * time.Second)
+		state.UpdatePendingChange()
 		require.True(t, cmp.Equal(state, &tc.expected, cmpopts.IgnoreUnexported(GlobalReactorState{}, ChangefeedReactorState{})),
 			cmp.Diff(state, &tc.expected, cmpopts.IgnoreUnexported(GlobalReactorState{}, ChangefeedReactorState{})))
 	}
 }
 
 func TestCaptureChangeHooks(t *testing.T) {
-	state := NewGlobalState()
+	t.Parallel()
+
+	state := NewGlobalState(etcd.DefaultCDCClusterID, 10)
 
 	var callCount int
 	state.onCaptureAdded = func(captureID model.CaptureID, addr string) {
@@ -623,17 +613,27 @@ func TestCaptureChangeHooks(t *testing.T) {
 	captureInfoBytes, err := json.Marshal(captureInfo)
 	require.Nil(t, err)
 
-	err = state.Update(util.NewEtcdKey(etcd.CaptureInfoKeyPrefix+"/capture-1"), captureInfoBytes, false)
+	err = state.Update(util.NewEtcdKey(
+		etcd.CaptureInfoKeyPrefix(etcd.DefaultCDCClusterID)+"/capture-1"),
+		captureInfoBytes, false)
 	require.Nil(t, err)
-	require.Equal(t, callCount, 1)
+	require.Eventually(t, func() bool {
+		return callCount == 1
+	}, time.Second*3, 10*time.Millisecond)
 
-	err = state.Update(util.NewEtcdKey(etcd.CaptureInfoKeyPrefix+"/capture-1"), nil /* delete */, false)
+	err = state.Update(util.NewEtcdKey(
+		etcd.CaptureInfoKeyPrefix(etcd.DefaultCDCClusterID)+"/capture-1"),
+		nil /* delete */, false)
 	require.Nil(t, err)
-	require.Equal(t, callCount, 2)
+	require.Eventually(t, func() bool {
+		state.UpdatePendingChange()
+		return callCount == 2
+	}, time.Second*10, 10*time.Millisecond)
 }
 
 func TestCheckChangefeedNormal(t *testing.T) {
-	state := NewChangefeedReactorState(model.DefaultChangeFeedID("test1"))
+	state := NewChangefeedReactorState(etcd.DefaultCDCClusterID,
+		model.DefaultChangeFeedID("test1"))
 	stateTester := NewReactorStateTester(t, state, nil)
 	state.CheckChangefeedNormal()
 	stateTester.MustApplyPatches()
@@ -641,29 +641,29 @@ func TestCheckChangefeedNormal(t *testing.T) {
 		return &model.ChangeFeedInfo{SinkURI: "123", AdminJobType: model.AdminNone, Config: &config.ReplicaConfig{}}, true, nil
 	})
 	state.PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		return &model.ChangeFeedStatus{ResolvedTs: 1, AdminJobType: model.AdminNone}, true, nil
+		return &model.ChangeFeedStatus{CheckpointTs: 1, AdminJobType: model.AdminNone}, true, nil
 	})
 	state.CheckChangefeedNormal()
 	stateTester.MustApplyPatches()
-	require.Equal(t, state.Status.ResolvedTs, uint64(1))
+	require.Equal(t, state.Status.CheckpointTs, uint64(1))
 
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
 		info.AdminJobType = model.AdminStop
 		return info, true, nil
 	})
 	state.PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		status.ResolvedTs = 2
+		status.CheckpointTs = 2
 		return status, true, nil
 	})
 	state.CheckChangefeedNormal()
 	stateTester.MustApplyPatches()
-	require.Equal(t, state.Status.ResolvedTs, uint64(1))
+	require.Equal(t, state.Status.CheckpointTs, uint64(1))
 
 	state.PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		status.ResolvedTs = 2
+		status.CheckpointTs = 2
 		return status, true, nil
 	})
 	state.CheckChangefeedNormal()
 	stateTester.MustApplyPatches()
-	require.Equal(t, state.Status.ResolvedTs, uint64(2))
+	require.Equal(t, state.Status.CheckpointTs, uint64(2))
 }

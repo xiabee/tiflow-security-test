@@ -16,6 +16,7 @@ package terror
 import (
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/pingcap/errors"
 )
@@ -24,7 +25,13 @@ const (
 	errBaseFormat = "[code=%d:class=%s:scope=%s:level=%s]"
 )
 
+// codeToErrorMap maps from error code to base error, it is used for error
+// retrieval by error code.
+var codeToErrorMap = new(sync.Map)
+
 // ErrCode is used as the unique identifier of a specific error type.
+//
+//go:generate stringer -type=ErrCode -trimprefix=code
 type ErrCode int
 
 // ErrClass represents a class of errors.
@@ -155,7 +162,7 @@ type Error struct {
 
 // New creates a new *Error instance.
 func New(code ErrCode, class ErrClass, scope ErrScope, level ErrLevel, message string, workaround string) *Error {
-	return &Error{
+	err := &Error{
 		code:       code,
 		class:      class,
 		scope:      scope,
@@ -163,6 +170,8 @@ func New(code ErrCode, class ErrClass, scope ErrScope, level ErrLevel, message s
 		message:    message,
 		workaround: workaround,
 	}
+	codeToErrorMap.Store(code, err)
+	return err
 }
 
 // Code returns ErrCode.
@@ -195,14 +204,27 @@ func (e *Error) Workaround() string {
 	return e.workaround
 }
 
+// ErrorWithoutWorkaround returns err msg without workaround, in some place like cloud we want display it separately.
+func (e *Error) ErrorWithoutWorkaround() string {
+	var str string
+	if e.getMsg() != "" {
+		str += fmt.Sprintf("Message: %s", e.getMsg())
+	}
+	if e.rawCause != nil {
+		if len(str) > 0 {
+			str += ", "
+		}
+		str += fmt.Sprintf("RawCause: %s", Message(e.rawCause))
+	}
+	return str
+}
+
 // Error implements error interface.
 func (e *Error) Error() string {
 	str := fmt.Sprintf(errBaseFormat, e.code, e.class, e.scope, e.level)
-	if e.getMsg() != "" {
-		str += fmt.Sprintf(", Message: %s", e.getMsg())
-	}
-	if e.rawCause != nil {
-		str += fmt.Sprintf(", RawCause: %s", Message(e.rawCause))
+	tmp := e.ErrorWithoutWorkaround()
+	if tmp != "" {
+		str += ", " + tmp
 	}
 	if e.workaround != "" {
 		str += fmt.Sprintf(", Workaround: %s", e.workaround)
@@ -391,4 +413,13 @@ func WithClass(err error, class ErrClass) error {
 	}
 	e.class = class
 	return e
+}
+
+// ErrorFromCode queries registered error from error code.
+func ErrorFromCode(code ErrCode) (*Error, bool) {
+	value, ok := codeToErrorMap.Load(code)
+	if !ok {
+		return nil, false
+	}
+	return value.(*Error), true
 }

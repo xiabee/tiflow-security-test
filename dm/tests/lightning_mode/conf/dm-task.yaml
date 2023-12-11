@@ -55,7 +55,8 @@ loaders:
   global:
     pool-size: 16
     dir: "./dumped_data"
-    import-mode: "sql"
+    import-mode: "physical"
+    on-duplicate-physical: "manual"
 
 syncers:
   global:

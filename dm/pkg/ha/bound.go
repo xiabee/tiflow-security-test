@@ -20,15 +20,14 @@ import (
 	"time"
 
 	"github.com/pingcap/failpoint"
-	"go.etcd.io/etcd/api/v3/mvccpb"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.uber.org/zap"
-
-	"github.com/pingcap/tiflow/dm/dm/common"
-	"github.com/pingcap/tiflow/dm/dm/config"
+	"github.com/pingcap/tiflow/dm/common"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/etcdutil"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
 )
 
 const (
@@ -43,7 +42,7 @@ const (
 // SourceBound represents the bound relationship between the DM-worker instance and the upstream MySQL source.
 type SourceBound struct {
 	Source string `json:"source"` // the source ID of the upstream.
-	Worker string `json:"worker"` // the name of the bounded DM-worker for the source.
+	Worker string `json:"worker"` // the name of the bound DM-worker for the source.
 
 	// only used to report to the caller of the watcher, do not marsh it.
 	// if it's true, it means the bound has been deleted in etcd.

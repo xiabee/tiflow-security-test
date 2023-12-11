@@ -25,14 +25,13 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/errno"
-	"go.uber.org/zap"
-
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
-	"github.com/pingcap/tiflow/dm/pkg/metricsproxy"
 	"github.com/pingcap/tiflow/dm/pkg/retry"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 )
 
 // BaseConn is the basic connection we use in dm
@@ -73,17 +72,33 @@ import (
 // each connection should have ability to retry on some common errors (e.g. tmysql.ErrTiKVServerTimeout) or maybe some specify errors in the future
 // and each connection also should have ability to reset itself during some specify connection error (e.g. driver.ErrBadConn).
 type BaseConn struct {
-	DBConn *sql.Conn
-
+	DBConn        *sql.Conn
+	Scope         terror.ErrScope
 	RetryStrategy retry.Strategy
 }
 
 // NewBaseConn builds BaseConn to connect real DB.
-func NewBaseConn(conn *sql.Conn, strategy retry.Strategy) *BaseConn {
+func NewBaseConn(conn *sql.Conn, scope terror.ErrScope, strategy retry.Strategy) *BaseConn {
 	if strategy == nil {
 		strategy = &retry.FiniteRetryStrategy{}
 	}
-	return &BaseConn{conn, strategy}
+	return &BaseConn{
+		DBConn:        conn,
+		Scope:         scope,
+		RetryStrategy: strategy,
+	}
+}
+
+// NewBaseConnForTest builds BaseConn to connect real DB for test.
+func NewBaseConnForTest(conn *sql.Conn, strategy retry.Strategy) *BaseConn {
+	if strategy == nil {
+		strategy = &retry.FiniteRetryStrategy{}
+	}
+	return &BaseConn{
+		DBConn:        conn,
+		Scope:         terror.ScopeNotSet,
+		RetryStrategy: strategy,
+	}
 }
 
 // SetRetryStrategy set retry strategy for baseConn.
@@ -118,8 +133,9 @@ func (conn *BaseConn) QuerySQL(tctx *tcontext.Context, query string, args ...int
 // ExecuteSQLWithIgnoreError executes sql on real DB, and will ignore some error and continue execute the next query.
 // return
 // 1. failed: (the index of sqls executed error, error)
-// 2. succeed: (len(sqls), nil).
-func (conn *BaseConn) ExecuteSQLWithIgnoreError(tctx *tcontext.Context, hVec *metricsproxy.HistogramVecProxy, task string, ignoreErr func(error) bool, queries []string, args ...[]interface{}) (int, error) {
+// 2. succeed: (rows affected, nil).
+func (conn *BaseConn) ExecuteSQLWithIgnoreError(tctx *tcontext.Context, hVec *prometheus.HistogramVec, task string, ignoreErr func(error) bool, queries []string, args ...[]interface{}) (int, error) {
+	var affect int64
 	// inject an error to trigger retry, this should be placed before the real execution of the SQL statement.
 	failpoint.Inject("retryableError", func(val failpoint.Value) {
 		if mark, ok := val.(string); ok {
@@ -171,23 +187,25 @@ func (conn *BaseConn) ExecuteSQLWithIgnoreError(tctx *tcontext.Context, hVec *me
 		}
 
 		startTime = time.Now()
-		_, err = txn.ExecContext(tctx.Context(), query, arg...)
-		if err == nil {
+		result, err2 := txn.ExecContext(tctx.Context(), query, arg...)
+		if err2 == nil {
+			rows, _ := result.RowsAffected()
+			affect += rows
 			if hVec != nil {
 				hVec.WithLabelValues("stmt", task).Observe(time.Since(startTime).Seconds())
 			}
 		} else {
-			if ignoreErr != nil && ignoreErr(err) {
+			if ignoreErr != nil && ignoreErr(err2) {
 				tctx.L().Warn("execute statement failed and will ignore this error",
 					zap.String("query", utils.TruncateString(query, -1)),
 					zap.String("argument", utils.TruncateInterface(arg, -1)),
-					log.ShortError(err))
+					log.ShortError(err2))
 				continue
 			}
 
 			tctx.L().ErrorFilterContextCanceled("execute statement failed",
 				zap.String("query", utils.TruncateString(query, -1)),
-				zap.String("argument", utils.TruncateInterface(arg, -1)), log.ShortError(err))
+				zap.String("argument", utils.TruncateInterface(arg, -1)), log.ShortError(err2))
 
 			startTime = time.Now()
 			rerr := txn.Rollback()
@@ -200,7 +218,7 @@ func (conn *BaseConn) ExecuteSQLWithIgnoreError(tctx *tcontext.Context, hVec *me
 				hVec.WithLabelValues("rollback", task).Observe(time.Since(startTime).Seconds())
 			}
 			// we should return the exec err, instead of the rollback rerr.
-			return i, terror.ErrDBExecuteFailed.Delegate(err, utils.TruncateString(query, -1))
+			return i, terror.ErrDBExecuteFailed.Delegate(err2, utils.TruncateString(query, -1))
 		}
 	}
 	startTime = time.Now()
@@ -211,14 +229,14 @@ func (conn *BaseConn) ExecuteSQLWithIgnoreError(tctx *tcontext.Context, hVec *me
 	if hVec != nil {
 		hVec.WithLabelValues("commit", task).Observe(time.Since(startTime).Seconds())
 	}
-	return l, nil
+	return int(affect), nil
 }
 
 // ExecuteSQL executes sql on real DB,
 // return
 // 1. failed: (the index of sqls executed error, error)
-// 2. succeed: (len(sqls), nil).
-func (conn *BaseConn) ExecuteSQL(tctx *tcontext.Context, hVec *metricsproxy.HistogramVecProxy, task string, queries []string, args ...[]interface{}) (int, error) {
+// 2. succeed: (rows affected, nil).
+func (conn *BaseConn) ExecuteSQL(tctx *tcontext.Context, hVec *prometheus.HistogramVec, task string, queries []string, args ...[]interface{}) (int, error) {
 	return conn.ExecuteSQLWithIgnoreError(tctx, hVec, task, nil, queries, args...)
 }
 
@@ -227,7 +245,7 @@ func (conn *BaseConn) ExecuteSQL(tctx *tcontext.Context, hVec *metricsproxy.Hist
 // The `queries` and `args` should be the same length.
 func (conn *BaseConn) ExecuteSQLsAutoSplit(
 	tctx *tcontext.Context,
-	hVec *metricsproxy.HistogramVecProxy,
+	hVec *prometheus.HistogramVec,
 	task string,
 	queries []string,
 	args ...[]interface{},
@@ -257,7 +275,17 @@ func (conn *BaseConn) ApplyRetryStrategy(tctx *tcontext.Context, params retry.Pa
 	return conn.RetryStrategy.Apply(tctx, params, operateFn)
 }
 
+// close returns the connection to the connection pool, has the same meaning of sql.Conn.Close.
 func (conn *BaseConn) close() error {
+	if conn == nil || conn.DBConn == nil {
+		return nil
+	}
+	return conn.DBConn.Close()
+}
+
+// forceClose will close the underlying connection completely,
+// should not be used by functions other than BaseDB.ForceCloseConn.
+func (conn *BaseConn) forceClose() error {
 	if conn == nil || conn.DBConn == nil {
 		return nil
 	}

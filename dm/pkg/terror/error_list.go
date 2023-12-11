@@ -195,6 +195,12 @@ const (
 	// pkg/shardddl/optimism.
 	codeShardDDLOptimismNeedSkipAndRedirect
 	codeShardDDLOptimismAddNotFullyDroppedColumn
+
+	// syncer.
+	codeSyncerCancelledDDL
+
+	// pkg/utils.
+	codeIncorrectReturnColumnsNum
 )
 
 // Config related error code list.
@@ -258,6 +264,13 @@ const (
 	codeConfigStartTimeTooLate
 	codeConfigLoaderDirInvalid
 	codeConfigLoaderS3NotSupport
+	codeConfigInvalidSafeModeDuration
+	codeConfigConfictSafeModeDurationAndSafeMode
+	codeConfigInvalidLoadPhysicalDuplicateResolution
+	codeConfigInvalidLoadPhysicalChecksum
+	codeConfigColumnMappingDeprecated
+	codeConfigInvalidLoadAnalyze
+	codeConfigStrictOptimisticShardMode
 )
 
 // Binlog operation error code list.
@@ -373,6 +386,9 @@ const (
 	codeLoadUnitGenBAList
 	codeLoadTaskWorkerNotMatch
 	codeLoadCheckPointNotMatch
+	codeLoadLightningRuntime
+	codeLoadLightningHasDup
+	codeLoadLightningChecksum
 )
 
 // Sync unit error code.
@@ -447,6 +463,7 @@ const (
 	codeSyncerUnsupportedStmt
 	codeSyncerGetEvent
 	codeSyncerDownstreamTableNotFound
+	codeSyncerReprocessWithSafeModeFail
 )
 
 // DM-master error code.
@@ -630,6 +647,7 @@ const (
 	codeValidatorValidateChange
 	codeValidatorNotFound
 	codeValidatorPanic
+	codeValidatorTooMuchPending
 )
 
 // Schema-tracker error code.
@@ -653,6 +671,7 @@ const (
 	codeSchemaTrackerCannotInitDownstreamParser
 	codeSchemaTrackerCannotMockDownstreamTable
 	codeSchemaTrackerCannotFetchDownstreamCreateTableStmt
+	codeSchemaTrackerIsClosed
 )
 
 // HA scheduler.
@@ -885,7 +904,8 @@ var (
 	ErrPreviousGTIDNotExist = New(codePreviousGTIDNotExist, ClassFunctional, ScopeInternal, LevelHigh, "no previous gtid event from binlog %s", "")
 
 	// pkg/utils.
-	ErrNoMasterStatus = New(codeNoMasterStatus, ClassFunctional, ScopeUpstream, LevelMedium, "upstream returns an empty result for SHOW MASTER STATUS", "Please check the upstream settings like privileges, RDS settings to read data from SHOW MASTER STATUS.")
+	ErrNoMasterStatus            = New(codeNoMasterStatus, ClassFunctional, ScopeUpstream, LevelMedium, "upstream returns an empty result for SHOW MASTER STATUS", "Please make sure binlog is enabled, and check the upstream settings like privileges, RDS settings to read data from SHOW MASTER STATUS.")
+	ErrIncorrectReturnColumnsNum = New(codeIncorrectReturnColumnsNum, ClassFunctional, ScopeUpstream, LevelMedium, "upstream returns incorrect number of columns for SHOW MASTER STATUS", "Please check the upstream settings like privileges, RDS settings to read data from SHOW MASTER STATUS.")
 
 	// pkg/binlog.
 	ErrBinlogNotLogColumn = New(codeBinlogNotLogColumn, ClassBinlogOp, ScopeUpstream, LevelHigh, "upstream didn't log enough columns in binlog", "Please check if session `binlog_row_image` variable is not FULL, restart task to the location from where FULL binlog_row_image is used.")
@@ -946,16 +966,23 @@ var (
 		"config '%s' regex pattern '%s' invalid, reason: %s", "Please check if params is correctly in the configuration file.")
 	ErrConfigOnlineDDLMistakeRegex = New(codeConfigOnlineDDLMistakeRegex, ClassConfig, ScopeInternal, LevelHigh,
 		"online ddl sql '%s' invalid, table %s fail to match '%s' online ddl regex", "Please update your `shadow-table-rules` or `trash-table-rules` in the configuration file.")
-	ErrOpenAPITaskConfigExist              = New(codeConfigOpenAPITaskConfigExist, ClassConfig, ScopeInternal, LevelLow, "the openapi task config for '%s' already exist", "If you want to override it, please use the overwrite flag.")
-	ErrOpenAPITaskConfigNotExist           = New(codeConfigOpenAPITaskConfigNotExist, ClassConfig, ScopeInternal, LevelLow, "the openapi task config for '%s' does not exist", "")
-	ErrConfigCollationCompatibleNotSupport = New(codeCollationCompatibleNotSupport, ClassConfig, ScopeInternal, LevelMedium, "collation compatible %s not supported", "Please check the `collation_compatible` config in task configuration file, which can be set to `loose`/`strict`.")
-	ErrConfigInvalidLoadMode               = New(codeConfigInvalidLoadMode, ClassConfig, ScopeInternal, LevelMedium, "invalid load mode '%s'", "Please choose a valid value in ['sql', 'loader']")
-	ErrConfigInvalidDuplicateResolution    = New(codeConfigInvalidLoadDuplicateResolution, ClassConfig, ScopeInternal, LevelMedium, "invalid load on-duplicate '%s'", "Please choose a valid value in ['replace', 'error', 'ignore']")
-	ErrConfigValidationMode                = New(codeConfigValidationMode, ClassConfig, ScopeInternal, LevelHigh, "invalid validation mode", "Please check `validation-mode` config in task configuration file.")
-	ErrContinuousValidatorCfgNotFound      = New(codeContinuousValidatorCfgNotFound, ClassConfig, ScopeInternal, LevelMedium, "mysql-instance(%d)'s continuous validator config %s not exist", "Please check the `continuous-validator-config-name` config in task configuration file.")
-	ErrConfigStartTimeTooLate              = New(codeConfigStartTimeTooLate, ClassConfig, ScopeInternal, LevelHigh, "start-time %s is too late, no binlog location matches it", "Please check the `--start-time` is expected or try again later.")
-	ErrConfigLoaderDirInvalid              = New(codeConfigLoaderDirInvalid, ClassConfig, ScopeInternal, LevelHigh, "loader's dir %s is invalid", "Please check the `dir` config in task configuration file.")
-	ErrConfigLoaderS3NotSupport            = New(codeConfigLoaderS3NotSupport, ClassConfig, ScopeInternal, LevelHigh, "loader's dir %s is s3 dir, but s3 is not supported", "Please check the `dir` config in task configuration file and you can use `Lightning` by set config `import-mode` be `sql` which supports s3 instead.")
+	ErrOpenAPITaskConfigExist                   = New(codeConfigOpenAPITaskConfigExist, ClassConfig, ScopeInternal, LevelLow, "the openapi task config for '%s' already exist", "If you want to override it, please use the overwrite flag.")
+	ErrOpenAPITaskConfigNotExist                = New(codeConfigOpenAPITaskConfigNotExist, ClassConfig, ScopeInternal, LevelLow, "the openapi task config for '%s' does not exist", "")
+	ErrConfigCollationCompatibleNotSupport      = New(codeCollationCompatibleNotSupport, ClassConfig, ScopeInternal, LevelMedium, "collation compatible %s not supported", "Please check the `collation_compatible` config in task configuration file, which can be set to `loose`/`strict`.")
+	ErrConfigInvalidLoadMode                    = New(codeConfigInvalidLoadMode, ClassConfig, ScopeInternal, LevelMedium, "invalid load mode '%s'", "Please choose a valid value in ['logical', 'physical']")
+	ErrConfigInvalidDuplicateResolution         = New(codeConfigInvalidLoadDuplicateResolution, ClassConfig, ScopeInternal, LevelMedium, "invalid load on-duplicate-logical or on-duplicate option '%s'", "Please choose a valid value in ['replace', 'error', 'ignore'] or leave it empty.")
+	ErrConfigValidationMode                     = New(codeConfigValidationMode, ClassConfig, ScopeInternal, LevelHigh, "invalid validation mode", "Please check `validation-mode` config in task configuration file.")
+	ErrContinuousValidatorCfgNotFound           = New(codeContinuousValidatorCfgNotFound, ClassConfig, ScopeInternal, LevelMedium, "mysql-instance(%d)'s continuous validator config %s not exist", "Please check the `validator-config-name` config in task configuration file.")
+	ErrConfigStartTimeTooLate                   = New(codeConfigStartTimeTooLate, ClassConfig, ScopeInternal, LevelHigh, "start-time %s is too late, no binlog location matches it", "Please check the `--start-time` is expected or try again later.")
+	ErrConfigLoaderDirInvalid                   = New(codeConfigLoaderDirInvalid, ClassConfig, ScopeInternal, LevelHigh, "loader's dir %s is invalid", "Please check the `dir` config in task configuration file.")
+	ErrConfigLoaderS3NotSupport                 = New(codeConfigLoaderS3NotSupport, ClassConfig, ScopeInternal, LevelHigh, "loader's dir %s is s3 dir, but s3 is not supported", "Please check the `dir` config in task configuration file and you can use `Lightning` by set config `import-mode` be `sql` which supports s3 instead.")
+	ErrConfigInvalidSafeModeDuration            = New(codeConfigInvalidSafeModeDuration, ClassConfig, ScopeInternal, LevelMedium, "safe-mode-duration '%s' parsed failed: %v", "Please check the `safe-mode-duration` is correct.")
+	ErrConfigConfictSafeModeDurationAndSafeMode = New(codeConfigConfictSafeModeDurationAndSafeMode, ClassConfig, ScopeInternal, LevelLow, "safe-mode(true) conflicts with safe-mode-duration(0s)", "Please set safe-mode to false or safe-mode-duration to non-zero.")
+	ErrConfigInvalidPhysicalDuplicateResolution = New(codeConfigInvalidLoadPhysicalDuplicateResolution, ClassConfig, ScopeInternal, LevelMedium, "invalid load on-duplicate-physical option '%s'", "Please choose a valid value in ['none', 'manual'] or leave it empty.")
+	ErrConfigInvalidPhysicalChecksum            = New(codeConfigInvalidLoadPhysicalChecksum, ClassConfig, ScopeInternal, LevelMedium, "invalid load checksum-physical option '%s'", "Please choose a valid value in ['required', 'optional', 'off'] or leave it empty.")
+	ErrConfigColumnMappingDeprecated            = New(codeConfigColumnMappingDeprecated, ClassConfig, ScopeInternal, LevelHigh, "column-mapping is not supported since v6.6.0", "Please use extract-table/extract-schema/extract-source to handle data conflict when merge tables. See https://docs.pingcap.com/tidb/v6.4/task-configuration-file-full#task-configuration-file-template-advanced")
+	ErrConfigInvalidLoadAnalyze                 = New(codeConfigInvalidLoadAnalyze, ClassConfig, ScopeInternal, LevelMedium, "invalid load analyze option '%s'", "Please choose a valid value in ['required', 'optional', 'off'] or leave it empty.")
+	ErrConfigStrictOptimisticShardMode          = New(codeConfigStrictOptimisticShardMode, ClassConfig, ScopeInternal, LevelMedium, "cannot enable `strict-optimistic-shard-mode` while `shard-mode` is not `optimistic`", "Please set `shard-mode` to `optimistic` if you want to enable `strict-optimistic-shard-mode`.")
 
 	// Binlog operation error.
 	ErrBinlogExtractPosition = New(codeBinlogExtractPosition, ClassBinlogOp, ScopeInternal, LevelHigh, "", "")
@@ -1057,6 +1084,9 @@ var (
 	ErrLoadUnitGenBAList           = New(codeLoadUnitGenBAList, ClassLoadUnit, ScopeInternal, LevelHigh, "generate block allow list", "Please check the `block-allow-list` config in task configuration file.")
 	ErrLoadTaskWorkerNotMatch      = New(codeLoadTaskWorkerNotMatch, ClassFunctional, ScopeInternal, LevelHigh, "different worker in load stage, previous worker: %s, current worker: %s", "Please check if the previous worker is online.")
 	ErrLoadTaskCheckPointNotMatch  = New(codeLoadCheckPointNotMatch, ClassFunctional, ScopeInternal, LevelHigh, "inconsistent checkpoints between loader and target database", "If you want to redo the whole task, please check that you have not forgotten to add -remove-meta flag for start-task command.")
+	ErrLoadLightningRuntime        = New(codeLoadLightningRuntime, ClassLoadUnit, ScopeInternal, LevelHigh, "", "")
+	ErrLoadLightningHasDup         = New(codeLoadLightningHasDup, ClassLoadUnit, ScopeInternal, LevelMedium, "physical import finished but the data has duplication, please check `%s`.`%s` to see the duplication", "You can refer to https://docs.pingcap.com/tidb/stable/tidb-lightning-physical-import-mode-usage#conflict-detection to manually insert data and resume the task.")
+	ErrLoadLightningChecksum       = New(codeLoadLightningChecksum, ClassLoadUnit, ScopeInternal, LevelMedium, "checksum mismatched, KV number in source files: %s, KV number in TiDB cluster: %s", "If TiDB cluster has more KV, please check if the migrated tables are empty before the task. If source files have more KV, please set `on-duplicate-physical` and restart the task to see data duplication. You can resume the task to ignore the error if you want.")
 
 	// Sync unit error.
 	ErrSyncerUnitPanic                   = New(codeSyncerUnitPanic, ClassSyncUnit, ScopeInternal, LevelHigh, "panic error: %v", "")
@@ -1130,6 +1160,8 @@ var (
 	ErrSyncerUnsupportedStmt                = New(codeSyncerUnsupportedStmt, ClassSyncUnit, ScopeInternal, LevelHigh, "`%s` statement not supported in %s mode", "")
 	ErrSyncerGetEvent                       = New(codeSyncerGetEvent, ClassSyncUnit, ScopeUpstream, LevelHigh, "get binlog event error: %v", "Please check if the binlog file could be parsed by `mysqlbinlog`.")
 	ErrSyncerDownstreamTableNotFound        = New(codeSyncerDownstreamTableNotFound, ClassSyncUnit, ScopeInternal, LevelHigh, "downstream table %s not found", "")
+	ErrSyncerCancelledDDL                   = New(codeSyncerCancelledDDL, ClassSyncUnit, ScopeInternal, LevelHigh, "DDL %s executed in background and met error", "Please manually check the error from TiDB and handle it.")
+	ErrSyncerReprocessWithSafeModeFail      = New(codeSyncerReprocessWithSafeModeFail, ClassSyncUnit, ScopeInternal, LevelMedium, "your `safe-mode-duration` in task.yaml is set to 0s, the task can't be re-processed without safe mode currently", "Please stop and re-start this task. If you want to start task successfully, you need set `safe-mode-duration` greater than `0s`.")
 
 	// DM-master error.
 	ErrMasterSQLOpNilRequest        = New(codeMasterSQLOpNilRequest, ClassDMMaster, ScopeInternal, LevelMedium, "nil request not valid", "")
@@ -1307,8 +1339,9 @@ var (
 	ErrValidatorGetEvent          = New(codeValidatorGetEvent, ClassValidator, ScopeInternal, LevelHigh, "failed to get event", "")
 	ErrValidatorProcessRowEvent   = New(codeValidatorProcessRowEvent, ClassValidator, ScopeInternal, LevelHigh, "failed to process event", "")
 	ErrValidatorValidateChange    = New(codeValidatorValidateChange, ClassValidator, ScopeInternal, LevelHigh, "failed to validate row change", "")
-	ErrValidatorNotFound          = New(codeValidatorNotFound, ClassValidator, ScopeNotSet, LevelMedium, "validator not found for task %s", "")
+	ErrValidatorNotFound          = New(codeValidatorNotFound, ClassValidator, ScopeNotSet, LevelMedium, "validator not found for task %s with source %s", "")
 	ErrValidatorPanic             = New(codeValidatorPanic, ClassValidator, ScopeInternal, LevelHigh, "panic error: %v", "")
+	ErrValidatorTooMuchPending    = New(codeValidatorTooMuchPending, ClassValidator, ScopeInternal, LevelMedium, "too much pending data, stop validator. row size(curr/max): %d/%d, row count(curr/max): %d/%d", "")
 
 	// Schema-tracker error.
 	ErrSchemaTrackerInvalidJSON        = New(codeSchemaTrackerInvalidJSON, ClassSchemaTracker, ScopeDownstream, LevelHigh, "saved schema of `%s`.`%s` is not proper JSON", "")
@@ -1316,7 +1349,7 @@ var (
 	ErrSchemaTrackerCannotCreateTable  = New(codeSchemaTrackerCannotCreateTable, ClassSchemaTracker, ScopeInternal, LevelHigh, "failed to create table for %v in schema tracker", "")
 	ErrSchemaTrackerCannotSerialize    = New(codeSchemaTrackerCannotSerialize, ClassSchemaTracker, ScopeInternal, LevelHigh, "failed to serialize table info for `%s`.`%s`", "")
 	ErrSchemaTrackerCannotGetTable     = New(codeSchemaTrackerCannotGetTable, ClassSchemaTracker, ScopeInternal, LevelHigh, "cannot get table info for %v from schema tracker", "")
-	ErrSchemaTrackerCannotExecDDL      = New(codeSchemaTrackerCannotExecDDL, ClassSchemaTracker, ScopeInternal, LevelHigh, "cannot track DDL: %s", "")
+	ErrSchemaTrackerCannotExecDDL      = New(codeSchemaTrackerCannotExecDDL, ClassSchemaTracker, ScopeInternal, LevelHigh, "cannot track DDL: %s", "You can use handle-error to replace or skip this DDL.")
 	ErrSchemaTrackerMarshalJSON        = New(codeSchemaTrackerMarshalJSON, ClassSchemaTracker, ScopeDownstream, LevelHigh, "can not marshal struct maybe `%v` is unable to serialize", "")
 	ErrSchemaTrackerUnMarshalJSON      = New(codeSchemaTrackerUnMarshalJSON, ClassSchemaTracker, ScopeDownstream, LevelHigh, "can not unmarshal json maybe `%s` is not proper JSON", "")
 	ErrSchemaTrackerUnSchemaNotExist   = New(codeSchemaTrackerUnSchemaNotExist, ClassSchemaTracker, ScopeDownstream, LevelHigh, "can not find `%s` in tracker", "")
@@ -1342,7 +1375,7 @@ var (
 		"failed to mock downstream table by create table statement %v in schema tracker", "")
 	ErrSchemaTrackerCannotFetchDownstreamCreateTableStmt = New(codeSchemaTrackerCannotFetchDownstreamCreateTableStmt, ClassSchemaTracker, ScopeInternal, LevelHigh,
 		"failed to fetch downstream table %v by show create table statement in schema tracker", "")
-
+	ErrSchemaTrackerIsClosed = New(codeSchemaTrackerIsClosed, ClassSchemaTracker, ScopeInternal, LevelHigh, "schema tracker is closed", "")
 	// HA scheduler.
 	ErrSchedulerNotStarted                   = New(codeSchedulerNotStarted, ClassScheduler, ScopeInternal, LevelHigh, "the scheduler has not started", "")
 	ErrSchedulerStarted                      = New(codeSchedulerStarted, ClassScheduler, ScopeInternal, LevelMedium, "the scheduler has already started", "")

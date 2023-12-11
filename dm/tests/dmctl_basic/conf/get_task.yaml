@@ -2,6 +2,7 @@ name: test
 task-mode: all
 is-sharding: true
 shard-mode: pessimistic
+strict-optimistic-shard-mode: false
 ignore-checking-items: []
 meta-schema: dm_meta
 enable-heartbeat: false
@@ -24,8 +25,7 @@ mysql-instances:
   meta: null
   filter-rules:
   - filter-01
-  column-mapping-rules:
-  - cm-01
+  column-mapping-rules: []
   route-rules:
   - route-01
   - route-02
@@ -41,13 +41,12 @@ mysql-instances:
   syncer-config-name: sync-01
   syncer: null
   syncer-thread: 0
-  continuous-validator-config-name: validator-01
+  validator-config-name: validator-01
 - source-id: mysql-replica-02
   meta: null
   filter-rules:
   - filter-02
-  column-mapping-rules:
-  - cm-02
+  column-mapping-rules: []
   route-rules:
   - route-01
   - route-02
@@ -63,7 +62,7 @@ mysql-instances:
   syncer-config-name: sync-01
   syncer: null
   syncer-thread: 0
-  continuous-validator-config-name: validator-01
+  validator-config-name: validator-01
 online-ddl: true
 shadow-table-rules: []
 trash-table-rules: []
@@ -94,31 +93,7 @@ filters:
     sql-pattern:
     - alter table .* add column aaa int
     action: Ignore
-column-mappings:
-  cm-01:
-    schema-pattern: dmctl
-    table-pattern: t_*
-    source-column: id
-    target-column: id
-    expression: partition id
-    arguments:
-    - "1"
-    - ""
-    - t_
-    - ""
-    create-table-query: ""
-  cm-02:
-    schema-pattern: dmctl
-    table-pattern: t_*
-    source-column: id
-    target-column: id
-    expression: partition id
-    arguments:
-    - "2"
-    - ""
-    - t_
-    - ""
-    create-table-query: ""
+column-mappings: {}
 expression-filter: {}
 black-white-list: {}
 block-allow-list:
@@ -146,8 +121,17 @@ loaders:
   load-01:
     pool-size: 16
     dir: ./dumped_data
-    import-mode: sql
-    on-duplicate: replace
+    sorting-dir-physical: ./dumped_data.test.sorting
+    import-mode: logical
+    on-duplicate: ""
+    on-duplicate-logical: replace
+    on-duplicate-physical: none
+    disk-quota-physical: 0
+    checksum-physical: required
+    analyze: optional
+    range-concurrency: 0
+    compress-kv-pairs: ""
+    pd-addr: ""
 syncers:
   sync-01:
     meta-file: ""
@@ -162,6 +146,7 @@ syncers:
     enable-gtid: false
     disable-detect: false
     safe-mode: false
+    safe-mode-duration: 60s
     enable-ansi-quotes: false
 validators:
   validator-01:
@@ -170,8 +155,10 @@ validators:
     validate-interval: 10s
     check-interval: 5s
     row-error-delay: 30m0s
-    meta-flush-interval: 1m0s
+    meta-flush-interval: 5m0s
     batch-query-size: 100
+    max-pending-row-size: 500m
+    max-pending-row-count: 2147483647
 clean-dump-file: true
 ansi-quotes: false
 remove-meta: false

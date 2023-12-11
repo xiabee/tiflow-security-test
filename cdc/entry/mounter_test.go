@@ -11,6 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build intest
+// +build intest
+
 package entry
 
 import (
@@ -21,25 +24,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pingcap/log"
+	ticonfig "github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/executor"
+	tidbkv "github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/util/mock"
-	"github.com/pingcap/tiflow/pkg/sqlmodel"
-
-	"github.com/pingcap/log"
-	ticonfig "github.com/pingcap/tidb/config"
-	tidbkv "github.com/pingcap/tidb/kv"
 	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/store/mockstore"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/pkg/regionspan"
+	"github.com/pingcap/tiflow/pkg/config"
+	"github.com/pingcap/tiflow/pkg/filter"
+	"github.com/pingcap/tiflow/pkg/integrity"
+	"github.com/pingcap/tiflow/pkg/spanz"
+	"github.com/pingcap/tiflow/pkg/sqlmodel"
+	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
@@ -84,20 +90,20 @@ func TestMounterDisableOldValue(t *testing.T) {
 	}, {
 		tableName: "partition_table",
 		createTableDDL: `CREATE TABLE partition_table  (
-			id INT NOT NULL AUTO_INCREMENT UNIQUE KEY,
-			fname VARCHAR(25) NOT NULL,
-			lname VARCHAR(25) NOT NULL,
-			store_id INT NOT NULL,
-			department_id INT NOT NULL,
-			INDEX (department_id)
-		)
+				id INT NOT NULL AUTO_INCREMENT UNIQUE KEY,
+				fname VARCHAR(25) NOT NULL,
+				lname VARCHAR(25) NOT NULL,
+				store_id INT NOT NULL,
+				department_id INT NOT NULL,
+				INDEX (department_id)
+			)
 
-		PARTITION BY RANGE(id)  (
-			PARTITION p0 VALUES LESS THAN (5),
-			PARTITION p1 VALUES LESS THAN (10),
-			PARTITION p2 VALUES LESS THAN (15),
-			PARTITION p3 VALUES LESS THAN (20)
-		)`,
+			PARTITION BY RANGE(id)  (
+				PARTITION p0 VALUES LESS THAN (5),
+				PARTITION p1 VALUES LESS THAN (10),
+				PARTITION p2 VALUES LESS THAN (15),
+				PARTITION p3 VALUES LESS THAN (20)
+			)`,
 		values: [][]interface{}{
 			{1, "aa", "bb", 12, 12},
 			{6, "aac", "bab", 51, 51},
@@ -110,16 +116,16 @@ func TestMounterDisableOldValue(t *testing.T) {
 	}, {
 		tableName: "tp_int",
 		createTableDDL: `create table tp_int
-		(
-			id          int auto_increment,
-			c_tinyint   tinyint   null,
-			c_smallint  smallint  null,
-			c_mediumint mediumint null,
-			c_int       int       null,
-			c_bigint    bigint    null,
-			constraint pk
-				primary key (id)
-		);`,
+			(
+				id          int auto_increment,
+				c_tinyint   tinyint   null,
+				c_smallint  smallint  null,
+				c_mediumint mediumint null,
+				c_int       int       null,
+				c_bigint    bigint    null,
+				constraint pk
+					primary key (id)
+			);`,
 		values: [][]interface{}{
 			{1, 1, 2, 3, 4, 5},
 			{2},
@@ -154,12 +160,12 @@ func TestMounterDisableOldValue(t *testing.T) {
 			{
 				2, "89504E470D0A1A0A", "89504E470D0A1A0A", "89504E470D0A1A0A", "89504E470D0A1A0A", "89504E470D0A1A0A",
 				"89504E470D0A1A0A",
-				[]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
-				[]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
-				[]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
-				[]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
-				[]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
-				[]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
+				string([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}),
+				string([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}),
+				string([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}),
+				string([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}),
+				string([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}),
+				string([]byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}),
 			},
 			{
 				3, "bug free", "bug free", "bug free", "bug free", "bug free", "bug free", "bug free", "bug free",
@@ -276,9 +282,12 @@ func testMounterDisableOldValue(t *testing.T, tc struct {
 
 	tk.MustExec(tc.createTableDDL)
 
-	jobs, err := getAllHistoryDDLJob(store)
+	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	scheamStorage, err := NewSchemaStorage(nil, 0, nil, false, dummyChangeFeedID)
+	jobs, err := getAllHistoryDDLJob(store, f)
+	require.Nil(t, err)
+
+	scheamStorage, err := NewSchemaStorage(nil, 0, false, dummyChangeFeedID, util.RoleTester, f)
 	require.Nil(t, err)
 	for _, job := range jobs {
 		err := scheamStorage.HandleDDLJob(job)
@@ -292,6 +301,7 @@ func testMounterDisableOldValue(t *testing.T, tc struct {
 	}
 
 	for _, params := range tc.values {
+
 		insertSQL := prepareInsertSQL(t, tableInfo, len(params))
 		tk.MustExec(insertSQL, params...)
 	}
@@ -299,9 +309,11 @@ func testMounterDisableOldValue(t *testing.T, tc struct {
 	ver, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
 	scheamStorage.AdvanceResolvedTs(ver.Ver)
+	config := config.GetDefaultReplicaConfig()
+	filter, err := filter.NewFilter(config, "")
+	require.Nil(t, err)
 	mounter := NewMounter(scheamStorage,
-		model.DefaultChangeFeedID("c1"),
-		time.UTC, false).(*mounter)
+		model.DefaultChangeFeedID("c1"), time.UTC, filter, config.Integrity).(*mounter)
 	mounter.tz = time.Local
 	ctx := context.Background()
 
@@ -335,7 +347,6 @@ func testMounterDisableOldValue(t *testing.T, tc struct {
 		})
 		return rows
 	}
-
 	mountAndCheckRow := func(rowsBytes [][]int, f func(key []byte, value []byte) *model.RawKVEntry) int {
 		partitionInfo := tableInfo.GetPartitionInfo()
 		if partitionInfo == nil {
@@ -418,6 +429,10 @@ func prepareCheckSQL(t *testing.T, tableName string, cols []*model.Column) (stri
 			require.Nil(t, err)
 			continue
 		}
+		// convert types for tk.MustQuery
+		if bytes, ok := col.Value.([]byte); ok {
+			col.Value = string(bytes)
+		}
 		params = append(params, col.Value)
 		if col.Type == mysql.TypeJSON {
 			_, err = sb.WriteString(col.Name + " = CAST(? AS JSON)")
@@ -433,8 +448,8 @@ func walkTableSpanInStore(t *testing.T, store tidbkv.Storage, tableID int64, f f
 	txn, err := store.Begin()
 	require.Nil(t, err)
 	defer txn.Rollback() //nolint:errcheck
-	tableSpan := regionspan.GetTableSpan(tableID)
-	kvIter, err := txn.Iter(tableSpan.Start, tableSpan.End)
+	startKey, endKey := spanz.GetTableRange(tableID)
+	kvIter, err := txn.Iter(startKey, endKey)
 	require.Nil(t, err)
 	defer kvIter.Close()
 	for kvIter.Valid() {
@@ -977,10 +992,208 @@ func TestGetDefaultZeroValue(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		val, _, _, _ := getDefaultOrZeroValue(&tc.ColInfo)
+		_, val, _, _, _ := getDefaultOrZeroValue(&tc.ColInfo)
 		require.Equal(t, tc.Res, val, tc.Name)
-		val = getDDLDefaultDefinition(&tc.ColInfo)
+		val = GetDDLDefaultDefinition(&tc.ColInfo)
 		require.Equal(t, tc.Default, val, tc.Name)
+	}
+}
+
+func TestDecodeRow(t *testing.T) {
+	helper := NewSchemaTestHelper(t)
+	defer helper.Close()
+	helper.Tk().MustExec("set @@tidb_enable_clustered_index=1;")
+	helper.Tk().MustExec("use test;")
+
+	changefeed := model.DefaultChangeFeedID("changefeed-test-decode-row")
+
+	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
+	require.NoError(t, err)
+
+	cfg := config.GetDefaultReplicaConfig()
+
+	cfgWithChecksumEnabled := config.GetDefaultReplicaConfig()
+	cfgWithChecksumEnabled.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
+
+	for _, c := range []*config.ReplicaConfig{cfg, cfgWithChecksumEnabled} {
+		filter, err := filter.NewFilter(c, "")
+		require.NoError(t, err)
+
+		schemaStorage, err := NewSchemaStorage(helper.GetCurrentMeta(),
+			ver.Ver, false, changefeed, util.RoleTester, filter)
+		require.NoError(t, err)
+
+		// apply ddl to schemaStorage
+		ddl := "create table test.student(id int primary key, name char(50), age int, gender char(10))"
+		job := helper.DDL2Job(ddl)
+		err = schemaStorage.HandleDDLJob(job)
+		require.NoError(t, err)
+
+		ts := schemaStorage.GetLastSnapshot().CurrentTs()
+
+		schemaStorage.AdvanceResolvedTs(ver.Ver)
+
+		mounter := NewMounter(schemaStorage, changefeed, time.Local, filter, cfg.Integrity).(*mounter)
+
+		helper.Tk().MustExec(`insert into student values(1, "dongmen", 20, "male")`)
+		helper.Tk().MustExec(`update student set age = 27 where id = 1`)
+
+		ctx := context.Background()
+		decodeAndCheckRowInTable := func(tableID int64, f func(key []byte, value []byte) *model.RawKVEntry) {
+			walkTableSpanInStore(t, helper.Storage(), tableID, func(key []byte, value []byte) {
+				rawKV := f(key, value)
+
+				row, err := mounter.unmarshalAndMountRowChanged(ctx, rawKV)
+				require.NoError(t, err)
+				require.NotNil(t, row)
+
+				if row.Columns != nil {
+					require.NotNil(t, mounter.decoder)
+				}
+
+				if row.PreColumns != nil {
+					require.NotNil(t, mounter.preDecoder)
+				}
+			})
+		}
+
+		toRawKV := func(key []byte, value []byte) *model.RawKVEntry {
+			return &model.RawKVEntry{
+				OpType:  model.OpTypePut,
+				Key:     key,
+				Value:   value,
+				StartTs: ts - 1,
+				CRTs:    ts + 1,
+			}
+		}
+
+		tableInfo, ok := schemaStorage.GetLastSnapshot().TableByName("test", "student")
+		require.True(t, ok)
+
+		decodeAndCheckRowInTable(tableInfo.ID, toRawKV)
+		decodeAndCheckRowInTable(tableInfo.ID, toRawKV)
+
+		job = helper.DDL2Job("drop table student")
+		err = schemaStorage.HandleDDLJob(job)
+		require.NoError(t, err)
+	}
+}
+
+// TestDecodeEventIgnoreRow tests a PolymorphicEvent.Row is nil
+// if this event should be filter out by filter.
+func TestDecodeEventIgnoreRow(t *testing.T) {
+	helper := NewSchemaTestHelper(t)
+	defer helper.Close()
+	helper.Tk().MustExec("use test;")
+
+	ddls := []string{
+		"create table test.student(id int primary key, name char(50), age int, gender char(10))",
+		"create table test.computer(id int primary key, brand char(50), price int)",
+		"create table test.poet(id int primary key, name char(50), works char(100))",
+	}
+
+	cfID := model.DefaultChangeFeedID("changefeed-test-ignore-event")
+
+	cfg := config.GetDefaultReplicaConfig()
+	cfg.Filter.Rules = []string{"test.student", "test.computer"}
+	f, err := filter.NewFilter(cfg, "")
+	require.Nil(t, err)
+	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
+	require.Nil(t, err)
+
+	schemaStorage, err := NewSchemaStorage(helper.GetCurrentMeta(),
+		ver.Ver, false, cfID, util.RoleTester, f)
+	require.Nil(t, err)
+	// apply ddl to schemaStorage
+	for _, ddl := range ddls {
+		job := helper.DDL2Job(ddl)
+		err = schemaStorage.HandleDDLJob(job)
+		require.Nil(t, err)
+	}
+
+	ts := schemaStorage.GetLastSnapshot().CurrentTs()
+	schemaStorage.AdvanceResolvedTs(ver.Ver)
+	mounter := NewMounter(schemaStorage, cfID, time.Local, f, cfg.Integrity).(*mounter)
+
+	type testCase struct {
+		schema  string
+		table   string
+		columns []interface{}
+		ignored bool
+	}
+
+	testCases := []testCase{
+		{
+			schema:  "test",
+			table:   "student",
+			columns: []interface{}{1, "dongmen", 20, "male"},
+			ignored: false,
+		},
+		{
+			schema:  "test",
+			table:   "computer",
+			columns: []interface{}{1, "apple", 19999},
+			ignored: false,
+		},
+		// This case should be ignored by its table name.
+		{
+			schema:  "test",
+			table:   "poet",
+			columns: []interface{}{1, "李白", "静夜思"},
+			ignored: true,
+		},
+	}
+
+	ignoredTables := make([]string, 0)
+	tables := make([]string, 0)
+	for _, tc := range testCases {
+		tableInfo, ok := schemaStorage.GetLastSnapshot().TableByName(tc.schema, tc.table)
+		require.True(t, ok)
+		// TODO: add other dml event type
+		insertSQL := prepareInsertSQL(t, tableInfo, len(tc.columns))
+		if tc.ignored {
+			ignoredTables = append(ignoredTables, tc.table)
+		} else {
+			tables = append(tables, tc.table)
+		}
+		helper.tk.MustExec(insertSQL, tc.columns...)
+	}
+	ctx := context.Background()
+
+	decodeAndCheckRowInTable := func(tableID int64, f func(key []byte, value []byte) *model.RawKVEntry) int {
+		var rows int
+		walkTableSpanInStore(t, helper.Storage(), tableID, func(key []byte, value []byte) {
+			rawKV := f(key, value)
+			pEvent := model.NewPolymorphicEvent(rawKV)
+			err := mounter.DecodeEvent(ctx, pEvent)
+			require.Nil(t, err)
+			if pEvent.Row == nil {
+				return
+			}
+			row := pEvent.Row
+			rows++
+			require.Equal(t, row.Table.Schema, "test")
+			// Now we only allow filter dml event by table, so we only check row's table.
+			require.NotContains(t, ignoredTables, row.Table.Table)
+			require.Contains(t, tables, row.Table.Table)
+		})
+		return rows
+	}
+
+	toRawKV := func(key []byte, value []byte) *model.RawKVEntry {
+		return &model.RawKVEntry{
+			OpType:  model.OpTypePut,
+			Key:     key,
+			Value:   value,
+			StartTs: ts - 1,
+			CRTs:    ts + 1,
+		}
+	}
+
+	for _, tc := range testCases {
+		tableInfo, ok := schemaStorage.GetLastSnapshot().TableByName(tc.schema, tc.table)
+		require.True(t, ok)
+		decodeAndCheckRowInTable(tableInfo.ID, toRawKV)
 	}
 }
 
@@ -1016,7 +1229,7 @@ func TestBuildTableInfo(t *testing.T) {
 				"  UNIQUE KEY `idx_0` (`c2`(0),`c3`(0))\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
-				"  `omitted` unspecified CHARACTER SET  COLLATE  GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
+				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
 				"  `c3` bit(0) NOT NULL,\n" +
 				"  UNIQUE KEY `idx_0` (`c2`(0),`c3`(0))\n" +
@@ -1042,8 +1255,8 @@ func TestBuildTableInfo(t *testing.T) {
 			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) unsigned NOT NULL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
-				"  `omitted` unspecified CHARACTER SET  COLLATE  GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
-				"  `omitted` unspecified CHARACTER SET  COLLATE  GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
+				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
+				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
 				"  PRIMARY KEY (`c`(0),`c2`(0)) /*T![clustered_index] CLUSTERED */\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 		},
@@ -1064,26 +1277,69 @@ func TestBuildTableInfo(t *testing.T) {
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `a` int(0) NOT NULL,\n" +
-				"  `omitted` unspecified CHARACTER SET  COLLATE  GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
-				"  `omitted` unspecified CHARACTER SET  COLLATE  GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
+				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
+				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
 				"  PRIMARY KEY (`a`(0)) /*T![clustered_index] CLUSTERED */\n" +
+				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
+		},
+		{ // This case is to check the primary key is correctly identified by BuildTiDBTableInfo
+			"CREATE TABLE your_table (" +
+				" id INT NOT NULL," +
+				" name VARCHAR(50) NOT NULL," +
+				" email VARCHAR(100) NOT NULL," +
+				" age INT NOT NULL ," +
+				" address VARCHAR(200) NOT NULL," +
+				" PRIMARY KEY (id, name)," +
+				" UNIQUE INDEX idx_unique_1 (id, email, age)," +
+				" UNIQUE INDEX idx_unique_2 (name, email, address)" +
+				" );",
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
+				"  `id` int(0) NOT NULL,\n" +
+				"  `name` varchar(0) NOT NULL,\n" +
+				"  `email` varchar(0) NOT NULL,\n" +
+				"  `age` int(0) NOT NULL,\n" +
+				"  `address` varchar(0) NOT NULL,\n" +
+				"  PRIMARY KEY (`id`(0),`name`(0)) /*T![clustered_index] CLUSTERED */,\n" +
+				"  UNIQUE KEY `idx_1` (`id`(0),`email`(0),`age`(0)),\n" +
+				"  UNIQUE KEY `idx_2` (`name`(0),`email`(0),`address`(0))\n" +
+				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
+				"  `id` int(0) NOT NULL,\n" +
+				"  `name` varchar(0) NOT NULL,\n" +
+				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
+				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
+				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
+				"  PRIMARY KEY (`id`(0),`name`(0)) /*T![clustered_index] CLUSTERED */,\n" +
+				"  UNIQUE KEY `idx_1` (`id`(0),`omitted`(0),`omitted`(0)),\n" +
+				"  UNIQUE KEY `idx_2` (`name`(0),`omitted`(0),`omitted`(0))\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 		},
 	}
 	p := parser.New()
-	for _, c := range cases {
+	for i, c := range cases {
 		stmt, err := p.ParseOneStmt(c.origin, "", "")
 		require.NoError(t, err)
 		originTI, err := ddl.BuildTableInfoFromAST(stmt.(*ast.CreateTableStmt))
 		require.NoError(t, err)
 		cdcTableInfo := model.WrapTableInfo(0, "test", 0, originTI)
-		cols, err := datum2Column(cdcTableInfo, map[int64]types.Datum{}, true)
+		cols, _, _, _, err := datum2Column(cdcTableInfo, map[int64]types.Datum{})
 		require.NoError(t, err)
 		recoveredTI := model.BuildTiDBTableInfo(cols, cdcTableInfo.IndexColumnsOffset)
 		handle := sqlmodel.GetWhereHandle(recoveredTI, recoveredTI)
 		require.NotNil(t, handle.UniqueNotNullIdx)
 		require.Equal(t, c.recovered, showCreateTable(t, recoveredTI))
-
+		// make sure BuildTiDBTableInfo indentify the correct primary key
+		if i == 5 {
+			inexes := recoveredTI.Indices
+			primaryCount := 0
+			for i := range inexes {
+				if inexes[i].Primary {
+					primaryCount++
+				}
+			}
+			require.Equal(t, 1, primaryCount)
+			require.Equal(t, 2, len(handle.UniqueNotNullIdx.Columns))
+		}
 		// mimic the columns are set to nil when old value feature is disabled
 		for i := range cols {
 			if !cols[i].Flag.IsHandleKey() {

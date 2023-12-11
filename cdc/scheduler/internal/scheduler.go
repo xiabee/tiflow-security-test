@@ -17,6 +17,7 @@ import (
 	"context"
 
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/scheduler/schedulepb"
 )
 
 const (
@@ -42,6 +43,10 @@ type Scheduler interface {
 		currentTables []model.TableID,
 		// All captures that are alive according to the latest Etcd states.
 		aliveCaptures map[model.CaptureID]*model.CaptureInfo,
+		// barrier contains the barrierTs of those tables that have
+		// ddl jobs that need to be replicated. The Scheduler will
+		// broadcast the barrierTs to all captures through the Heartbeat.
+		barrier *schedulepb.BarrierWithMinTs,
 	) (newCheckpointTs, newResolvedTs model.Ts, err error)
 
 	// MoveTable requests that a table be moved to target.
@@ -52,7 +57,20 @@ type Scheduler interface {
 	// It is thread-safe
 	Rebalance()
 
-	// Close scheduler and release it's resource.
+	// DrainCapture is used to drop all tables situated at the target capture
+	// It is thread-safe.
+	DrainCapture(target model.CaptureID) (int, error)
+
+	// Close scheduler and release resource.
 	// It is not thread-safe.
 	Close(ctx context.Context)
+}
+
+// Query is for scheduler related owner job.
+// at the moment, only for `DrainCapture`, we can use this to handle all manual schedule task.
+// TODO: refactor `MoveTable` use Query to access the scheduler
+type Query struct {
+	CaptureID model.CaptureID
+
+	Resp interface{}
 }

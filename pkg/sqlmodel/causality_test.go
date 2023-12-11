@@ -17,9 +17,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCausalityKeys(t *testing.T) {
@@ -155,6 +154,18 @@ func TestGetCausalityString(t *testing.T) {
 			schema: `create table t65(a int unique, b varchar(16) primary key)`,
 			values: []interface{}{16, "xyz"},
 			keys:   []string{"16.a.db.tbl", "xyz.b.db.tbl"},
+		},
+		{
+			// case insensitive
+			schema: `create table t_ci(a int unique, b varchar(16) primary key)default charset=utf8 collate=utf8_unicode_ci`,
+			values: []interface{}{16, "XyZ"},
+			keys:   []string{"16.a.db.tbl", "xyz.b.db.tbl"},
+		},
+		{
+			// case sensitive
+			schema: `create table t_bin(a int unique, b varchar(16) primary key)default charset=utf8 collate=utf8_bin`,
+			values: []interface{}{16, "XyZ"},
+			keys:   []string{"16.a.db.tbl", "XyZ.b.db.tbl"},
 		},
 		{
 			// primary key of multiple columns

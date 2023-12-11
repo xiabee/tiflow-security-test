@@ -28,7 +28,7 @@ function kill_cdc_and_restart() {
 	status=$(curl -s http://127.0.0.1:8300/status)
 	cdc_pid=$(echo "$status" | jq '.pid')
 
-	kill $cdc_pid
+	kill_cdc_pid $cdc_pid
 	ensure $MAX_RETRIES check_capture_count $pd_addr 0
 	run_cdc_server --workdir $work_dir --binary $cdc_binary --addr "127.0.0.1:8300" --pd $pd_addr
 	ensure $MAX_RETRIES check_capture_count $pd_addr 1
@@ -39,7 +39,7 @@ export -f kill_cdc_and_restart
 
 function run() {
 	# kafka is not supported yet.
-	if [ "$SINK_TYPE" == "kafka" ]; then
+	if [ "$SINK_TYPE" != "mysql" ]; then
 		return
 	fi
 
@@ -56,7 +56,7 @@ function run() {
 	run_sql "CREATE table kill_owner_with_ddl.t1 (id int primary key auto_increment, val int);" ${UP_TIDB_HOST} ${UP_TIDB_PORT}
 	check_table_exists "kill_owner_with_ddl.t1" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 
-	export GO_FAILPOINTS='github.com/pingcap/tiflow/cdc/sink/mysql/MySQLSinkExecDDLDelay=return(true);github.com/pingcap/tiflow/cdc/capture/ownerFlushIntervalInject=return(10)'
+	export GO_FAILPOINTS='github.com/pingcap/tiflow/cdc/sink/ddlsink/mysql/MySQLSinkExecDDLDelay=return(true);github.com/pingcap/tiflow/cdc/capture/ownerFlushIntervalInject=return(10)'
 	kill_cdc_and_restart $pd_addr $WORK_DIR $CDC_BINARY
 
 	for i in $(seq 2 3); do

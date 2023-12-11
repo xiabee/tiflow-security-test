@@ -17,16 +17,15 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-	"github.com/stretchr/testify/suite"
-
-	"github.com/pingcap/tiflow/dm/dm/config"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/schema"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/dm/syncer/shardddl"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 )
 
 type optShardingGroupSuite struct {
@@ -74,6 +73,11 @@ func (s *optShardingGroupSuite) TestLowestFirstPosInOptGroups() {
 	k.removeShardingReSync(&ShardingReSync{targetTable: utils.UnpackTableID(db2tbl)})
 	// should be pos11 now, pos21 is totally resolved
 	require.Equal(s.T(), pos11.Position, k.lowestFirstLocationInGroups().Position)
+
+	// reset
+	k.Reset()
+	require.Len(s.T(), k.groups, 0)
+	require.Len(s.T(), k.shardingReSyncs, 0)
 }
 
 func (s *optShardingGroupSuite) TestSync() {
@@ -102,7 +106,7 @@ func (s *optShardingGroupSuite) TestSync() {
 		optimist:   shardddl.NewOptimist(&logger, nil, "", ""),
 		checkpoint: &mockCheckpoint{},
 	}
-	syncer.schemaTracker, err = schema.NewTracker(context.Background(), s.cfg.Name, defaultTestSessionCfg, syncer.downstreamTrackConn)
+	syncer.schemaTracker, err = schema.NewTestTracker(context.Background(), s.cfg.Name, syncer.downstreamTrackConn, log.L())
 	require.NoError(s.T(), err)
 
 	// case 1: mock receive resolved stage from dm-master when syncing other tables
@@ -111,7 +115,7 @@ func (s *optShardingGroupSuite) TestSync() {
 	require.True(s.T(), k.inConflictStage(utils.UnpackTableID(sourceTbls[3]), utils.UnpackTableID(db2tbl)))
 	syncer.resolveOptimisticDDL(&eventContext{
 		shardingReSyncCh: &shardingReSyncCh,
-		currentLocation:  &endPos3,
+		endLocation:      endPos3,
 	}, utils.UnpackTableID(sourceTbls[2]), utils.UnpackTableID(db2tbl))
 	require.False(s.T(), k.tableInConflict(utils.UnpackTableID(db2tbl)))
 	require.False(s.T(), k.inConflictStage(utils.UnpackTableID(sourceTbls[3]), utils.UnpackTableID(db2tbl)))
@@ -134,7 +138,7 @@ func (s *optShardingGroupSuite) TestSync() {
 	require.True(s.T(), k.inConflictStage(utils.UnpackTableID(sourceTbls[0]), utils.UnpackTableID(db1tbl)))
 	syncer.resolveOptimisticDDL(&eventContext{
 		shardingReSyncCh: &shardingReSyncCh,
-		currentLocation:  &endPos12,
+		endLocation:      endPos12,
 	}, utils.UnpackTableID(sourceTbls[1]), utils.UnpackTableID(db1tbl))
 	require.False(s.T(), k.tableInConflict(utils.UnpackTableID(db1tbl)))
 	require.False(s.T(), k.inConflictStage(utils.UnpackTableID(sourceTbls[0]), utils.UnpackTableID(db1tbl)))

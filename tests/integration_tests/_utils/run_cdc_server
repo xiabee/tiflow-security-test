@@ -28,6 +28,7 @@ config_path=
 data_dir=
 curl_status_cmd=
 supposed_to_fail="no"
+cluster_id="default"
 
 while [[ ${1} ]]; do
 	case "${1}" in
@@ -86,6 +87,10 @@ while [[ ${1} ]]; do
 		data_dir=${2}
 		shift
 		;;
+	--cluster-id)
+		cluster_id=${2}
+		shift
+		;;
 	*)
 		echo "Unknown parameter: ${1}" >&2
 		exit 1
@@ -115,8 +120,8 @@ if [[ "$restart" == "true" ]]; then
 		GO_FAILPOINTS=$failpoint $binary -test.coverprofile="$OUT_DIR/cov.$TEST_NAME.$pid.out" server \
 			--log-file $workdir/cdc$logsuffix.log \
 			--log-level $log_level \
-			--sorter-num-workerpool-goroutine 4 \
 			--data-dir "$data_dir" \
+			--cluster-id "$cluster_id" \
 			$config_path \
 			$tls \
 			$certcn \
@@ -131,8 +136,8 @@ else
 	GO_FAILPOINTS=$failpoint $binary -test.coverprofile="$OUT_DIR/cov.$TEST_NAME.$pid.out" server \
 		--log-file $workdir/cdc$logsuffix.log \
 		--log-level $log_level \
-		--sorter-num-workerpool-goroutine 4 \
 		--data-dir "$data_dir" \
+		--cluster-id "$cluster_id" \
 		$config_path \
 		$tls \
 		$certcn \

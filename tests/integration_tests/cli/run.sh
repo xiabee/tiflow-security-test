@@ -38,21 +38,20 @@ function run() {
 	TOPIC_NAME="ticdc-cli-test-$RANDOM"
 	case $SINK_TYPE in
 	kafka) SINK_URI="kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
+	storage) SINK_URI="file://$WORK_DIR/storage_test/$TOPIC_NAME?protocol=canal-json&enable-tidb-extension=true" ;;
 	*) SINK_URI="mysql://normal:123456@127.0.0.1:3306/" ;;
 	esac
 
 	uuid="custom-changefeed-name"
-	run_cdc_cli changefeed create --start-ts=$start_ts --sort-engine=memory --sink-uri="$SINK_URI" --tz="Asia/Shanghai" -c="$uuid"
-	if [ "$SINK_TYPE" == "kafka" ]; then
-		run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760"
-	fi
-
-	run_cdc_cli changefeed cyclic create-marktables \
-		--cyclic-upstream-dsn="root@tcp(${UP_TIDB_HOST}:${UP_TIDB_PORT})/"
+	run_cdc_cli changefeed create --start-ts=$start_ts --sink-uri="$SINK_URI" --tz="Asia/Shanghai" -c="$uuid"
+	case $SINK_TYPE in
+	kafka) run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
+	storage) run_storage_consumer $WORK_DIR $SINK_URI "" "" ;;
+	esac
 
 	# Make sure changefeed is created.
-	check_table_exists tidb_cdc.repl_mark_test_simple ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
-	check_table_exists tidb_cdc."\`repl_mark_test_simple-dash\`" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
+	check_table_exists test.simple ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
+	check_table_exists test."\`simple-dash\`" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 
 	check_changefeed_state "http://${UP_PD_HOST_1}:${UP_PD_PORT_1}" $uuid "normal" "null" ""
 
@@ -72,9 +71,9 @@ function run() {
 
 	# Update changefeed failed because changefeed is running
 	cat - >"$WORK_DIR/changefeed.toml" <<EOF
-case-sensitive = false
-[mounter]
-worker-num = 4
+case-sensitive = true
+[scheduler]
+enable-table-across-nodes = true
 EOF
 	set +e
 	update_result=$(cdc cli changefeed update --pd=$pd_addr --config="$WORK_DIR/changefeed.toml" --no-confirm --changefeed-id $uuid)
@@ -85,42 +84,30 @@ EOF
 
 	# Pause changefeed
 	run_cdc_cli changefeed --changefeed-id $uuid pause && sleep 3
-	jobtype=$(run_cdc_cli changefeed --changefeed-id $uuid query 2>&1 | grep 'admin-job-type' | grep -oE '[0-9]' | head -1)
-	if [[ $jobtype != 1 ]]; then
-		echo "[$(date)] <<<<< unexpect admin job type! expect 1 got ${jobtype} >>>>>"
-		exit 1
-	fi
 	check_changefeed_state "http://${UP_PD_HOST_1}:${UP_PD_PORT_1}" $uuid "stopped" "null" ""
 
 	# Update changefeed
 	run_cdc_cli changefeed update --pd=$pd_addr --config="$WORK_DIR/changefeed.toml" --no-confirm --changefeed-id $uuid
-	changefeed_info=$(run_cdc_cli changefeed query --changefeed-id $uuid 2>&1)
-	if [[ ! $changefeed_info == *"\"case-sensitive\": false"* ]]; then
+	changefeed_info=$(curl -s -X GET "http://127.0.0.1:8300/api/v2/changefeeds/$uuid/meta_info" 2>&1)
+	if [[ ! $changefeed_info == *"\"case_sensitive\":true"* ]]; then
 		echo "[$(date)] <<<<< changefeed info is not updated as expected ${changefeed_info} >>>>>"
 		exit 1
 	fi
-	if [[ ! $changefeed_info == *"\"worker-num\": 4"* ]]; then
-		echo "[$(date)] <<<<< changefeed info is not updated as expected ${changefeed_info} >>>>>"
-		exit 1
-	fi
-	if [[ ! $changefeed_info == *"\"sort-engine\": \"memory\""* ]]; then
-		echo "[$(date)] <<<<< changefeed info is not updated as expected ${changefeed_info} >>>>>"
-		exit 1
-	fi
-
-	jobtype=$(run_cdc_cli changefeed --changefeed-id $uuid query 2>&1 | grep 'admin-job-type' | grep -oE '[0-9]' | head -1)
-	if [[ $jobtype != 1 ]]; then
-		echo "[$(date)] <<<<< unexpect admin job type! expect 1 got ${jobtype} >>>>>"
-		exit 1
+	if [ "$SINK_TYPE" == "kafka" ]; then
+		if [[ ! $changefeed_info == *"\"enable_table_across_nodes\":true"* ]]; then
+			echo "[$(date)] <<<<< changefeed info is not updated as expected ${changefeed_info} >>>>>"
+			exit 1
+		fi
+	else
+		# Currently, MySQL changefeed does not support scale out feature.
+		if [[ $changefeed_info == *"\"enable_table_across_nodes\":true"* ]]; then
+			echo "[$(date)] <<<<< changefeed info is not updated as expected ${changefeed_info} >>>>>"
+			exit 1
+		fi
 	fi
 
 	# Resume changefeed
 	run_cdc_cli changefeed --changefeed-id $uuid resume && sleep 3
-	jobtype=$(run_cdc_cli changefeed --changefeed-id $uuid query 2>&1 | grep 'admin-job-type' | grep -oE '[0-9]' | head -1)
-	if [[ $jobtype != 0 ]]; then
-		echo "[$(date)] <<<<< unexpect admin job type! expect 0 got ${jobtype} >>>>>"
-		exit 1
-	fi
 	check_changefeed_state "http://${UP_PD_HOST_1}:${UP_PD_PORT_1}" $uuid "normal" "null" ""
 
 	# Remove changefeed
@@ -140,15 +127,17 @@ EOF
 	# Test Kafka SSL connection.
 	if [ "$SINK_TYPE" == "kafka" ]; then
 		SSL_TOPIC_NAME="ticdc-cli-test-ssl-$RANDOM"
-		SINK_URI="kafka://127.0.0.1:9093/$SSL_TOPIC_NAME?protocol=open-protocol&ca=${TLS_DIR}/ca.pem&cert=${TLS_DIR}/client.pem&key=${TLS_DIR}/client-key.pem&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760"
+		SINK_URI="kafka://127.0.0.1:9093/$SSL_TOPIC_NAME?protocol=open-protocol&ca=${TLS_DIR}/ca.pem&cert=${TLS_DIR}/client.pem&key=${TLS_DIR}/client-key.pem&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760&insecure-skip-verify=true"
 		run_cdc_cli changefeed create --start-ts=$start_ts --sink-uri="$SINK_URI" --tz="Asia/Shanghai"
 	fi
 
 	# Smoke test unsafe commands
 	echo "y" | run_cdc_cli unsafe delete-service-gc-safepoint
-	run_cdc_cli unsafe reset --no-confirm
+	run_cdc_cli unsafe reset --no-confirm --pd=$pd_addr
 	REGION_ID=$(pd-ctl -u=$pd_addr region | jq '.regions[0].id')
 	TS=$(cdc cli tso query --pd=$pd_addr)
+	# wait for owner online
+	sleep 3
 	run_cdc_cli unsafe resolve-lock --region=$REGION_ID
 	run_cdc_cli unsafe resolve-lock --region=$REGION_ID --ts=$TS
 

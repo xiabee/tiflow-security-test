@@ -19,13 +19,11 @@ import (
 
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
-	"go.uber.org/zap"
-
 	"github.com/pingcap/tiflow/dm/pkg/binlog/common"
 	"github.com/pingcap/tiflow/dm/pkg/binlog/reader"
-	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	"go.uber.org/zap"
 )
 
 // RResult represents a read operation result.
@@ -56,7 +54,7 @@ type Reader interface {
 type RConfig struct {
 	SyncConfig replication.BinlogSyncerConfig
 	Pos        mysql.Position
-	GTIDs      gtid.Set
+	GTIDs      mysql.GTIDSet
 	EnableGTID bool
 	MasterID   string // the identifier for the master, used when logging.
 }

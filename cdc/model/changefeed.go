@@ -18,14 +18,13 @@ import (
 	"math"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/cyclic/mark"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/pingcap/tiflow/pkg/version"
@@ -33,9 +32,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// DefaultNamespace is the default namespace value,
-// all the old changefeed will be put into default namespace
-const DefaultNamespace = "default"
+const (
+	// DefaultNamespace is the default namespace value,
+	// all the old changefeed will be put into default namespace
+	DefaultNamespace = "default"
+)
 
 // ChangeFeedID is the type for change feed ID
 type ChangeFeedID struct {
@@ -45,10 +46,23 @@ type ChangeFeedID struct {
 	ID        string
 }
 
+// String implements fmt.Stringer interface
+func (c ChangeFeedID) String() string {
+	return c.Namespace + "/" + c.ID
+}
+
 // DefaultChangeFeedID returns `ChangeFeedID` with default namespace
 func DefaultChangeFeedID(id string) ChangeFeedID {
 	return ChangeFeedID{
 		Namespace: DefaultNamespace,
+		ID:        id,
+	}
+}
+
+// ChangeFeedID4Test returns `ChangefeedID` with given namespace and id
+func ChangeFeedID4Test(namespace, id string) ChangeFeedID {
+	return ChangeFeedID{
+		Namespace: namespace,
 		ID:        id,
 	}
 }
@@ -67,13 +81,19 @@ const (
 type FeedState string
 
 // All FeedStates
+// Only `StateNormal` and `StatePending` changefeed is running,
+// others are stopped.
 const (
 	StateNormal   FeedState = "normal"
-	StateError    FeedState = "error"
+	StatePending  FeedState = "pending"
 	StateFailed   FeedState = "failed"
 	StateStopped  FeedState = "stopped"
 	StateRemoved  FeedState = "removed"
 	StateFinished FeedState = "finished"
+	StateWarning  FeedState = "warning"
+	// StateUnInitialized is used for the changefeed that has not been initialized
+	// it only exists in memory for a short time and will not be persisted to storage
+	StateUnInitialized FeedState = ""
 )
 
 // ToInt return an int for each `FeedState`, only use this for metrics.
@@ -81,7 +101,7 @@ func (s FeedState) ToInt() int {
 	switch s {
 	case StateNormal:
 		return 0
-	case StateError:
+	case StatePending:
 		return 1
 	case StateFailed:
 		return 2
@@ -91,6 +111,10 @@ func (s FeedState) ToInt() int {
 		return 4
 	case StateRemoved:
 		return 5
+	case StateWarning:
+		return 6
+	case StateUnInitialized:
+		return 7
 	}
 	// -1 for unknown feed state
 	return -1
@@ -109,17 +133,27 @@ func (s FeedState) IsNeeded(need string) bool {
 			return true
 		case StateFailed:
 			return true
+		case StateWarning:
+			return true
+		case StatePending:
+			return true
 		}
 	}
 	return need == string(s)
 }
 
+// IsRunning return true if the feedState represents a running state.
+func (s FeedState) IsRunning() bool {
+	return s == StateNormal || s == StateWarning
+}
+
 // ChangeFeedInfo describes the detail of a ChangeFeed
 type ChangeFeedInfo struct {
-	UpstreamID uint64            `json:"upstream-id"`
-	SinkURI    string            `json:"sink-uri"`
-	Opts       map[string]string `json:"opts"`
-	CreateTime time.Time         `json:"create-time"`
+	UpstreamID uint64    `json:"upstream-id"`
+	Namespace  string    `json:"namespace"`
+	ID         string    `json:"changefeed-id"`
+	SinkURI    string    `json:"sink-uri"`
+	CreateTime time.Time `json:"create-time"`
 	// Start sync at this commit ts if `StartTs` is specify or using the CreateTime of changefeed.
 	StartTs uint64 `json:"start-ts"`
 	// The ChangeFeed will exits until sync to timestamp TargetTs
@@ -132,13 +166,14 @@ type ChangeFeedInfo struct {
 	// but can be fetched for backward compatibility
 	SortDir string `json:"sort-dir"`
 
-	Config *config.ReplicaConfig `json:"config"`
-	State  FeedState             `json:"state"`
-	Error  *RunningError         `json:"error"`
+	Config  *config.ReplicaConfig `json:"config"`
+	State   FeedState             `json:"state"`
+	Error   *RunningError         `json:"error"`
+	Warning *RunningError         `json:"warning"`
 
-	SyncPointEnabled  bool          `json:"sync-point-enabled"`
-	SyncPointInterval time.Duration `json:"sync-point-interval"`
-	CreatorVersion    string        `json:"creator-version"`
+	CreatorVersion string `json:"creator-version"`
+	// Epoch is the epoch of a changefeed, changes on every restart.
+	Epoch uint64 `json:"epoch"`
 }
 
 const changeFeedIDMaxLen = 128
@@ -152,6 +187,42 @@ func ValidateChangefeedID(changefeedID string) error {
 		return cerror.ErrInvalidChangefeedID.GenWithStackByArgs(changeFeedIDMaxLen)
 	}
 	return nil
+}
+
+const namespaceMaxLen = 128
+
+var namespaceRe = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
+
+// ValidateNamespace returns true if the namespace matches
+// the pattern "^[a-zA-Z0-9]+(\-[a-zA-Z0-9]+)*$",
+// length no more than "changeFeedIDMaxLen", eg, "simple-changefeed-task".
+func ValidateNamespace(namespace string) error {
+	if !namespaceRe.MatchString(namespace) || len(namespace) > namespaceMaxLen {
+		return cerror.ErrInvalidNamespace.GenWithStackByArgs(namespaceRe)
+	}
+	return nil
+}
+
+// NeedBlockGC returns true if the changefeed need to block the GC safepoint.
+// Note: if the changefeed is failed by GC, it should not block the GC safepoint.
+func (info *ChangeFeedInfo) NeedBlockGC() bool {
+	switch info.State {
+	case StateNormal, StateStopped, StateWarning, StatePending:
+		return true
+	case StateFailed:
+		return !info.isFailedByGC()
+	case StateFinished, StateRemoved:
+	default:
+	}
+	return false
+}
+
+func (info *ChangeFeedInfo) isFailedByGC() bool {
+	if info.Error == nil {
+		log.Panic("changefeed info is not consistent",
+			zap.Any("state", info.State), zap.Any("error", info.Error))
+	}
+	return cerror.IsChangefeedGCFastFailErrorCode(errors.RFCErrorCode(info.Error.Code))
 }
 
 // String implements fmt.Stringer interface, but hide some sensitive information
@@ -169,9 +240,9 @@ func (info *ChangeFeedInfo) String() (str string) {
 		return
 	}
 
-	clone.SinkURI, err = util.MaskSinkURI(clone.SinkURI)
-	if err != nil {
-		log.Error("failed to mask sink uri", zap.Error(err))
+	clone.SinkURI = util.MaskSensitiveDataInURI(clone.SinkURI)
+	if clone.Config != nil {
+		clone.Config.MaskSensitiveData()
 	}
 
 	str, err = clone.Marshal()
@@ -220,15 +291,6 @@ func (info *ChangeFeedInfo) Unmarshal(data []byte) error {
 		return errors.Annotatef(
 			cerror.WrapError(cerror.ErrUnmarshalFailed, err), "Unmarshal data: %v", data)
 	}
-	// TODO(neil) find a better way to let sink know cyclic is enabled.
-	if info.Config != nil && info.Config.Cyclic.IsEnabled() {
-		cyclicCfg, err := info.Config.Cyclic.Marshal()
-		if err != nil {
-			return errors.Annotatef(
-				cerror.WrapError(cerror.ErrMarshalFailed, err), "Marshal data: %v", data)
-		}
-		info.Opts[mark.OptCyclicConfig] = cyclicCfg
-	}
 	return nil
 }
 
@@ -246,7 +308,7 @@ func (info *ChangeFeedInfo) Clone() (*ChangeFeedInfo, error) {
 // VerifyAndComplete verifies changefeed info and may fill in some fields.
 // If a required field is not provided, return an error.
 // If some necessary filed is missing but can use a default value, fill in it.
-func (info *ChangeFeedInfo) VerifyAndComplete() error {
+func (info *ChangeFeedInfo) VerifyAndComplete() {
 	defaultConfig := config.GetDefaultReplicaConfig()
 	if info.Engine == "" {
 		info.Engine = SortUnified
@@ -260,14 +322,23 @@ func (info *ChangeFeedInfo) VerifyAndComplete() error {
 	if info.Config.Sink == nil {
 		info.Config.Sink = defaultConfig.Sink
 	}
-	if info.Config.Cyclic == nil {
-		info.Config.Cyclic = defaultConfig.Cyclic
-	}
 	if info.Config.Consistent == nil {
 		info.Config.Consistent = defaultConfig.Consistent
 	}
+	if info.Config.Scheduler == nil {
+		info.Config.Scheduler = defaultConfig.Scheduler
+	}
 
-	return nil
+	if info.Config.Integrity == nil {
+		info.Config.Integrity = defaultConfig.Integrity
+	}
+
+	if info.Config.ChangefeedErrorStuckDuration == nil {
+		info.Config.ChangefeedErrorStuckDuration = defaultConfig.ChangefeedErrorStuckDuration
+	}
+	if info.Config.SQLMode == "" {
+		info.Config.SQLMode = defaultConfig.SQLMode
+	}
 }
 
 // FixIncompatible fixes incompatible changefeed meta info.
@@ -290,6 +361,31 @@ func (info *ChangeFeedInfo) FixIncompatible() {
 		info.fixMySQLSinkProtocol()
 		log.Info("Fix incompatibility changefeed sink uri completed", zap.String("changefeed", info.String()))
 	}
+
+	if info.Config.MemoryQuota == uint64(0) {
+		log.Info("Start fixing incompatible memory quota", zap.String("changefeed", info.String()))
+		info.fixMemoryQuota()
+		log.Info("Fix incompatible memory quota completed", zap.String("changefeed", info.String()))
+	}
+
+	if info.Config.ChangefeedErrorStuckDuration == nil {
+		log.Info("Start fixing incompatible error stuck duration", zap.String("changefeed", info.String()))
+		info.Config.ChangefeedErrorStuckDuration = config.GetDefaultReplicaConfig().ChangefeedErrorStuckDuration
+		log.Info("Fix incompatible error stuck duration completed", zap.String("changefeed", info.String()))
+	}
+
+	log.Info("Start fixing incompatible scheduler", zap.String("changefeed", info.String()))
+	inheritV66 := creatorVersionGate.ChangefeedInheritSchedulerConfigFromV66()
+	info.fixScheduler(inheritV66)
+	log.Info("Fix incompatible scheduler completed", zap.String("changefeed", info.String()))
+
+	if creatorVersionGate.ChangefeedAdjustEnableOldValueByProtocol() {
+		log.Info("Start fixing incompatible enable old value", zap.String("changefeed", info.String()),
+			zap.Bool("enableOldValue", info.Config.EnableOldValue))
+		info.fixEnableOldValue()
+		log.Info("Fix incompatible enable old value completed", zap.String("changefeed", info.String()),
+			zap.Bool("enableOldValue", info.Config.EnableOldValue))
+	}
 }
 
 // fixState attempts to fix state loss from upgrading the old owner to the new owner.
@@ -306,10 +402,10 @@ func (info *ChangeFeedInfo) fixState() {
 		// This corresponds to the case of failure or error.
 		case AdminNone, AdminResume:
 			if info.Error != nil {
-				if cerrors.ChangefeedFastFailErrorCode(errors.RFCErrorCode(info.Error.Code)) {
+				if cerror.IsChangefeedGCFastFailErrorCode(errors.RFCErrorCode(info.Error.Code)) {
 					state = StateFailed
 				} else {
-					state = StateError
+					state = StateWarning
 				}
 			}
 		case AdminStop:
@@ -360,6 +456,18 @@ func (info *ChangeFeedInfo) fixMySQLSinkProtocol() {
 	}
 }
 
+func (info *ChangeFeedInfo) fixEnableOldValue() {
+	uri, err := url.Parse(info.SinkURI)
+	if err != nil {
+		// this is impossible to happen, since the changefeed registered successfully.
+		log.Warn("parse sink URI failed", zap.Error(err))
+		return
+	}
+	scheme := strings.ToLower(uri.Scheme)
+	protocol := uri.Query().Get(config.ProtocolKey)
+	info.Config.AdjustEnableOldValue(scheme, protocol)
+}
+
 func (info *ChangeFeedInfo) fixMQSinkProtocol() {
 	uri, err := url.Parse(info.SinkURI)
 	if err != nil {
@@ -372,8 +480,7 @@ func (info *ChangeFeedInfo) fixMQSinkProtocol() {
 	}
 
 	needsFix := func(protocolStr string) bool {
-		var protocol config.Protocol
-		err = protocol.FromString(protocolStr)
+		_, err := config.ParseSinkProtocolFromString(protocolStr)
 		// There are two cases:
 		// 1. there is an error indicating that the old ticdc accepts
 		//    a protocol that is not known. It needs to be fixed as open protocol.
@@ -401,11 +508,11 @@ func (info *ChangeFeedInfo) fixMQSinkProtocol() {
 }
 
 func (info *ChangeFeedInfo) updateSinkURIAndConfigProtocol(uri *url.URL, newProtocol string, newQuery url.Values) {
-	oldRawQuery := uri.RawQuery
 	newRawQuery := newQuery.Encode()
+	maskedURI, _ := util.MaskSinkURI(uri.String())
 	log.Info("handle incompatible protocol from sink URI",
-		zap.String("oldUriQuery", oldRawQuery),
-		zap.String("fixedUriQuery", newQuery.Encode()))
+		zap.String("oldURI", maskedURI),
+		zap.String("newProtocol", newProtocol))
 
 	uri.RawQuery = newRawQuery
 	fixedSinkURI := uri.String()
@@ -413,10 +520,65 @@ func (info *ChangeFeedInfo) updateSinkURIAndConfigProtocol(uri *url.URL, newProt
 	info.Config.Sink.Protocol = newProtocol
 }
 
-// HasFastFailError returns true if the error in changefeed is fast-fail
-func (info *ChangeFeedInfo) HasFastFailError() bool {
-	if info.Error == nil {
-		return false
+// DownstreamType returns the type of the downstream.
+func (info *ChangeFeedInfo) DownstreamType() (DownstreamType, error) {
+	uri, err := url.Parse(info.SinkURI)
+	if err != nil {
+		return Unknown, errors.Trace(err)
 	}
-	return cerror.ChangefeedFastFailErrorCode(errors.RFCErrorCode(info.Error.Code))
+	if sink.IsMySQLCompatibleScheme(uri.Scheme) {
+		return DB, nil
+	}
+	if sink.IsMQScheme(uri.Scheme) {
+		return MQ, nil
+	}
+	if sink.IsStorageScheme(uri.Scheme) {
+		return Storage, nil
+	}
+	return Unknown, nil
+}
+
+func (info *ChangeFeedInfo) fixMemoryQuota() {
+	info.Config.FixMemoryQuota()
+}
+
+func (info *ChangeFeedInfo) fixScheduler(inheritV66 bool) {
+	info.Config.FixScheduler(inheritV66)
+}
+
+// DownstreamType is the type of downstream.
+type DownstreamType int
+
+const (
+	// DB is the type of Database.
+	DB DownstreamType = iota
+	// MQ is the type of MQ or Cloud Storage.
+	MQ
+	// Storage is the type of Cloud Storage.
+	Storage
+	// Unknown is the type of Unknown.
+	Unknown
+)
+
+// String implements fmt.Stringer interface.
+func (t DownstreamType) String() string {
+	switch t {
+	case DB:
+		return "DB"
+	case MQ:
+		return "MQ"
+	case Storage:
+		return "Storage"
+	}
+	return "Unknown"
+}
+
+// ChangeFeedStatusForAPI uses to transfer the status of changefeed for API.
+type ChangeFeedStatusForAPI struct {
+	ResolvedTs   uint64 `json:"resolved-ts"`
+	CheckpointTs uint64 `json:"checkpoint-ts"`
+	// minTableBarrierTs is the minimum commitTs of all DDL events and is only
+	// used to check whether there is a pending DDL job at the checkpointTs when
+	// initializing the changefeed.
+	MinTableBarrierTs uint64 `json:"min-table-barrier-ts"`
 }

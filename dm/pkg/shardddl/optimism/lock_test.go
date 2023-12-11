@@ -25,14 +25,13 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/schemacmp"
-	"go.etcd.io/etcd/tests/v3/integration"
-
-	"github.com/pingcap/tiflow/dm/dm/config"
+	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/pingcap/tiflow/dm/pkg/cputil"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"go.etcd.io/etcd/tests/v3/integration"
 )
 
 type testLock struct{}
@@ -2095,7 +2094,7 @@ func (t *testLock) TestFetchTableInfo(c *C) {
 	c.Assert(ti, IsNil)
 
 	// table info not exist
-	l = NewLock(etcdTestCli, ID, task, downSchema, downTable, schemacmp.Encode(ti0), tts, &DownstreamMeta{dbConfig: &config.DBConfig{}, meta: meta})
+	l = NewLock(etcdTestCli, ID, task, downSchema, downTable, schemacmp.Encode(ti0), tts, &DownstreamMeta{dbConfig: &dbconfig.DBConfig{}, meta: meta})
 	conn.DefaultDBProvider = &conn.DefaultDBProviderImpl{}
 	mock := conn.InitMockDB(c)
 	mock.ExpectQuery(query).WithArgs(source, schema, tbls[0]).WillReturnRows(sqlmock.NewRows([]string{"table_info"}))
@@ -2104,7 +2103,7 @@ func (t *testLock) TestFetchTableInfo(c *C) {
 	c.Assert(ti, IsNil)
 
 	// null table info
-	l = NewLock(etcdTestCli, ID, task, downSchema, downTable, schemacmp.Encode(ti0), tts, &DownstreamMeta{dbConfig: &config.DBConfig{}, meta: meta})
+	l = NewLock(etcdTestCli, ID, task, downSchema, downTable, schemacmp.Encode(ti0), tts, &DownstreamMeta{dbConfig: &dbconfig.DBConfig{}, meta: meta})
 	conn.DefaultDBProvider = &conn.DefaultDBProviderImpl{}
 	mock = conn.InitMockDB(c)
 	mock.ExpectQuery(query).WithArgs(source, schema, tbls[0]).WillReturnRows(sqlmock.NewRows([]string{"table_info"}).AddRow("null"))
@@ -2735,6 +2734,11 @@ func (t *testLock) TestTrySyncForOneDDL(c *C) {
 	c.Assert(conflictStage, Equals, ConflictNone)
 
 	// check alter table add column
+	schemaChanged, conflictStage = l.trySyncForOneDDL(source, schema, table1, t0, t1)
+	c.Assert(schemaChanged, IsTrue)
+	c.Assert(conflictStage, Equals, ConflictNone)
+
+	// check create partition, no changed since https://github.com/pingcap/tidb-tools/blob/d671b0840063bc2532941f02e02e12627402844c/pkg/schemacmp/table.go#L251
 	schemaChanged, conflictStage = l.trySyncForOneDDL(source, schema, table1, t0, t1)
 	c.Assert(schemaChanged, IsTrue)
 	c.Assert(conflictStage, Equals, ConflictNone)

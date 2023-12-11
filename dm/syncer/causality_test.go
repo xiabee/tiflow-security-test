@@ -18,16 +18,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/mysql"
 	. "github.com/pingcap/check"
-	"github.com/stretchr/testify/require"
-
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/dm/dm/config"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/pingcap/tiflow/dm/syncer/metrics"
 	"github.com/pingcap/tiflow/pkg/sqlmodel"
+	"github.com/stretchr/testify/require"
 )
 
 func (s *testSyncerSuite) TestDetectConflict(c *C) {
@@ -78,9 +79,11 @@ func TestCausality(t *testing.T) {
 			Name:     "task",
 			SourceID: "source",
 		},
-		tctx:    tcontext.Background().WithLogger(log.L()),
-		sessCtx: utils.NewSessionCtx(map[string]string{"time_zone": "UTC"}),
+		tctx:           tcontext.Background().WithLogger(log.L()),
+		sessCtx:        utils.NewSessionCtx(map[string]string{"time_zone": "UTC"}),
+		metricsProxies: &metrics.Proxies{},
 	}
+	syncer.metricsProxies = metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source")
 	causalityCh := causalityWrap(jobCh, syncer)
 	testCases := []struct {
 		preVals  []interface{}
@@ -105,8 +108,8 @@ func TestCausality(t *testing.T) {
 	}
 	results := []opType{dml, dml, dml, dml, conflict, dml}
 	table := &cdcmodel.TableName{Schema: "test", Table: "t1"}
-	location := binlog.NewLocation("")
-	ec := &eventContext{startLocation: &location, currentLocation: &location, lastLocation: &location}
+	location := binlog.MustZeroLocation(mysql.MySQLFlavor)
+	ec := &eventContext{startLocation: location, endLocation: location, lastLocation: location}
 
 	for _, tc := range testCases {
 		change := sqlmodel.NewRowChange(table, nil, tc.preVals, tc.postVals, ti, nil, nil)

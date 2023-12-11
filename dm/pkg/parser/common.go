@@ -17,18 +17,17 @@ import (
 	"bytes"
 	"strings"
 
-	"github.com/pingcap/tidb/parser/charset"
-
-	"github.com/pingcap/tiflow/dm/pkg/log"
-	"github.com/pingcap/tiflow/dm/pkg/terror"
-	"github.com/pingcap/tiflow/dm/pkg/utils"
-
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/format"
 	"github.com/pingcap/tidb/parser/model"
 	_ "github.com/pingcap/tidb/types/parser_driver" // for import parser driver
 	"github.com/pingcap/tidb/util/filter"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
+	"github.com/pingcap/tiflow/dm/pkg/log"
+	"github.com/pingcap/tiflow/dm/pkg/terror"
+	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"go.uber.org/zap"
 )
 
@@ -67,14 +66,17 @@ func Parse(p *parser.Parser, sql, charset, collation string) (stmt []ast.StmtNod
 // ref: https://github.com/pingcap/tidb/blob/09feccb529be2830944e11f5fed474020f50370f/server/sql_info_fetcher.go#L46
 type tableNameExtractor struct {
 	curDB  string
-	flavor utils.LowerCaseTableNamesFlavor
+	flavor conn.LowerCaseTableNamesFlavor
 	names  []*filter.Table
 }
 
 func (tne *tableNameExtractor) Enter(in ast.Node) (ast.Node, bool) {
+	if _, ok := in.(*ast.ReferenceDef); ok {
+		return in, true
+	}
 	if t, ok := in.(*ast.TableName); ok {
 		var tb *filter.Table
-		if tne.flavor == utils.LCTableNamesSensitive {
+		if tne.flavor == conn.LCTableNamesSensitive {
 			tb = &filter.Table{Schema: t.Schema.O, Name: t.Name.O}
 		} else {
 			tb = &filter.Table{Schema: t.Schema.L, Name: t.Name.L}
@@ -98,7 +100,7 @@ func (tne *tableNameExtractor) Leave(in ast.Node) (ast.Node, bool) {
 // specifically, for `create table like` DDL, result contains [sourceTable, sourceRefTable]
 // for rename table ddl, result contains [old1, new1, old2, new2, old3, new3, ...] because of TiDB parser
 // for other DDL, order of tableName is the node visit order.
-func FetchDDLTables(schema string, stmt ast.StmtNode, flavor utils.LowerCaseTableNamesFlavor) ([]*filter.Table, error) {
+func FetchDDLTables(schema string, stmt ast.StmtNode, flavor conn.LowerCaseTableNamesFlavor) ([]*filter.Table, error) {
 	switch stmt.(type) {
 	case ast.DDLNode:
 	default:
@@ -106,13 +108,14 @@ func FetchDDLTables(schema string, stmt ast.StmtNode, flavor utils.LowerCaseTabl
 	}
 
 	// special cases: schema related SQLs doesn't have tableName
+	// todo: pass .O or .L of table name depends on flavor
 	switch v := stmt.(type) {
 	case *ast.AlterDatabaseStmt:
-		return []*filter.Table{genTableName(v.Name, "")}, nil
+		return []*filter.Table{genTableName(v.Name.O, "")}, nil
 	case *ast.CreateDatabaseStmt:
-		return []*filter.Table{genTableName(v.Name, "")}, nil
+		return []*filter.Table{genTableName(v.Name.O, "")}, nil
 	case *ast.DropDatabaseStmt:
-		return []*filter.Table{genTableName(v.Name, "")}, nil
+		return []*filter.Table{genTableName(v.Name.O, "")}, nil
 	}
 
 	e := &tableNameExtractor{
@@ -133,6 +136,9 @@ type tableRenameVisitor struct {
 
 func (v *tableRenameVisitor) Enter(in ast.Node) (ast.Node, bool) {
 	if v.hasErr {
+		return in, true
+	}
+	if _, ok := in.(*ast.ReferenceDef); ok {
 		return in, true
 	}
 	if t, ok := in.(*ast.TableName); ok {
@@ -167,11 +173,11 @@ func RenameDDLTable(stmt ast.StmtNode, targetTables []*filter.Table) (string, er
 
 	switch v := stmt.(type) {
 	case *ast.AlterDatabaseStmt:
-		v.Name = targetTables[0].Schema
+		v.Name = model.NewCIStr(targetTables[0].Schema)
 	case *ast.CreateDatabaseStmt:
-		v.Name = targetTables[0].Schema
+		v.Name = model.NewCIStr(targetTables[0].Schema)
 	case *ast.DropDatabaseStmt:
-		v.Name = targetTables[0].Schema
+		v.Name = model.NewCIStr(targetTables[0].Schema)
 	default:
 		visitor := &tableRenameVisitor{
 			targetNames: targetTables,
@@ -185,7 +191,7 @@ func RenameDDLTable(stmt ast.StmtNode, targetTables []*filter.Table) (string, er
 	var b []byte
 	bf := bytes.NewBuffer(b)
 	err := stmt.Restore(&format.RestoreCtx{
-		Flags: format.DefaultRestoreFlags | format.RestoreTiDBSpecialComment,
+		Flags: format.DefaultRestoreFlags | format.RestoreTiDBSpecialComment | format.RestoreStringWithoutDefaultCharset,
 		In:    bf,
 	})
 	if err != nil {
@@ -203,7 +209,7 @@ func SplitDDL(stmt ast.StmtNode, schema string) (sqls []string, err error) {
 		schemaName = model.NewCIStr(schema) // fill schema name
 		bf         = new(bytes.Buffer)
 		ctx        = &format.RestoreCtx{
-			Flags: format.DefaultRestoreFlags | format.RestoreTiDBSpecialComment,
+			Flags: format.DefaultRestoreFlags | format.RestoreTiDBSpecialComment | format.RestoreStringWithoutDefaultCharset,
 			In:    bf,
 		}
 	)
@@ -357,6 +363,10 @@ func genTableName(schema string, table string) *filter.Table {
 
 // CheckIsDDL checks input SQL whether is a valid DDL statement.
 func CheckIsDDL(sql string, p *parser.Parser) bool {
+	// fast path for begin/comit
+	if sql == "BEGIN" || sql == "COMMIT" {
+		return false
+	}
 	sql = utils.TrimCtrlChars(sql)
 
 	if utils.IsBuildInSkipDDL(sql) {

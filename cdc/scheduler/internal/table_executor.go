@@ -17,6 +17,7 @@ import (
 	"context"
 
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 )
 
 // TableExecutor is an abstraction for "Processor".
@@ -25,22 +26,23 @@ import (
 // to adapt the current Processor implementation to it.
 // TODO find a way to make the semantics easier to understand.
 type TableExecutor interface {
-	AddTable(ctx context.Context, tableID model.TableID, startTs model.Ts) (done bool, err error)
-	RemoveTable(ctx context.Context, tableID model.TableID) (done bool, err error)
-	IsAddTableFinished(ctx context.Context, tableID model.TableID) (done bool)
-	IsRemoveTableFinished(ctx context.Context, tableID model.TableID) (done bool)
+	// AddTableSpan add a new table span with `Checkpoint.CheckpointTs`
+	// if `isPrepare` is true, the 1st phase of the 2 phase scheduling protocol.
+	// if `isPrepare` is false, the 2nd phase.
+	AddTableSpan(
+		ctx context.Context, span tablepb.Span, checkpoint tablepb.Checkpoint, isPrepare bool,
+	) (done bool, err error)
 
-	// GetAllCurrentTables should return all tables that are being run,
-	// being added and being removed.
-	//
-	// NOTE: two subsequent calls to the method should return the same
-	// result, unless there is a call to AddTable, RemoveTable, IsAddTableFinished
-	// or IsRemoveTableFinished in between two calls to this method.
-	GetAllCurrentTables() []model.TableID
+	// IsAddTableSpanFinished make sure the requested table span is in the proper status
+	IsAddTableSpanFinished(span tablepb.Span, isPrepare bool) (done bool)
 
-	// GetCheckpoint returns the local checkpoint-ts and resolved-ts of
-	// the processor. Its calculation should take into consideration all
-	// tables that would have been returned if GetAllCurrentTables had been
-	// called immediately before.
-	GetCheckpoint() (checkpointTs, resolvedTs model.Ts)
+	// RemoveTableSpan remove the table, return true if the table is already removed
+	RemoveTableSpan(span tablepb.Span) (done bool)
+	// IsRemoveTableSpanFinished convince the table is fully stopped.
+	// return false if table is not stopped
+	// return true and corresponding checkpoint otherwise.
+	IsRemoveTableSpanFinished(span tablepb.Span) (model.Ts, bool)
+
+	// GetTableSpanStatus return the checkpoint and resolved ts for the given table span.
+	GetTableSpanStatus(span tablepb.Span, collectStat bool) tablepb.TableStatus
 }

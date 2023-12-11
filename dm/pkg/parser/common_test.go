@@ -16,15 +16,12 @@ package parser
 import (
 	"testing"
 
-	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/util/filter"
-
+	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
-	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/stretchr/testify/require"
 )
-
-var _ = Suite(&testParserSuite{})
 
 type testCase struct {
 	sql                string
@@ -35,6 +32,13 @@ type testCase struct {
 }
 
 var testCases = []testCase{
+	{
+		"create table `t1` (`id` int, `student_id` int, primary key (`id`), foreign key (`student_id`) references `t2`(`id`))",
+		[]string{"CREATE TABLE IF NOT EXISTS `test`.`t1` (`id` INT,`student_id` INT,PRIMARY KEY(`id`),CONSTRAINT FOREIGN KEY (`student_id`) REFERENCES `t2`(`id`))"},
+		[][]*filter.Table{{genTableName("test", "t1")}},
+		[][]*filter.Table{{genTableName("xtest", "t1")}},
+		[]string{"CREATE TABLE IF NOT EXISTS `xtest`.`t1` (`id` INT,`student_id` INT,PRIMARY KEY(`id`),CONSTRAINT FOREIGN KEY (`student_id`) REFERENCES `t2`(`id`))"},
+	},
 	{
 		"create schema `s1`",
 		[]string{"CREATE DATABASE IF NOT EXISTS `s1`"},
@@ -97,6 +101,13 @@ var testCases = []testCase{
 		[][]*filter.Table{{genTableName("test", "t1")}},
 		[][]*filter.Table{{genTableName("xtest", "xt1")}},
 		[]string{"CREATE TABLE IF NOT EXISTS `xtest`.`xt1` (`id` INT)"},
+	},
+	{
+		"create table `s1` (c int default '0')",
+		[]string{"CREATE TABLE IF NOT EXISTS `test`.`s1` (`c` INT DEFAULT '0')"},
+		[][]*filter.Table{{genTableName("test", "s1")}},
+		[][]*filter.Table{{genTableName("xtest", "xs1")}},
+		[]string{"CREATE TABLE IF NOT EXISTS `xtest`.`xs1` (`c` INT DEFAULT '0')"},
 	},
 	{
 		"create table `t1` like `t2`",
@@ -213,9 +224,9 @@ var testCases = []testCase{
 	{
 		"alter table `t1` add constraint fk_t2_id foreign key if not exists (t2_id) references t2(id)",
 		[]string{"ALTER TABLE `test`.`t1` ADD CONSTRAINT `fk_t2_id` FOREIGN KEY IF NOT EXISTS (`t2_id`) REFERENCES `t2`(`id`)"},
-		[][]*filter.Table{{genTableName("test", "t1"), genTableName("test", "t2")}},
-		[][]*filter.Table{{genTableName("xtest", "xt1"), genTableName("xtest", "xt2")}},
-		[]string{"ALTER TABLE `xtest`.`xt1` ADD CONSTRAINT `fk_t2_id` FOREIGN KEY IF NOT EXISTS (`t2_id`) REFERENCES `xtest`.`xt2`(`id`)"},
+		[][]*filter.Table{{genTableName("test", "t1")}},
+		[][]*filter.Table{{genTableName("xtest", "xt1")}},
+		[]string{"ALTER TABLE `xtest`.`xt1` ADD CONSTRAINT `fk_t2_id` FOREIGN KEY IF NOT EXISTS (`t2_id`) REFERENCES `t2`(`id`)"},
 	},
 	{
 		"create index if not exists i1 on `t1`(`c1`)",
@@ -335,26 +346,21 @@ var nonDDLs = []string{
 	"GRANT CREATE TABLESPACE ON *.* TO `root`@`%` WITH GRANT OPTION",
 }
 
-func TestSuite(t *testing.T) {
-	TestingT(t)
-}
-
-type testParserSuite struct{}
-
-func (t *testParserSuite) TestParser(c *C) {
+func TestParser(t *testing.T) {
+	t.Parallel()
 	p := parser.New()
 
 	for _, ca := range testCases {
 		sql := ca.sql
 		stmts, err := Parse(p, sql, "", "")
-		c.Assert(err, IsNil)
-		c.Assert(stmts, HasLen, 1)
+		require.NoError(t, err)
+		require.Len(t, stmts, 1)
 	}
 
 	for _, sql := range nonDDLs {
 		stmts, err := Parse(p, sql, "", "")
-		c.Assert(err, IsNil)
-		c.Assert(stmts, HasLen, 1)
+		require.NoError(t, err)
+		require.Len(t, stmts, 1)
 	}
 
 	unsupportedSQLs := []string{
@@ -363,62 +369,65 @@ func (t *testParserSuite) TestParser(c *C) {
 
 	for _, sql := range unsupportedSQLs {
 		_, err := Parse(p, sql, "", "")
-		c.Assert(err, NotNil)
+		require.NotNil(t, err)
 	}
 }
 
-func (t *testParserSuite) TestError(c *C) {
+func TestError(t *testing.T) {
+	t.Parallel()
 	p := parser.New()
 
 	// DML will report ErrUnknownTypeDDL
 	dml := "INSERT INTO `t1` VALUES (1)"
 
 	stmts, err := Parse(p, dml, "", "")
-	c.Assert(err, IsNil)
-	_, err = FetchDDLTables("test", stmts[0], utils.LCTableNamesInsensitive)
-	c.Assert(terror.ErrUnknownTypeDDL.Equal(err), IsTrue)
+	require.NoError(t, err)
+	_, err = FetchDDLTables("test", stmts[0], conn.LCTableNamesInsensitive)
+	require.True(t, terror.ErrUnknownTypeDDL.Equal(err))
 
 	_, err = RenameDDLTable(stmts[0], nil)
-	c.Assert(terror.ErrUnknownTypeDDL.Equal(err), IsTrue)
+	require.True(t, terror.ErrUnknownTypeDDL.Equal(err))
 
 	// tableRenameVisitor with less `targetNames` won't panic
 	ddl := "create table `s1`.`t1` (id int)"
 	stmts, err = Parse(p, ddl, "", "")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, err = RenameDDLTable(stmts[0], nil)
-	c.Assert(terror.ErrRewriteSQL.Equal(err), IsTrue)
+	require.True(t, terror.ErrRewriteSQL.Equal(err))
 }
 
-func (t *testParserSuite) TestResolveDDL(c *C) {
+func TestResolveDDL(t *testing.T) {
+	t.Parallel()
 	p := parser.New()
 
 	for _, ca := range testCases {
 		stmts, err := Parse(p, ca.sql, "", "")
-		c.Assert(err, IsNil)
-		c.Assert(stmts, HasLen, 1)
+		require.NoError(t, err)
+		require.Len(t, stmts, 1)
 
 		statements, err := SplitDDL(stmts[0], "test")
-		c.Assert(err, IsNil)
-		c.Assert(statements, DeepEquals, ca.expectedSQLs)
+		require.NoError(t, err)
+		require.Equal(t, ca.expectedSQLs, statements)
 
 		tbs := ca.expectedTableNames
 		for j, statement := range statements {
 			s, err := Parse(p, statement, "", "")
-			c.Assert(err, IsNil)
-			c.Assert(s, HasLen, 1)
+			require.NoError(t, err)
+			require.Len(t, s, 1)
 
-			tableNames, err := FetchDDLTables("test", s[0], utils.LCTableNamesSensitive)
-			c.Assert(err, IsNil)
-			c.Assert(tableNames, DeepEquals, tbs[j])
+			tableNames, err := FetchDDLTables("test", s[0], conn.LCTableNamesSensitive)
+			require.NoError(t, err)
+			require.Equal(t, tbs[j], tableNames)
 
 			targetSQL, err := RenameDDLTable(s[0], ca.targetTableNames[j])
-			c.Assert(err, IsNil)
-			c.Assert(targetSQL, Equals, ca.targetSQLs[j])
+			require.NoError(t, err)
+			require.Equal(t, ca.targetSQLs[j], targetSQL)
 		}
 	}
 }
 
-func (t *testParserSuite) TestCheckIsDDL(c *C) {
+func TestCheckIsDDL(t *testing.T) {
+	t.Parallel()
 	var (
 		cases = []struct {
 			sql   string
@@ -445,6 +454,6 @@ func (t *testParserSuite) TestCheckIsDDL(c *C) {
 	)
 
 	for _, cs := range cases {
-		c.Assert(CheckIsDDL(cs.sql, parser2), Equals, cs.isDDL)
+		require.Equal(t, cs.isDDL, CheckIsDDL(cs.sql, parser2))
 	}
 }

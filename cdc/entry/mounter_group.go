@@ -15,36 +15,39 @@ package entry
 
 import (
 	"context"
-	"strconv"
-	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/pkg/filter"
+	"github.com/pingcap/tiflow/pkg/integrity"
+	"github.com/pingcap/tiflow/pkg/util"
 	"golang.org/x/sync/errgroup"
 )
 
 // MounterGroup is a group of mounter workers
 type MounterGroup interface {
-	Run(ctx context.Context) error
+	util.Runnable
+
 	AddEvent(ctx context.Context, event *model.PolymorphicEvent) error
+	TryAddEvent(ctx context.Context, event *model.PolymorphicEvent) (bool, error)
 }
 
 type mounterGroup struct {
-	schemaStorage  SchemaStorage
-	inputCh        []chan *model.PolymorphicEvent
-	tz             *time.Location
-	enableOldValue bool
+	schemaStorage SchemaStorage
+	inputCh       chan *model.PolymorphicEvent
+	tz            *time.Location
+	filter        filter.Filter
+	integrity     *integrity.Config
 
 	workerNum int
-	index     uint64
 
 	changefeedID model.ChangeFeedID
 }
 
 const (
 	defaultMounterWorkerNum = 16
-	defaultInputChanSize    = 256
+	defaultInputChanSize    = 1024
 	defaultMetricInterval   = 15 * time.Second
 )
 
@@ -52,22 +55,21 @@ const (
 func NewMounterGroup(
 	schemaStorage SchemaStorage,
 	workerNum int,
-	enableOldValue bool,
+	filter filter.Filter,
 	tz *time.Location,
 	changefeedID model.ChangeFeedID,
+	integrity *integrity.Config,
 ) *mounterGroup {
 	if workerNum <= 0 {
 		workerNum = defaultMounterWorkerNum
 	}
-	inputCh := make([]chan *model.PolymorphicEvent, workerNum)
-	for i := 0; i < workerNum; i++ {
-		inputCh[i] = make(chan *model.PolymorphicEvent, defaultInputChanSize)
-	}
 	return &mounterGroup{
-		schemaStorage:  schemaStorage,
-		inputCh:        inputCh,
-		enableOldValue: enableOldValue,
-		tz:             tz,
+		schemaStorage: schemaStorage,
+		inputCh:       make(chan *model.PolymorphicEvent, defaultInputChanSize),
+		filter:        filter,
+		tz:            tz,
+
+		integrity: integrity,
 
 		workerNum: workerNum,
 
@@ -75,35 +77,43 @@ func NewMounterGroup(
 	}
 }
 
-func (m *mounterGroup) Run(ctx context.Context) error {
+func (m *mounterGroup) Run(ctx context.Context, _ ...chan<- error) error {
 	defer func() {
 		mounterGroupInputChanSizeGauge.DeleteLabelValues(m.changefeedID.Namespace, m.changefeedID.ID)
 	}()
 	g, ctx := errgroup.WithContext(ctx)
 	for i := 0; i < m.workerNum; i++ {
-		idx := i
 		g.Go(func() error {
-			return m.runWorker(ctx, idx)
+			return m.runWorker(ctx)
 		})
 	}
+	g.Go(func() error {
+		metrics := mounterGroupInputChanSizeGauge.WithLabelValues(m.changefeedID.Namespace, m.changefeedID.ID)
+		ticker := time.NewTicker(defaultMetricInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return errors.Trace(ctx.Err())
+			case <-ticker.C:
+				metrics.Set(float64(len(m.inputCh)))
+			}
+		}
+	})
 	return g.Wait()
 }
 
-func (m *mounterGroup) runWorker(ctx context.Context, index int) error {
-	mounter := NewMounter(m.schemaStorage, m.changefeedID, m.tz, m.enableOldValue)
-	rawCh := m.inputCh[index]
-	metrics := mounterGroupInputChanSizeGauge.
-		WithLabelValues(m.changefeedID.Namespace, m.changefeedID.ID, strconv.Itoa(index))
-	ticker := time.NewTicker(defaultMetricInterval)
-	defer ticker.Stop()
+func (m *mounterGroup) WaitForReady(_ context.Context) {}
+
+func (m *mounterGroup) Close() {}
+
+func (m *mounterGroup) runWorker(ctx context.Context) error {
+	mounter := NewMounter(m.schemaStorage, m.changefeedID, m.tz, m.filter, m.integrity)
 	for {
-		var pEvent *model.PolymorphicEvent
 		select {
 		case <-ctx.Done():
 			return errors.Trace(ctx.Err())
-		case <-ticker.C:
-			metrics.Set(float64(len(rawCh)))
-		case pEvent = <-rawCh:
+		case pEvent := <-m.inputCh:
 			if pEvent.RawKV.OpType == model.OpTypeResolved {
 				pEvent.MarkFinished()
 				continue
@@ -118,11 +128,52 @@ func (m *mounterGroup) runWorker(ctx context.Context, index int) error {
 }
 
 func (m *mounterGroup) AddEvent(ctx context.Context, event *model.PolymorphicEvent) error {
-	index := atomic.AddUint64(&m.index, 1) % uint64(m.workerNum)
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case m.inputCh[index] <- event:
+	case m.inputCh <- event:
 		return nil
 	}
+}
+
+func (m *mounterGroup) TryAddEvent(ctx context.Context, event *model.PolymorphicEvent) (bool, error) {
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case m.inputCh <- event:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// MockMountGroup is used for tests.
+type MockMountGroup struct {
+	IsFull bool
+}
+
+// Run implements util.Runnable.
+func (m *MockMountGroup) Run(ctx context.Context, _ ...chan<- error) error {
+	return nil
+}
+
+// WaitForReady implements util.Runnable.
+func (m *MockMountGroup) WaitForReady(_ context.Context) {}
+
+// Close implements util.Runnable.
+func (m *MockMountGroup) Close() {}
+
+// AddEvent implements MountGroup.
+func (m *MockMountGroup) AddEvent(ctx context.Context, event *model.PolymorphicEvent) error {
+	event.MarkFinished()
+	return nil
+}
+
+// TryAddEvent implements MountGroup.
+func (m *MockMountGroup) TryAddEvent(ctx context.Context, event *model.PolymorphicEvent) (bool, error) {
+	if !m.IsFull {
+		event.MarkFinished()
+		return true, nil
+	}
+	return false, nil
 }

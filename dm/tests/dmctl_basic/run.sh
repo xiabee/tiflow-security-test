@@ -316,7 +316,7 @@ function run() {
 	# start no source meta task with start time
 	start_task_no_source_meta_but_start_time $cur/conf/dm-task7.yaml
 	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"stop-task $cur/conf/dm-task7.yaml" \
+		"stop-task test_incremental_no_source_meta" \
 		"\"result\": true" 3
 	run_sql_tidb "DROP DATABASE if exists dmctl;"
 	# start task
@@ -412,8 +412,8 @@ function run() {
 	md5_new_worker2=$(md5sum $dm_worker2_conf | awk '{print $1}')
 	md5_old_worker1=$(md5sum $cur/conf/dm-worker1.toml | awk '{print $1}')
 	md5_old_worker2=$(md5sum $cur/conf/dm-worker2.toml | awk '{print $1}')
-	[ "md5_new_worker1" != "md5_old_worker1" ]
-	[ "md5_new_worker2" != "md5_old_worker2" ]
+	[ "$md5_new_worker1" != "$md5_old_worker1" ]
+	[ "$md5_new_worker2" != "$md5_old_worker2" ]
 
 	#    update_master_config_success $dm_master_conf
 	#    cmp $dm_master_conf $cur/conf/dm-master.toml
@@ -448,8 +448,9 @@ function run() {
 	run_sql_source1 "update dmctl.t_1 set d = '' where id = 13"
 	run_sql_source1 "update dmctl.t_2 set d = '' where id = 12"
 
-	# sleep to ensure syncer unit has resumed, read next binlog files and updated ActiveRelayLog
-	sleep 5
+	# ensure syncer unit has resumed, read latest binlog files and updated ActiveRelayLog
+	check_sync_diff $WORK_DIR $cur/conf/diff_config.toml
+
 	server_uuid=$(tail -n 1 $WORK_DIR/worker1/relay_log/server-uuid.index)
 	run_sql_source1 "show binary logs\G"
 	max_binlog_name=$(grep Log_name "$SQL_RESULT_FILE" | tail -n 1 | awk -F":" '{print $NF}')

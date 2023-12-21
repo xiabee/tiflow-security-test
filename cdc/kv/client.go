@@ -30,13 +30,15 @@ import (
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tiflow/cdc/kv/regionlock"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/pkg/chann"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/pdutil"
-	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/retry"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/pingcap/tiflow/pkg/txnutil"
 	"github.com/pingcap/tiflow/pkg/version"
 	"github.com/prometheus/client_golang/prometheus"
@@ -72,8 +74,6 @@ const (
 	// don't need to force reload region anymore.
 	regionScheduleReload = false
 
-	resolveLockMinInterval = 10 * time.Second
-
 	scanRegionsConcurrency = 1024
 )
 
@@ -107,6 +107,7 @@ var (
 	metricFeedRPCCtxUnavailable       = eventFeedErrorCounter.WithLabelValues("RPCCtxUnavailable")
 	metricStoreSendRequestErr         = eventFeedErrorCounter.WithLabelValues("SendRequestToStore")
 	metricConnectToStoreErr           = eventFeedErrorCounter.WithLabelValues("ConnectToStore")
+	metricKvIsBusyCounter             = eventFeedErrorCounter.WithLabelValues("KvIsBusy")
 )
 
 var (
@@ -139,7 +140,7 @@ type eventFeedStream struct {
 type CDCKVClient interface {
 	EventFeed(
 		ctx context.Context,
-		span regionspan.ComparableSpan,
+		span tablepb.Span,
 		ts uint64,
 		lockResolver txnutil.LockResolver,
 		eventCh chan<- model.RegionFeedEvent,
@@ -270,7 +271,7 @@ func (c *CDCClient) newStream(ctx context.Context, addr string, storeID uint64) 
 // provided channel.
 // The `Start` and `End` field in input span must be memcomparable encoded.
 func (c *CDCClient) EventFeed(
-	ctx context.Context, span regionspan.ComparableSpan, ts uint64,
+	ctx context.Context, span tablepb.Span, ts uint64,
 	lockResolver txnutil.LockResolver,
 	eventCh chan<- model.RegionFeedEvent,
 ) error {
@@ -337,7 +338,7 @@ type eventFeedSession struct {
 	lockResolver txnutil.LockResolver
 
 	// The whole range that is being subscribed.
-	totalSpan regionspan.ComparableSpan
+	totalSpan tablepb.Span
 
 	// The channel to send the processed events.
 	eventCh      chan<- model.RegionFeedEvent
@@ -350,7 +351,7 @@ type eventFeedSession struct {
 	// The channel to schedule scanning and requesting regions in a specified range.
 	requestRangeCh *chann.DrainableChann[rangeRequestTask]
 
-	rangeLock *regionspan.RegionRangeLock
+	rangeLock *regionlock.RegionRangeLock
 
 	// To identify metrics of different eventFeedSession
 	id                string
@@ -368,20 +369,20 @@ type eventFeedSession struct {
 }
 
 type rangeRequestTask struct {
-	span regionspan.ComparableSpan
+	span tablepb.Span
 }
 
 func newEventFeedSession(
 	client *CDCClient,
-	totalSpan regionspan.ComparableSpan,
+	totalSpan tablepb.Span,
 	lockResolver txnutil.LockResolver,
 	startTs uint64,
 	eventCh chan<- model.RegionFeedEvent,
 ) *eventFeedSession {
 	id := allocID()
 	idStr := strconv.FormatUint(id, 10)
-	rangeLock := regionspan.NewRegionRangeLock(
-		id, totalSpan.Start, totalSpan.End, startTs,
+	rangeLock := regionlock.NewRegionRangeLock(
+		id, totalSpan.StartKey, totalSpan.EndKey, startTs,
 		client.changefeed.Namespace+"."+client.changefeed.ID)
 	return &eventFeedSession{
 		client:     client,
@@ -411,10 +412,10 @@ func newEventFeedSession(
 }
 
 func (s *eventFeedSession) eventFeed(ctx context.Context) error {
-	s.requestRangeCh = chann.NewDrainableChann[rangeRequestTask]()
-	s.regionCh = chann.NewDrainableChann[singleRegionInfo]()
-	s.regionRouter = chann.NewDrainableChann[singleRegionInfo]()
-	s.errCh = chann.NewDrainableChann[regionErrorInfo]()
+	s.requestRangeCh = chann.NewAutoDrainChann[rangeRequestTask]()
+	s.regionCh = chann.NewAutoDrainChann[singleRegionInfo]()
+	s.regionRouter = chann.NewAutoDrainChann[singleRegionInfo]()
+	s.errCh = chann.NewAutoDrainChann[regionErrorInfo]()
 
 	eventFeedGauge.Inc()
 	defer func() {
@@ -481,7 +482,7 @@ func (s *eventFeedSession) eventFeed(ctx context.Context) error {
 		zap.Int64("tableID", s.tableID),
 		zap.String("tableName", s.tableName),
 		zap.Uint64("startTs", s.startTs),
-		zap.Stringer("span", s.totalSpan))
+		zap.Stringer("span", &s.totalSpan))
 
 	return g.Wait()
 }
@@ -489,7 +490,7 @@ func (s *eventFeedSession) eventFeed(ctx context.Context) error {
 // scheduleDivideRegionAndRequest schedules a range to be divided by regions,
 // and these regions will be then scheduled to send ChangeData requests.
 func (s *eventFeedSession) scheduleDivideRegionAndRequest(
-	ctx context.Context, span regionspan.ComparableSpan,
+	ctx context.Context, span tablepb.Span,
 ) {
 	task := rangeRequestTask{span: span}
 	select {
@@ -502,57 +503,58 @@ func (s *eventFeedSession) scheduleDivideRegionAndRequest(
 // scheduleRegionRequest locks the region's range and schedules sending ChangeData request to the region.
 // This function is blocking until the region range is locked successfully
 func (s *eventFeedSession) scheduleRegionRequest(ctx context.Context, sri singleRegionInfo) {
-	handleResult := func(res regionspan.LockRangeResult) {
+	handleResult := func(res regionlock.LockRangeResult) {
 		switch res.Status {
-		case regionspan.LockRangeStatusSuccess:
+		case regionlock.LockRangeStatusSuccess:
 			sri.lockedRange = res.LockedRange
 			select {
 			case s.regionCh.In() <- sri:
 				s.regionChSizeGauge.Inc()
 			case <-ctx.Done():
 			}
-		case regionspan.LockRangeStatusStale:
+		case regionlock.LockRangeStatusStale:
 			log.Info("request expired",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
 				zap.Uint64("regionID", sri.verID.GetID()),
-				zap.Stringer("span", sri.span),
+				zap.Stringer("span", &sri.span),
 				zap.Any("retrySpans", res.RetryRanges))
 			for _, r := range res.RetryRanges {
 				// This call is always blocking, otherwise if scheduling in a new
 				// goroutine, it won't block the caller of `schedulerRegionRequest`.
 				s.scheduleDivideRegionAndRequest(ctx, r)
 			}
-		case regionspan.LockRangeStatusCancel:
+		case regionlock.LockRangeStatusCancel:
 			return
 		default:
 			panic("unreachable")
 		}
 	}
 
-	res := s.rangeLock.LockRange(ctx, sri.span.Start, sri.span.End, sri.verID.GetID(), sri.verID.GetVer())
+	res := s.rangeLock.LockRange(
+		ctx, sri.span.StartKey, sri.span.EndKey, sri.verID.GetID(), sri.verID.GetVer())
+
 	failpoint.Inject("kvClientMockRangeLock", func(val failpoint.Value) {
 		// short sleep to wait region has split
 		time.Sleep(time.Second)
-		s.rangeLock.UnlockRange(sri.span.Start, sri.span.End,
+		s.rangeLock.UnlockRange(sri.span.StartKey, sri.span.EndKey,
 			sri.verID.GetID(), sri.verID.GetVer())
 		regionNum := val.(int)
-		retryRanges := make([]regionspan.ComparableSpan, 0, regionNum)
+		retryRanges := make([]tablepb.Span, 0, regionNum)
 		start := []byte("a")
 		end := []byte("b1001")
 		for i := 0; i < regionNum; i++ {
-			span := regionspan.Span{Start: start, End: end}
-			retryRanges = append(retryRanges, regionspan.ToComparableSpan(span))
+			retryRanges = append(retryRanges, spanz.ToSpan(start, end))
 			start = end
 			end = []byte(fmt.Sprintf("b%d", 1002+i))
 		}
-		res = regionspan.LockRangeResult{
-			Status:      regionspan.LockRangeStatusStale,
+		res = regionlock.LockRangeResult{
+			Status:      regionlock.LockRangeStatusStale,
 			RetryRanges: retryRanges,
 		}
 	})
 
-	if res.Status == regionspan.LockRangeStatusWait {
+	if res.Status == regionlock.LockRangeStatusWait {
 		res = res.WaitFn()
 	}
 
@@ -563,7 +565,7 @@ func (s *eventFeedSession) scheduleRegionRequest(ctx context.Context, sri single
 // error handling. This function is non-blocking even if error channel is full.
 // CAUTION: Note that this should only be called in a context that the region has locked its range.
 func (s *eventFeedSession) onRegionFail(ctx context.Context, errorInfo regionErrorInfo) {
-	s.rangeLock.UnlockRange(errorInfo.span.Start, errorInfo.span.End,
+	s.rangeLock.UnlockRange(errorInfo.span.StartKey, errorInfo.span.EndKey,
 		errorInfo.verID.GetID(), errorInfo.verID.GetVer(), errorInfo.resolvedTs())
 	log.Info("region failed", zap.Stringer("span", &errorInfo.span),
 		zap.Any("regionId", errorInfo.verID.GetID()),
@@ -615,8 +617,8 @@ func (s *eventFeedSession) requestRegionToStore(
 			RequestId:    requestID,
 			RegionEpoch:  regionEpoch,
 			CheckpointTs: sri.resolvedTs(),
-			StartKey:     sri.span.Start,
-			EndKey:       sri.span.End,
+			StartKey:     sri.span.StartKey,
+			EndKey:       sri.span.EndKey,
 			ExtraOp:      extraOp,
 			FilterLoop:   s.client.filterLoop,
 		}
@@ -806,7 +808,7 @@ func (s *eventFeedSession) dispatchRequest(ctx context.Context) error {
 				zap.Int64("tableID", s.tableID),
 				zap.String("tableName", s.tableName),
 				zap.Uint64("regionID", sri.verID.GetID()),
-				zap.Stringer("span", sri.span),
+				zap.Stringer("span", &sri.span),
 				zap.Uint64("resolvedTs", sri.resolvedTs()))
 			errInfo := newRegionErrorInfo(sri, &rpcCtxUnavailableErr{verID: sri.verID})
 			s.onRegionFail(ctx, errInfo)
@@ -821,7 +823,7 @@ func (s *eventFeedSession) dispatchRequest(ctx context.Context) error {
 // to region boundaries. When region merging happens, it's possible that it
 // will produce some overlapping spans.
 func (s *eventFeedSession) divideAndSendEventFeedToRegions(
-	ctx context.Context, span regionspan.ComparableSpan,
+	ctx context.Context, span tablepb.Span,
 ) error {
 	limit := 20
 	nextSpan := span
@@ -835,7 +837,7 @@ func (s *eventFeedSession) divideAndSendEventFeedToRegions(
 			bo := tikv.NewBackoffer(ctx, tikvRequestMaxBackoff)
 			start := time.Now()
 			regions, err = s.client.regionCache.BatchLoadRegionsWithKeyRange(
-				bo, nextSpan.Start, nextSpan.End, limit)
+				bo, nextSpan.StartKey, nextSpan.EndKey, limit)
 			scanRegionsDuration.Observe(time.Since(start).Seconds())
 			if err != nil {
 				return cerror.WrapError(cerror.ErrPDBatchLoadRegions, err)
@@ -847,7 +849,7 @@ func (s *eventFeedSession) divideAndSendEventFeedToRegions(
 				}
 				metas = append(metas, region.GetMeta())
 			}
-			if !regionspan.CheckRegionsLeftCover(metas, nextSpan) {
+			if !regionlock.CheckRegionsLeftCover(metas, nextSpan) {
 				return cerror.ErrRegionsNotCoverSpan.FastGenByArgs(nextSpan, metas)
 			}
 			return nil
@@ -864,19 +866,19 @@ func (s *eventFeedSession) divideAndSendEventFeedToRegions(
 
 		for _, tiRegion := range regions {
 			region := tiRegion.GetMeta()
-			partialSpan, err := regionspan.Intersect(
-				s.totalSpan, regionspan.ComparableSpan{Start: region.StartKey, End: region.EndKey})
+			partialSpan, err := spanz.Intersect(
+				s.totalSpan, tablepb.Span{StartKey: region.StartKey, EndKey: region.EndKey})
 			if err != nil {
 				return errors.Trace(err)
 			}
-			nextSpan.Start = region.EndKey
+			nextSpan.StartKey = region.EndKey
 			// the End key return by the PD API will be nil to represent the biggest key,
-			partialSpan = partialSpan.Hack()
+			partialSpan = spanz.HackSpan(partialSpan)
 
 			sri := newSingleRegionInfo(tiRegion.VerID(), partialSpan, nil)
 			s.scheduleRegionRequest(ctx, sri)
 			// return if no more regions
-			if regionspan.EndCompare(nextSpan.Start, span.End) >= 0 {
+			if spanz.EndCompare(nextSpan.StartKey, span.EndKey) >= 0 {
 				return nil
 			}
 		}
@@ -910,6 +912,10 @@ func (s *eventFeedSession) handleError(ctx context.Context, errInfo regionErrorI
 		} else if innerErr.GetRegionNotFound() != nil {
 			metricFeedRegionNotFoundCounter.Inc()
 			s.scheduleDivideRegionAndRequest(ctx, errInfo.span)
+			return nil
+		} else if busy := innerErr.GetServerIsBusy(); busy != nil {
+			metricKvIsBusyCounter.Inc()
+			s.scheduleRegionRequest(ctx, errInfo.singleRegionInfo)
 			return nil
 		} else if duplicatedRequest := innerErr.GetDuplicateRequest(); duplicatedRequest != nil {
 			metricFeedDuplicateRequestCounter.Inc()
@@ -985,7 +991,7 @@ func (s *eventFeedSession) receiveFromStream(
 ) error {
 	var tsStat *tableStoreStat
 	s.client.tableStoreStats.Lock()
-	key := fmt.Sprintf("%d_%d", s.client.tableID, storeID)
+	key := fmt.Sprintf("%d_%d", s.totalSpan.TableID, storeID)
 	if tsStat = s.client.tableStoreStats.v[key]; tsStat == nil {
 		tsStat = new(tableStoreStat)
 		s.client.tableStoreStats.v[key] = tsStat
@@ -1117,14 +1123,10 @@ func (s *eventFeedSession) receiveFromStream(
 					zap.Int("resolvedRegionCount", regionCount))
 			}
 
-			if len(cevent.Events) != 0 {
-				if entries, ok := cevent.Events[0].Event.(*cdcpb.Event_Entries_); ok && len(entries.Entries.Entries) > 0 {
-					commitTs := entries.Entries.Entries[0].CommitTs
-					if maxCommitTs < commitTs {
-						maxCommitTs = commitTs
-					}
-				}
+			if commitTs := getChangeDataEventCommitTs(cevent); commitTs > 0 && maxCommitTs < commitTs {
+				maxCommitTs = commitTs
 			}
+
 			err = s.sendRegionChangeEvents(ctx, cevent.Events, worker, pendingRegions, addr)
 			if err != nil {
 				return err
@@ -1375,7 +1377,7 @@ func (s *eventFeedSession) logSlowRegions(ctx context.Context) error {
 		if len(attr.Holes) > 0 {
 			holes := make([]string, 0, len(attr.Holes))
 			for _, hole := range attr.Holes {
-				holes = append(holes, fmt.Sprintf("[%s,%s)", hole.Start, hole.End))
+				holes = append(holes, fmt.Sprintf("[%s,%s)", hole.StartKey, hole.EndKey))
 			}
 			log.Info("event feed holes exist",
 				zap.String("namespace", s.changefeed.Namespace),

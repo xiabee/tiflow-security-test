@@ -31,13 +31,13 @@ import (
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/store/mockstore/mockcopr"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/store/mockstore/mockcopr"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/pdutil"
-	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/pkg/txnutil"
@@ -48,7 +48,9 @@ import (
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 func Test(t *testing.T) {
@@ -228,6 +230,10 @@ loop:
 	return nil
 }
 
+func (s *mockChangeDataService) EventFeedV2(server cdcpb.ChangeData_EventFeedV2Server) error {
+	return status.Error(codes.Unimplemented, "")
+}
+
 func newMockService(
 	ctx context.Context,
 	t *testing.T,
@@ -313,7 +319,7 @@ func TestConnectOfflineTiKV(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -328,7 +334,7 @@ func TestConnectOfflineTiKV(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			1, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -415,7 +421,7 @@ func TestRecvLargeMessageSize(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -428,7 +434,7 @@ func TestRecvLargeMessageSize(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			1, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -515,7 +521,7 @@ func TestHandleError(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -528,7 +534,7 @@ func TestHandleError(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("d")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("d")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -674,7 +680,7 @@ func TestCompatibilityWithSameConn(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -688,7 +694,7 @@ func TestCompatibilityWithSameConn(t *testing.T) {
 	go func() {
 		defer wg2.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.True(t, cerror.ErrVersionIncompatible.Equal(err))
 	}()
@@ -741,7 +747,7 @@ func TestClusterIDMismatch(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -756,7 +762,7 @@ func TestClusterIDMismatch(t *testing.T) {
 	go func() {
 		defer wg2.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.True(t, cerror.ErrClusterIDMismatch.Equal(err))
 	}()
@@ -810,7 +816,7 @@ func testHandleFeedEvent(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -823,7 +829,7 @@ func testHandleFeedEvent(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -1082,7 +1088,7 @@ func testHandleFeedEvent(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: 3,
 				}}, ResolvedTs: 100,
 			},
@@ -1155,7 +1161,7 @@ func testHandleFeedEvent(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: 3,
 				}}, ResolvedTs: 135,
 			},
@@ -1163,7 +1169,7 @@ func testHandleFeedEvent(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: 3,
 				}}, ResolvedTs: 145,
 			},
@@ -1177,7 +1183,7 @@ func testHandleFeedEvent(t *testing.T) {
 	}
 	for i := range multipleExpected.Resolved.Spans {
 		multipleExpected.Resolved.Spans[i] = model.RegionComparableSpan{
-			Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			Region: 3,
 		}
 	}
@@ -1271,7 +1277,7 @@ func TestStreamSendWithError(t *testing.T) {
 	cluster.SplitRaw(regionID3, regionID4, []byte("b"), []uint64{5}, 5)
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockerResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockerResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1284,7 +1290,7 @@ func TestStreamSendWithError(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("c")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("c")},
 			100, lockerResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -1383,7 +1389,7 @@ func testStreamRecvWithError(t *testing.T, failpointStr string) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1396,7 +1402,7 @@ func testStreamRecvWithError(t *testing.T, failpointStr string) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -1442,7 +1448,7 @@ func testStreamRecvWithError(t *testing.T, failpointStr string) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: 120,
 			},
@@ -1450,7 +1456,7 @@ func testStreamRecvWithError(t *testing.T, failpointStr string) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: 120,
 			},
@@ -1516,7 +1522,7 @@ func TestStreamRecvWithErrorAndResolvedGoBack(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1530,7 +1536,7 @@ func TestStreamRecvWithErrorAndResolvedGoBack(t *testing.T) {
 		defer wg.Done()
 		defer close(eventCh)
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -1725,7 +1731,7 @@ func TestIncompatibleTiKV(t *testing.T) {
 	}()
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1739,7 +1745,7 @@ func TestIncompatibleTiKV(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -1802,7 +1808,7 @@ func TestNoPendingRegionError(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1816,7 +1822,7 @@ func TestNoPendingRegionError(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -1881,7 +1887,7 @@ func TestDropStaleRequest(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1894,7 +1900,7 @@ func TestDropStaleRequest(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -1925,7 +1931,7 @@ func TestDropStaleRequest(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: 100,
 			},
@@ -1933,7 +1939,7 @@ func TestDropStaleRequest(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: 120,
 			},
@@ -1941,7 +1947,7 @@ func TestDropStaleRequest(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: 130,
 			},
@@ -1995,7 +2001,7 @@ func TestResolveLock(t *testing.T) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2008,7 +2014,7 @@ func TestResolveLock(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -2031,7 +2037,7 @@ func TestResolveLock(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: 100,
 			},
@@ -2039,7 +2045,7 @@ func TestResolveLock(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: tso,
 			},
@@ -2063,7 +2069,6 @@ func TestResolveLock(t *testing.T) {
 }
 
 func testEventCommitTsFallback(t *testing.T, events []*cdcpb.ChangeDataEvent) {
-	InitWorkerPool()
 	ctx, cancel := context.WithCancel(context.Background())
 	wg := &sync.WaitGroup{}
 
@@ -2101,7 +2106,7 @@ func testEventCommitTsFallback(t *testing.T, events []*cdcpb.ChangeDataEvent) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2115,7 +2120,7 @@ func testEventCommitTsFallback(t *testing.T, events []*cdcpb.ChangeDataEvent) {
 	go func() {
 		defer clientWg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, errUnreachable, err)
 	}()
@@ -2229,7 +2234,7 @@ func testEventAfterFeedStop(t *testing.T) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2242,7 +2247,7 @@ func testEventAfterFeedStop(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -2343,7 +2348,7 @@ func testEventAfterFeedStop(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: 100,
 			},
@@ -2352,7 +2357,7 @@ func testEventAfterFeedStop(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: 100,
 			},
@@ -2372,7 +2377,7 @@ func testEventAfterFeedStop(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: regionID,
 				}}, ResolvedTs: 120,
 			},
@@ -2416,7 +2421,7 @@ func TestOutOfRegionRangeEvent(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2429,7 +2434,7 @@ func TestOutOfRegionRangeEvent(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -2549,7 +2554,7 @@ func TestOutOfRegionRangeEvent(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: 3,
 				}}, ResolvedTs: 100,
 			},
@@ -2579,7 +2584,7 @@ func TestOutOfRegionRangeEvent(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: 3,
 				}}, ResolvedTs: 145,
 			},
@@ -2634,7 +2639,7 @@ func TestResolveLockNoCandidate(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2647,7 +2652,7 @@ func TestResolveLockNoCandidate(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -2730,7 +2735,7 @@ func TestFailRegionReentrant(t *testing.T) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2743,7 +2748,7 @@ func TestFailRegionReentrant(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -2813,7 +2818,7 @@ func TestClientV1UnlockRangeReentrant(t *testing.T) {
 	}()
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2826,7 +2831,7 @@ func TestClientV1UnlockRangeReentrant(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("c")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("c")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -2881,7 +2886,7 @@ func testClientErrNoPendingRegion(t *testing.T) {
 	}()
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2894,7 +2899,7 @@ func testClientErrNoPendingRegion(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("c")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("c")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -2959,7 +2964,7 @@ func testKVClientForceReconnect(t *testing.T) {
 	cluster.Bootstrap(regionID3, []uint64{1}, []uint64{4}, 4)
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2972,7 +2977,7 @@ func testKVClientForceReconnect(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("c")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("c")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -3036,7 +3041,7 @@ func testKVClientForceReconnect(t *testing.T) {
 	expected := model.RegionFeedEvent{
 		Resolved: &model.ResolvedSpans{
 			Spans: []model.RegionComparableSpan{{
-				Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("c")},
+				Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("c")},
 				Region: regionID3,
 			}}, ResolvedTs: 135,
 		},
@@ -3110,7 +3115,7 @@ func TestConcurrentProcessRangeRequest(t *testing.T) {
 	}()
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -3123,7 +3128,7 @@ func TestConcurrentProcessRangeRequest(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("z")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("z")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -3227,7 +3232,7 @@ func TestEvTimeUpdate(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -3240,7 +3245,7 @@ func TestEvTimeUpdate(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -3276,7 +3281,7 @@ func TestEvTimeUpdate(t *testing.T) {
 		{
 			Resolved: &model.ResolvedSpans{
 				Spans: []model.RegionComparableSpan{{
-					Span:   regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+					Span:   tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 					Region: 3,
 				}}, ResolvedTs: 100,
 			},
@@ -3353,7 +3358,7 @@ func TestRegionWorkerExitWhenIsIdle(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -3366,7 +3371,7 @@ func TestRegionWorkerExitWhenIsIdle(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -3445,7 +3450,7 @@ func TestPrewriteNotMatchError(t *testing.T) {
 	cluster.SplitRaw(regionID3, regionID4, []byte("b"), []uint64{5}, 5)
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -3460,7 +3465,7 @@ func TestPrewriteNotMatchError(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err = cdcClient.EventFeed(ctx,
-			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("c")},
+			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("c")},
 			100, lockResolver, eventCh)
 		require.Equal(t, context.Canceled, errors.Cause(err))
 	}()
@@ -3535,7 +3540,7 @@ func TestPrewriteNotMatchError(t *testing.T) {
 func createFakeEventFeedSession() *eventFeedSession {
 	return newEventFeedSession(
 		&CDCClient{config: config.GetDefaultServerConfig()},
-		regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
+		tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
 		nil, /*lockResolver*/
 		100, /*startTs*/
 		nil, /*eventCh*/

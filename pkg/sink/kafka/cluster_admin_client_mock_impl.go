@@ -14,10 +14,12 @@
 package kafka
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
+	"github.com/pingcap/tiflow/pkg/errors"
 )
 
 const (
@@ -36,7 +38,7 @@ const (
 	// default to 1048576, identical to kafka broker's `message.max.bytes` and topic's `max.message.bytes`
 	// see: https://kafka.apache.org/documentation/#brokerconfigs_message.max.bytes
 	// see: https://kafka.apache.org/documentation/#topicconfigs_max.message.bytes
-	defaultMaxMessageBytes = "1048576"
+	defaultMaxMessageBytes = "1048588"
 
 	// defaultMinInsyncReplicas specifies the default `min.insync.replicas` for broker and topic.
 	defaultMinInsyncReplicas = "1"
@@ -52,7 +54,7 @@ var (
 )
 
 type topicDetail struct {
-	sarama.TopicDetail
+	TopicDetail
 	fetchesRemainingUntilVisible int
 }
 
@@ -60,35 +62,25 @@ type topicDetail struct {
 type ClusterAdminClientMockImpl struct {
 	topics map[string]*topicDetail
 	// Cluster controller ID.
-	controllerID  int32
+	controllerID  int
+	brokerConfigs map[string]string
 	topicConfigs  map[string]map[string]string
-	brokerConfigs []sarama.ConfigEntry
 }
 
 // NewClusterAdminClientMockImpl news a ClusterAdminClientMockImpl struct with default configurations.
 func NewClusterAdminClientMockImpl() *ClusterAdminClientMockImpl {
 	topics := make(map[string]*topicDetail)
-	configEntries := make(map[string]*string)
-	configEntries[TopicMaxMessageBytesConfigName] = &TopicMaxMessageBytes
-	configEntries[MinInsyncReplicasConfigName] = &MinInSyncReplicas
 	topics[DefaultMockTopicName] = &topicDetail{
 		fetchesRemainingUntilVisible: 0,
-		TopicDetail: sarama.TopicDetail{
+		TopicDetail: TopicDetail{
+			Name:          DefaultMockTopicName,
 			NumPartitions: 3,
-			ConfigEntries: configEntries,
 		},
 	}
 
-	brokerConfigs := []sarama.ConfigEntry{
-		{
-			Name:  BrokerMessageMaxBytesConfigName,
-			Value: BrokerMessageMaxBytes,
-		},
-		{
-			Name:  MinInsyncReplicasConfigName,
-			Value: MinInSyncReplicas,
-		},
-	}
+	brokerConfigs := make(map[string]string)
+	brokerConfigs[BrokerMessageMaxBytesConfigName] = BrokerMessageMaxBytes
+	brokerConfigs[MinInsyncReplicasConfigName] = MinInSyncReplicas
 
 	topicConfigs := make(map[string]map[string]string)
 	topicConfigs[DefaultMockTopicName] = make(map[string]string)
@@ -103,44 +95,41 @@ func NewClusterAdminClientMockImpl() *ClusterAdminClientMockImpl {
 	}
 }
 
-// DescribeCluster returns the controller ID.
-func (c *ClusterAdminClientMockImpl) DescribeCluster() (brokers []*sarama.Broker, controllerID int32, err error) {
-	return nil, c.controllerID, nil
+// GetAllBrokers implement the ClusterAdminClient interface
+func (c *ClusterAdminClientMockImpl) GetAllBrokers(context.Context) ([]Broker, error) {
+	return nil, nil
 }
 
-// DescribeConfig return brokerConfigs directly.
-func (c *ClusterAdminClientMockImpl) DescribeConfig(resource sarama.ConfigResource) ([]sarama.ConfigEntry, error) {
-	var result []sarama.ConfigEntry
-	if resource.Type == sarama.TopicResource {
-		if _, ok := c.topics[resource.Name]; !ok {
-			return nil, fmt.Errorf("topic %s not found", resource.Name)
-		}
-		for _, name := range resource.ConfigNames {
-			for n, config := range c.topicConfigs[resource.Name] {
-				if name == n {
-					result = append(result, sarama.ConfigEntry{
-						Name:  n,
-						Value: config,
-					})
-				}
-			}
-		}
-
-	} else if resource.Type == sarama.BrokerResource {
-		for _, name := range resource.ConfigNames {
-			for _, config := range c.brokerConfigs {
-				if name == config.Name {
-					result = append(result, config)
-				}
-			}
-		}
+// GetBrokerConfig implement the ClusterAdminClient interface
+func (c *ClusterAdminClientMockImpl) GetBrokerConfig(
+	_ context.Context,
+	configName string,
+) (string, error) {
+	value, ok := c.brokerConfigs[configName]
+	if !ok {
+		return "", errors.ErrKafkaConfigNotFound.GenWithStack(
+			"cannot find the `%s` from the broker's configuration", configName)
 	}
-	return result, nil
+	return value, nil
+}
+
+// GetTopicConfig implement the ClusterAdminClient interface
+func (c *ClusterAdminClientMockImpl) GetTopicConfig(ctx context.Context, topicName string, configName string) (string, error) {
+	if _, ok := c.topics[topicName]; !ok {
+		return "", errors.ErrKafkaConfigNotFound.GenWithStack("cannot find the `%s` from the topic's configuration", topicName)
+	}
+	value, ok := c.topicConfigs[topicName][configName]
+	if !ok {
+		return "", errors.ErrKafkaConfigNotFound.GenWithStack(
+			"cannot find the `%s` from the topic's configuration", configName)
+	}
+	return value, nil
 }
 
 // SetRemainingFetchesUntilTopicVisible is used to control the visibility of a specific topic.
 // It is used to mock the topic creation delay.
-func (c *ClusterAdminClientMockImpl) SetRemainingFetchesUntilTopicVisible(topicName string,
+func (c *ClusterAdminClientMockImpl) SetRemainingFetchesUntilTopicVisible(
+	topicName string,
 	fetchesRemainingUntilVisible int,
 ) error {
 	topic, ok := c.topics[topicName]
@@ -152,56 +141,48 @@ func (c *ClusterAdminClientMockImpl) SetRemainingFetchesUntilTopicVisible(topicN
 	return nil
 }
 
-// DescribeTopics fetches metadata from some topics.
-func (c *ClusterAdminClientMockImpl) DescribeTopics(topics []string) (
-	metadata []*sarama.TopicMetadata, err error,
-) {
-	topicDescriptions := make(map[string]*sarama.TopicMetadata)
-
-	for _, requestedTopic := range topics {
-		for topicName, topicDetail := range c.topics {
-			if topicName == requestedTopic {
-				if topicDetail.fetchesRemainingUntilVisible > 0 {
-					topicDetail.fetchesRemainingUntilVisible--
-				} else {
-					topicDescriptions[topicName] = &sarama.TopicMetadata{
-						Name:       topicName,
-						Partitions: make([]*sarama.PartitionMetadata, topicDetail.NumPartitions),
-					}
-					break
-				}
+// GetTopicsMeta implement the ClusterAdminClient interface
+func (c *ClusterAdminClientMockImpl) GetTopicsMeta(
+	_ context.Context,
+	topics []string,
+	_ bool,
+) (map[string]TopicDetail, error) {
+	result := make(map[string]TopicDetail, len(topics))
+	for _, topic := range topics {
+		details, ok := c.topics[topic]
+		if ok {
+			if details.fetchesRemainingUntilVisible > 0 {
+				details.fetchesRemainingUntilVisible--
+				continue
 			}
-		}
-
-		if _, ok := topicDescriptions[requestedTopic]; !ok {
-			topicDescriptions[requestedTopic] = &sarama.TopicMetadata{
-				Name: requestedTopic,
-				Err:  sarama.ErrUnknownTopicOrPartition,
-			}
+			result[topic] = details.TopicDetail
 		}
 	}
+	return result, nil
+}
 
-	metadataRes := make([]*sarama.TopicMetadata, 0)
-	for _, meta := range topicDescriptions {
-		metadataRes = append(metadataRes, meta)
+// GetTopicsPartitionsNum implement the ClusterAdminClient interface
+func (c *ClusterAdminClientMockImpl) GetTopicsPartitionsNum(
+	_ context.Context, topics []string,
+) (map[string]int32, error) {
+	result := make(map[string]int32, len(topics))
+	for _, topic := range topics {
+		result[topic] = c.topics[topic].NumPartitions
 	}
-
-	return metadataRes, nil
+	return result, nil
 }
 
 // CreateTopic adds topic into map.
-func (c *ClusterAdminClientMockImpl) CreateTopic(topic string, detail *sarama.TopicDetail, _ bool) error {
+func (c *ClusterAdminClientMockImpl) CreateTopic(
+	_ context.Context,
+	detail *TopicDetail,
+	_ bool,
+) error {
 	if detail.ReplicationFactor > defaultReplicationFactor {
 		return sarama.ErrInvalidReplicationFactor
 	}
 
-	minInsyncReplicaConfigFound := false
-
-	for _, config := range c.brokerConfigs {
-		if config.Name == MinInsyncReplicasConfigName {
-			minInsyncReplicaConfigFound = true
-		}
-	}
+	_, minInsyncReplicaConfigFound := c.brokerConfigs[MinInsyncReplicasConfigName]
 	// For Confluent Cloud, min.insync.replica is invisible and replication factor must be 3.
 	// Otherwise, ErrPolicyViolation is expected to be returned.
 	if !minInsyncReplicaConfigFound &&
@@ -209,26 +190,24 @@ func (c *ClusterAdminClientMockImpl) CreateTopic(topic string, detail *sarama.To
 		return sarama.ErrPolicyViolation
 	}
 
-	c.topics[topic] = &topicDetail{
+	c.topics[detail.Name] = &topicDetail{
 		TopicDetail: *detail,
 	}
 	return nil
 }
 
-// Close do nothing.
-func (c *ClusterAdminClientMockImpl) Close() error {
-	return nil
+// DeleteTopic deletes a topic, only used for testing.
+func (c *ClusterAdminClientMockImpl) DeleteTopic(topicName string) {
+	delete(c.topics, topicName)
 }
+
+// Close do nothing.
+func (c *ClusterAdminClientMockImpl) Close() {}
 
 // SetMinInsyncReplicas sets the MinInsyncReplicas for broker and default topic.
 func (c *ClusterAdminClientMockImpl) SetMinInsyncReplicas(minInsyncReplicas string) {
 	c.topicConfigs[DefaultMockTopicName][MinInsyncReplicasConfigName] = minInsyncReplicas
-
-	for i, config := range c.brokerConfigs {
-		if config.Name == MinInsyncReplicasConfigName {
-			c.brokerConfigs[i].Value = minInsyncReplicas
-		}
-	}
+	c.brokerConfigs[MinInsyncReplicasConfigName] = minInsyncReplicas
 }
 
 // GetDefaultMockTopicName returns the default topic name
@@ -250,14 +229,5 @@ func (c *ClusterAdminClientMockImpl) GetTopicMaxMessageBytes() int {
 
 // DropBrokerConfig remove all broker level configuration for test purpose.
 func (c *ClusterAdminClientMockImpl) DropBrokerConfig(configName string) {
-	targetIdx := 0
-	for i, config := range c.brokerConfigs {
-		if config.Name == configName {
-			targetIdx = i
-		}
-	}
-
-	if targetIdx != 0 {
-		c.brokerConfigs = append(c.brokerConfigs[:targetIdx], c.brokerConfigs[targetIdx+1:]...)
-	}
+	delete(c.brokerConfigs, configName)
 }

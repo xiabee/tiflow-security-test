@@ -18,7 +18,7 @@ import (
 
 	"github.com/pingcap/tiflow/cdc/api/owner"
 	"github.com/pingcap/tiflow/cdc/model"
-	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
+	"github.com/pingcap/tiflow/pkg/api/v2"
 	"github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
@@ -36,9 +36,10 @@ type changefeedCommonInfo struct {
 
 // listChangefeedOptions defines flags for the `cli changefeed list` command.
 type listChangefeedOptions struct {
-	apiClient apiv1client.APIV1Interface
+	apiClient v2.APIV2Interface
 
-	listAll bool
+	listAll   bool
+	namespace string
 }
 
 // newListChangefeedOptions creates new options for the `cli changefeed list` command.
@@ -49,12 +50,13 @@ func newListChangefeedOptions() *listChangefeedOptions {
 // addFlags receives a *cobra.Command reference and binds
 // flags related to template printing to it.
 func (o *listChangefeedOptions) addFlags(cmd *cobra.Command) {
+	cmd.PersistentFlags().StringVarP(&o.namespace, "namespace", "n", "default", "Replication task (changefeed) Namespace")
 	cmd.PersistentFlags().BoolVarP(&o.listAll, "all", "a", false, "List all replication tasks(including removed and finished)")
 }
 
 // complete adapts from the command line args to the data and client required.
 func (o *listChangefeedOptions) complete(f factory.Factory) error {
-	apiClient, err := f.APIV1Client()
+	apiClient, err := f.APIV2Client()
 	if err != nil {
 		return err
 	}
@@ -66,13 +68,13 @@ func (o *listChangefeedOptions) complete(f factory.Factory) error {
 func (o *listChangefeedOptions) run(cmd *cobra.Command) error {
 	ctx := context.GetDefaultContext()
 
-	raw, err := o.apiClient.Changefeeds().List(ctx, "all")
+	raw, err := o.apiClient.Changefeeds().List(ctx, o.namespace, "all")
 	if err != nil {
 		return err
 	}
-	cfs := make([]*changefeedCommonInfo, 0, len(*raw))
+	cfs := make([]*changefeedCommonInfo, 0, len(raw))
 
-	for _, cf := range *raw {
+	for _, cf := range raw {
 		if !o.listAll {
 			if cf.FeedState == model.StateFinished ||
 				cf.FeedState == model.StateRemoved {

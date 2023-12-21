@@ -189,29 +189,13 @@ func (l *LogReader) runReader(egCtx context.Context, cfg *readerConfig) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	for i := 0; i < len(fileReaders); i++ {
-		rl, err := fileReaders[i].Read()
-		if err != nil {
-			if err != io.EOF {
-				return errors.Trace(err)
-			}
-			continue
-		}
-
-		ld := &logWithIdx{
-			data: rl,
-			idx:  i,
-		}
-		redoLogHeap = append(redoLogHeap, ld)
-	}
-	heap.Init(&redoLogHeap)
 
 	for redoLogHeap.Len() != 0 {
 		item := heap.Pop(&redoLogHeap).(*logWithIdx)
 
 		switch cfg.fileType {
 		case redo.RedoRowLogFileType:
-			row := model.LogToRow(item.data.RedoRow)
+			row := item.data.RedoRow.Row
 			// By design only data (startTs,endTs] is needed,
 			// so filter out data may beyond the boundary.
 			if row != nil && row.CommitTs > cfg.startTs && row.CommitTs <= cfg.endTs {
@@ -227,7 +211,7 @@ func (l *LogReader) runReader(egCtx context.Context, cfg *readerConfig) error {
 			}
 
 		case redo.RedoDDLLogFileType:
-			ddl := model.LogToDDL(item.data.RedoDDL)
+			ddl := item.data.RedoDDL.DDL
 			if ddl != nil && ddl.CommitTs > cfg.startTs && ddl.CommitTs <= cfg.endTs {
 				select {
 				case <-egCtx.Done():
@@ -365,19 +349,19 @@ func (h logHeap) Len() int {
 
 func (h logHeap) Less(i, j int) bool {
 	if h[i].data.Type == model.RedoLogTypeDDL {
-		if h[i].data.RedoDDL == nil || h[i].data.RedoDDL.DDL == nil {
+		if h[i].data.RedoDDL.DDL == nil {
 			return true
 		}
-		if h[j].data.RedoDDL == nil || h[j].data.RedoDDL.DDL == nil {
+		if h[j].data.RedoDDL.DDL == nil {
 			return false
 		}
 		return h[i].data.RedoDDL.DDL.CommitTs < h[j].data.RedoDDL.DDL.CommitTs
 	}
 
-	if h[i].data.RedoRow == nil || h[i].data.RedoRow.Row == nil {
+	if h[i].data.RedoRow.Row == nil {
 		return true
 	}
-	if h[j].data.RedoRow == nil || h[j].data.RedoRow.Row == nil {
+	if h[j].data.RedoRow.Row == nil {
 		return false
 	}
 

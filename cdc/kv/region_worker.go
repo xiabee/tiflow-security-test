@@ -29,7 +29,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/regionspan"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/pingcap/tiflow/pkg/workerpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/client-go/v2/oracle"
@@ -74,6 +74,8 @@ type regionWorkerMetrics struct {
 	metricSendEventResolvedCounter  prometheus.Counter
 	metricSendEventCommitCounter    prometheus.Counter
 	metricSendEventCommittedCounter prometheus.Counter
+
+	metricQueueDuration prometheus.Observer
 }
 
 /*
@@ -139,6 +141,9 @@ func newRegionWorkerMetrics(changefeedID model.ChangeFeedID) *regionWorkerMetric
 	metrics.metricSendEventCommittedCounter = sendEventCounter.
 		WithLabelValues("committed", changefeedID.Namespace, changefeedID.ID)
 
+	metrics.metricQueueDuration = regionWorkerQueueDuration.
+		WithLabelValues(changefeedID.Namespace, changefeedID.ID)
+
 	return metrics
 }
 
@@ -156,7 +161,7 @@ func newRegionWorker(
 		rtsManager:    newRegionTsManager(),
 		rtsUpdateCh:   make(chan *rtsUpdateEvent, 1024),
 		storeAddr:     addr,
-		concurrency:   s.client.config.KVClient.WorkerConcurrent,
+		concurrency:   int(s.client.config.KVClient.WorkerConcurrent),
 		metrics:       newRegionWorkerMetrics(changefeedID),
 		inputPending:  0,
 
@@ -211,7 +216,7 @@ func (w *regionWorker) handleSingleRegionError(err error, state *regionFeedState
 		zap.String("changefeed", w.session.client.changefeed.ID),
 		zap.Uint64("regionID", regionID),
 		zap.Uint64("requestID", state.requestID),
-		zap.Stringer("span", state.sri.span),
+		zap.Stringer("span", &state.sri.span),
 		zap.Uint64("resolvedTs", state.sri.resolvedTs()),
 		zap.Bool("isStale", isStale),
 		zap.Error(err))
@@ -220,7 +225,7 @@ func (w *regionWorker) handleSingleRegionError(err error, state *regionFeedState
 		return w.checkShouldExit()
 	}
 	// We need to ensure when the error is handled, `isStale` must be set. So set it before sending the error.
-	state.markStopped()
+	state.markStopped(nil)
 	w.delRegionState(regionID)
 	failpoint.Inject("kvClientSingleFeedProcessDelay", nil)
 
@@ -335,7 +340,7 @@ func (w *regionWorker) resolveLock(ctx context.Context) error {
 							zap.String("changefeed", w.session.client.changefeed.ID),
 							zap.String("addr", w.storeAddr),
 							zap.Uint64("regionID", rts.regionID),
-							zap.Stringer("span", state.sri.span),
+							zap.Stringer("span", &state.sri.span),
 							zap.Duration("duration", sinceLastResolvedTs),
 							zap.Duration("lastEvent", sinceLastEvent),
 							zap.Uint64("resolvedTs", lastResolvedTs),
@@ -643,12 +648,11 @@ func handleEventEntry(
 ) error {
 	regionID, regionSpan, _ := state.getRegionMeta()
 	for _, entry := range x.Entries.GetEntries() {
-		// if a region with kv range [a, z), and we only want the get [b, c) from this region,
-		// tikv will return all key events in the region, although specified [b, c) int the request.
-		// we can make tikv only return the events about the keys in the specified range.
-		comparableKey := regionspan.ToComparableKey(entry.GetKey())
+		// NOTE: from TiKV 7.0.0, entries are already filtered out in TiKV side.
+		// We can remove the check in future.
+		comparableKey := spanz.ToComparableKey(entry.GetKey())
 		if entry.Type != cdcpb.Event_INITIALIZED &&
-			!regionspan.KeyInSpan(comparableKey, regionSpan) {
+			!spanz.KeyInSpan(comparableKey, regionSpan) {
 			metrics.metricDroppedEventSize.Observe(float64(entry.Size()))
 			continue
 		}
@@ -814,7 +818,7 @@ func (w *regionWorker) evictAllRegions() {
 			if regionState.isStale() {
 				return true
 			}
-			regionState.markStopped()
+			regionState.markStopped(nil)
 			deletes = append(deletes, struct {
 				regionID    uint64
 				regionState *regionFeedState

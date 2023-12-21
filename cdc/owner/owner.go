@@ -15,10 +15,7 @@ package owner
 
 import (
 	"context"
-	"fmt"
 	"io"
-	"net/url"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,12 +25,13 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/scheduler"
+	"github.com/pingcap/tiflow/pkg/config"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
 	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/pingcap/tiflow/pkg/version"
-	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
@@ -53,16 +51,6 @@ const (
 // versionInconsistentLogRate represents the rate of log output when there are
 // captures with versions different from that of the owner
 const versionInconsistentLogRate = 1
-
-// Remove following variables once we fix https://github.com/pingcap/tiflow/issues/7657.
-var (
-	recreateChangefeedDelayLimit = 30 * time.Second
-	hasCIEnv                     = func() bool {
-		// Most CI platform has the "CI" environment variable.
-		_, ok := os.LookupEnv("CI")
-		return ok
-	}()
-)
 
 // Export field names for pretty printing.
 type ownerJob struct {
@@ -93,7 +81,6 @@ type ownerJob struct {
 //
 // The interface is thread-safe, except for Tick, it's only used by etcd worker.
 type Owner interface {
-	orchestrator.Reactor
 	EnqueueJob(adminJob model.AdminJob, done chan<- error)
 	RebalanceTables(cfID model.ChangeFeedID, done chan<- error)
 	ScheduleTable(
@@ -103,8 +90,14 @@ type Owner interface {
 	DrainCapture(query *scheduler.Query, done chan<- error)
 	WriteDebugInfo(w io.Writer, done chan<- error)
 	Query(query *Query, done chan<- error)
-	ValidateChangefeed(info *model.ChangeFeedInfo) error
 	AsyncStop()
+	UpdateChangefeedAndUpstream(ctx context.Context,
+		upstreamInfo *model.UpstreamInfo,
+		changeFeedInfo *model.ChangeFeedInfo,
+		changeFeedID model.ChangeFeedID,
+	) error
+	UpdateChangefeed(ctx context.Context,
+		changeFeedInfo *model.ChangeFeedInfo) error
 }
 
 type ownerImpl struct {
@@ -119,39 +112,44 @@ type ownerImpl struct {
 	logLimiter   *rate.Limiter
 	lastTickTime time.Time
 	closed       int32
-	// bootstrapped specifies whether the owner has been initialized.
-	// This will only be done when the owner starts the first Tick.
-	// NOTICE: Do not use it in a method other than tick unexpectedly,
-	//         as it is not a thread-safe value.
-	bootstrapped bool
+
 	// changefeedTicked specifies whether changefeeds have been ticked.
 	// NOTICE: Do not use it in a method other than tick unexpectedly,
 	//         as it is not a thread-safe value.
 	changefeedTicked bool
 
+	etcdClient etcd.CDCEtcdClient
+
 	newChangefeed func(
 		id model.ChangeFeedID,
-		state *orchestrator.ChangefeedReactorState,
+		cfInfo *model.ChangeFeedInfo,
+		cfStatus *model.ChangeFeedStatus,
+		feedStateManager FeedStateManager,
 		up *upstream.Upstream,
+		cfg *config.SchedulerConfig,
 	) *changefeed
-
-	// removedChangefeed is a workload of https://github.com/pingcap/tiflow/issues/7657
-	// by delaying recreate changefeed with the same ID.
-	// TODO: remove these fields after the issue is resolved.
-	removedChangefeed map[model.ChangeFeedID]time.Time
-	removedSinkURI    map[url.URL]time.Time
+	cfg *config.SchedulerConfig
 }
 
+var (
+	_ orchestrator.Reactor = &ownerImpl{}
+	_ Owner                = &ownerImpl{}
+)
+
 // NewOwner creates a new Owner
-func NewOwner(upstreamManager *upstream.Manager) Owner {
+func NewOwner(
+	upstreamManager *upstream.Manager,
+	cfg *config.SchedulerConfig,
+	etcdClient etcd.CDCEtcdClient,
+) Owner {
 	return &ownerImpl{
-		upstreamManager:   upstreamManager,
-		changefeeds:       make(map[model.ChangeFeedID]*changefeed),
-		lastTickTime:      time.Now(),
-		newChangefeed:     newChangefeed,
-		logLimiter:        rate.NewLimiter(versionInconsistentLogRate, versionInconsistentLogRate),
-		removedChangefeed: make(map[model.ChangeFeedID]time.Time),
-		removedSinkURI:    make(map[url.URL]time.Time),
+		upstreamManager: upstreamManager,
+		changefeeds:     make(map[model.ChangeFeedID]*changefeed),
+		lastTickTime:    time.Now(),
+		newChangefeed:   NewChangefeed,
+		logLimiter:      rate.NewLimiter(versionInconsistentLogRate, versionInconsistentLogRate),
+		cfg:             cfg,
+		etcdClient:      etcdClient,
 	}
 }
 
@@ -162,13 +160,6 @@ func (o *ownerImpl) Tick(stdCtx context.Context, rawState orchestrator.ReactorSt
 	})
 	failpoint.Inject("sleep-in-owner-tick", nil)
 	state := rawState.(*orchestrator.GlobalReactorState)
-	// At the first Tick, we need to do a bootstrap operation.
-	// Fix incompatible or incorrect meta information.
-	if !o.bootstrapped {
-		o.Bootstrap(state)
-		o.bootstrapped = true
-		return state, nil
-	}
 
 	o.captures = state.Captures
 	o.updateMetrics()
@@ -179,21 +170,13 @@ func (o *ownerImpl) Tick(stdCtx context.Context, rawState orchestrator.ReactorSt
 	// admin job, which will cause all http api unavailable.
 	o.handleJobs(stdCtx)
 
-	if !o.clusterVersionConsistent(o.captures) {
-		return state, nil
-	}
-	// Owner should update GC safepoint before initializing changefeed, so
-	// changefeed can remove its "ticdc-creating" service GC safepoint during
-	// initializing.
-	//
-	// See more gc doc.
-	if err = o.updateGCSafepoint(stdCtx, state); err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	// Tick all changefeeds.
 	ctx := stdCtx.(cdcContext.Context)
 	for changefeedID, changefeedState := range state.Changefeeds {
+		// check if we are the changefeed owner to handle this changefeed
+		if !o.shouldHandleChangefeed(changefeedState) {
+			continue
+		}
 		if changefeedState.Info == nil {
 			o.cleanUpChangefeed(changefeedState)
 			if cfReactor, ok := o.changefeeds[changefeedID]; ok {
@@ -208,13 +191,21 @@ func (o *ownerImpl) Tick(stdCtx context.Context, rawState orchestrator.ReactorSt
 				upstreamInfo := state.Upstreams[changefeedState.Info.UpstreamID]
 				up = o.upstreamManager.AddUpstream(upstreamInfo)
 			}
-			cfReactor = o.newChangefeed(changefeedID, changefeedState, up)
+			cfReactor = o.newChangefeed(changefeedID, changefeedState.Info, changefeedState.Status,
+				NewFeedStateManager(up, changefeedState),
+				up, o.cfg)
 			o.changefeeds[changefeedID] = cfReactor
 		}
 		ctx = cdcContext.WithChangefeedVars(ctx, &cdcContext.ChangefeedVars{
 			ID: changefeedID,
 		})
-		cfReactor.Tick(ctx, state.Captures)
+		changefeedState.CheckCaptureAlive(ctx.GlobalVars().CaptureInfo.ID)
+		captures := o.getChangefeedCaptures(changefeedState, state)
+		if !preflightCheck(changefeedState, captures) {
+			continue
+		}
+		checkpointTs, minTableBarrierTs := cfReactor.Tick(ctx, changefeedState.Info, changefeedState.Status, captures)
+		updateStatus(changefeedState, checkpointTs, minTableBarrierTs)
 	}
 	o.changefeedTicked = true
 
@@ -236,11 +227,106 @@ func (o *ownerImpl) Tick(stdCtx context.Context, rawState orchestrator.ReactorSt
 		}
 		return state, cerror.ErrReactorFinished.GenWithStackByArgs()
 	}
-	// close upstream
+
 	if err := o.upstreamManager.Tick(stdCtx, state); err != nil {
 		return state, errors.Trace(err)
 	}
 	return state, nil
+}
+
+// preflightCheck makes sure that the metadata in Etcd is complete enough to run the tick.
+// If the metadata is not complete, such as when the ChangeFeedStatus is nil,
+// this function will reconstruct the lost metadata and skip this tick.
+func preflightCheck(changefeed *orchestrator.ChangefeedReactorState,
+	captures map[model.CaptureID]*model.CaptureInfo,
+) (ok bool) {
+	ok = true
+	if changefeed.Status == nil {
+		// complete the changefeed status when it is just created.
+		changefeed.PatchStatus(
+			func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
+				if status == nil {
+					status = &model.ChangeFeedStatus{
+						// changefeed status is nil when the changefeed has just created.
+						CheckpointTs:      changefeed.Info.StartTs,
+						MinTableBarrierTs: changefeed.Info.StartTs,
+						AdminJobType:      model.AdminNone,
+					}
+					return status, true, nil
+				}
+				return status, false, nil
+			})
+		ok = false
+	} else if changefeed.Status.MinTableBarrierTs == 0 {
+		// complete the changefeed status when the TiCDC cluster is
+		// upgraded from an old version(less than v6.7.0).
+		changefeed.PatchStatus(
+			func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
+				if status != nil {
+					if status.MinTableBarrierTs == 0 {
+						status.MinTableBarrierTs = status.CheckpointTs
+					}
+					return status, true, nil
+				}
+				return status, false, nil
+			})
+		ok = false
+	}
+
+	// clean stale capture task positions
+	for captureID := range changefeed.TaskPositions {
+		if _, exist := captures[captureID]; !exist {
+			changefeed.PatchTaskPosition(captureID, func(position *model.TaskPosition) (*model.TaskPosition, bool, error) {
+				return nil, position != nil, nil
+			})
+			ok = false
+		}
+	}
+	if !ok {
+		log.Info("changefeed preflight check failed, will skip this tick",
+			zap.String("namespace", changefeed.ID.Namespace),
+			zap.String("changefeed", changefeed.ID.ID),
+			zap.Any("status", changefeed.Status), zap.Bool("ok", ok),
+		)
+	}
+
+	return
+}
+
+func updateStatus(changefeed *orchestrator.ChangefeedReactorState,
+	checkpointTs, minTableBarrierTs model.Ts,
+) {
+	if checkpointTs == 0 || minTableBarrierTs == 0 {
+		return
+	}
+	changefeed.PatchStatus(
+		func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
+			changed := false
+			if status == nil {
+				return nil, changed, nil
+			}
+			if status.CheckpointTs != checkpointTs {
+				status.CheckpointTs = checkpointTs
+				changed = true
+			}
+			if status.MinTableBarrierTs != minTableBarrierTs {
+				status.MinTableBarrierTs = minTableBarrierTs
+				changed = true
+			}
+			return status, changed, nil
+		})
+}
+
+// shouldHandleChangefeed returns whether the owner should handle the changefeed.
+func (o *ownerImpl) shouldHandleChangefeed(_ *orchestrator.ChangefeedReactorState) bool {
+	return true
+}
+
+// getChangefeedCaptures returns the captures to run the changefeed.
+func (o *ownerImpl) getChangefeedCaptures(_ *orchestrator.ChangefeedReactorState,
+	globalStates *orchestrator.GlobalReactorState,
+) map[model.CaptureID]*model.CaptureInfo {
+	return globalStates.Captures
 }
 
 // EnqueueJob enqueues an admin job into an internal queue,
@@ -308,49 +394,29 @@ func (o *ownerImpl) Query(query *Query, done chan<- error) {
 	})
 }
 
-func (o *ownerImpl) ValidateChangefeed(info *model.ChangeFeedInfo) error {
-	o.ownerJobQueue.Lock()
-	defer o.ownerJobQueue.Unlock()
-	if hasCIEnv {
-		// Disable the check on CI platform, because many tests repeatedly
-		// create changefeed with same name and same sinkURI.
-		return nil
-	}
-
-	t, ok := o.removedChangefeed[model.ChangeFeedID{ID: info.ID, Namespace: info.Namespace}]
-	if ok {
-		remain := recreateChangefeedDelayLimit - time.Since(t)
-		if remain >= 0 {
-			return cerror.ErrInternalServerError.GenWithStackByArgs(fmt.Sprintf(
-				"changefeed with same ID was just removed, please wait %s", remain))
-		}
-	}
-
-	sinkURI, err := url.Parse(info.SinkURI)
-	if err != nil {
-		return cerror.ErrInternalServerError.GenWithStackByArgs(
-			fmt.Sprintf("invalid sink URI %s", err))
-	}
-	t, ok = o.removedSinkURI[url.URL{
-		Scheme: sinkURI.Scheme,
-		Host:   sinkURI.Host,
-	}]
-	if ok {
-		remain := recreateChangefeedDelayLimit - time.Since(t)
-		if remain >= 0 {
-			return cerror.ErrInternalServerError.GenWithStackByArgs(fmt.Sprintf(
-				"changefeed with same sink URI was just removed, please wait %s", remain))
-		}
-	}
-	return nil
-}
-
 // AsyncStop stops the owner asynchronously
 func (o *ownerImpl) AsyncStop() {
 	atomic.StoreInt32(&o.closed, 1)
 	// Must be called after setting closed.
 	o.cleanupOwnerJob()
 	o.cleanStaleMetrics()
+}
+
+func (o *ownerImpl) UpdateChangefeedAndUpstream(ctx context.Context,
+	upstreamInfo *model.UpstreamInfo,
+	changeFeedInfo *model.ChangeFeedInfo,
+	changeFeedID model.ChangeFeedID,
+) error {
+	return o.etcdClient.UpdateChangefeedAndUpstream(ctx, upstreamInfo, changeFeedInfo, changeFeedID)
+}
+
+func (o *ownerImpl) UpdateChangefeed(ctx context.Context,
+	changeFeedInfo *model.ChangeFeedInfo,
+) error {
+	return o.etcdClient.SaveChangeFeedInfo(ctx, changeFeedInfo, model.ChangeFeedID{
+		Namespace: changeFeedInfo.Namespace,
+		ID:        changeFeedInfo.ID,
+	})
 }
 
 func (o *ownerImpl) cleanUpChangefeed(state *orchestrator.ChangefeedReactorState) {
@@ -364,28 +430,6 @@ func (o *ownerImpl) cleanUpChangefeed(state *orchestrator.ChangefeedReactorState
 		state.PatchTaskPosition(captureID, func(position *model.TaskPosition) (*model.TaskPosition, bool, error) {
 			return nil, position != nil, nil
 		})
-	}
-}
-
-// Bootstrap checks if the state contains incompatible or incorrect information and tries to fix it.
-func (o *ownerImpl) Bootstrap(state *orchestrator.GlobalReactorState) {
-	log.Info("Start bootstrapping")
-	o.cleanStaleMetrics()
-	fixChangefeedInfos(state)
-}
-
-// fixChangefeedInfos attempts to fix incompatible or incorrect meta information in changefeed state.
-func fixChangefeedInfos(state *orchestrator.GlobalReactorState) {
-	for _, changefeedState := range state.Changefeeds {
-		if changefeedState != nil {
-			changefeedState.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
-				if info == nil {
-					return nil, false, nil
-				}
-				info.FixIncompatible()
-				return info, true, nil
-			})
-		}
 	}
 }
 
@@ -408,9 +452,9 @@ func (o *ownerImpl) updateMetrics() {
 	o.lastTickTime = now
 
 	for cfID, cf := range o.changefeeds {
-		if cf.state != nil && cf.state.Info != nil {
+		if cf.latestInfo != nil {
 			changefeedStatusGauge.WithLabelValues(cfID.Namespace, cfID.ID).
-				Set(float64(cf.state.Info.State.ToInt()))
+				Set(float64(cf.latestInfo.State.ToInt()))
 		}
 	}
 }
@@ -454,7 +498,7 @@ func (o *ownerImpl) handleDrainCaptures(ctx context.Context, query *scheduler.Qu
 	)
 	for _, changefeed := range o.changefeeds {
 		// Only count normal changefeed.
-		state := changefeed.state.Info.State
+		state := changefeed.latestInfo.State
 		if state != model.StateNormal {
 			log.Info("skip drain changefeed",
 				zap.String("state", string(state)),
@@ -518,17 +562,6 @@ func (o *ownerImpl) handleJobs(ctx context.Context) {
 		}
 		switch job.Tp {
 		case ownerJobTypeAdminJob:
-			if job.AdminJob.Type == model.AdminRemove {
-				now := time.Now()
-				o.removedChangefeed[changefeedID] = now
-				uri, err := url.Parse(cfReactor.state.Info.SinkURI)
-				if err == nil {
-					o.removedSinkURI[url.URL{
-						Scheme: uri.Scheme,
-						Host:   uri.Host,
-					}] = now
-				}
-			}
 			cfReactor.feedStateManager.PushAdminJob(job.AdminJob)
 		case ownerJobTypeScheduleTable:
 			// Scheduler is created lazily, it is nil before initialization.
@@ -550,59 +583,57 @@ func (o *ownerImpl) handleJobs(ctx context.Context) {
 		}
 		close(job.done)
 	}
-
-	// Try GC removed changefeed id/sink URI after delay limit passed.
-	for id, t := range o.removedChangefeed {
-		if time.Since(t) >= recreateChangefeedDelayLimit {
-			delete(o.removedChangefeed, id)
-		}
-	}
-	for s, t := range o.removedSinkURI {
-		if time.Since(t) >= recreateChangefeedDelayLimit {
-			delete(o.removedSinkURI, s)
-		}
-	}
 }
 
 func (o *ownerImpl) handleQueries(query *Query) error {
 	switch query.Tp {
-	case QueryAllChangeFeedStatuses:
-		ret := map[model.ChangeFeedID]*model.ChangeFeedStatusForAPI{}
-		for cfID, cfReactor := range o.changefeeds {
-			ret[cfID] = &model.ChangeFeedStatusForAPI{}
-			if cfReactor.state == nil {
-				continue
-			}
-			if cfReactor.state.Status == nil {
-				continue
-			}
-			ret[cfID].ResolvedTs = cfReactor.resolvedTs
-			ret[cfID].CheckpointTs = cfReactor.state.Status.CheckpointTs
+	case QueryChangeFeedStatuses:
+		cfReactor, ok := o.changefeeds[query.ChangeFeedID]
+		if !ok {
+			query.Data = nil
+			return nil
+		}
+		ret := &model.ChangeFeedStatusForAPI{}
+		ret.ResolvedTs = cfReactor.resolvedTs
+		ret.CheckpointTs = cfReactor.latestStatus.CheckpointTs
+		query.Data = ret
+	case QueryChangeFeedSyncedStatus:
+		cfReactor, ok := o.changefeeds[query.ChangeFeedID]
+		if !ok {
+			query.Data = nil
+			return nil
+		}
+		ret := &model.ChangeFeedSyncedStatusForAPI{}
+		ret.LastSyncedTs = cfReactor.lastSyncedTs
+		ret.CheckpointTs = cfReactor.latestStatus.CheckpointTs
+		ret.PullerResolvedTs = cfReactor.pullerResolvedTs
+
+		if cfReactor.latestInfo == nil {
+			ret.CheckpointInterval = 0
+			ret.SyncedCheckInterval = 0
+		} else {
+			ret.CheckpointInterval = cfReactor.latestInfo.Config.SyncedStatus.CheckpointInterval
+			ret.SyncedCheckInterval = cfReactor.latestInfo.Config.SyncedStatus.SyncedCheckInterval
 		}
 		query.Data = ret
-	case QueryAllChangeFeedInfo:
-		ret := map[model.ChangeFeedID]*model.ChangeFeedInfo{}
-		for cfID, cfReactor := range o.changefeeds {
-			if cfReactor.state == nil {
-				continue
-			}
-			if cfReactor.state.Info == nil {
-				ret[cfID] = &model.ChangeFeedInfo{}
-				continue
-			}
+	case QueryChangefeedInfo:
+		cfReactor, ok := o.changefeeds[query.ChangeFeedID]
+		if !ok {
+			query.Data = nil
+			return nil
+		}
+		if cfReactor.latestInfo == nil {
+			query.Data = &model.ChangeFeedInfo{}
+		} else {
 			var err error
-			ret[cfID], err = cfReactor.state.Info.Clone()
+			query.Data, err = cfReactor.latestInfo.Clone()
 			if err != nil {
 				return errors.Trace(err)
 			}
 		}
-		query.Data = ret
 	case QueryAllTaskStatuses:
 		cfReactor, ok := o.changefeeds[query.ChangeFeedID]
 		if !ok {
-			return cerror.ErrChangeFeedNotExists.GenWithStackByArgs(query.ChangeFeedID)
-		}
-		if cfReactor.state == nil {
 			return cerror.ErrChangeFeedNotExists.GenWithStackByArgs(query.ChangeFeedID)
 		}
 
@@ -652,6 +683,9 @@ func (o *ownerImpl) handleQueries(query *Query) error {
 		query.Data = ret
 	case QueryHealth:
 		query.Data = o.isHealthy()
+	case QueryOwner:
+		_, exist := o.changefeeds[query.ChangeFeedID]
+		query.Data = exist
 	}
 	return nil
 }
@@ -667,17 +701,14 @@ func (o *ownerImpl) isHealthy() bool {
 		return false
 	}
 	for _, changefeed := range o.changefeeds {
-		if changefeed.state == nil {
-			log.Warn("isHealthy: changefeed state is nil",
-				zap.String("namespace", changefeed.id.Namespace),
-				zap.String("changefeed", changefeed.id.ID))
+		if changefeed.latestInfo == nil {
 			continue
 		}
-		if changefeed.state.Info.State != model.StateNormal {
+		if changefeed.latestInfo.State != model.StateNormal {
 			log.Warn("isHealthy: changefeed not normal",
 				zap.String("namespace", changefeed.id.Namespace),
 				zap.String("changefeed", changefeed.id.ID),
-				zap.Any("state", changefeed.state.Info.State))
+				zap.Any("state", changefeed.latestInfo.State))
 			continue
 		}
 
@@ -729,87 +760,6 @@ func (o *ownerImpl) cleanupOwnerJob() {
 		}
 		close(job.done)
 	}
-}
-
-func (o *ownerImpl) updateGCSafepoint(
-	ctx context.Context, state *orchestrator.GlobalReactorState,
-) error {
-	minChekpoinTsMap, forceUpdateMap := o.calculateGCSafepoint(state)
-
-	for upstreamID, minCheckpointTs := range minChekpoinTsMap {
-		up, ok := o.upstreamManager.Get(upstreamID)
-		if !ok {
-			upstreamInfo := state.Upstreams[upstreamID]
-			up = o.upstreamManager.AddUpstream(upstreamInfo)
-		}
-		if !up.IsNormal() {
-			log.Warn("upstream is not ready, skip",
-				zap.Uint64("id", up.ID),
-				zap.Strings("pd", up.PdEndpoints))
-			continue
-		}
-
-		// When the changefeed starts up, CDC will do a snapshot read at
-		// (checkpointTs - 1) from TiKV, so (checkpointTs - 1) should be an upper
-		// bound for the GC safepoint.
-		gcSafepointUpperBound := minCheckpointTs - 1
-
-		var forceUpdate bool
-		if _, exist := forceUpdateMap[upstreamID]; exist {
-			forceUpdate = true
-		}
-
-		err := up.GCManager.TryUpdateGCSafePoint(ctx, gcSafepointUpperBound, forceUpdate)
-		if err != nil {
-			return errors.Trace(err)
-		}
-	}
-	return nil
-}
-
-// calculateGCSafepoint calculates GCSafepoint for different upstream.
-// Note: we need to maintain a TiCDC service GC safepoint for each upstream TiDB cluster
-// to prevent upstream TiDB GC from removing data that is still needed by TiCDC.
-// GcSafepoint is the minimum checkpointTs of all changefeeds that replicating a same upstream TiDB cluster.
-func (o *ownerImpl) calculateGCSafepoint(state *orchestrator.GlobalReactorState) (
-	map[uint64]uint64, map[uint64]interface{},
-) {
-	minCheckpointTsMap := make(map[uint64]uint64)
-	forceUpdateMap := make(map[uint64]interface{})
-
-	for changefeedID, changefeedState := range state.Changefeeds {
-		if changefeedState.Info == nil || !changefeedState.Info.NeedBlockGC() {
-			continue
-		}
-
-		checkpointTs := changefeedState.Info.GetCheckpointTs(changefeedState.Status)
-		upstreamID := changefeedState.Info.UpstreamID
-
-		if _, exist := minCheckpointTsMap[upstreamID]; !exist {
-			minCheckpointTsMap[upstreamID] = checkpointTs
-		}
-
-		minCpts := minCheckpointTsMap[upstreamID]
-
-		if minCpts > checkpointTs {
-			minCpts = checkpointTs
-			minCheckpointTsMap[upstreamID] = minCpts
-		}
-		// Force update when adding a new changefeed.
-		_, exist := o.changefeeds[changefeedID]
-		if !exist {
-			forceUpdateMap[upstreamID] = nil
-		}
-	}
-	// check if the upstream has a changefeed, if not we should update the gc safepoint
-	_ = o.upstreamManager.Visit(func(up *upstream.Upstream) error {
-		if _, exist := minCheckpointTsMap[up.ID]; !exist {
-			ts := up.PDClock.CurrentTime()
-			minCheckpointTsMap[up.ID] = oracle.GoTimeToTS(ts)
-		}
-		return nil
-	})
-	return minCheckpointTsMap, forceUpdateMap
 }
 
 // StatusProvider returns a StatusProvider

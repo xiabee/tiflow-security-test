@@ -20,12 +20,15 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/filter"
+	"github.com/pingcap/tiflow/pkg/integrity"
+	"github.com/pingcap/tiflow/pkg/util"
 	"golang.org/x/sync/errgroup"
 )
 
 // MounterGroup is a group of mounter workers
 type MounterGroup interface {
-	Run(ctx context.Context) error
+	util.Runnable
+
 	AddEvent(ctx context.Context, event *model.PolymorphicEvent) error
 	TryAddEvent(ctx context.Context, event *model.PolymorphicEvent) (bool, error)
 }
@@ -35,7 +38,9 @@ type mounterGroup struct {
 	inputCh       chan *model.PolymorphicEvent
 	tz            *time.Location
 	filter        filter.Filter
-	workerNum     int
+	integrity     *integrity.Config
+
+	workerNum int
 
 	changefeedID model.ChangeFeedID
 }
@@ -53,6 +58,7 @@ func NewMounterGroup(
 	filter filter.Filter,
 	tz *time.Location,
 	changefeedID model.ChangeFeedID,
+	integrity *integrity.Config,
 ) *mounterGroup {
 	if workerNum <= 0 {
 		workerNum = defaultMounterWorkerNum
@@ -63,13 +69,15 @@ func NewMounterGroup(
 		filter:        filter,
 		tz:            tz,
 
+		integrity: integrity,
+
 		workerNum: workerNum,
 
 		changefeedID: changefeedID,
 	}
 }
 
-func (m *mounterGroup) Run(ctx context.Context) error {
+func (m *mounterGroup) Run(ctx context.Context, _ ...chan<- error) error {
 	defer func() {
 		mounterGroupInputChanSizeGauge.DeleteLabelValues(m.changefeedID.Namespace, m.changefeedID.ID)
 	}()
@@ -95,8 +103,12 @@ func (m *mounterGroup) Run(ctx context.Context) error {
 	return g.Wait()
 }
 
+func (m *mounterGroup) WaitForReady(_ context.Context) {}
+
+func (m *mounterGroup) Close() {}
+
 func (m *mounterGroup) runWorker(ctx context.Context) error {
-	mounter := NewMounter(m.schemaStorage, m.changefeedID, m.tz, m.filter)
+	mounter := NewMounter(m.schemaStorage, m.changefeedID, m.tz, m.filter, m.integrity)
 	for {
 		select {
 		case <-ctx.Done():
@@ -140,10 +152,16 @@ type MockMountGroup struct {
 	IsFull bool
 }
 
-// Run implements MountGroup.
-func (m *MockMountGroup) Run(ctx context.Context) error {
+// Run implements util.Runnable.
+func (m *MockMountGroup) Run(ctx context.Context, _ ...chan<- error) error {
 	return nil
 }
+
+// WaitForReady implements util.Runnable.
+func (m *MockMountGroup) WaitForReady(_ context.Context) {}
+
+// Close implements util.Runnable.
+func (m *MockMountGroup) Close() {}
 
 // AddEvent implements MountGroup.
 func (m *MockMountGroup) AddEvent(ctx context.Context, event *model.PolymorphicEvent) error {

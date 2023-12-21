@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/pingcap/tiflow/dm/config"
+	"github.com/pingcap/tiflow/dm/config/security"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
@@ -137,7 +137,7 @@ type Config struct {
 	V1SourcesPath string `toml:"v1-sources-path" json:"v1-sources-path"`
 
 	// tls config
-	config.Security
+	security.Security
 
 	printVersion      bool
 	printSampleConfig bool
@@ -361,21 +361,21 @@ func (c *Config) genEmbedEtcdConfig(cfg *embed.Config) (*embed.Config, error) {
 
 	// reuse the previous master-addr as the client listening URL.
 	var err error
-	cfg.LCUrls, err = parseURLs(c.MasterAddr)
+	cfg.ListenClientUrls, err = parseURLs(c.MasterAddr)
 	if err != nil {
 		return nil, terror.ErrMasterGenEmbedEtcdConfigFail.Delegate(err, "invalid master-addr")
 	}
-	cfg.ACUrls, err = parseURLs(c.AdvertiseAddr)
+	cfg.AdvertiseClientUrls, err = parseURLs(c.AdvertiseAddr)
 	if err != nil {
 		return nil, terror.ErrMasterGenEmbedEtcdConfigFail.Delegate(err, "invalid advertise-addr")
 	}
 
-	cfg.LPUrls, err = parseURLs(c.PeerUrls)
+	cfg.ListenPeerUrls, err = parseURLs(c.PeerUrls)
 	if err != nil {
 		return nil, terror.ErrMasterGenEmbedEtcdConfigFail.Delegate(err, "invalid peer-urls")
 	}
 
-	cfg.APUrls, err = parseURLs(c.AdvertisePeerUrls)
+	cfg.AdvertisePeerUrls, err = parseURLs(c.AdvertisePeerUrls)
 	if err != nil {
 		return nil, terror.ErrMasterGenEmbedEtcdConfigFail.Delegate(err, "invalid advertise-peer-urls")
 	}

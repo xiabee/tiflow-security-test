@@ -21,7 +21,8 @@ import (
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/pingcap/tidb/errno"
+	gmysql "github.com/go-sql-driver/mysql"
+	"github.com/pingcap/tidb/pkg/errno"
 	"github.com/stretchr/testify/require"
 )
 
@@ -169,6 +170,13 @@ func TestIsContextCanceledError(t *testing.T) {
 	require.True(t, IsContextCanceledError(context.Canceled))
 	require.False(t, IsContextCanceledError(context.DeadlineExceeded))
 	require.False(t, IsContextCanceledError(errors.New("another error")))
+}
+
+func newMysqlErr(number uint16, message string) *gmysql.MySQLError {
+	return &gmysql.MySQLError{
+		Number:  number,
+		Message: message,
+	}
 }
 
 func TestIgnoreErrorCheckpoint(t *testing.T) {

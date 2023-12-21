@@ -61,7 +61,7 @@ func newResourceHandle(
 	isPersisted bool,
 	client client.ResourceManagerClient,
 ) (*ResourceHandle, error) {
-	// TODO(maxshuang): check, may need a context for BrExternalStorage
+	// Use context.Background here since we only support local storage for now.
 	inner, err := desc.ExternalStorage(context.Background())
 	if err != nil {
 		return nil, err

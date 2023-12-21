@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/redo/common"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -37,9 +38,9 @@ func TestInitAndWriteMeta(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	captureID := "test-capture"
-	nConfig := config.GetGlobalServerConfig().Clone()
-	config.StoreGlobalServerConfig(nConfig)
+	ctx = contextutil.PutCaptureAddrInCtx(ctx, captureID)
 	changefeedID := model.DefaultChangeFeedID("test-changefeed")
+	ctx = contextutil.PutChangefeedIDInCtx(ctx, changefeedID)
 
 	extStorage, uri, err := util.GetTestExtStorage(ctx, t.TempDir())
 	require.NoError(t, err)
@@ -118,9 +119,9 @@ func TestPreCleanupAndWriteMeta(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	captureID := "test-capture"
-	nConfig := config.GetGlobalServerConfig().Clone()
-	config.StoreGlobalServerConfig(nConfig)
+	ctx = contextutil.PutCaptureAddrInCtx(ctx, captureID)
 	changefeedID := model.DefaultChangeFeedID("test-changefeed")
+	ctx = contextutil.PutChangefeedIDInCtx(ctx, changefeedID)
 
 	extStorage, uri, err := util.GetTestExtStorage(ctx, t.TempDir())
 	require.NoError(t, err)
@@ -241,12 +242,18 @@ func testWriteMeta(ctx context.Context, t *testing.T, m *metaManager) {
 func TestGCAndCleanup(t *testing.T) {
 	t.Parallel()
 
+	originValue := redo.DefaultGCIntervalInMs
+	redo.DefaultGCIntervalInMs = 20
+	defer func() {
+		redo.DefaultGCIntervalInMs = originValue
+	}()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	captureID := "test-capture"
-	nConfig := config.GetGlobalServerConfig().Clone()
-	config.StoreGlobalServerConfig(nConfig)
+	ctx = contextutil.PutCaptureAddrInCtx(ctx, captureID)
 	changefeedID := model.DefaultChangeFeedID("test-changefeed")
+	ctx = contextutil.PutChangefeedIDInCtx(ctx, changefeedID)
 
 	extStorage, uri, err := util.GetTestExtStorage(ctx, t.TempDir())
 	require.NoError(t, err)
@@ -270,6 +277,7 @@ func TestGCAndCleanup(t *testing.T) {
 	}
 
 	// write some log files
+	require.NoError(t, err)
 	maxCommitTs := 20
 	for i := 1; i <= maxCommitTs; i++ {
 		for _, logType := range []string{redo.RedoRowLogFileType, redo.RedoDDLLogFileType} {
@@ -293,7 +301,6 @@ func TestGCAndCleanup(t *testing.T) {
 		EncodingWorkerNum:     redo.DefaultEncodingWorkerNum,
 		FlushWorkerNum:        redo.DefaultFlushWorkerNum,
 	}
-
 	m := NewMetaManager(changefeedID, cfg, startTs)
 
 	var eg errgroup.Group
@@ -319,14 +326,14 @@ func TestGCAndCleanup(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, eg.Wait(), context.Canceled)
 
-	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
-	defer cleanupCancel()
-	m.Cleanup(cleanupCtx)
-	ret, err := extStorage.FileExists(cleanupCtx, getDeletedChangefeedMarker(changefeedID))
+	clenupCtx, clenupCancel := context.WithCancel(context.Background())
+	defer clenupCancel()
+	m.Cleanup(clenupCtx)
+	ret, err := extStorage.FileExists(clenupCtx, getDeletedChangefeedMarker(changefeedID))
 	require.NoError(t, err)
 	require.True(t, ret)
 	cnt := 0
-	extStorage.WalkDir(cleanupCtx, nil, func(path string, size int64) error {
+	extStorage.WalkDir(clenupCtx, nil, func(path string, size int64) error {
 		cnt++
 		return nil
 	})

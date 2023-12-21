@@ -126,7 +126,7 @@ func (r Role) MarshalJSON() ([]byte, error) {
 // ReplicationSet is a state machine that manages replication states.
 type ReplicationSet struct { //nolint:revive
 	Changefeed model.ChangeFeedID
-	Span       tablepb.Span
+	TableID    model.TableID
 	State      ReplicationSetState
 	// Primary is the capture ID that is currently replicating the table.
 	Primary model.CaptureID
@@ -140,14 +140,14 @@ type ReplicationSet struct { //nolint:revive
 
 // NewReplicationSet returns a new replication set.
 func NewReplicationSet(
-	span tablepb.Span,
+	tableID model.TableID,
 	checkpoint model.Ts,
 	tableStatus map[model.CaptureID]*tablepb.TableStatus,
 	changefeed model.ChangeFeedID,
 ) (*ReplicationSet, error) {
 	r := &ReplicationSet{
 		Changefeed: changefeed,
-		Span:       span,
+		TableID:    tableID,
 		Captures:   make(map[string]Role),
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: checkpoint,
@@ -158,7 +158,7 @@ func NewReplicationSet(
 	stoppingCount := 0
 	committed := false
 	for captureID, table := range tableStatus {
-		if !r.Span.Eq(&table.Span) {
+		if r.TableID != table.TableID {
 			return nil, r.inconsistentError(table, captureID,
 				"schedulerv3: table id inconsistent")
 		}
@@ -202,7 +202,7 @@ func NewReplicationSet(
 			log.Warn("schedulerv3: found a stopping capture during initializing",
 				zap.String("namespace", r.Changefeed.Namespace),
 				zap.String("changefeed", r.Changefeed.ID),
-				zap.Int64("tableID", table.Span.TableID),
+				zap.Int64("tableID", table.TableID),
 				zap.Any("replicationSet", r),
 				zap.Any("status", tableStatus))
 			err := r.setCapture(captureID, RoleUndetermined)
@@ -217,7 +217,7 @@ func NewReplicationSet(
 			log.Warn("schedulerv3: unknown table state",
 				zap.String("namespace", r.Changefeed.Namespace),
 				zap.String("changefeed", r.Changefeed.ID),
-				zap.Int64("tableID", table.Span.TableID),
+				zap.Int64("tableID", table.TableID),
 				zap.Any("replicationSet", r),
 				zap.Any("status", tableStatus))
 		}
@@ -334,7 +334,7 @@ func (r *ReplicationSet) inconsistentError(
 	}...)
 	log.L().WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 	return errors.ErrReplicationSetInconsistent.GenWithStackByArgs(
-		fmt.Sprintf("tableID %d, %s", r.Span.TableID, msg))
+		fmt.Sprintf("tableID %d, %s", r.TableID, msg))
 }
 
 func (r *ReplicationSet) multiplePrimaryError(
@@ -349,14 +349,14 @@ func (r *ReplicationSet) multiplePrimaryError(
 	}...)
 	log.L().WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 	return errors.ErrReplicationSetMultiplePrimaryError.GenWithStackByArgs(
-		fmt.Sprintf("tableID %d, %s", r.Span.TableID, msg))
+		fmt.Sprintf("tableID %d, %s", r.TableID, msg))
 }
 
 // checkInvariant ensures ReplicationSet invariant is hold.
 func (r *ReplicationSet) checkInvariant(
 	input *tablepb.TableStatus, captureID model.CaptureID,
 ) error {
-	if !r.Span.Eq(&input.Span) {
+	if r.TableID != input.TableID {
 		return r.inconsistentError(input, captureID,
 			"schedulerv3: tableID must be the same")
 	}
@@ -477,7 +477,7 @@ func (r *ReplicationSet) pollOnPrepare(
 				DispatchTableRequest: &schedulepb.DispatchTableRequest{
 					Request: &schedulepb.DispatchTableRequest_AddTable{
 						AddTable: &schedulepb.AddTableRequest{
-							Span:        r.Span,
+							TableID:     r.TableID,
 							IsSecondary: true,
 							Checkpoint:  r.Checkpoint,
 						},
@@ -560,9 +560,7 @@ func (r *ReplicationSet) pollOnCommit(
 					MsgType: schedulepb.MsgDispatchTableRequest,
 					DispatchTableRequest: &schedulepb.DispatchTableRequest{
 						Request: &schedulepb.DispatchTableRequest_RemoveTable{
-							RemoveTable: &schedulepb.RemoveTableRequest{
-								Span: r.Span,
-							},
+							RemoveTable: &schedulepb.RemoveTableRequest{TableID: r.TableID},
 						},
 					},
 				}, false, nil
@@ -601,7 +599,7 @@ func (r *ReplicationSet) pollOnCommit(
 				DispatchTableRequest: &schedulepb.DispatchTableRequest{
 					Request: &schedulepb.DispatchTableRequest_AddTable{
 						AddTable: &schedulepb.AddTableRequest{
-							Span:        r.Span,
+							TableID:     r.TableID,
 							IsSecondary: false,
 							Checkpoint:  r.Checkpoint,
 						},
@@ -645,7 +643,7 @@ func (r *ReplicationSet) pollOnCommit(
 				DispatchTableRequest: &schedulepb.DispatchTableRequest{
 					Request: &schedulepb.DispatchTableRequest_AddTable{
 						AddTable: &schedulepb.AddTableRequest{
-							Span:        r.Span,
+							TableID:     r.TableID,
 							IsSecondary: false,
 							Checkpoint:  r.Checkpoint,
 						},
@@ -692,9 +690,7 @@ func (r *ReplicationSet) pollOnCommit(
 					MsgType: schedulepb.MsgDispatchTableRequest,
 					DispatchTableRequest: &schedulepb.DispatchTableRequest{
 						Request: &schedulepb.DispatchTableRequest_RemoveTable{
-							RemoveTable: &schedulepb.RemoveTableRequest{
-								Span: r.Span,
-							},
+							RemoveTable: &schedulepb.RemoveTableRequest{TableID: r.TableID},
 						},
 					},
 				}, false, nil
@@ -797,9 +793,7 @@ func (r *ReplicationSet) pollOnRemoving(
 			MsgType: schedulepb.MsgDispatchTableRequest,
 			DispatchTableRequest: &schedulepb.DispatchTableRequest{
 				Request: &schedulepb.DispatchTableRequest_RemoveTable{
-					RemoveTable: &schedulepb.RemoveTableRequest{
-						Span: r.Span,
-					},
+					RemoveTable: &schedulepb.RemoveTableRequest{TableID: r.TableID},
 				},
 			},
 		}, false, nil
@@ -848,7 +842,7 @@ func (r *ReplicationSet) handleAddTable(
 		log.Warn("schedulerv3: add table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.Span.TableID),
+			zap.Int64("tableID", r.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -858,7 +852,7 @@ func (r *ReplicationSet) handleAddTable(
 	}
 	oldState := r.State
 	status := tablepb.TableStatus{
-		Span:       r.Span,
+		TableID:    r.TableID,
 		State:      tablepb.TableStateAbsent,
 		Checkpoint: tablepb.Checkpoint{},
 	}
@@ -883,7 +877,7 @@ func (r *ReplicationSet) handleMoveTable(
 		log.Warn("schedulerv3: move table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.Span.TableID),
+			zap.Int64("tableID", r.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -894,7 +888,7 @@ func (r *ReplicationSet) handleMoveTable(
 		log.Warn("schedulerv3: move table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.Span.TableID),
+			zap.Int64("tableID", r.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -911,7 +905,7 @@ func (r *ReplicationSet) handleMoveTable(
 		zap.Any("replicationSet", r),
 		zap.Stringer("old", oldState))
 	status := tablepb.TableStatus{
-		Span:       r.Span,
+		TableID:    r.TableID,
 		State:      tablepb.TableStateAbsent,
 		Checkpoint: tablepb.Checkpoint{},
 	}
@@ -924,7 +918,7 @@ func (r *ReplicationSet) handleRemoveTable() ([]*schedulepb.Message, error) {
 		log.Warn("schedulerv3: remove table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.Span.TableID),
+			zap.Int64("tableID", r.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -933,7 +927,7 @@ func (r *ReplicationSet) handleRemoveTable() ([]*schedulepb.Message, error) {
 		log.Warn("schedulerv3: remove table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.Span.TableID),
+			zap.Int64("tableID", r.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -942,12 +936,12 @@ func (r *ReplicationSet) handleRemoveTable() ([]*schedulepb.Message, error) {
 	log.Info("schedulerv3: replication state transition, remove table",
 		zap.String("namespace", r.Changefeed.Namespace),
 		zap.String("changefeed", r.Changefeed.ID),
-		zap.Int64("tableID", r.Span.TableID),
+		zap.Int64("tableID", r.TableID),
 		zap.Any("replicationSet", r),
 		zap.Stringer("old", oldState))
 	status := tablepb.TableStatus{
-		Span:  r.Span,
-		State: tablepb.TableStateReplicating,
+		TableID: r.TableID,
+		State:   tablepb.TableStateReplicating,
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: r.Checkpoint.CheckpointTs,
 			ResolvedTs:   r.Checkpoint.ResolvedTs,
@@ -975,15 +969,15 @@ func (r *ReplicationSet) handleCaptureShutdown(
 	}
 	// The capture has shutdown, the table has stopped.
 	status := tablepb.TableStatus{
-		Span:  r.Span,
-		State: tablepb.TableStateStopped,
+		TableID: r.TableID,
+		State:   tablepb.TableStateStopped,
 	}
 	oldState := r.State
 	msgs, err := r.poll(&status, captureID)
 	log.Info("schedulerv3: replication state transition, capture shutdown",
 		zap.String("namespace", r.Changefeed.Namespace),
 		zap.String("changefeed", r.Changefeed.ID),
-		zap.Int64("tableID", r.Span.TableID),
+		zap.Int64("tableID", r.TableID),
 		zap.Any("replicationSet", r),
 		zap.Stringer("old", oldState), zap.Stringer("new", r.State))
 	return msgs, true, errors.Trace(err)
@@ -996,7 +990,7 @@ func (r *ReplicationSet) updateCheckpointAndStats(
 		log.Warn("schedulerv3: resolved ts should not less than checkpoint ts",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.Span.TableID),
+			zap.Int64("tableID", r.TableID),
 			zap.Any("replicationSet", r),
 			zap.Any("checkpoint", checkpoint))
 
@@ -1015,14 +1009,10 @@ func (r *ReplicationSet) updateCheckpointAndStats(
 		log.Warn("schedulerv3: resolved ts should not less than checkpoint ts",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.Span.TableID),
+			zap.Int64("tableID", r.TableID),
 			zap.Any("replicationSet", r),
 			zap.Any("checkpointTs", r.Checkpoint.CheckpointTs),
 			zap.Any("resolvedTs", r.Checkpoint.ResolvedTs))
-	}
-
-	if r.Checkpoint.LastSyncedTs < checkpoint.LastSyncedTs {
-		r.Checkpoint.LastSyncedTs = checkpoint.LastSyncedTs
 	}
 
 	// we only update stats when stats is not empty, because we only collect stats every 10s.

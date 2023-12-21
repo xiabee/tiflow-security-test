@@ -14,8 +14,6 @@
 package config
 
 import (
-	"github.com/pingcap/tiflow/dm/config/dbconfig"
-	"github.com/pingcap/tiflow/dm/config/security"
 	"github.com/pingcap/tiflow/dm/openapi"
 )
 
@@ -56,7 +54,7 @@ func SourceCfgToOpenAPISource(cfg *SourceConfig) openapi.Source {
 // OpenAPISourceToSourceCfg converter openapi.Source to SourceConfig.
 func OpenAPISourceToSourceCfg(source openapi.Source) *SourceConfig {
 	cfg := NewSourceConfig()
-	from := dbconfig.DBConfig{
+	from := DBConfig{
 		Host: source.Host,
 		Port: source.Port,
 		User: source.User,
@@ -65,7 +63,7 @@ func OpenAPISourceToSourceCfg(source openapi.Source) *SourceConfig {
 		from.Password = *source.Password
 	}
 	if source.Security != nil {
-		from.Security = &security.Security{
+		from.Security = &Security{
 			SSLCABytes:   []byte(source.Security.SslCaContent),
 			SSLKeyBytes:  []byte(source.Security.SslKeyContent),
 			SSLCertBytes: []byte(source.Security.SslCertContent),

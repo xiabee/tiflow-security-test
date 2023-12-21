@@ -16,32 +16,28 @@ package config
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
-	"golang.org/x/exp/slices"
+	. "github.com/pingcap/check"
 )
 
-func TestCheckingItems(t *testing.T) {
-	lightningCheck, normalCheck := 0, 0
+func TestConfig(t *testing.T) {
+	TestingT(t)
+}
+
+type testConfig struct{}
+
+var _ = Suite(&testConfig{})
+
+func (t *testConfig) TestCheckingItems(c *C) {
 	for item := range AllCheckingItems {
-		require.NoError(t, ValidateCheckingItem(item))
-		if slices.Contains(LightningPrechecks, item) {
-			lightningCheck++
-		} else {
-			normalCheck++
-		}
+		c.Assert(ValidateCheckingItem(item), IsNil)
 	}
-	// remember to update the number when add new checking items.
-	require.Equal(t, 5, lightningCheck)
-	require.Equal(t, 16, normalCheck)
-	// all LightningPrechecks can be found by iterating AllCheckingItems
-	require.Len(t, LightningPrechecks, lightningCheck)
-	require.Error(t, ValidateCheckingItem("xxx"))
+	c.Assert(ValidateCheckingItem("xxx"), NotNil)
 
 	// ignore all checking items
 	ignoredCheckingItems := []string{AllChecking}
-	require.Nil(t, FilterCheckingItems(ignoredCheckingItems))
+	c.Assert(FilterCheckingItems(ignoredCheckingItems), IsNil)
 	ignoredCheckingItems = append(ignoredCheckingItems, ShardTableSchemaChecking)
-	require.Nil(t, FilterCheckingItems(ignoredCheckingItems))
+	c.Assert(FilterCheckingItems(ignoredCheckingItems), IsNil)
 
 	// ignore shard checking items
 	checkingItems := make(map[string]string)
@@ -50,12 +46,12 @@ func TestCheckingItems(t *testing.T) {
 	}
 	delete(checkingItems, AllChecking)
 
-	require.Equal(t, checkingItems, FilterCheckingItems(ignoredCheckingItems[:0]))
+	c.Assert(FilterCheckingItems(ignoredCheckingItems[:0]), DeepEquals, checkingItems)
 
 	delete(checkingItems, ShardTableSchemaChecking)
-	require.Equal(t, checkingItems, FilterCheckingItems(ignoredCheckingItems[1:]))
+	c.Assert(FilterCheckingItems(ignoredCheckingItems[1:]), DeepEquals, checkingItems)
 
 	ignoredCheckingItems = append(ignoredCheckingItems, ShardAutoIncrementIDChecking)
 	delete(checkingItems, ShardAutoIncrementIDChecking)
-	require.Equal(t, checkingItems, FilterCheckingItems(ignoredCheckingItems[1:]))
+	c.Assert(FilterCheckingItems(ignoredCheckingItems[1:]), DeepEquals, checkingItems)
 }

@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/capture"
 	mock_capture "github.com/pingcap/tiflow/cdc/capture/mock"
-	mock2 "github.com/pingcap/tiflow/cdc/controller/mock"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/owner"
 	mock_owner "github.com/pingcap/tiflow/cdc/owner/mock"
@@ -100,32 +99,14 @@ func (p *mockStatusProvider) GetCaptures(ctx context.Context) ([]*model.CaptureI
 	return args.Get(0).([]*model.CaptureInfo), args.Error(1)
 }
 
-func (p *mockStatusProvider) GetChangeFeedSyncedStatus(ctx context.Context,
-	changefeedID model.ChangeFeedID,
-) (*model.ChangeFeedSyncedStatusForAPI, error) {
-	args := p.Called(ctx)
-	return args.Get(0).(*model.ChangeFeedSyncedStatusForAPI), args.Error(1)
-}
-
 func (p *mockStatusProvider) IsHealthy(ctx context.Context) (bool, error) {
 	args := p.Called(ctx)
-	return args.Get(0).(bool), args.Error(1)
-}
-
-func (p *mockStatusProvider) IsChangefeedOwner(ctx context.Context, id model.ChangeFeedID) (bool, error) {
-	args := p.Called(ctx, id)
 	return args.Get(0).(bool), args.Error(1)
 }
 
 func newRouter(c capture.Capture, p owner.StatusProvider) *gin.Engine {
 	router := gin.New()
 	RegisterOpenAPIRoutes(router, NewOpenAPI4Test(c, p))
-	return router
-}
-
-func newRouterWithoutStatusProvider(c capture.Capture) *gin.Engine {
-	router := gin.New()
-	RegisterOpenAPIRoutes(router, NewOpenAPI(c))
 	return router
 }
 
@@ -178,22 +159,8 @@ func newStatusProvider() *mockStatusProvider {
 func TestListChangefeed(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
-	mo := mock2.NewMockController(ctrl)
-	cp := capture.NewCaptureWithController4Test(mock_owner.NewMockOwner(ctrl), mo)
-	mo.EXPECT().GetAllChangeFeedCheckpointTs(gomock.Any()).Return(
-		map[model.ChangeFeedID]uint64{
-			model.ChangeFeedID4Test("ab", "123"):  1,
-			model.ChangeFeedID4Test("ab", "13"):   2,
-			model.ChangeFeedID4Test("abc", "123"): 1,
-			model.ChangeFeedID4Test("def", "456"): 2,
-		}, nil).AnyTimes()
-	mo.EXPECT().GetAllChangeFeedInfo(gomock.Any()).Return(
-		map[model.ChangeFeedID]*model.ChangeFeedInfo{
-			model.ChangeFeedID4Test("ab", "123"):  {State: model.StateNormal},
-			model.ChangeFeedID4Test("ab", "13"):   {State: model.StateStopped},
-			model.ChangeFeedID4Test("abc", "123"): {State: model.StateNormal},
-			model.ChangeFeedID4Test("def", "456"): {State: model.StateStopped},
-		}, nil).AnyTimes()
+	mo := mock_owner.NewMockOwner(ctrl)
+	cp := capture.NewCapture4Test(mo)
 	router := newRouter(cp, newStatusProvider())
 
 	// test list changefeed succeeded
@@ -238,19 +205,9 @@ func TestGetChangefeed(t *testing.T) {
 	mo := mock_owner.NewMockOwner(ctrl)
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(ctrl)
 	etcdClient.EXPECT().GetClusterID().Return("abcd").AnyTimes()
-	cp := capture.NewCaptureWithController4Test(mo, mock2.NewMockController(ctrl))
+	cp := capture.NewCapture4Test(mo)
 	cp.EtcdClient = etcdClient
-	controller := mock2.NewMockController(ctrl)
-	capture := mock_capture.NewMockCapture(ctrl)
-	capture.EXPECT().GetController().Return(controller, nil).AnyTimes()
-	capture.EXPECT().GetOwner().Return(mo, nil).AnyTimes()
-	capture.EXPECT().IsReady().Return(true).AnyTimes()
-	capture.EXPECT().IsController().Return(true).AnyTimes()
-	statusProvider := newStatusProvider()
-	capture.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
-	router := newRouter(capture, statusProvider)
-	statusProvider.On("IsChangefeedOwner", mock.Anything, mock.Anything).
-		Return(true, nil).Times(3)
+	router := newRouter(cp, newStatusProvider())
 
 	// test get changefeed succeeded
 	api := testCase{url: fmt.Sprintf("/api/v1/changefeeds/%s", changeFeedID.ID), method: "GET"}
@@ -283,19 +240,8 @@ func TestPauseChangefeed(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mo := mock_owner.NewMockOwner(ctrl)
-	controller := mock2.NewMockController(ctrl)
-	capture := mock_capture.NewMockCapture(ctrl)
-	capture.EXPECT().GetController().Return(controller, nil).AnyTimes()
-	capture.EXPECT().GetOwner().Return(mo, nil).AnyTimes()
-	capture.EXPECT().IsReady().Return(true).AnyTimes()
-	capture.EXPECT().IsController().Return(true).AnyTimes()
-	statusProvider := newStatusProvider()
-	capture.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
-	router := newRouter(capture, statusProvider)
-	statusProvider.On("IsChangefeedOwner", mock.Anything, changeFeedID).
-		Return(true, nil).Twice()
-	statusProvider.On("IsChangefeedOwner", mock.Anything, nonExistChangefeedID).
-		Return(true, nil).Once()
+	cp := capture.NewCapture4Test(mo)
+	router := newRouter(cp, newStatusProvider())
 
 	// test pause changefeed succeeded
 	mo.EXPECT().
@@ -353,19 +299,8 @@ func TestResumeChangefeed(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mo := mock_owner.NewMockOwner(ctrl)
-	controller := mock2.NewMockController(ctrl)
-	cp := mock_capture.NewMockCapture(ctrl)
-	cp.EXPECT().GetController().Return(controller, nil).AnyTimes()
-	cp.EXPECT().GetOwner().Return(mo, nil).AnyTimes()
-	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	statusProvider := mock_owner.NewMockStatusProvider(ctrl)
-	statusProvider.EXPECT().IsChangefeedOwner(gomock.Any(), gomock.Any()).
-		Return(true, nil).AnyTimes()
-	cp.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
-	dataProvider := newStatusProvider()
-	statusProvider.EXPECT().GetChangeFeedStatus(gomock.Any(), changeFeedID).Return(
-		dataProvider.GetChangeFeedStatus(context.Background(), changeFeedID))
-	router := newRouter(cp, statusProvider)
+	cp := capture.NewCapture4Test(mo)
+	router := newRouter(cp, newStatusProvider())
 
 	// test resume changefeed succeeded
 	mo.EXPECT().
@@ -385,8 +320,6 @@ func TestResumeChangefeed(t *testing.T) {
 	require.Equal(t, 202, w.Code)
 
 	// test resume changefeed failed from owner side.
-	statusProvider.EXPECT().GetChangeFeedStatus(gomock.Any(), changeFeedID).Return(
-		dataProvider.GetChangeFeedStatus(context.Background(), changeFeedID))
 	mo.EXPECT().
 		EnqueueJob(gomock.Any(), gomock.Any()).
 		Do(func(adminJob model.AdminJob, done chan<- error) {
@@ -407,8 +340,6 @@ func TestResumeChangefeed(t *testing.T) {
 	require.Contains(t, respErr.Error, "changefeed not exists")
 
 	// test resume changefeed failed
-	statusProvider.EXPECT().GetChangeFeedStatus(gomock.Any(), nonExistChangefeedID).
-		Return(nil, cerror.ErrChangeFeedNotExists)
 	api = testCase{
 		url:    fmt.Sprintf("/api/v1/changefeeds/%s/resume", nonExistChangefeedID.ID),
 		method: "POST",
@@ -427,14 +358,16 @@ func TestRemoveChangefeed(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mo := mock_owner.NewMockOwner(ctrl)
+	cp := capture.NewCapture4Test(mo)
 
-	controller := mock2.NewMockController(ctrl)
-	capture := mock_capture.NewMockCapture(ctrl)
-	capture.EXPECT().GetController().Return(controller, nil).AnyTimes()
-	capture.EXPECT().GetOwner().Return(mo, nil).AnyTimes()
-	capture.EXPECT().IsReady().Return(true).AnyTimes()
-	capture.EXPECT().IsController().Return(true).AnyTimes()
-	router1 := newRouterWithoutStatusProvider(capture)
+	statusProvider := &mockStatusProvider{}
+	statusProvider.On("GetChangeFeedStatus", mock.Anything, changeFeedID).
+		Return(&model.ChangeFeedStatusForAPI{CheckpointTs: 1}, nil).Once()
+	statusProvider.On("GetChangeFeedStatus", mock.Anything, changeFeedID).
+		Return(new(model.ChangeFeedStatusForAPI),
+			cerror.ErrChangeFeedNotExists.FastGenByArgs(changeFeedID)).Once()
+
+	router1 := newRouter(cp, statusProvider)
 
 	// test remove changefeed succeeded
 	mo.EXPECT().
@@ -444,17 +377,13 @@ func TestRemoveChangefeed(t *testing.T) {
 			require.EqualValues(t, model.AdminRemove, adminJob.Type)
 			close(done)
 		})
-	controller.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(true, nil)
-	controller.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
 	api := testCase{url: fmt.Sprintf("/api/v1/changefeeds/%s", changeFeedID.ID), method: "DELETE"}
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequestWithContext(context.Background(), api.method, api.url, nil)
 	router1.ServeHTTP(w, req)
 	require.Equal(t, 202, w.Code)
 
-	router2 := newRouterWithoutStatusProvider(capture)
-	controller.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(true, nil)
-
+	router2 := newRouter(cp, newStatusProvider())
 	// test remove changefeed failed from owner side
 	mo.EXPECT().
 		EnqueueJob(gomock.Any(), gomock.Any()).
@@ -473,7 +402,6 @@ func TestRemoveChangefeed(t *testing.T) {
 	require.Contains(t, respErr.Error, "changefeed not exists")
 
 	// test remove changefeed failed
-	controller.EXPECT().IsChangefeedExists(gomock.Any(), nonExistChangefeedID).Return(false, nil)
 	api = testCase{
 		url:    fmt.Sprintf("/api/v1/changefeeds/%s", nonExistChangefeedID.ID),
 		method: "DELETE",
@@ -492,17 +420,8 @@ func TestRebalanceTables(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mo := mock_owner.NewMockOwner(ctrl)
-	controller := mock2.NewMockController(ctrl)
-	capture := mock_capture.NewMockCapture(ctrl)
-	capture.EXPECT().GetController().Return(controller, nil).AnyTimes()
-	capture.EXPECT().GetOwner().Return(mo, nil).AnyTimes()
-	capture.EXPECT().IsReady().Return(true).AnyTimes()
-	capture.EXPECT().IsController().Return(true).AnyTimes()
-	statusProvider := newStatusProvider()
-	capture.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
-	router := newRouter(capture, statusProvider)
-	statusProvider.On("IsChangefeedOwner", mock.Anything, mock.Anything).
-		Return(true, nil).Times(5)
+	cp := capture.NewCapture4Test(mo)
+	router := newRouter(cp, newStatusProvider())
 
 	// test rebalance table succeeded
 	mo.EXPECT().
@@ -563,8 +482,7 @@ func TestDrainCapture(t *testing.T) {
 
 	ctrl := gomock.NewController(t)
 	owner := mock_owner.NewMockOwner(ctrl)
-	controller := mock2.NewMockController(ctrl)
-	capture := capture.NewCaptureWithController4Test(owner, controller)
+	capture := capture.NewCapture4Test(owner)
 	router := newRouter(capture, statusProvider)
 
 	captureInfo, err := capture.Info()
@@ -693,16 +611,9 @@ func TestMoveTable(t *testing.T) {
 
 	ctrl := gomock.NewController(t)
 	mo := mock_owner.NewMockOwner(ctrl)
-	controller := mock2.NewMockController(ctrl)
-	cp := mock_capture.NewMockCapture(ctrl)
-	cp.EXPECT().GetController().Return(controller, nil).AnyTimes()
-	cp.EXPECT().GetOwner().Return(mo, nil).AnyTimes()
-	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	statusProvider := newStatusProvider()
-	cp.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
-	router := newRouter(cp, statusProvider)
-	statusProvider.On("IsChangefeedOwner", mock.Anything, mock.Anything).
-		Return(true, nil).Times(3)
+	cp := capture.NewCapture4Test(mo)
+	router := newRouter(cp, newStatusProvider())
+
 	// test move table succeeded
 	data := struct {
 		CaptureID string `json:"capture_id"`
@@ -782,8 +693,8 @@ func TestMoveTable(t *testing.T) {
 func TestResignOwner(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
-	mo := mock2.NewMockController(ctrl)
-	cp := capture.NewCaptureWithController4Test(mock_owner.NewMockOwner(ctrl), mo)
+	mo := mock_owner.NewMockOwner(ctrl)
+	cp := capture.NewCapture4Test(mo)
 	router := newRouter(cp, newStatusProvider())
 	// test resign owner succeeded
 	mo.EXPECT().AsyncStop()
@@ -797,24 +708,9 @@ func TestResignOwner(t *testing.T) {
 func TestGetProcessor(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
-	controller := mock2.NewMockController(ctrl)
-	cp := mock_capture.NewMockCapture(ctrl)
-	cp.EXPECT().GetController().Return(controller, nil).AnyTimes()
-	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	statusProvider := mock_owner.NewMockStatusProvider(ctrl)
-	cp.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
-	router := newRouter(cp, statusProvider)
-	statusProvider.EXPECT().IsChangefeedOwner(gomock.Any(), gomock.Any()).
-		Return(true, nil).AnyTimes()
-	dataProvider := newStatusProvider()
-	statusProvider.EXPECT().GetChangeFeedInfo(gomock.Any(), changeFeedID).Return(
-		dataProvider.GetChangeFeedInfo(context.Background(), changeFeedID)).AnyTimes()
-	statusProvider.EXPECT().GetChangeFeedStatus(gomock.Any(), changeFeedID).Return(
-		dataProvider.GetChangeFeedStatus(context.Background(), changeFeedID)).AnyTimes()
-	statusProvider.EXPECT().GetProcessors(gomock.Any()).Return(
-		dataProvider.GetProcessors(context.Background())).AnyTimes()
-	statusProvider.EXPECT().GetAllTaskStatuses(gomock.Any(), gomock.Any()).Return(
-		dataProvider.GetAllTaskStatuses(context.Background(), changeFeedID)).AnyTimes()
+	mo := mock_owner.NewMockOwner(ctrl)
+	cp := capture.NewCapture4Test(mo)
+	router := newRouter(cp, newStatusProvider())
 	// test get processor succeeded
 	api := testCase{
 		url:    fmt.Sprintf("/api/v1/processors/%s/%s", changeFeedID.ID, captureID),
@@ -844,11 +740,8 @@ func TestListProcessor(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	mo := mock_owner.NewMockOwner(ctrl)
-	controller := mock2.NewMockController(ctrl)
-	cp := capture.NewCaptureWithController4Test(mo, controller)
-	statusProvider := newStatusProvider()
-	router := newRouter(cp, statusProvider)
-	controller.EXPECT().GetProcessors(gomock.Any()).Return(statusProvider.GetProcessors(context.TODO()))
+	cp := capture.NewCapture4Test(mo)
+	router := newRouter(cp, newStatusProvider())
 	// test list processor succeeded
 	api := testCase{url: "/api/v1/processors", method: "GET"}
 	w := httptest.NewRecorder()
@@ -867,12 +760,9 @@ func TestListCapture(t *testing.T) {
 	mo := mock_owner.NewMockOwner(ctrl)
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(ctrl)
 	etcdClient.EXPECT().GetClusterID().Return("abcd").AnyTimes()
-	controller := mock2.NewMockController(ctrl)
-	cp := capture.NewCaptureWithController4Test(mo, controller)
+	cp := capture.NewCapture4Test(mo)
 	cp.EtcdClient = etcdClient
-	statusProvider := newStatusProvider()
-	router := newRouter(cp, statusProvider)
-	controller.EXPECT().GetCaptures(gomock.Any()).Return(statusProvider.GetCaptures(context.TODO()))
+	router := newRouter(cp, newStatusProvider())
 	// test list processor succeeded
 	api := testCase{url: "/api/v1/captures", method: "GET"}
 	w := httptest.NewRecorder()
@@ -890,8 +780,7 @@ func TestServerStatus(t *testing.T) {
 	// capture is owner
 	ctrl := gomock.NewController(t)
 	mo := mock_owner.NewMockOwner(ctrl)
-	controller := mock2.NewMockController(ctrl)
-	cp := capture.NewCaptureWithController4Test(mo, controller)
+	cp := capture.NewCapture4Test(mo)
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(ctrl)
 	etcdClient.EXPECT().GetClusterID().Return("abcd").AnyTimes()
 	ownerRouter := newRouter(cp, newStatusProvider())
@@ -939,7 +828,7 @@ func TestServerStatusLiveness(t *testing.T) {
 	cp.EXPECT().Info().DoAndReturn(func() (model.CaptureInfo, error) {
 		return model.CaptureInfo{}, nil
 	}).AnyTimes()
-	cp.EXPECT().IsController().DoAndReturn(func() bool {
+	cp.EXPECT().IsOwner().DoAndReturn(func() bool {
 		return true
 	}).AnyTimes()
 	cp.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
@@ -1022,7 +911,7 @@ func TestHealth(t *testing.T) {
 	cp.EXPECT().Info().DoAndReturn(func() (model.CaptureInfo, error) {
 		return model.CaptureInfo{}, nil
 	}).AnyTimes()
-	cp.EXPECT().IsController().DoAndReturn(func() bool {
+	cp.EXPECT().IsOwner().DoAndReturn(func() bool {
 		return true
 	}).AnyTimes()
 

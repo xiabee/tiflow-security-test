@@ -13,9 +13,7 @@
 
 package p2p
 
-import (
-	proto "github.com/pingcap/tiflow/proto/p2p"
-)
+import "github.com/pingcap/tiflow/proto/p2p"
 
 type (
 	// NodeID represents the identifier of a sender node.
@@ -26,16 +24,5 @@ type (
 	// Seq represents the serial number of a message for a given topic.
 	Seq = int64
 	// MessageServerStream is an alias for the protobuf-generated interface for the message service.
-	MessageServerStream = proto.CDCPeerToPeer_SendMessageServer
-	// MessageClientStream is an alias for the protobuf-generated interface for the message service.
-	MessageClientStream = proto.CDCPeerToPeer_SendMessageClient
+	MessageServerStream = p2p.CDCPeerToPeer_SendMessageServer
 )
-
-// MessageEntry is an alias for the protobuf-generated type for a message.
-type MessageEntry = *proto.MessageEntry
-
-// RawMessageEntry is an alias for the protobuf-generated type for a message.
-type RawMessageEntry struct {
-	topic Topic
-	value interface{}
-}

@@ -19,13 +19,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pingcap/check"
 	perrors "github.com/pingcap/errors"
-	"github.com/stretchr/testify/require"
 )
 
-func TestTError(t *testing.T) {
-	t.Parallel()
+func TestT(t *testing.T) {
+	check.TestingT(t)
+}
 
+var _ = check.Suite(&testTErrorSuite{})
+
+type testTErrorSuite struct{}
+
+func (t *testTErrorSuite) TestTError(c *check.C) {
 	var (
 		code                  = codeDBBadConn
 		class                 = ClassDatabase
@@ -40,102 +46,99 @@ func TestTError(t *testing.T) {
 		errFormatWithRawCause = errBaseFormat + ", Message: %s, RawCause: %s, Workaround: %s"
 	)
 
-	require.Equal(t, errClass2Str[ClassDatabase], ClassDatabase.String())
-	require.Equal(t, "unknown error class: 10000", ErrClass(10000).String())
+	c.Assert(ClassDatabase.String(), check.Equals, errClass2Str[ClassDatabase])
+	c.Assert(ErrClass(10000).String(), check.Equals, "unknown error class: 10000")
 
-	require.Equal(t, errScope2Str[ScopeUpstream], ScopeUpstream.String())
-	require.Equal(t, "unknown error scope: 10000", ErrScope(10000).String())
+	c.Assert(ScopeUpstream.String(), check.Equals, errScope2Str[ScopeUpstream])
+	c.Assert(ErrScope(10000).String(), check.Equals, "unknown error scope: 10000")
 
-	require.Equal(t, errLevel2Str[LevelHigh], LevelHigh.String())
-	require.Equal(t, "unknown error level: 10000", ErrLevel(10000).String())
+	c.Assert(LevelHigh.String(), check.Equals, errLevel2Str[LevelHigh])
+	c.Assert(ErrLevel(10000).String(), check.Equals, "unknown error level: 10000")
 
 	// test Error basic API
 	err := New(code, class, scope, level, message, workaround)
-	require.Equal(t, code, err.code)
-	require.Equal(t, class, err.Class())
-	require.Equal(t, scope, err.scope)
-	require.Equal(t, level, err.level)
-	require.Equal(t, workaround, err.workaround)
-	require.Equal(t, fmt.Sprintf(errFormat, code, class, scope, level, err.getMsg(), workaround), err.Error())
+	c.Assert(err.Code(), check.Equals, code)
+	c.Assert(err.Class(), check.Equals, class)
+	c.Assert(err.Scope(), check.Equals, scope)
+	c.Assert(err.Level(), check.Equals, level)
+	c.Assert(err.Workaround(), check.Equals, workaround)
+	c.Assert(err.Error(), check.Equals, fmt.Sprintf(errFormat, code, class, scope, level, err.getMsg(), workaround))
 
 	setMsgErr := err.SetMessage(messageArgs)
-	require.Equal(t, messageArgs, setMsgErr.getMsg())
+	c.Assert(setMsgErr.getMsg(), check.Equals, messageArgs)
 	setMsgErr.args = []interface{}{"1062"}
-	require.Equal(t, fmt.Sprintf(messageArgs, setMsgErr.args...), setMsgErr.getMsg())
+	c.Assert(setMsgErr.getMsg(), check.Equals, fmt.Sprintf(messageArgs, setMsgErr.args...))
 
 	// test Error Generate/Generatef
 	err2 := err.Generate("1063")
-	require.True(t, err.Equal(err2))
-	require.Equal(t, fmt.Sprintf(errFormat, code, class, scope, level, "bad connection%!(EXTRA string=1063)", workaround), err2.Error())
+	c.Assert(err.Equal(err2), check.IsTrue)
+	c.Assert(err2.Error(), check.Equals, fmt.Sprintf(errFormat, code, class, scope, level, "bad connection%!(EXTRA string=1063)", workaround))
 
 	err3 := err.Generatef("new message format: %s", "1064")
-	require.True(t, err.Equal(err3))
-	require.Equal(t, fmt.Sprintf(errFormatWithArg, code, class, scope, level, "new message format", "1064", workaround), err3.Error())
+	c.Assert(err.Equal(err3), check.IsTrue)
+	c.Assert(err3.Error(), check.Equals, fmt.Sprintf(errFormatWithArg, code, class, scope, level, "new message format", "1064", workaround))
 
 	// test Error Delegate
-	require.Nil(t, err.Delegate(nil, "nil"))
+	c.Assert(err.Delegate(nil, "nil"), check.IsNil)
 	err4 := err.Delegate(commonErr)
-	require.True(t, err.Equal(err4))
-	require.Equal(t, fmt.Sprintf(errFormatWithRawCause, code, class, scope, level, message, commonErr, workaround), err4.Error())
-	require.Equal(t, commonErr, perrors.Cause(err4))
+	c.Assert(err.Equal(err4), check.IsTrue)
+	c.Assert(err4.Error(), check.Equals, fmt.Sprintf(errFormatWithRawCause, code, class, scope, level, message, commonErr, workaround))
+	c.Assert(perrors.Cause(err4), check.Equals, commonErr)
 
 	argsErr := New(code, class, scope, level, messageArgs, workaround)
 	err4 = argsErr.Delegate(commonErr, "1065")
-	require.True(t, argsErr.Equal(err4))
-	require.Equal(t, fmt.Sprintf(errFormatWithRawCause, code, class, scope, level, "message with args: 1065", commonErr, workaround), err4.Error())
+	c.Assert(argsErr.Equal(err4), check.IsTrue)
+	c.Assert(err4.Error(), check.Equals, fmt.Sprintf(errFormatWithRawCause, code, class, scope, level, "message with args: 1065", commonErr, workaround))
 
 	// test Error AnnotateDelegate
-	require.Nil(t, err.AnnotateDelegate(nil, "message", "args"))
+	c.Assert(err.AnnotateDelegate(nil, "message", "args"), check.IsNil)
 	err5 := err.AnnotateDelegate(commonErr, "annotate delegate error: %d", 1066)
-	require.True(t, err.Equal(err5))
-	require.Equal(t, fmt.Sprintf(errFormatWithRawCause, code, class, scope, level, "annotate delegate error: 1066", commonErr, workaround), err5.Error())
+	c.Assert(err.Equal(err5), check.IsTrue)
+	c.Assert(err5.Error(), check.Equals, fmt.Sprintf(errFormatWithRawCause, code, class, scope, level, "annotate delegate error: 1066", commonErr, workaround))
 
 	// test Error Annotate
 	oldMsg := err.getMsg()
 	err6 := Annotate(err, "annotate error")
-	require.True(t, err.Equal(err6))
-	require.Equal(t, fmt.Sprintf(errFormatWithArg, code, class, scope, level, "annotate error", oldMsg, workaround), err6.Error())
+	c.Assert(err.Equal(err6), check.IsTrue)
+	c.Assert(err6.Error(), check.Equals, fmt.Sprintf(errFormatWithArg, code, class, scope, level, "annotate error", oldMsg, workaround))
 
-	require.Nil(t, Annotate(nil, ""))
+	c.Assert(Annotate(nil, ""), check.IsNil)
 	annotateErr := Annotate(commonErr, "annotate")
 	_, ok := annotateErr.(*Error)
-	require.False(t, ok)
-	require.Equal(t, commonErr, perrors.Cause(annotateErr))
+	c.Assert(ok, check.IsFalse)
+	c.Assert(perrors.Cause(annotateErr), check.Equals, commonErr)
 
 	// test Error Annotatef
 	oldMsg = err.getMsg()
 	err7 := Annotatef(err, "annotatef error %s", "1067")
-	require.True(t, err.Equal(err7))
-	require.Equal(t, fmt.Sprintf(errFormatWithArg, code, class, scope, level, "annotatef error 1067", oldMsg, workaround), err7.Error())
+	c.Assert(err.Equal(err7), check.IsTrue)
+	c.Assert(err7.Error(), check.Equals, fmt.Sprintf(errFormatWithArg, code, class, scope, level, "annotatef error 1067", oldMsg, workaround))
 
-	require.Nil(t, Annotatef(nil, ""))
+	c.Assert(Annotatef(nil, ""), check.IsNil)
 	annotateErr = Annotatef(commonErr, "annotatef %s", "1068")
 	_, ok = annotateErr.(*Error)
-	require.False(t, ok)
-	require.Equal(t, commonErr, perrors.Cause(annotateErr))
+	c.Assert(ok, check.IsFalse)
+	c.Assert(perrors.Cause(annotateErr), check.Equals, commonErr)
 
 	// test format
-	require.Equal(t, fmt.Sprintf("%q", err.Error()), fmt.Sprintf("%q", err))
+	c.Assert(fmt.Sprintf("%q", err), check.Equals, fmt.Sprintf("%q", err.Error()))
 	// err has no stack trace
-	require.Equal(t, err.Error(), fmt.Sprintf("%+v", err))
-	require.Equal(t, err.Error(), fmt.Sprintf("%v", err))
-
+	c.Assert(fmt.Sprintf("%+v", err), check.Equals, err.Error())
+	c.Assert(fmt.Sprintf("%v", err), check.Equals, err.Error())
 	// err2 has stack trace
 	verbose := strings.Split(fmt.Sprintf("%+v", err2), "\n")
-	require.True(t, len(verbose) > 5)
-	require.Equal(t, err2.Error(), verbose[0])
-	require.Regexp(t, ".*\\(\\*Error\\)\\.Generate", verbose[1])
-	require.Equal(t, err2.Error(), fmt.Sprintf("%v", err2))
+	c.Assert(len(verbose) > 5, check.IsTrue)
+	c.Assert(verbose[0], check.Equals, err2.Error())
+	c.Assert(verbose[1], check.Matches, ".*\\(\\*Error\\)\\.Generate")
+	c.Assert(fmt.Sprintf("%v", err2), check.Equals, err2.Error())
 
 	// test Message function
-	require.Equal(t, "", Message(nil))
-	require.Equal(t, commonErr.Error(), Message(commonErr))
-	require.Equal(t, err.getMsg(), Message(err))
+	c.Assert(Message(nil), check.Equals, "")
+	c.Assert(Message(commonErr), check.Equals, commonErr.Error())
+	c.Assert(Message(err), check.Equals, err.getMsg())
 }
 
-func TestTErrorStackTrace(t *testing.T) {
-	t.Parallel()
-
+func (t *testTErrorSuite) TestTErrorStackTrace(c *check.C) {
 	err := ErrDBUnExpect
 
 	testCases := []struct {
@@ -160,15 +163,13 @@ func TestTErrorStackTrace(t *testing.T) {
 			err2 = err.Generatef(tc.message, tc.args...)
 		}
 		verbose := strings.Split(fmt.Sprintf("%+v", err2), "\n")
-		require.True(t, len(verbose) > 5)
-		require.Equal(t, err2.Error(), verbose[0])
-		require.Regexp(t, tc.stackFingerprint, verbose[1])
+		c.Assert(len(verbose) > 5, check.IsTrue)
+		c.Assert(verbose[0], check.Equals, err2.Error())
+		c.Assert(verbose[1], check.Matches, tc.stackFingerprint)
 	}
 }
 
-func TestTerrorWithOperate(t *testing.T) {
-	t.Parallel()
-
+func (t *testTErrorSuite) TestTerrorWithOperate(c *check.C) {
 	var (
 		code             = codeDBBadConn
 		class            = ClassDatabase
@@ -184,28 +185,26 @@ func TestTerrorWithOperate(t *testing.T) {
 
 	// test WithScope
 	newScope := ScopeDownstream
-	require.Nil(t, WithScope(nil, newScope))
-	require.Equal(t, fmt.Sprintf("error scope: %s: common error", newScope), WithScope(commonErr, newScope).Error())
+	c.Assert(WithScope(nil, newScope), check.IsNil)
+	c.Assert(WithScope(commonErr, newScope).Error(), check.Equals, fmt.Sprintf("error scope: %s: common error", newScope))
 	err1 := WithScope(err.Generate(arg), newScope)
-	require.True(t, err.Equal(err1))
-	require.Equal(t, fmt.Sprintf(errFormatWithArg, code, class, newScope, level, "message with args", arg, workaround), err1.Error())
+	c.Assert(err.Equal(err1), check.IsTrue)
+	c.Assert(err1.Error(), check.Equals, fmt.Sprintf(errFormatWithArg, code, class, newScope, level, "message with args", arg, workaround))
 
 	// test WithClass
 	newClass := ClassFunctional
-	require.Nil(t, WithClass(nil, newClass))
-	require.Equal(t, fmt.Sprintf("error class: %s: common error", newClass), WithClass(commonErr, newClass).Error())
+	c.Assert(WithClass(nil, newClass), check.IsNil)
+	c.Assert(WithClass(commonErr, newClass).Error(), check.Equals, fmt.Sprintf("error class: %s: common error", newClass))
 	err2 := WithClass(err.Generate(arg), newClass)
-	require.True(t, err.Equal(err2))
-	require.Equal(t, fmt.Sprintf(errFormatWithArg, code, newClass, scope, level, "message with args", arg, workaround), err2.Error())
+	c.Assert(err.Equal(err2), check.IsTrue)
+	c.Assert(err2.Error(), check.Equals, fmt.Sprintf(errFormatWithArg, code, newClass, scope, level, "message with args", arg, workaround))
 }
 
-func TestTerrorCodeMap(t *testing.T) {
-	t.Parallel()
-
+func (t *testTErrorSuite) TestTerrorCodeMap(c *check.C) {
 	err, ok := ErrorFromCode(codeDBDriverError)
-	require.True(t, ok)
-	require.True(t, ErrDBDriverError.Equal(err))
+	c.Assert(ok, check.IsTrue)
+	c.Assert(ErrDBDriverError.Equal(err), check.IsTrue)
 
 	_, ok = ErrorFromCode(1000)
-	require.False(t, ok)
+	c.Assert(ok, check.IsFalse)
 }

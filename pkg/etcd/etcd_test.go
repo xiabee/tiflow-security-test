@@ -214,11 +214,11 @@ func TestCreateChangefeed(t *testing.T) {
 
 	upstreamInfo := &model.UpstreamInfo{ID: 1}
 	err := s.client.CreateChangefeedInfo(ctx,
-		upstreamInfo, detail)
+		upstreamInfo, detail, model.DefaultChangeFeedID("test-id"))
 	require.NoError(t, err)
 
 	err = s.client.CreateChangefeedInfo(ctx,
-		upstreamInfo, detail)
+		upstreamInfo, detail, model.DefaultChangeFeedID("test-id"))
 	require.True(t, cerror.ErrChangeFeedAlreadyExists.Equal(err))
 }
 

@@ -15,23 +15,25 @@ package streamer
 
 import (
 	"path/filepath"
-	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestRelayLogInfo(t *testing.T) {
-	t.Parallel()
+var _ = Suite(&testHubSuite{})
+
+type testHubSuite struct{}
+
+func (t *testHubSuite) TestRelayLogInfo(c *C) {
 	rli1 := RelayLogInfo{}
 	rli1.SubDirSuffix = 1
 	rli2 := RelayLogInfo{}
 	rli2.SubDirSuffix = 2
 
 	// compare by UUIDSuffix
-	require.False(t, rli1.Earlier(&rli1))
-	require.True(t, rli1.Earlier(&rli2))
-	require.False(t, rli2.Earlier(&rli1))
-	require.False(t, rli2.Earlier(&rli2))
+	c.Assert(rli1.Earlier(&rli1), IsFalse)
+	c.Assert(rli1.Earlier(&rli2), IsTrue)
+	c.Assert(rli2.Earlier(&rli1), IsFalse)
+	c.Assert(rli2.Earlier(&rli2), IsFalse)
 
 	// compare by filename
 	rli3 := RelayLogInfo{}
@@ -39,33 +41,32 @@ func TestRelayLogInfo(t *testing.T) {
 
 	rli1.Filename = "mysql-bin.000001"
 	rli3.Filename = "mysql-bin.000001" // equal
-	require.False(t, rli1.Earlier(&rli3))
-	require.False(t, rli3.Earlier(&rli1))
+	c.Assert(rli1.Earlier(&rli3), IsFalse)
+	c.Assert(rli3.Earlier(&rli1), IsFalse)
 
 	rli3.Filename = "mysql-bin.000003"
-	require.True(t, rli1.Earlier(&rli3))
-	require.False(t, rli3.Earlier(&rli1))
+	c.Assert(rli1.Earlier(&rli3), IsTrue)
+	c.Assert(rli3.Earlier(&rli1), IsFalse)
 
 	// string representation
 	rli3.SubDir = "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000001"
-	require.Equal(t, filepath.Join(rli3.SubDir, rli3.Filename), rli3.String())
+	c.Assert(rli3.String(), Equals, filepath.Join(rli3.SubDir, rli3.Filename))
 }
 
-func TestRelayLogInfoHub(t *testing.T) {
-	t.Parallel()
+func (t *testHubSuite) TestRelayLogInfoHub(c *C) {
 	rlih := newRelayLogInfoHub()
 	taskName, earliest := rlih.earliest()
-	require.Equal(t, "", taskName)
-	require.Nil(t, earliest)
+	c.Assert(taskName, Equals, "")
+	c.Assert(earliest, IsNil)
 
 	// update with invalid args
 	err := rlih.update("invalid-task", "invalid.uuid", "mysql-bin.000006")
-	require.Error(t, err)
+	c.Assert(err, NotNil)
 	err = rlih.update("invalid-task", "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000002", "invalid.binlog")
-	require.Error(t, err)
+	c.Assert(err, NotNil)
 	taskName, earliest = rlih.earliest()
-	require.Equal(t, "", taskName)
-	require.Nil(t, earliest)
+	c.Assert(taskName, Equals, "")
+	c.Assert(earliest, IsNil)
 
 	cases := []struct {
 		taskName string
@@ -81,92 +82,91 @@ func TestRelayLogInfoHub(t *testing.T) {
 	// update from later to earlier
 	for _, cs := range cases {
 		err = rlih.update(cs.taskName, cs.uuid, cs.filename)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		taskName, earliest = rlih.earliest()
-		require.Equal(t, cs.taskName, taskName)
-		require.Equal(t, cs.uuid, earliest.SubDir)
-		require.Equal(t, cs.filename, earliest.Filename)
+		c.Assert(taskName, Equals, cs.taskName)
+		c.Assert(earliest.SubDir, Equals, cs.uuid)
+		c.Assert(earliest.Filename, Equals, cs.filename)
 	}
-	require.Len(t, rlih.logs, 3)
+	c.Assert(len(rlih.logs), Equals, 3)
 
 	// remove earliest
 	cs := cases[3]
 	rlih.remove(cs.taskName)
-	require.Len(t, rlih.logs, 2)
+	c.Assert(len(rlih.logs), Equals, 2)
 
 	taskName, earliest = rlih.earliest()
 	cs = cases[1]
-	require.Equal(t, cs.taskName, taskName)
-	require.Equal(t, cs.uuid, earliest.SubDir)
-	require.Equal(t, cs.filename, earliest.Filename)
+	c.Assert(taskName, Equals, cs.taskName)
+	c.Assert(earliest.SubDir, Equals, cs.uuid)
+	c.Assert(earliest.Filename, Equals, cs.filename)
 
 	// remove non-earliest
 	cs = cases[0]
 	rlih.remove(cs.taskName)
-	require.Len(t, rlih.logs, 1)
+	c.Assert(len(rlih.logs), Equals, 1)
 
 	taskName, earliest = rlih.earliest()
 	cs = cases[1]
-	require.Equal(t, cs.taskName, taskName)
-	require.Equal(t, cs.uuid, earliest.SubDir)
-	require.Equal(t, cs.filename, earliest.Filename)
+	c.Assert(taskName, Equals, cs.taskName)
+	c.Assert(earliest.SubDir, Equals, cs.uuid)
+	c.Assert(earliest.Filename, Equals, cs.filename)
 
 	// all removed
 	cs = cases[1]
 	rlih.remove(cs.taskName)
-	require.Len(t, rlih.logs, 0)
+	c.Assert(len(rlih.logs), Equals, 0)
 
 	taskName, earliest = rlih.earliest()
-	require.Equal(t, "", taskName)
-	require.Nil(t, earliest)
+	c.Assert(taskName, Equals, "")
+	c.Assert(earliest, IsNil)
 }
 
-func TestReaderHub(t *testing.T) {
-	t.Parallel()
+func (t *testHubSuite) TestReaderHub(c *C) {
 	h := GetReaderHub()
-	require.NotNil(t, h)
+	c.Assert(h, NotNil)
 
 	h2 := GetReaderHub()
-	require.NotNil(t, h2)
-	require.Equal(t, h, h2)
+	c.Assert(h2, NotNil)
+	c.Assert(h2, Equals, h)
 
 	// no earliest
 	erli := h.EarliestActiveRelayLog()
-	require.Nil(t, erli)
+	c.Assert(erli, IsNil)
 
 	// update one
 	err := h.UpdateActiveRelayLog("task-1", "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000004", "mysql-bin.000001")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	// the only one is the earliest
 	erli = h.EarliestActiveRelayLog()
-	require.NotNil(t, erli)
-	require.Equal(t, "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000004", erli.SubDir)
-	require.Equal(t, "mysql-bin.000001", erli.Filename)
+	c.Assert(erli, NotNil)
+	c.Assert(erli.SubDir, Equals, "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000004")
+	c.Assert(erli.Filename, Equals, "mysql-bin.000001")
 
 	// update an earlier one
 	err = h.UpdateActiveRelayLog("task-2", "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000002", "mysql-bin.000002")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	// the earlier one is the earliest
 	erli = h.EarliestActiveRelayLog()
-	require.NotNil(t, erli)
-	require.Equal(t, "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000002", erli.SubDir)
-	require.Equal(t, "mysql-bin.000002", erli.Filename)
+	c.Assert(erli, NotNil)
+	c.Assert(erli.SubDir, Equals, "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000002")
+	c.Assert(erli.Filename, Equals, "mysql-bin.000002")
 
 	// remove the earlier one
 	h.RemoveActiveRelayLog("task-2")
 
 	// the only one is the earliest
 	erli = h.EarliestActiveRelayLog()
-	require.NotNil(t, erli)
-	require.Equal(t, "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000004", erli.SubDir)
-	require.Equal(t, "mysql-bin.000001", erli.Filename)
+	c.Assert(erli, NotNil)
+	c.Assert(erli.SubDir, Equals, "c6ae5afe-c7a3-11e8-a19d-0242ac130006.000004")
+	c.Assert(erli.Filename, Equals, "mysql-bin.000001")
 
 	// remove the only one
 	h.RemoveActiveRelayLog("task-1")
 
 	// no earliest
 	erli = h.EarliestActiveRelayLog()
-	require.Nil(t, erli)
+	c.Assert(erli, IsNil)
 }

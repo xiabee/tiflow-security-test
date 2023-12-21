@@ -18,48 +18,56 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
 )
+
+func TestSuite(t *testing.T) {
+	check.TestingT(t)
+}
+
+var _ = check.Suite(&testValueSuite{})
+
+type testValueSuite struct{}
 
 type fIsNil func()
 
 func fIsNil1() {}
 
-func TestIsNil(t *testing.T) {
+func (t *testValueSuite) TestIsNil(c *check.C) {
 	// nil value
 	i := 123
-	require.True(t, IsNil(nil))
-	require.False(t, IsNil(i))
+	c.Assert(IsNil(nil), check.IsTrue)
+	c.Assert(IsNil(i), check.IsFalse)
 
 	// chan
-	require.True(t, IsNil((chan int)(nil)))
-	require.False(t, IsNil(make(chan int)))
+	c.Assert(IsNil((chan int)(nil)), check.IsTrue)
+	c.Assert(IsNil(make(chan int)), check.IsFalse)
 
 	// func
-	require.True(t, IsNil((fIsNil)(nil)))
-	require.False(t, IsNil(fIsNil1))
+	c.Assert(IsNil((fIsNil)(nil)), check.IsTrue)
+	c.Assert(IsNil(fIsNil1), check.IsFalse)
 
 	// interface (error is an interface)
-	require.True(t, IsNil((error)(nil)))
-	require.False(t, IsNil(errors.New("")))
+	c.Assert(IsNil((error)(nil)), check.IsTrue)
+	c.Assert(IsNil(errors.New("")), check.IsFalse)
 
 	// map
-	require.True(t, IsNil((map[int]int)(nil)))
-	require.False(t, IsNil(make(map[int]int)))
+	c.Assert(IsNil((map[int]int)(nil)), check.IsTrue)
+	c.Assert(IsNil(make(map[int]int)), check.IsFalse)
 
 	// pointer
 	var piNil *int
 	piNotNil := &i
-	require.True(t, IsNil(piNil))
-	require.False(t, IsNil(piNotNil))
+	c.Assert(IsNil(piNil), check.IsTrue)
+	c.Assert(IsNil(piNotNil), check.IsFalse)
 
 	// unsafe pointer
 	var upiNil unsafe.Pointer
 	upiNotNil := unsafe.Pointer(piNotNil)
-	require.True(t, IsNil(upiNil))
-	require.False(t, IsNil(upiNotNil))
+	c.Assert(IsNil(upiNil), check.IsTrue)
+	c.Assert(IsNil(upiNotNil), check.IsFalse)
 
 	// slice
-	require.True(t, IsNil(([]int)(nil)))
-	require.False(t, IsNil(make([]int, 0)))
+	c.Assert(IsNil(([]int)(nil)), check.IsTrue)
+	c.Assert(IsNil(make([]int, 0)), check.IsFalse)
 }

@@ -19,22 +19,18 @@ import (
 
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/scheduler/schedulepb"
-	"github.com/pingcap/tiflow/pkg/spanz"
 )
 
 func benchmarkHeartbeatResponse(b *testing.B, bench func(b *testing.B, a *agent)) {
 	upperBound := 16384
 	for size := 1; size <= upperBound; size *= 2 {
 		tableExec := newMockTableExecutor()
-		liveness := model.LivenessCaptureAlive
 		a := &agent{
-			tableM:   newTableSpanManager(model.ChangeFeedID{}, tableExec),
-			liveness: &liveness,
+			tableM: newTableManager(model.ChangeFeedID{}, tableExec),
 		}
 
 		for j := 0; j < size; j++ {
-			span := spanz.TableIDToComparableSpan(model.TableID(10000 + j))
-			_ = a.tableM.addTableSpan(span)
+			_ = a.tableM.addTable(model.TableID(10000 + j))
 		}
 
 		b.ResetTimer()
@@ -45,7 +41,7 @@ func benchmarkHeartbeatResponse(b *testing.B, bench func(b *testing.B, a *agent)
 
 func BenchmarkRefreshAllTables(b *testing.B) {
 	benchmarkHeartbeatResponse(b, func(b *testing.B, a *agent) {
-		total := a.tableM.tables.Len()
+		total := len(a.tableM.tables)
 		b.Run(fmt.Sprintf("%d tables", total), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				a.handleMessageHeartbeat(&schedulepb.Heartbeat{})

@@ -10,7 +10,7 @@ SINK_TYPE=$1
 
 function run() {
 	# BDR mode only supports mysql sink
-	if [ "$SINK_TYPE" != "mysql" ]; then
+	if [ "$SINK_TYPE" == "kafka" ]; then
 		return
 	fi
 

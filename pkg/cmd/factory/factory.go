@@ -17,6 +17,7 @@ import (
 	"crypto/tls"
 
 	"github.com/pingcap/errors"
+	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
 	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/security"
@@ -30,6 +31,7 @@ type Factory interface {
 	ClientGetter
 	EtcdClient() (*etcd.CDCEtcdClientImpl, error)
 	PdClient() (pd.Client, error)
+	APIV1Client() (apiv1client.APIV1Interface, error)
 	APIV2Client() (apiv2client.APIV2Interface, error)
 }
 

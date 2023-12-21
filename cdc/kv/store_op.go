@@ -17,9 +17,9 @@ import (
 	"fmt"
 
 	"github.com/pingcap/errors"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/store/driver"
+	tidbkv "github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta"
+	"github.com/pingcap/tidb/store/driver"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/flags"
 	"github.com/pingcap/tiflow/pkg/security"
@@ -27,9 +27,10 @@ import (
 )
 
 // GetSnapshotMeta returns tidb meta information
-func GetSnapshotMeta(tiStore tidbkv.Storage, ts uint64) *meta.Meta {
+// TODO: Simplify the signature of this function
+func GetSnapshotMeta(tiStore tidbkv.Storage, ts uint64) (*meta.Meta, error) {
 	snapshot := tiStore.GetSnapshot(tidbkv.NewVersion(ts))
-	return meta.NewSnapshotMeta(snapshot)
+	return meta.NewSnapshotMeta(snapshot), nil
 }
 
 // CreateTiStore creates a tikv storage client

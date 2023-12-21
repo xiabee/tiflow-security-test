@@ -429,8 +429,7 @@ func (m *DefaultBaseMaster) doInit(ctx context.Context) (isFirstStartUp bool, er
 		},
 		func(_ context.Context, handle master.WorkerHandle, err error) error {
 			return m.Impl.OnWorkerDispatched(handle, err)
-		}, isInit, m.timeoutConfig, m.clock).
-		WithLogger(m.logger)
+		}, isInit, m.timeoutConfig, m.clock)
 
 	inheritedSelectors := m.masterMeta.Ext.Selectors
 	workerCreator := master.NewWorkerCreatorBuilder().

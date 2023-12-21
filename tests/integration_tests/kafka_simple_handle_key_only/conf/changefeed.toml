@@ -1,3 +1,0 @@
-[sink.kafka-config.large-message-handle]
-large-message-handle-option = "handle-key-only"
-large-message-handle-compression = "lz4"

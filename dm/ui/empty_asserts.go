@@ -1,4 +1,5 @@
 //go:build !dm_webui
+// +build !dm_webui
 
 // Copyright 2021 PingCAP, Inc.
 //

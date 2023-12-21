@@ -23,13 +23,12 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/dumpling/export"
-	tidbpromutil "github.com/pingcap/tidb/pkg/util/promutil"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	tidbpromutil "github.com/pingcap/tidb/util/promutil"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
-	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	dutils "github.com/pingcap/tiflow/dm/pkg/dumpling"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/storage"
@@ -85,7 +84,7 @@ func (m *Dumpling) Init(ctx context.Context) error {
 				Subsystem: "dumpling",
 				Name:      "exit_with_error_count",
 				Help:      "counter for dumpling exit with error",
-			}, []string{"task", "source_id", "resumable_err"},
+			}, []string{"task", "source_id"},
 		)
 		m.dumpConfig.PromFactory = promutil.NewWrappingFactory(
 			m.cfg.MetricsFactory,
@@ -111,15 +110,9 @@ func (m *Dumpling) Init(ctx context.Context) error {
 	return nil
 }
 
-func (m *Dumpling) handleExitErrMetric(err *pb.ProcessError) {
-	resumable := fmt.Sprintf("%t", unit.IsResumableError(err))
-	m.metricProxies.dumplingExitWithErrorCounter.WithLabelValues(m.cfg.Name, m.cfg.SourceID, resumable).Inc()
-}
-
 // Process implements Unit.Process.
 func (m *Dumpling) Process(ctx context.Context, pr chan pb.ProcessResult) {
-	m.metricProxies.dumplingExitWithErrorCounter.WithLabelValues(m.cfg.Name, m.cfg.SourceID, "true").Add(0)
-	m.metricProxies.dumplingExitWithErrorCounter.WithLabelValues(m.cfg.Name, m.cfg.SourceID, "false").Add(0)
+	m.metricProxies.dumplingExitWithErrorCounter.WithLabelValues(m.cfg.Name, m.cfg.SourceID).Add(0)
 
 	failpoint.Inject("dumpUnitProcessWithError", func(val failpoint.Value) {
 		m.logger.Info("dump unit runs with injected error", zap.String("failpoint", "dumpUnitProcessWithError"), zap.Reflect("error", val))
@@ -154,9 +147,7 @@ func (m *Dumpling) Process(ctx context.Context, pr chan pb.ProcessResult) {
 		err := storage.RemoveAll(ctx, m.cfg.Dir, nil)
 		if err != nil {
 			m.logger.Error("fail to remove output directory", zap.String("directory", m.cfg.Dir), log.ShortError(err))
-			processError := unit.NewProcessError(terror.ErrDumpUnitRuntime.Delegate(err, "fail to remove output directory: "+m.cfg.Dir))
-			m.handleExitErrMetric(processError)
-			errs = append(errs, processError)
+			errs = append(errs, unit.NewProcessError(terror.ErrDumpUnitRuntime.Delegate(err, "fail to remove output directory: "+m.cfg.Dir)))
 			pr <- pb.ProcessResult{
 				IsCanceled: false,
 				Errors:     errs,
@@ -195,9 +186,8 @@ func (m *Dumpling) Process(ctx context.Context, pr chan pb.ProcessResult) {
 		if utils.IsContextCanceledError(err) {
 			m.logger.Info("filter out error caused by user cancel")
 		} else {
-			processError := unit.NewProcessError(terror.ErrDumpUnitRuntime.Delegate(err, ""))
-			m.handleExitErrMetric(processError)
-			errs = append(errs, processError)
+			m.metricProxies.dumplingExitWithErrorCounter.WithLabelValues(m.cfg.Name, m.cfg.SourceID).Inc()
+			errs = append(errs, unit.NewProcessError(terror.ErrDumpUnitRuntime.Delegate(err, "")))
 		}
 	}
 
@@ -345,7 +335,7 @@ func (m *Dumpling) constructArgs(ctx context.Context) (*export.Config, error) {
 	tz := m.cfg.Timezone
 	if len(tz) == 0 {
 		// use target db time_zone as default
-		baseDB, err2 := conn.GetDownstreamDB(&m.cfg.To)
+		baseDB, err2 := conn.DefaultDBProvider.Apply(&m.cfg.To)
 		if err2 != nil {
 			return nil, err2
 		}
@@ -424,15 +414,16 @@ func (m *Dumpling) constructArgs(ctx context.Context) (*export.Config, error) {
 // detectSQLMode tries to detect SQL mode from upstream. If success, write it to LoaderConfig.
 // Because loader will use this SQL mode, we need to treat disable `EscapeBackslash` when NO_BACKSLASH_ESCAPES.
 func (m *Dumpling) detectSQLMode(ctx context.Context, dumpCfg *export.Config) {
-	baseDB, err := conn.GetUpstreamDB(&m.cfg.From)
+	baseDB, err := conn.DefaultDBProvider.Apply(&m.cfg.From)
 	if err != nil {
 		log.L().Warn("set up db connect failed", zap.Any("db", m.cfg.From),
 			zap.Error(err))
 		return
 	}
 	defer baseDB.Close()
+	db := baseDB.DB
 
-	sqlMode, err := conn.GetGlobalVariable(tcontext.NewContext(ctx, log.L()), baseDB, "sql_mode")
+	sqlMode, err := utils.GetGlobalVariable(ctx, db, "sql_mode")
 	if err != nil {
 		log.L().Warn("get global sql_mode from upstream failed", zap.Any("db", m.cfg.From), zap.Error(err))
 		return

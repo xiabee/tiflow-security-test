@@ -18,9 +18,9 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
-	timeta "github.com/pingcap/tidb/pkg/meta"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	tidbkv "github.com/pingcap/tidb/kv"
+	timeta "github.com/pingcap/tidb/meta"
+	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -46,8 +46,13 @@ func newSchemaWrap4Owner(
 	filter filter.Filter,
 ) (*schemaWrap4Owner, error) {
 	var meta *timeta.Meta
+
 	if kvStorage != nil {
-		meta = kv.GetSnapshotMeta(kvStorage, startTs)
+		var err error
+		meta, err = kv.GetSnapshotMeta(kvStorage, startTs)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
 	}
 
 	schemaStorage, err := entry.NewSchemaStorage(

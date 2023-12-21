@@ -25,6 +25,7 @@ import (
 type MetaData struct {
 	clusterInfoStore *ClusterInfoStore
 	jobStore         *JobStore
+	ddlStore         *DDLStore
 	unitStateStore   *UnitStateStore
 }
 
@@ -33,6 +34,7 @@ func NewMetaData(kvClient metaModel.KVClient, pLogger *zap.Logger) *MetaData {
 	return &MetaData{
 		clusterInfoStore: NewClusterInfoStore(kvClient),
 		jobStore:         NewJobStore(kvClient, pLogger),
+		ddlStore:         NewDDLStore(kvClient),
 		unitStateStore:   NewUnitStateStore(kvClient),
 	}
 }
@@ -45,6 +47,11 @@ func (m *MetaData) ClusterInfoStore() *ClusterInfoStore {
 // JobStore returns internal jobStore
 func (m *MetaData) JobStore() *JobStore {
 	return m.jobStore
+}
+
+// DDLStore returns internal ddlStore
+func (m *MetaData) DDLStore() *DDLStore {
+	return m.ddlStore
 }
 
 // UnitStateStore returns internal unitStateStore

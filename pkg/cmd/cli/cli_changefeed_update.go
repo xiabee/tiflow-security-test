@@ -15,6 +15,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/pingcap/log"
@@ -90,7 +91,7 @@ func (o *updateChangefeedOptions) complete(f factory.Factory) error {
 func (o *updateChangefeedOptions) run(cmd *cobra.Command) error {
 	ctx := cmdcontext.GetDefaultContext()
 
-	old, err := o.apiV2Client.Changefeeds().Get(ctx, o.changefeedID)
+	old, err := o.apiV2Client.Changefeeds().GetInfo(ctx, o.changefeedID)
 	if err != nil {
 		return err
 	}
@@ -99,10 +100,7 @@ func (o *updateChangefeedOptions) run(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	// sink uri is not changed, set old to empty to skip diff
-	if newInfo.SinkURI == "" {
-		old.SinkURI = ""
-	}
+
 	changelog, err := diff.Diff(old, newInfo)
 	if err != nil {
 		return err
@@ -118,8 +116,12 @@ func (o *updateChangefeedOptions) run(cmd *cobra.Command) error {
 
 	if !o.commonChangefeedOptions.noConfirm {
 		cmd.Printf("Could you agree to apply changes above to changefeed [Y/N]\n")
-		confirmed := readInput(cmd)
-		if !confirmed {
+		var yOrN string
+		_, err = fmt.Scan(&yOrN)
+		if err != nil {
+			return err
+		}
+		if strings.ToLower(strings.TrimSpace(yOrN)) != "y" {
 			cmd.Printf("No update to changefeed.\n")
 			return nil
 		}
@@ -148,7 +150,6 @@ func (o *updateChangefeedOptions) applyChanges(oldInfo *v2.ChangeFeedInfo,
 	if err != nil {
 		return nil, err
 	}
-	newInfo.SinkURI = ""
 	cmd.Flags().Visit(func(flag *pflag.Flag) {
 		switch flag.Name {
 		case "target-ts":

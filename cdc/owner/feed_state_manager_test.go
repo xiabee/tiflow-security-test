@@ -428,6 +428,7 @@ func TestChangefeedStatusNotExist(t *testing.T) {
     "sort-engine": "unified",
     "config": {
         "case-sensitive": true,
+        "enable-old-value": true,
         "force-replicate": false,
         "check-gc-safe-point": true,
         "filter": {
@@ -531,13 +532,13 @@ func TestChangefeedNotRetry(t *testing.T) {
 				position = &model.TaskPosition{}
 			}
 			position.Error = &model.RunningError{
-				Time:    time.Now(),
-				Addr:    "test",
-				Code:    "CDC:ErrExpressionColumnNotFound",
-				Message: "what ever",
+				Addr:    "127.0.0.1",
+				Code:    string(cerror.ErrExpressionColumnNotFound.RFCCode()),
+				Message: cerror.ErrExpressionColumnNotFound.Error(),
 			}
 			return position, true, nil
 		})
+
 	tester.MustApplyPatches()
 	manager.Tick(state, 0)
 	require.False(t, manager.ShouldRunning())
@@ -554,6 +555,7 @@ func TestChangefeedNotRetry(t *testing.T) {
 			}
 			return position, true, nil
 		})
+
 	tester.MustApplyPatches()
 	manager.Tick(state, 0)
 	// should be false
@@ -730,7 +732,6 @@ func TestUpdateChangefeedEpoch(t *testing.T) {
 		tester.MustApplyPatches()
 		require.False(t, manager.ShouldRunning())
 		require.Equal(t, model.StatePending, state.Info.State, i)
-
 		require.Equal(t, state.Info.AdminJobType, model.AdminStop)
 		require.Equal(t, state.Status.AdminJobType, model.AdminStop)
 

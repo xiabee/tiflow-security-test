@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/integrity"
 	"github.com/pingcap/tiflow/pkg/quotes"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/util"
@@ -64,10 +63,6 @@ const (
 	// BinaryFlag means the column charset is binary
 	BinaryFlag ColumnFlagType = 1 << ColumnFlagType(iota)
 	// HandleKeyFlag means the column is selected as the handle key
-	// The handleKey is chosen by the following rules:
-	// 1. If the table has a primary key, the handleKey is the first column of the primary key.
-	// 2. If the table has not null unique key, the handleKey is the first column of the unique key.
-	// 3. If the table has no primary key and no not null unique key, it has no handleKey.
 	HandleKeyFlag
 	// GeneratedColumnFlag means the column is a generated column
 	GeneratedColumnFlag
@@ -81,7 +76,19 @@ const (
 	NullableFlag
 	// UnsignedFlag means the column stores an unsigned integer
 	UnsignedFlag
+	// ZerofillFlag means the column is zerofill
+	ZerofillFlag
 )
+
+// SetZeroFill sets ZerofillFlag
+func (b *ColumnFlagType) SetZeroFill() {
+	(*util.Flag)(b).Add(util.Flag(ZerofillFlag))
+}
+
+// IsZerofill shows whether ZerofillFlag is set
+func (b *ColumnFlagType) IsZerofill() bool {
+	return (*util.Flag)(b).HasAll(util.Flag(ZerofillFlag))
+}
 
 // SetIsBinary sets BinaryFlag
 func (b *ColumnFlagType) SetIsBinary() {
@@ -253,9 +260,9 @@ const (
 // more info https://github.com/tinylib/msgp/issues/158, https://github.com/tinylib/msgp/issues/149
 // so define a RedoColumn, RedoDDLEvent instead of using the Column, DDLEvent
 type RedoLog struct {
-	RedoRow RedoRowChangedEvent `msg:"row"`
-	RedoDDL RedoDDLEvent        `msg:"ddl"`
-	Type    RedoLogType         `msg:"type"`
+	RedoRow *RedoRowChangedEvent `msg:"row"`
+	RedoDDL *RedoDDLEvent        `msg:"ddl"`
+	Type    RedoLogType          `msg:"type"`
 }
 
 // GetCommitTs returns the commit ts of the redo log.
@@ -272,15 +279,15 @@ func (r *RedoLog) GetCommitTs() Ts {
 }
 
 // TrySplitAndSortUpdateEvent redo log do nothing
-func (r *RedoLog) TrySplitAndSortUpdateEvent(_ string) error {
+func (r *RedoLog) TrySplitAndSortUpdateEvent(sinkScheme string) error {
 	return nil
 }
 
 // RedoRowChangedEvent represents the DML event used in RedoLog
 type RedoRowChangedEvent struct {
 	Row        *RowChangedEvent `msg:"row"`
-	Columns    []RedoColumn     `msg:"columns"`
-	PreColumns []RedoColumn     `msg:"pre-columns"`
+	PreColumns []*RedoColumn    `msg:"pre-columns"`
+	Columns    []*RedoColumn    `msg:"columns"`
 }
 
 // RedoDDLEvent represents DDL event used in redo log persistent
@@ -292,18 +299,12 @@ type RedoDDLEvent struct {
 
 // ToRedoLog converts row changed event to redo log
 func (row *RowChangedEvent) ToRedoLog() *RedoLog {
-	return &RedoLog{
-		RedoRow: RedoRowChangedEvent{Row: row},
-		Type:    RedoLogTypeRow,
-	}
+	return &RedoLog{RedoRow: RowToRedo(row), Type: RedoLogTypeRow}
 }
 
 // ToRedoLog converts ddl event to redo log
 func (ddl *DDLEvent) ToRedoLog() *RedoLog {
-	return &RedoLog{
-		RedoDDL: RedoDDLEvent{DDL: ddl},
-		Type:    RedoLogTypeDDL,
-	}
+	return &RedoLog{RedoDDL: DDLToRedo(ddl), Type: RedoLogTypeDDL}
 }
 
 // RowChangedEvent represents a row changed event
@@ -329,13 +330,9 @@ type RowChangedEvent struct {
 	// So be careful when using the TableInfo.
 	TableInfo *TableInfo `json:"-" msg:"-"`
 
-	Columns      []*Column `json:"columns" msg:"columns"`
-	PreColumns   []*Column `json:"pre-columns" msg:"pre-columns"`
+	Columns      []*Column `json:"columns" msg:"-"`
+	PreColumns   []*Column `json:"pre-columns" msg:"-"`
 	IndexColumns [][]int   `json:"-" msg:"index-columns"`
-
-	// Checksum for the event, only not nil if the upstream TiDB enable the row level checksum
-	// and TiCDC set the integrity check level to the correctness.
-	Checksum *integrity.Checksum `json:"-" msg:"-"`
 
 	// ApproximateDataSize is the approximate size of protobuf binary
 	// representation of this event.
@@ -380,7 +377,7 @@ func (r *RowChangedEvent) GetCommitTs() uint64 {
 }
 
 // TrySplitAndSortUpdateEvent do nothing
-func (r *RowChangedEvent) TrySplitAndSortUpdateEvent(_ string) error {
+func (r *RowChangedEvent) TrySplitAndSortUpdateEvent(sinkScheme string) error {
 	return nil
 }
 
@@ -417,6 +414,48 @@ func (r *RowChangedEvent) PrimaryKeyColumnNames() []string {
 		}
 	}
 	return result
+}
+
+// PrimaryKeyColumns returns the column(s) corresponding to the handle key(s)
+func (r *RowChangedEvent) PrimaryKeyColumns() []*Column {
+	pkeyCols := make([]*Column, 0)
+
+	var cols []*Column
+	if r.IsDelete() {
+		cols = r.PreColumns
+	} else {
+		cols = r.Columns
+	}
+
+	for _, col := range cols {
+		if col != nil && (col.Flag.IsPrimaryKey()) {
+			pkeyCols = append(pkeyCols, col)
+		}
+	}
+
+	// It is okay not to have primary keys, so the empty array is an acceptable result
+	return pkeyCols
+}
+
+// HandleKeyColumns returns the column(s) corresponding to the handle key(s)
+func (r *RowChangedEvent) HandleKeyColumns() []*Column {
+	pkeyCols := make([]*Column, 0)
+
+	var cols []*Column
+	if r.IsDelete() {
+		cols = r.PreColumns
+	} else {
+		cols = r.Columns
+	}
+
+	for _, col := range cols {
+		if col != nil && col.Flag.IsHandleKey() {
+			pkeyCols = append(pkeyCols, col)
+		}
+	}
+
+	// It is okay not to have handle keys, so the empty array is an acceptable result
+	return pkeyCols
 }
 
 // HandleKeyColInfos returns the column(s) and colInfo(s) corresponding to the handle key(s)
@@ -494,7 +533,7 @@ type Column struct {
 	Charset   string         `json:"charset" msg:"charset"`
 	Collation string         `json:"collation" msg:"collation"`
 	Flag      ColumnFlagType `json:"flag" msg:"-"`
-	Value     interface{}    `json:"value" msg:"-"`
+	Value     interface{}    `json:"value" msg:"value"`
 	Default   interface{}    `json:"default" msg:"-"`
 
 	// ApproximateBytes is approximate bytes consumed by the column.
@@ -503,11 +542,8 @@ type Column struct {
 
 // RedoColumn stores Column change
 type RedoColumn struct {
-	// Fields from Column and can't be marshaled directly in Column.
-	Value interface{} `msg:"column"`
-	// msgp transforms empty byte slice into nil, PTAL msgp#247.
-	ValueIsEmptyBytes bool   `msg:"value-is-empty-bytes"`
-	Flag              uint64 `msg:"flag"`
+	Column *Column `msg:"column"`
+	Flag   uint64  `msg:"flag"`
 }
 
 // BuildTiDBTableInfo builds a TiDB TableInfo from given information.
@@ -754,10 +790,11 @@ func (t *SingleTableTxn) GetCommitTs() uint64 {
 }
 
 // TrySplitAndSortUpdateEvent split update events if unique key is updated
-func (t *SingleTableTxn) TrySplitAndSortUpdateEvent(scheme string) error {
-	if t.dontSplitUpdateEvent(scheme) {
+func (t *SingleTableTxn) TrySplitAndSortUpdateEvent(sinkScheme string) error {
+	if !t.shouldSplitUpdateEvent(sinkScheme) {
 		return nil
 	}
+
 	newRows, err := trySplitAndSortUpdateEvent(t.Rows)
 	if err != nil {
 		return errors.Trace(err)
@@ -775,11 +812,11 @@ func (t *SingleTableTxn) TrySplitAndSortUpdateEvent(scheme string) error {
 // 1. Avro and CSV does not output the previous column values for the update event, so it would
 // cause consumer missing data if the unique key changed event is not split.
 // 2. Index-Value Dispatcher cannot work correctly if the unique key changed event isn't split.
-func (t *SingleTableTxn) dontSplitUpdateEvent(scheme string) bool {
-	if len(t.Rows) < 2 && sink.IsMySQLCompatibleScheme(scheme) {
-		return true
+func (t *SingleTableTxn) shouldSplitUpdateEvent(sinkScheme string) bool {
+	if len(t.Rows) < 2 && sink.IsMySQLCompatibleScheme(sinkScheme) {
+		return false
 	}
-	return false
+	return true
 }
 
 // trySplitAndSortUpdateEvent try to split update events if unique key is updated

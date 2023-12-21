@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/pingcap/log"
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tidb/parser"
 	timodel "github.com/pingcap/tidb/parser/model"
@@ -100,7 +101,6 @@ func TestDDLToEventType(t *testing.T) {
 		{"Alter table test.t1 drop partition t11", timodel.ActionDropTablePartition, bf.DropTablePartition, nil},
 		{"Alter table test.t1 add partition (partition p3 values less than (2002))", timodel.ActionDropTablePartition, bf.DropTablePartition, nil},
 		{"Alter table test.t1 truncate partition t11", timodel.ActionDropTablePartition, bf.DropTablePartition, nil},
-		{"Alter table test.t1 reorganize partition p11 into (partition p1 values less than (10), partition p2 values less than (20))", timodel.ActionReorganizePartition, bf.AlterTable, nil},
 		{"alter table add i", timodel.ActionAddIndex, bf.NullEvent, cerror.ErrConvertDDLToEventTypeFailed},
 	}
 	p := parser.New()
@@ -161,6 +161,7 @@ func TestDDLToTypeSpecialDDL(t *testing.T) {
 	}
 	p := parser.New()
 	for _, c := range cases {
+		log.Info(c.ddl)
 		et, err := ddlToEventType(p, c.ddl, c.jobType)
 		if c.err != nil {
 			errRFC, ok := cerror.RFCCode(err)

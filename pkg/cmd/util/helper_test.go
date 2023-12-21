@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -174,7 +173,7 @@ func TestStrictDecodeInvalidFile(t *testing.T) {
 func TestAndWriteExampleReplicaTOML(t *testing.T) {
 	cfg := config.GetDefaultReplicaConfig()
 	err := StrictDecodeFile("changefeed.toml", "cdc", &cfg)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	require.True(t, cfg.CaseSensitive)
 	require.Equal(t, &config.FilterConfig{
@@ -210,21 +209,21 @@ func TestAndWriteExampleReplicaTOML(t *testing.T) {
 		DateSeparator:            config.DateSeparatorDay.String(),
 		EnablePartitionSeparator: true,
 		Protocol:                 "open-protocol",
-		AdvanceTimeoutInSec:      util.AddressOf(uint(150)),
+		AdvanceTimeoutInSec:      config.DefaultAdvanceTimeoutInSec,
 	}, cfg.Sink)
 }
 
 func TestAndWriteStorageSinkTOML(t *testing.T) {
 	cfg := config.GetDefaultReplicaConfig()
 	err := StrictDecodeFile("changefeed_storage_sink.toml", "cdc", &cfg)
-	require.NoError(t, err)
+	require.Nil(t, err)
 
 	sinkURL, err := url.Parse("s3://127.0.0.1:9092")
 	require.NoError(t, err)
 
 	cfg.Sink.Protocol = config.ProtocolCanalJSON.String()
 	err = cfg.ValidateAndAdjust(sinkURL)
-	require.NoError(t, err)
+	require.Nil(t, err)
 	require.Equal(t, &config.SinkConfig{
 		Protocol:                 config.ProtocolCanalJSON.String(),
 		EncoderConcurrency:       16,
@@ -239,7 +238,7 @@ func TestAndWriteStorageSinkTOML(t *testing.T) {
 			IncludeCommitTs:      false,
 			BinaryEncodingMethod: config.BinaryEncodingBase64,
 		},
-		AdvanceTimeoutInSec: util.AddressOf(uint(150)),
+		AdvanceTimeoutInSec: config.DefaultAdvanceTimeoutInSec,
 	}, cfg.Sink)
 }
 

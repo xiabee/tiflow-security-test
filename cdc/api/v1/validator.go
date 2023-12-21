@@ -15,7 +15,6 @@ package v1
 
 import (
 	"context"
-	"net/url"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -25,7 +24,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/owner"
-	"github.com/pingcap/tiflow/cdc/sink/validator"
+	"github.com/pingcap/tiflow/cdc/sink"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
@@ -113,15 +112,6 @@ func verifyCreateChangefeedConfig(
 	if len(changefeedConfig.FilterRules) != 0 {
 		replicaConfig.Filter.Rules = changefeedConfig.FilterRules
 	}
-	// verify replicaConfig
-	sinkURIParsed, err := url.Parse(changefeedConfig.SinkURI)
-	if err != nil {
-		return nil, cerror.WrapError(cerror.ErrSinkURIInvalid, err)
-	}
-	err = replicaConfig.ValidateAndAdjust(sinkURIParsed)
-	if err != nil {
-		return nil, err
-	}
 
 	captureInfos, err := capture.StatusProvider().GetCaptures(ctx)
 	if err != nil {
@@ -180,7 +170,7 @@ func verifyCreateChangefeedConfig(
 		return nil, cerror.ErrAPIInvalidParam.Wrap(errors.Annotatef(err, "invalid timezone:%s", changefeedConfig.TimeZone))
 	}
 	ctx = contextutil.PutTimezoneInCtx(ctx, tz)
-	if err := validator.Validate(ctx, info.SinkURI, info.Config); err != nil {
+	if err := sink.Validate(ctx, info.SinkURI, info.Config); err != nil {
 		return nil, err
 	}
 
@@ -238,7 +228,7 @@ func VerifyUpdateChangefeedConfig(ctx context.Context,
 			return nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 
-		if err := validator.Validate(ctx, newInfo.SinkURI, newInfo.Config); err != nil {
+		if err := sink.Validate(ctx, newInfo.SinkURI, newInfo.Config); err != nil {
 			return nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 	}

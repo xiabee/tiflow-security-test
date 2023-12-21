@@ -110,7 +110,7 @@ func (m *gcManager) CheckStaleCheckpointTs(
 ) error {
 	gcSafepointUpperBound := checkpointTs - 1
 	if m.isTiCDCBlockGC {
-		pdTime, _ := m.pdClock.CurrentTime()
+		pdTime := m.pdClock.CurrentTime()
 		if pdTime.Sub(
 			oracle.GetTimeFromTS(gcSafepointUpperBound),
 		) > time.Duration(m.gcTTL)*time.Second {

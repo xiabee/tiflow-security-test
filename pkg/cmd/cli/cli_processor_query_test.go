@@ -19,7 +19,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/pingcap/errors"
-	v2 "github.com/pingcap/tiflow/cdc/api/v2"
+	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,7 +31,7 @@ func TestProcessorQueryCli(t *testing.T) {
 	o.complete(f)
 	cmd := newCmdQueryProcessor(f)
 
-	f.processors.EXPECT().Get(gomock.Any(), "a", "b").
+	f.processor.EXPECT().Get(gomock.Any(), "a", "b").
 		Return(nil, errors.New("test"))
 	o.changefeedID = "a"
 	o.captureID = "b"
@@ -39,8 +39,8 @@ func TestProcessorQueryCli(t *testing.T) {
 
 	cmd = newCmdQueryProcessor(f)
 	os.Args = []string{"query", "-c", "a", "-p", "b"}
-	f.processors.EXPECT().Get(gomock.Any(), "a", "b").
-		Return(&v2.ProcessorDetail{
+	f.processor.EXPECT().Get(gomock.Any(), "a", "b").
+		Return(&model.ProcessorDetail{
 			Tables: []int64{1, 2},
 		}, nil)
 	require.Nil(t, cmd.Execute())

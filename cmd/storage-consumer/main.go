@@ -33,22 +33,21 @@ import (
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/sink/ddlsink"
-	ddlfactory "github.com/pingcap/tiflow/cdc/sink/ddlsink/factory"
-	dmlfactory "github.com/pingcap/tiflow/cdc/sink/dmlsink/factory"
-	"github.com/pingcap/tiflow/cdc/sink/tablesink"
-	sinkutil "github.com/pingcap/tiflow/cdc/sink/util"
+	"github.com/pingcap/tiflow/cdc/sink/codec"
+	"github.com/pingcap/tiflow/cdc/sink/codec/canal"
+	"github.com/pingcap/tiflow/cdc/sink/codec/common"
+	"github.com/pingcap/tiflow/cdc/sink/codec/csv"
+	"github.com/pingcap/tiflow/cdc/sinkv2/ddlsink"
+	ddlfactory "github.com/pingcap/tiflow/cdc/sinkv2/ddlsink/factory"
+	dmlfactory "github.com/pingcap/tiflow/cdc/sinkv2/eventsink/factory"
+	"github.com/pingcap/tiflow/cdc/sinkv2/tablesink"
+	sinkutil "github.com/pingcap/tiflow/cdc/sinkv2/util"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/logutil"
 	"github.com/pingcap/tiflow/pkg/quotes"
 	psink "github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/sink/cloudstorage"
-	"github.com/pingcap/tiflow/pkg/sink/codec"
-	"github.com/pingcap/tiflow/pkg/sink/codec/canal"
-	"github.com/pingcap/tiflow/pkg/sink/codec/common"
-	"github.com/pingcap/tiflow/pkg/sink/codec/csv"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	putil "github.com/pingcap/tiflow/pkg/util"
 	"github.com/pingcap/tiflow/pkg/version"
 	"github.com/prometheus/client_golang/prometheus"
@@ -118,7 +117,7 @@ type fileIndexRange struct {
 
 type consumer struct {
 	sinkFactory     *dmlfactory.SinkFactory
-	ddlSink         ddlsink.Sink
+	ddlSink         ddlsink.DDLEventSink
 	replicationCfg  *config.ReplicaConfig
 	codecCfg        *common.Config
 	externalStorage storage.ExternalStorage
@@ -291,7 +290,7 @@ func (c *consumer) emitDMLEvents(
 	content []byte,
 ) error {
 	var (
-		decoder codec.RowEventDecoder
+		decoder codec.EventBatchDecoder
 		err     error
 	)
 
@@ -344,7 +343,7 @@ func (c *consumer) emitDMLEvents(
 			if _, ok := c.tableSinkMap[tableID]; !ok {
 				c.tableSinkMap[tableID] = c.sinkFactory.CreateTableSinkForConsumer(
 					model.DefaultChangeFeedID(defaultChangefeedName),
-					spanz.TableIDToComparableSpan(tableID),
+					tableID,
 					row.CommitTs,
 					prometheus.NewCounter(prometheus.CounterOpts{}))
 			}

@@ -21,7 +21,6 @@ import (
 
 	"github.com/BurntSushi/toml"
 	dmconfig "github.com/pingcap/tiflow/dm/config"
-	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	dmmaster "github.com/pingcap/tiflow/dm/master"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/engine/framework"
@@ -110,7 +109,7 @@ func TestWorker(t *testing.T) {
 	}))
 	taskCfg := &config.TaskCfg{
 		JobCfg: config.JobCfg{
-			TargetDB: &dbconfig.DBConfig{},
+			TargetDB: &dmconfig.DBConfig{},
 			Upstreams: []*config.UpstreamCfg{
 				{
 					MySQLInstance: dmconfig.MySQLInstance{
@@ -119,7 +118,7 @@ func TestWorker(t *testing.T) {
 						Syncer:   &dmconfig.SyncerConfig{},
 						SourceID: "task-id",
 					},
-					DBCfg: &dbconfig.DBConfig{},
+					DBCfg: &dmconfig.DBConfig{},
 				},
 			},
 		},

@@ -11,9 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build intest
-// +build intest
-
 package puller
 
 import (
@@ -78,6 +75,10 @@ func (m *mockPuller) Run(ctx context.Context) error {
 	}
 }
 
+func (m *mockPuller) GetResolvedTs() uint64 {
+	return atomic.LoadUint64(&m.resolvedTs)
+}
+
 func (m *mockPuller) Output() <-chan *model.RawKVEntry {
 	return m.outCh
 }
@@ -124,6 +125,8 @@ func newMockDDLJobPuller(
 		outputCh: make(
 			chan *model.DDLJobEntry,
 			defaultPullerOutputChanSize),
+		metricDiscardedDDLCounter: discardedDDLCounter.
+			WithLabelValues("ddl", "test"),
 	}
 	var helper *entry.SchemaTestHelper
 	if needSchemaStorage {

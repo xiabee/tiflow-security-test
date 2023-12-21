@@ -17,8 +17,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/pingcap/tiflow/cdc/kv/regionlock"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/tikv/client-go/v2/tikv"
 )
 
@@ -33,15 +32,15 @@ const (
 
 type singleRegionInfo struct {
 	verID  tikv.RegionVerID
-	span   tablepb.Span
+	span   regionspan.ComparableSpan
 	rpcCtx *tikv.RPCContext
 
-	lockedRange *regionlock.LockedRange
+	lockedRange *regionspan.LockedRange
 }
 
 func newSingleRegionInfo(
 	verID tikv.RegionVerID,
-	span tablepb.Span,
+	span regionspan.ComparableSpan,
 	rpcCtx *tikv.RPCContext,
 ) singleRegionInfo {
 	return singleRegionInfo{
@@ -82,7 +81,7 @@ func (s *regionFeedState) start() {
 	s.matcher = newMatcher()
 }
 
-// mark regionFeedState as stopped with the given error if possible.
+// mark regionFeedState as stopped.
 func (s *regionFeedState) markStopped() {
 	s.state.Lock()
 	defer s.state.Unlock()
@@ -131,7 +130,7 @@ func (s *regionFeedState) getRegionInfo() singleRegionInfo {
 	return s.sri
 }
 
-func (s *regionFeedState) getRegionMeta() (uint64, tablepb.Span, string) {
+func (s *regionFeedState) getRegionMeta() (uint64, regionspan.ComparableSpan, string) {
 	return s.sri.verID.GetID(), s.sri.span, s.sri.rpcCtx.Addr
 }
 

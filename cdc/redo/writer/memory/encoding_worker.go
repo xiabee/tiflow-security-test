@@ -22,7 +22,6 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/redo"
@@ -71,7 +70,7 @@ func (e *polymorphicRedoEvent) encode() (err error) {
 	redoLog := e.event.ToRedoLog()
 	e.commitTs = redoLog.GetCommitTs()
 
-	rawData, err := codec.MarshalRedoLog(redoLog, nil)
+	rawData, err := redoLog.MarshalMsg(nil)
 	if err != nil {
 		return err
 	}
@@ -98,6 +97,7 @@ func (e *polymorphicRedoEvent) encode() (err error) {
 }
 
 type encodingWorkerGroup struct {
+	changefeed model.ChangeFeedID
 	outputCh   chan *polymorphicRedoEvent
 	inputChs   []chan *polymorphicRedoEvent
 	workerNum  int
@@ -106,7 +106,8 @@ type encodingWorkerGroup struct {
 	closed chan struct{}
 }
 
-func newEncodingWorkerGroup(workerNum int) *encodingWorkerGroup {
+func newEncodingWorkerGroup(cfg *writer.LogWriterConfig) *encodingWorkerGroup {
+	workerNum := cfg.EncodingWorkerNum
 	if workerNum <= 0 {
 		workerNum = redo.DefaultEncodingWorkerNum
 	}
@@ -115,10 +116,11 @@ func newEncodingWorkerGroup(workerNum int) *encodingWorkerGroup {
 		inputChs[i] = make(chan *polymorphicRedoEvent, redo.DefaultEncodingInputChanSize)
 	}
 	return &encodingWorkerGroup{
-		inputChs:  inputChs,
-		outputCh:  make(chan *polymorphicRedoEvent, redo.DefaultEncodingOutputChanSize),
-		workerNum: workerNum,
-		closed:    make(chan struct{}),
+		changefeed: cfg.ChangeFeedID,
+		inputChs:   inputChs,
+		outputCh:   make(chan *polymorphicRedoEvent, redo.DefaultEncodingOutputChanSize),
+		workerNum:  workerNum,
+		closed:     make(chan struct{}),
 	}
 }
 
@@ -126,7 +128,10 @@ func (e *encodingWorkerGroup) Run(ctx context.Context) (err error) {
 	defer func() {
 		close(e.closed)
 		if err != nil && errors.Cause(err) != context.Canceled {
-			log.Warn("redo fileWorkerGroup closed with error", zap.Error(err))
+			log.Warn("redo fileWorkerGroup closed with error",
+				zap.String("namespace", e.changefeed.Namespace),
+				zap.String("changefeed", e.changefeed.ID),
+				zap.Error(err))
 		}
 	}()
 	eg, egCtx := errgroup.WithContext(ctx)
@@ -136,7 +141,10 @@ func (e *encodingWorkerGroup) Run(ctx context.Context) (err error) {
 			return e.runWorker(egCtx, idx)
 		})
 	}
-	log.Info("redo log encoding workers started", zap.Int("workerNum", e.workerNum))
+	log.Info("redo log encoding workers started",
+		zap.String("namespace", e.changefeed.Namespace),
+		zap.String("changefeed", e.changefeed.ID),
+		zap.Int("workerNum", e.workerNum))
 	return eg.Wait()
 }
 

@@ -38,7 +38,8 @@ function check_old_value_enabled() {
 export -f check_old_value_enabled
 
 function run() {
-	if [ "$SINK_TYPE" != "mysql" ]; then
+	# kafka is not supported yet.
+	if [ "$SINK_TYPE" == "kafka" ]; then
 		return
 	fi
 

@@ -14,7 +14,7 @@
 package cli
 
 import (
-	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
+	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
 	"github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
@@ -23,7 +23,7 @@ import (
 
 // pauseChangefeedOptions defines flags for the `cli changefeed pause` command.
 type pauseChangefeedOptions struct {
-	apiClient apiv2client.APIV2Interface
+	apiClient apiv1client.APIV1Interface
 
 	changefeedID string
 }
@@ -42,7 +42,7 @@ func (o *pauseChangefeedOptions) addFlags(cmd *cobra.Command) {
 
 // complete adapts from the command line args to the data and client required.
 func (o *pauseChangefeedOptions) complete(f factory.Factory) error {
-	apiClient, err := f.APIV2Client()
+	apiClient, err := f.APIV1Client()
 	if err != nil {
 		return err
 	}

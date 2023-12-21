@@ -154,12 +154,18 @@ func TestParseCfg(t *testing.T) {
 			SortDir:             config.DefaultSortDir,
 			CacheSizeInMB:       128,
 			MaxMemoryPercentage: 10,
+
+			NumConcurrentWorker:    4,
+			ChunkSizeLimit:         128 * 1024 * 1024,
+			MaxMemoryConsumption:   16 * 1024 * 1024 * 1024,
+			NumWorkerPoolGoroutine: 16,
 		},
 		Security: &config.SecurityConfig{
 			CertPath:      "bb",
 			KeyPath:       "cc",
 			CertAllowedCN: []string{"dd", "ee"},
 		},
+		PerTableMemoryQuota: config.DefaultTableMemoryQuota,
 		KVClient: &config.KVClientConfig{
 			WorkerConcurrent:    8,
 			WorkerPoolSize:      0,
@@ -167,6 +173,12 @@ func TestParseCfg(t *testing.T) {
 			RegionRetryDuration: config.TomlDuration(time.Minute),
 		},
 		Debug: &config.DebugConfig{
+			TableActor: &config.TableActorConfig{
+				EventBatchSize: 32,
+			},
+			EnableDBSorter:      true,
+			EnableNewScheduler:  true,
+			EnablePullBasedSink: true,
 			DB: &config.DBConfig{
 				Count:                       8,
 				Concurrency:                 128,
@@ -201,6 +213,7 @@ func TestParseCfg(t *testing.T) {
 				CheckBalanceInterval: 60000000000,
 				AddTableBatchSize:    50,
 			},
+			EnableNewSink: true,
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
@@ -237,13 +250,13 @@ max-backups = 1
 
 [sorter]
 sort-dir = "/tmp/just_a_test"
-cache-size-in-mb = 8
-max-memory-percentage = 3
 
 [kv-client]
 region-retry-duration = "3s"
 
 [debug]
+enable-db-sorter = true
+enable-pull-based-sink = true
 [debug.db]
 count = 5
 concurrency = 6
@@ -308,10 +321,16 @@ check-balance-interval = "10s"
 		ProcessorFlushInterval: config.TomlDuration(600 * time.Millisecond),
 		Sorter: &config.SorterConfig{
 			SortDir:             config.DefaultSortDir,
-			CacheSizeInMB:       8,
-			MaxMemoryPercentage: 3,
+			CacheSizeInMB:       128,
+			MaxMemoryPercentage: 10,
+
+			NumConcurrentWorker:    4,
+			ChunkSizeLimit:         128 * 1024 * 1024,
+			MaxMemoryConsumption:   16 * 1024 * 1024 * 1024,
+			NumWorkerPoolGoroutine: 16,
 		},
-		Security: &config.SecurityConfig{},
+		Security:            &config.SecurityConfig{},
+		PerTableMemoryQuota: config.DefaultTableMemoryQuota,
 		KVClient: &config.KVClientConfig{
 			WorkerConcurrent:    8,
 			WorkerPoolSize:      0,
@@ -319,6 +338,12 @@ check-balance-interval = "10s"
 			RegionRetryDuration: config.TomlDuration(3 * time.Second),
 		},
 		Debug: &config.DebugConfig{
+			TableActor: &config.TableActorConfig{
+				EventBatchSize: 32,
+			},
+			EnableDBSorter:      true,
+			EnablePullBasedSink: true,
+			EnableNewScheduler:  true,
 			DB: &config.DBConfig{
 				Count:                       5,
 				Concurrency:                 6,
@@ -352,6 +377,7 @@ check-balance-interval = "10s"
 				CheckBalanceInterval: config.TomlDuration(10 * time.Second),
 				AddTableBatchSize:    50,
 			},
+			EnableNewSink: true,
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
@@ -388,8 +414,6 @@ max-backups = 1
 
 [sorter]
 sort-dir = "/tmp/just_a_test"
-cache-size-in-mb = 8
-max-memory-percentage = 3
 
 [security]
 ca-path = "aa"
@@ -442,14 +466,20 @@ cert-allowed-cn = ["dd","ee"]
 		ProcessorFlushInterval: config.TomlDuration(150 * time.Millisecond),
 		Sorter: &config.SorterConfig{
 			SortDir:             config.DefaultSortDir,
-			CacheSizeInMB:       8,
-			MaxMemoryPercentage: 3,
+			CacheSizeInMB:       128,
+			MaxMemoryPercentage: 10,
+
+			NumConcurrentWorker:    4,
+			ChunkSizeLimit:         128 * 1024 * 1024,
+			MaxMemoryConsumption:   16 * 1024 * 1024 * 1024,
+			NumWorkerPoolGoroutine: 16,
 		},
 		Security: &config.SecurityConfig{
 			CertPath:      "bb",
 			KeyPath:       "cc",
 			CertAllowedCN: []string{"dd", "ee"},
 		},
+		PerTableMemoryQuota: config.DefaultTableMemoryQuota,
 		KVClient: &config.KVClientConfig{
 			WorkerConcurrent:    8,
 			WorkerPoolSize:      0,
@@ -457,6 +487,12 @@ cert-allowed-cn = ["dd","ee"]
 			RegionRetryDuration: config.TomlDuration(time.Minute),
 		},
 		Debug: &config.DebugConfig{
+			TableActor: &config.TableActorConfig{
+				EventBatchSize: 32,
+			},
+			EnableDBSorter:      true,
+			EnableNewScheduler:  true,
+			EnablePullBasedSink: true,
 			DB: &config.DBConfig{
 				Count:                       8,
 				Concurrency:                 128,
@@ -491,6 +527,7 @@ cert-allowed-cn = ["dd","ee"]
 				CheckBalanceInterval: 60000000000,
 				AddTableBatchSize:    50,
 			},
+			EnableNewSink: true,
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
@@ -501,7 +538,7 @@ cert-allowed-cn = ["dd","ee"]
 	}, o.serverConfig)
 }
 
-func TestDecodeUnknownDebugCfg(t *testing.T) {
+func TestDecodeUnkownDebugCfg(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "ticdc.toml")
 	configContent := `
@@ -524,6 +561,12 @@ unknown3 = 3
 	err = o.validate()
 	require.Nil(t, err)
 	require.Equal(t, &config.DebugConfig{
+		TableActor: &config.TableActorConfig{
+			EventBatchSize: 32,
+		},
+		EnableDBSorter:      true,
+		EnableNewScheduler:  true,
+		EnablePullBasedSink: true,
 		DB: &config.DBConfig{
 			Count:                       8,
 			Concurrency:                 128,
@@ -558,6 +601,7 @@ unknown3 = 3
 			CheckBalanceInterval: 60000000000,
 			AddTableBatchSize:    50,
 		},
+		EnableNewSink: true,
 		Puller: &config.PullerConfig{
 			EnableResolvedTsStuckDetection: false,
 			ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),

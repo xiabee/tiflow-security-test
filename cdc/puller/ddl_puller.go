@@ -30,14 +30,15 @@ import (
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/puller/memorysorter"
+	"github.com/pingcap/tiflow/cdc/sorter/memory"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/pdutil"
-	"github.com/pingcap/tiflow/pkg/spanz"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/pingcap/tiflow/pkg/util"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/client-go/v2/tikv"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
@@ -57,8 +58,8 @@ const (
 // DDLJobPuller is used to pull ddl job from TiKV.
 // It's used by processor and ddlPullerImpl.
 type DDLJobPuller interface {
-	util.Runnable
-
+	// Run starts the DDLJobPuller.
+	Run(ctx context.Context) error
 	// Output the DDL job entry, it contains the DDL job and the error.
 	Output() <-chan *model.DDLJobEntry
 }
@@ -77,19 +78,20 @@ type ddlJobPullerImpl struct {
 	// It holds the info of table `tidb_ddl_jobs` of upstream TiDB.
 	ddlJobsTable *model.TableInfo
 	// It holds the column id of `job_meta` in table `tidb_ddl_jobs`.
-	jobMetaColumnID int64
-	outputCh        chan *model.DDLJobEntry
+	jobMetaColumnID           int64
+	outputCh                  chan *model.DDLJobEntry
+	metricDiscardedDDLCounter prometheus.Counter
 }
 
 // Run starts the DDLJobPuller.
-func (p *ddlJobPullerImpl) Run(ctx context.Context, _ ...chan<- error) error {
+func (p *ddlJobPullerImpl) Run(ctx context.Context) error {
 	eg, ctx := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
 		return errors.Trace(p.puller.Run(ctx))
 	})
 
-	rawDDLCh := memorysorter.SortOutput(ctx, p.puller.Output())
+	rawDDLCh := memory.SortOutput(ctx, p.puller.Output())
 	eg.Go(
 		func() error {
 			for {
@@ -148,12 +150,6 @@ func (p *ddlJobPullerImpl) Run(ctx context.Context, _ ...chan<- error) error {
 		})
 	return eg.Wait()
 }
-
-// WaitForReady implements util.Runnable.
-func (p *ddlJobPullerImpl) WaitForReady(_ context.Context) {}
-
-// Close implements util.Runnable.
-func (p *ddlJobPullerImpl) Close() {}
 
 // Output the DDL job entry, it contains the DDL job and the error.
 func (p *ddlJobPullerImpl) Output() <-chan *model.DDLJobEntry {
@@ -357,19 +353,25 @@ func (p *ddlJobPullerImpl) handleJob(job *timodel.Job) (skip bool, err error) {
 				zap.String("schema", job.SchemaName),
 				zap.String("table", job.TableName),
 				zap.String("query", job.Query),
-				zap.Stringer("job", job))
-		}
-		if err != nil {
-			log.Warn("handle ddl job failed",
-				zap.String("namespace", p.changefeedID.Namespace),
-				zap.String("changefeed", p.changefeedID.ID),
-				zap.String("schema", job.SchemaName),
-				zap.String("table", job.TableName),
-				zap.String("query", job.Query),
-				zap.Stringer("job", job),
-				zap.Error(err))
+				zap.String("job", job.String()))
+			p.metricDiscardedDDLCounter.Inc()
 		}
 	}()
+
+	snap := p.schemaStorage.GetLastSnapshot()
+	// Do this first to fill the schema name to its origin schema name.
+	if err := snap.FillSchemaName(job); err != nil {
+		log.Info("failed to fill schema name for ddl job", zap.Error(err))
+		// If we can't find a job's schema, check if it's been filtered.
+		discard, fErr := p.filter.
+			ShouldDiscardDDL(job.StartTS, job.Type, job.SchemaName, job.TableName, job.Query)
+		if fErr != nil {
+			return false, errors.Trace(fErr)
+		}
+		if discard {
+			return true, nil
+		}
+	}
 
 	if job.BinlogInfo.FinishedTS <= p.getResolvedTs() ||
 		job.BinlogInfo.SchemaVersion <= p.schemaVersion {
@@ -383,21 +385,8 @@ func (p *ddlJobPullerImpl) handleJob(job *timodel.Job) (skip bool, err error) {
 			zap.String("table", job.TableName),
 			zap.String("query", job.Query),
 			zap.String("job", job.String()))
+		p.metricDiscardedDDLCounter.Inc()
 		return true, nil
-	}
-
-	snap := p.schemaStorage.GetLastSnapshot()
-	if err := snap.FillSchemaName(job); err != nil {
-		log.Info("failed to fill schema name for ddl job", zap.Error(err))
-		discard, fErr := p.filter.
-			ShouldDiscardDDL(job.StartTS, job.Type, job.SchemaName, job.TableName, job.Query)
-		if fErr != nil {
-			return false, errors.Trace(fErr)
-		}
-		if discard {
-			return true, nil
-		}
-		return true, errors.Trace(err)
 	}
 
 	switch job.Type {
@@ -430,7 +419,6 @@ func (p *ddlJobPullerImpl) handleJob(job *timodel.Job) (skip bool, err error) {
 			log.Info("rename table ddl job",
 				zap.String("oldTableName", oldTable.TableName.Table),
 				zap.String("oldSchemaName", oldTable.TableName.Schema))
-			// since we can find the old table, we must can find the old schema.
 			// 2. If we can find the preTableInfo, we filter it by the old table name.
 			skipByOldTableName, err := p.filter.ShouldDiscardDDL(job.StartTS,
 				job.Type, oldTable.TableName.Schema, oldTable.TableName.Table, job.Query)
@@ -534,10 +522,6 @@ func NewDDLJobPuller(
 	schemaStorage entry.SchemaStorage,
 	filter filter.Filter,
 ) (DDLJobPuller, error) {
-	spans := spanz.GetAllDDLSpan()
-	for i := range spans {
-		spans[i].TableID = -1
-	}
 	return &ddlJobPullerImpl{
 		changefeedID:  changefeed,
 		filter:        filter,
@@ -550,15 +534,16 @@ func NewDDLJobPuller(
 			kvStorage,
 			pdClock,
 			checkpointTs,
-			spans,
+			regionspan.GetAllDDLSpan(),
 			cfg,
 			changefeed,
 			-1, DDLPullerTableName,
 			ddLPullerFilterLoop,
-			true,
 		),
 		kvStorage: kvStorage,
 		outputCh:  make(chan *model.DDLJobEntry, defaultPullerOutputChanSize),
+		metricDiscardedDDLCounter: discardedDDLCounter.
+			WithLabelValues(changefeed.Namespace, changefeed.ID),
 	}, nil
 }
 
@@ -613,8 +598,11 @@ func NewDDLPuller(ctx context.Context,
 			up.RegionCache,
 			storage,
 			up.PDClock,
-			startTs, config.GetGlobalServerConfig(),
-			changefeed, schemaStorage, filter,
+			startTs,
+			config.GetGlobalServerConfig(),
+			changefeed,
+			schemaStorage,
+			filter,
 		)
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -731,22 +719,6 @@ func (h *ddlPullerImpl) Close() {
 	log.Info("close the ddl puller",
 		zap.String("namespace", h.changefeedID.Namespace),
 		zap.String("changefeed", h.changefeedID.ID))
-
-	ok := PullerEventCounter.DeleteLabelValues(h.changefeedID.Namespace, h.changefeedID.ID, "kv")
-	if !ok {
-		log.Warn("delete puller event counter metrics failed",
-			zap.String("namespace", h.changefeedID.Namespace),
-			zap.String("changefeed", h.changefeedID.ID),
-			zap.String("type", "kv"))
-	}
-	ok = PullerEventCounter.DeleteLabelValues(h.changefeedID.Namespace, h.changefeedID.ID, "resolved")
-	if !ok {
-		log.Warn("delete puller event counter metrics failed",
-			zap.String("namespace", h.changefeedID.Namespace),
-			zap.String("changefeed", h.changefeedID.ID),
-			zap.String("type", "resolved"))
-	}
-
 	h.cancel()
 }
 

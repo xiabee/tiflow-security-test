@@ -25,7 +25,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
-	"github.com/pingcap/tiflow/cdc/sink/tablesink"
+	"github.com/pingcap/tiflow/cdc/sinkv2/tablesink"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"github.com/tikv/client-go/v2/oracle"
@@ -43,8 +43,7 @@ type tableSinkWrapper struct {
 
 	// changefeed used for logging.
 	changefeed model.ChangeFeedID
-	// tableSpan used for logging.
-	span tablepb.Span
+	tableID    model.TableID
 
 	tableSinkCreater func() (tablesink.TableSink, uint64)
 
@@ -105,7 +104,7 @@ func newRangeEventCount(pos engine.Position, events int) rangeEventCount {
 
 func newTableSinkWrapper(
 	changefeed model.ChangeFeedID,
-	span tablepb.Span,
+	tableID model.TableID,
 	tableSinkCreater func() (tablesink.TableSink, uint64),
 	state tablepb.TableState,
 	startTs model.Ts,
@@ -115,7 +114,7 @@ func newTableSinkWrapper(
 	res := &tableSinkWrapper{
 		version:          atomic.AddUint64(&tableSinkWrapperVersion, 1),
 		changefeed:       changefeed,
-		span:             span,
+		tableID:          tableID,
 		tableSinkCreater: tableSinkCreater,
 		state:            &state,
 		startTs:          startTs,
@@ -138,7 +137,7 @@ func (t *tableSinkWrapper) start(ctx context.Context, startTs model.Ts) (err err
 		log.Panic("The table sink has already started",
 			zap.String("namespace", t.changefeed.Namespace),
 			zap.String("changefeed", t.changefeed.ID),
-			zap.Stringer("span", &t.span),
+			zap.Int64("tableID", t.tableID),
 			zap.Uint64("startTs", startTs),
 			zap.Uint64("oldReplicateTs", t.replicateTs),
 		)
@@ -152,7 +151,7 @@ func (t *tableSinkWrapper) start(ctx context.Context, startTs model.Ts) (err err
 	log.Info("Sink is started",
 		zap.String("namespace", t.changefeed.Namespace),
 		zap.String("changefeed", t.changefeed.ID),
-		zap.Stringer("span", &t.span),
+		zap.Int64("tableID", t.tableID),
 		zap.Uint64("startTs", startTs),
 		zap.Uint64("replicateTs", t.replicateTs),
 	)
@@ -273,7 +272,7 @@ func (t *tableSinkWrapper) markAsClosing() {
 			log.Info("Sink is closing",
 				zap.String("namespace", t.changefeed.Namespace),
 				zap.String("changefeed", t.changefeed.ID),
-				zap.Stringer("span", &t.span))
+				zap.Int64("tableID", t.tableID))
 			break
 		}
 	}
@@ -289,7 +288,7 @@ func (t *tableSinkWrapper) markAsClosed() {
 			log.Info("Sink is closed",
 				zap.String("namespace", t.changefeed.Namespace),
 				zap.String("changefeed", t.changefeed.ID),
-				zap.Stringer("span", &t.span))
+				zap.Int64("tableID", t.tableID))
 			return
 		}
 	}
@@ -387,7 +386,7 @@ func (t *tableSinkWrapper) restart(ctx context.Context) (err error) {
 	log.Info("Sink is restarted",
 		zap.String("namespace", t.changefeed.Namespace),
 		zap.String("changefeed", t.changefeed.ID),
-		zap.Stringer("span", &t.span),
+		zap.Int64("tableID", t.tableID),
 		zap.Uint64("replicateTs", t.replicateTs))
 	return nil
 }
@@ -463,8 +462,10 @@ func (t *tableSinkWrapper) sinkMaybeStuck(stuckCheck time.Duration) (bool, uint6
 	return false, uint64(0)
 }
 
+// handleRowChangedEvents uses to convert RowChangedEvents to TableSinkRowChangedEvents.
+// It will deal with the old value compatibility.
 func handleRowChangedEvents(
-	changefeed model.ChangeFeedID, span tablepb.Span, events ...*model.PolymorphicEvent,
+	changefeed model.ChangeFeedID, tableID model.TableID, events ...*model.PolymorphicEvent,
 ) ([]*model.RowChangedEvent, uint64) {
 	size := 0
 	rowChangedEvents := make([]*model.RowChangedEvent, 0, len(events))
@@ -473,7 +474,7 @@ func handleRowChangedEvents(
 			log.Warn("skip emit nil event",
 				zap.String("namespace", changefeed.Namespace),
 				zap.String("changefeed", changefeed.ID),
-				zap.Stringer("span", &span),
+				zap.Int64("tableID", tableID),
 				zap.Any("event", e))
 			continue
 		}
@@ -485,7 +486,7 @@ func handleRowChangedEvents(
 		// Just ignore these row changed events.
 		if colLen == 0 && preColLen == 0 {
 			log.Warn("skip emit empty row event",
-				zap.Stringer("span", &span),
+				zap.Int64("tableID", tableID),
 				zap.String("namespace", changefeed.Namespace),
 				zap.String("changefeed", changefeed.ID),
 				zap.Any("event", e))

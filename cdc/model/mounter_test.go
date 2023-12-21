@@ -84,21 +84,6 @@ func TestResolvedTs(t *testing.T) {
 	require.True(t, batchResolvedTs1.EqualOrGreater(smallerBatchResolvedTs))
 }
 
-func TestResolvedTsEqual(t *testing.T) {
-	t1 := ResolvedTs{Mode: BatchResolvedMode, Ts: 1, BatchID: 1}
-	t2 := ResolvedTs{Mode: BatchResolvedMode, Ts: 1, BatchID: 1}
-	require.True(t, t1.Equal(t2))
-
-	t3 := NewResolvedTs(1)
-	require.False(t, t1.Equal(t3))
-
-	t4 := ResolvedTs{Mode: BatchResolvedMode, Ts: 1, BatchID: 2}
-	require.False(t, t1.Equal(t4))
-
-	t5 := ResolvedTs{Mode: BatchResolvedMode, Ts: 2, BatchID: 1}
-	require.False(t, t1.Equal(t5))
-}
-
 func TestComparePolymorphicEvents(t *testing.T) {
 	cases := []struct {
 		a *PolymorphicEvent
@@ -127,4 +112,19 @@ func TestComparePolymorphicEvents(t *testing.T) {
 	for _, item := range cases {
 		require.True(t, ComparePolymorphicEvents(item.a, item.b))
 	}
+}
+
+func TestResolvedTsEqual(t *testing.T) {
+	t1 := ResolvedTs{Mode: BatchResolvedMode, Ts: 1, BatchID: 1}
+	t2 := ResolvedTs{Mode: BatchResolvedMode, Ts: 1, BatchID: 1}
+	require.True(t, t1.Equal(t2))
+
+	t3 := NewResolvedTs(1)
+	require.False(t, t1.Equal(t3))
+
+	t4 := ResolvedTs{Mode: BatchResolvedMode, Ts: 1, BatchID: 2}
+	require.False(t, t1.Equal(t4))
+
+	t5 := ResolvedTs{Mode: BatchResolvedMode, Ts: 2, BatchID: 1}
+	require.False(t, t1.Equal(t5))
 }

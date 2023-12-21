@@ -29,7 +29,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/spanz"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/workerpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/client-go/v2/oracle"
@@ -211,7 +211,7 @@ func (w *regionWorker) handleSingleRegionError(err error, state *regionFeedState
 		zap.String("changefeed", w.session.client.changefeed.ID),
 		zap.Uint64("regionID", regionID),
 		zap.Uint64("requestID", state.requestID),
-		zap.Stringer("span", &state.sri.span),
+		zap.Stringer("span", state.sri.span),
 		zap.Uint64("resolvedTs", state.sri.resolvedTs()),
 		zap.Bool("isStale", isStale),
 		zap.Error(err))
@@ -279,14 +279,7 @@ func (w *regionWorker) resolveLock(ctx context.Context) error {
 				w.rtsManager.Upsert(regionID, resolvedTs, eventTime)
 			}
 		case <-advanceCheckTicker.C:
-			currentTimeFromPD, err := w.session.client.pdClock.CurrentTime()
-			if err != nil {
-				log.Warn("failed to get current time from PD",
-					zap.Error(err),
-					zap.String("namespace", w.session.client.changefeed.Namespace),
-					zap.String("changefeed", w.session.client.changefeed.ID))
-				continue
-			}
+			currentTimeFromPD := w.session.client.pdClock.CurrentTime()
 			expired := make([]*regionTsInfo, 0)
 			for w.rtsManager.Len() > 0 {
 				item := w.rtsManager.Pop()
@@ -342,7 +335,7 @@ func (w *regionWorker) resolveLock(ctx context.Context) error {
 							zap.String("changefeed", w.session.client.changefeed.ID),
 							zap.String("addr", w.storeAddr),
 							zap.Uint64("regionID", rts.regionID),
-							zap.Stringer("span", &state.sri.span),
+							zap.Stringer("span", state.sri.span),
 							zap.Duration("duration", sinceLastResolvedTs),
 							zap.Duration("lastEvent", sinceLastEvent),
 							zap.Uint64("resolvedTs", lastResolvedTs),
@@ -650,11 +643,12 @@ func handleEventEntry(
 ) error {
 	regionID, regionSpan, _ := state.getRegionMeta()
 	for _, entry := range x.Entries.GetEntries() {
-		// NOTE: from TiKV 7.0.0, entries are already filtered out in TiKV side.
-		// We can remove the check in future.
-		comparableKey := spanz.ToComparableKey(entry.GetKey())
+		// if a region with kv range [a, z), and we only want the get [b, c) from this region,
+		// tikv will return all key events in the region, although specified [b, c) int the request.
+		// we can make tikv only return the events about the keys in the specified range.
+		comparableKey := regionspan.ToComparableKey(entry.GetKey())
 		if entry.Type != cdcpb.Event_INITIALIZED &&
-			!spanz.KeyInSpan(comparableKey, regionSpan) {
+			!regionspan.KeyInSpan(comparableKey, regionSpan) {
 			metrics.metricDroppedEventSize.Observe(float64(entry.Size()))
 			continue
 		}

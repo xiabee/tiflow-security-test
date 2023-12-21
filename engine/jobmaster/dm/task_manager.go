@@ -40,7 +40,6 @@ var (
 type TaskManager struct {
 	*ticker.DefaultTicker
 
-	jobID        string
 	jobStore     *metadata.JobStore
 	messageAgent dmpkg.MessageAgent
 	logger       *zap.Logger
@@ -52,16 +51,8 @@ type TaskManager struct {
 }
 
 // NewTaskManager creates a new TaskManager instance
-func NewTaskManager(
-	jobID string,
-	initTaskStatus []runtime.TaskStatus,
-	jobStore *metadata.JobStore,
-	messageAgent dmpkg.MessageAgent,
-	pLogger *zap.Logger,
-	metricFactory promutil.Factory,
-) *TaskManager {
+func NewTaskManager(initTaskStatus []runtime.TaskStatus, jobStore *metadata.JobStore, messageAgent dmpkg.MessageAgent, pLogger *zap.Logger, metricFactory promutil.Factory) *TaskManager {
 	taskManager := &TaskManager{
-		jobID:         jobID,
 		DefaultTicker: ticker.NewDefaultTicker(taskNormalInterval, taskErrorInterval),
 		jobStore:      jobStore,
 		logger:        pLogger.With(zap.String("component", "task_manager")),
@@ -69,10 +60,10 @@ func NewTaskManager(
 		gaugeVec: metricFactory.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Namespace: "dm",
-				Subsystem: "worker",
-				Name:      "task_state",
-				Help:      "task state of dm worker in this job",
-			}, []string{"task", "source_id"}),
+				Subsystem: "task",
+				Name:      "stage",
+				Help:      "task stage of dm worker in this job",
+			}, []string{"task_id"}),
 	}
 	taskManager.DefaultTicker.Ticker = taskManager
 
@@ -125,7 +116,7 @@ func (tm *TaskManager) UpdateTaskStatus(taskStatus runtime.TaskStatus) {
 		zap.Uint64("config_modify_revison", taskStatus.CfgModRevision),
 	)
 	tm.tasks.Store(taskStatus.Task, taskStatus)
-	tm.gaugeVec.WithLabelValues(tm.jobID, taskStatus.Task).Set(float64(taskStatus.Stage))
+	tm.gaugeVec.WithLabelValues(taskStatus.Task).Set(float64(taskStatus.Stage))
 }
 
 // TaskStatus return the task status.
@@ -206,7 +197,7 @@ func (tm *TaskManager) onJobDel() {
 	tm.logger.Info("clear all task status")
 	tm.tasks.Range(func(key, value interface{}) bool {
 		tm.tasks.Delete(key)
-		tm.gaugeVec.DeleteLabelValues(tm.jobID, key.(string))
+		tm.gaugeVec.DeleteLabelValues(key.(string))
 		return true
 	})
 }
@@ -218,7 +209,7 @@ func (tm *TaskManager) removeTaskStatus(job *metadata.Job) {
 		if _, ok := job.Tasks[taskID]; !ok {
 			tm.logger.Info("remove task status", zap.String("task_id", taskID))
 			tm.tasks.Delete(taskID)
-			tm.gaugeVec.DeleteLabelValues(tm.jobID, taskID)
+			tm.gaugeVec.DeleteLabelValues(taskID)
 		}
 		return true
 	})

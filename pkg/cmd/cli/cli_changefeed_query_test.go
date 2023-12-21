@@ -23,22 +23,24 @@ import (
 	"github.com/pingcap/errors"
 	v2 "github.com/pingcap/tiflow/cdc/api/v2"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/pkg/api/v2/mock"
+	mock_v1 "github.com/pingcap/tiflow/pkg/api/v1/mock"
+	mock_v2 "github.com/pingcap/tiflow/pkg/api/v2/mock"
 	"github.com/stretchr/testify/require"
 )
 
 func TestChangefeedQueryCli(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
-	cfV2 := mock.NewMockChangefeedInterface(ctrl)
+	cfV1 := mock_v1.NewMockChangefeedInterface(ctrl)
+	cfV2 := mock_v2.NewMockChangefeedInterface(ctrl)
 
-	f := &mockFactory{changefeeds: cfV2}
+	f := &mockFactory{changefeeds: cfV1, changefeedsv2: cfV2}
 
 	o := newQueryChangefeedOptions()
 	o.complete(f)
 	cmd := newCmdQueryChangefeed(f)
 
-	cfV2.EXPECT().List(gomock.Any(), "all").Return([]v2.ChangefeedCommonInfo{
+	cfV1.EXPECT().List(gomock.Any(), "all").Return(&[]model.ChangefeedCommonInfo{
 		{
 			UpstreamID:     1,
 			Namespace:      "default",
@@ -51,7 +53,7 @@ func TestChangefeedQueryCli(t *testing.T) {
 	o.simplified = true
 	o.changefeedID = "abc"
 	require.Nil(t, o.run(cmd))
-	cfV2.EXPECT().List(gomock.Any(), "all").Return([]v2.ChangefeedCommonInfo{
+	cfV1.EXPECT().List(gomock.Any(), "all").Return(&[]model.ChangefeedCommonInfo{
 		{
 			UpstreamID:     1,
 			Namespace:      "default",
@@ -65,13 +67,16 @@ func TestChangefeedQueryCli(t *testing.T) {
 	o.changefeedID = "abcd"
 	require.NotNil(t, o.run(cmd))
 
-	cfV2.EXPECT().List(gomock.Any(), "all").Return(nil, errors.New("test"))
+	cfV1.EXPECT().List(gomock.Any(), "all").Return(nil, errors.New("test"))
 	o.simplified = true
 	o.changefeedID = "abcd"
 	require.NotNil(t, o.run(cmd))
 
 	// query success
-	cfV2.EXPECT().Get(gomock.Any(), "bcd").Return(&v2.ChangeFeedInfo{}, nil)
+	cfV1.EXPECT().Get(gomock.Any(), "bcd").Return(&model.ChangefeedDetail{}, nil)
+	cfV2.EXPECT().GetInfo(gomock.Any(), gomock.Any()).Return(&v2.ChangeFeedInfo{
+		Config: v2.GetDefaultReplicaConfig(),
+	}, nil)
 
 	o.simplified = false
 	o.changefeedID = "bcd"
@@ -84,7 +89,7 @@ func TestChangefeedQueryCli(t *testing.T) {
 	require.Contains(t, string(out), "config")
 
 	// query failed
-	cfV2.EXPECT().Get(gomock.Any(), "bcd").Return(nil, errors.New("test"))
+	cfV1.EXPECT().Get(gomock.Any(), "bcd").Return(nil, errors.New("test"))
 	os.Args = []string{"query", "--simple=false", "--changefeed-id=bcd"}
 	require.NotNil(t, o.run(cmd))
 }

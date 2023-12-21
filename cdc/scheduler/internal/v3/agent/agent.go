@@ -25,7 +25,6 @@ import (
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/compat"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/transport"
 	"github.com/pingcap/tiflow/cdc/scheduler/schedulepb"
-	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/p2p"
@@ -41,7 +40,7 @@ type agent struct {
 	trans  transport.Transport
 	compat *compat.Compat
 
-	tableM *tableSpanManager
+	tableM *tableManager
 
 	ownerInfo ownerInfo
 
@@ -80,8 +79,9 @@ func newAgentInfo(
 }
 
 type ownerInfo struct {
-	model.CaptureInfo
-	Revision schedulepb.OwnerRevision
+	Revision  schedulepb.OwnerRevision
+	Version   string
+	CaptureID string
 }
 
 func newAgent(
@@ -92,13 +92,12 @@ func newAgent(
 	etcdClient etcd.CDCEtcdClient,
 	tableExecutor internal.TableExecutor,
 	changefeedEpoch uint64,
-	cfg *config.SchedulerConfig,
 ) (internal.Agent, error) {
 	result := &agent{
 		agentInfo: newAgentInfo(changeFeedID, captureID, changefeedEpoch),
-		tableM:    newTableSpanManager(changeFeedID, tableExecutor),
+		tableM:    newTableManager(changeFeedID, tableExecutor),
 		liveness:  liveness,
-		compat:    compat.New(cfg, map[model.CaptureID]*model.CaptureInfo{}),
+		compat:    compat.New(map[model.CaptureID]*model.CaptureInfo{}),
 	}
 
 	etcdCliCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -119,6 +118,7 @@ func newAgent(
 			zap.Error(err))
 		return result, nil
 	}
+
 	var ownerCaptureInfo *model.CaptureInfo
 	_, captures, err := etcdClient.GetCaptures(ctx)
 	for _, captureInfo := range captures {
@@ -129,12 +129,12 @@ func newAgent(
 	}
 	if ownerCaptureInfo == nil {
 		log.Info("schedulerv3: no owner found. We will wait for an owner to contact us.",
-			zap.String("ownerCaptureID", ownerCaptureID),
 			zap.String("namespace", changeFeedID.Namespace),
 			zap.String("changefeed", changeFeedID.ID),
 			zap.Error(err))
 		return result, nil
 	}
+
 	result.compat.UpdateCaptureInfo(map[model.CaptureID]*model.CaptureInfo{
 		ownerCaptureID: ownerCaptureInfo,
 	})
@@ -160,12 +160,11 @@ func newAgent(
 		return nil, err
 	}
 
-	// We don't need address, and owner info will be updated when there is a
-	// new owner elected. To avoid confusion, just leave it empty.
-	ownerCaptureInfo.AdvertiseAddr = ""
 	result.ownerInfo = ownerInfo{
-		Revision:    schedulepb.OwnerRevision{Revision: revision},
-		CaptureInfo: *ownerCaptureInfo,
+		// owner's version can only be got by receiving heartbeat
+		Version:   "",
+		CaptureID: ownerCaptureID,
+		Revision:  schedulepb.OwnerRevision{Revision: revision},
 	}
 	return result, nil
 }
@@ -180,11 +179,9 @@ func NewAgent(ctx context.Context,
 	etcdClient etcd.CDCEtcdClient,
 	tableExecutor internal.TableExecutor,
 	changefeedEpoch uint64,
-	cfg *config.SchedulerConfig,
 ) (internal.Agent, error) {
 	result, err := newAgent(
-		ctx, captureID, liveness, changeFeedID, etcdClient, tableExecutor,
-		changefeedEpoch, cfg)
+		ctx, captureID, liveness, changeFeedID, etcdClient, tableExecutor, changefeedEpoch)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -265,26 +262,25 @@ func (a *agent) handleMessage(msg []*schedulepb.Message) (result []*schedulepb.M
 }
 
 func (a *agent) handleMessageHeartbeat(request *schedulepb.Heartbeat) (*schedulepb.Message, *schedulepb.Barrier) {
-	allTables := a.tableM.getAllTableSpans()
-	result := make([]tablepb.TableStatus, 0, allTables.Len())
+	allTables := a.tableM.getAllTables()
+	result := make([]tablepb.TableStatus, 0, len(allTables))
 
-	allTables.Ascend(func(span tablepb.Span, table *tableSpan) bool {
-		status := table.getTableSpanStatus(request.CollectStats)
+	for tableID, table := range allTables {
+		status := table.getTableStatus(request.CollectStats)
 		if status.Checkpoint.CheckpointTs > status.Checkpoint.ResolvedTs {
 			log.Warn("schedulerv3: CheckpointTs is greater than ResolvedTs",
 				zap.String("namespace", a.ChangeFeedID.Namespace),
 				zap.String("changefeed", a.ChangeFeedID.ID),
-				zap.String("span", span.String()))
+				zap.Int64("tableID", tableID))
 		}
 		if table.task != nil && table.task.IsRemove {
 			status.State = tablepb.TableStateStopping
 		}
 		result = append(result, status)
-		return true
-	})
-	for _, span := range request.GetSpans() {
-		if _, ok := allTables.Get(span); !ok {
-			status := a.tableM.getTableSpanStatus(span, request.CollectStats)
+	}
+	for _, tableID := range request.GetTableIDs() {
+		if _, ok := allTables[tableID]; !ok {
+			status := a.tableM.getTableStatus(tableID, request.CollectStats)
 			result = append(result, status)
 		}
 	}
@@ -319,7 +315,7 @@ const (
 )
 
 type dispatchTableTask struct {
-	Span       tablepb.Span
+	TableID    model.TableID
 	Checkpoint tablepb.Checkpoint
 	IsRemove   bool
 	IsPrepare  bool
@@ -342,7 +338,7 @@ func (a *agent) handleMessageDispatchTableRequest(
 		return
 	}
 	var (
-		table *tableSpan
+		table *table
 		task  *dispatchTableTask
 		ok    bool
 	)
@@ -350,31 +346,31 @@ func (a *agent) handleMessageDispatchTableRequest(
 	// this should be guaranteed by the caller of the method.
 	switch req := request.Request.(type) {
 	case *schedulepb.DispatchTableRequest_AddTable:
-		span := req.AddTable.GetSpan()
+		tableID := req.AddTable.GetTableID()
 		task = &dispatchTableTask{
-			Span:       span,
+			TableID:    tableID,
 			Checkpoint: req.AddTable.GetCheckpoint(),
 			IsRemove:   false,
 			IsPrepare:  req.AddTable.GetIsSecondary(),
 			Epoch:      epoch,
 			status:     dispatchTableTaskReceived,
 		}
-		table = a.tableM.addTableSpan(span)
+		table = a.tableM.addTable(tableID)
 	case *schedulepb.DispatchTableRequest_RemoveTable:
-		span := req.RemoveTable.GetSpan()
-		table, ok = a.tableM.getTableSpan(span)
+		tableID := req.RemoveTable.GetTableID()
+		table, ok = a.tableM.getTable(tableID)
 		if !ok {
 			log.Warn("schedulerv3: agent ignore remove table request, "+
 				"since the table not found",
 				zap.String("capture", a.CaptureID),
 				zap.String("namespace", a.ChangeFeedID.Namespace),
 				zap.String("changefeed", a.ChangeFeedID.ID),
-				zap.String("span", span.String()),
+				zap.Any("tableID", tableID),
 				zap.Any("request", request))
 			return
 		}
 		task = &dispatchTableTask{
-			Span:     span,
+			TableID:  tableID,
 			IsRemove: true,
 			Epoch:    epoch,
 			status:   dispatchTableTaskReceived,
@@ -406,7 +402,7 @@ func (a *agent) Close() error {
 // version: the incoming owner's semantic version string
 func (a *agent) handleOwnerInfo(id model.CaptureID, revision int64, version string) bool {
 	if a.ownerInfo.Revision.Revision == revision {
-		if a.ownerInfo.ID != id {
+		if a.ownerInfo.CaptureID != id {
 			// This panic will happen only if two messages have been received
 			// with the same ownerRev but with different ownerIDs.
 			// This should never happen unless the election via Etcd is buggy.
@@ -414,7 +410,7 @@ func (a *agent) handleOwnerInfo(id model.CaptureID, revision int64, version stri
 				zap.String("capture", a.CaptureID),
 				zap.String("namespace", a.ChangeFeedID.Namespace),
 				zap.String("changefeed", a.ChangeFeedID.ID),
-				zap.String("expected", a.ownerInfo.ID),
+				zap.String("expected", a.ownerInfo.CaptureID),
 				zap.String("actual", id))
 		}
 		return true
@@ -422,15 +418,17 @@ func (a *agent) handleOwnerInfo(id model.CaptureID, revision int64, version stri
 
 	// the current owner is staled
 	if a.ownerInfo.Revision.Revision < revision {
-		a.ownerInfo.CaptureInfo.ID = id
-		a.ownerInfo.CaptureInfo.Version = version
+		a.ownerInfo.CaptureID = id
 		a.ownerInfo.Revision.Revision = revision
+		a.ownerInfo.Version = version
 
 		a.resetEpoch()
 
-		captureInfo := a.ownerInfo.CaptureInfo
 		a.compat.UpdateCaptureInfo(map[model.CaptureID]*model.CaptureInfo{
-			id: &captureInfo,
+			id: {
+				Version: a.ownerInfo.Version,
+				ID:      a.ownerInfo.CaptureID,
+			},
 		})
 		log.Info("schedulerv3: new owner in power",
 			zap.String("capture", a.CaptureID),
@@ -446,11 +444,9 @@ func (a *agent) handleOwnerInfo(id model.CaptureID, revision int64, version stri
 		zap.String("namespace", a.ChangeFeedID.Namespace),
 		zap.String("changefeed", a.ChangeFeedID.ID),
 		zap.Any("staledOwner", ownerInfo{
-			CaptureInfo: model.CaptureInfo{
-				ID:      id,
-				Version: version,
-			},
-			Revision: schedulepb.OwnerRevision{Revision: revision},
+			CaptureID: id,
+			Revision:  schedulepb.OwnerRevision{Revision: revision},
+			Version:   version,
 		}),
 		zap.Any("owner", a.ownerInfo),
 		zap.Any("agent", a.agentInfo))
@@ -477,7 +473,6 @@ func (a *agent) recvMsgs(ctx context.Context) ([]*schedulepb.Message, error) {
 		messages[n] = msg
 		n++
 	}
-	a.compat.AfterTransportReceive(messages[:n])
 	return messages[:n], nil
 }
 
@@ -500,8 +495,7 @@ func (a *agent) sendMsgs(ctx context.Context, msgs []*schedulepb.Message) error 
 			},
 		}
 		m.From = a.CaptureID
-		m.To = a.ownerInfo.ID
+		m.To = a.ownerInfo.CaptureID
 	}
-	a.compat.BeforeTransportSend(msgs)
 	return a.trans.Send(ctx, msgs)
 }

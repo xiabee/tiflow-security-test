@@ -16,7 +16,7 @@ package cli
 import (
 	"strings"
 
-	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
+	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
 	"github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
@@ -26,7 +26,7 @@ import (
 
 // removeChangefeedOptions defines flags for the `cli changefeed remove` command.
 type removeChangefeedOptions struct {
-	apiClient    apiv2client.APIV2Interface
+	apiClient    apiv1client.APIV1Interface
 	changefeedID string
 }
 
@@ -44,11 +44,12 @@ func (o *removeChangefeedOptions) addFlags(cmd *cobra.Command) {
 
 // complete adapts from the command line args to the data and client required.
 func (o *removeChangefeedOptions) complete(f factory.Factory) error {
-	client, err := f.APIV2Client()
+	apiClient, err := f.APIV1Client()
 	if err != nil {
 		return err
 	}
-	o.apiClient = client
+
+	o.apiClient = apiClient
 	return nil
 }
 
@@ -67,7 +68,7 @@ func (o *removeChangefeedOptions) run(cmd *cobra.Command) error {
 			err.Error())
 		return err
 	}
-	checkpointTs := changefeedDetail.CheckpointTs
+	checkpointTs := changefeedDetail.CheckpointTSO
 	sinkURI := changefeedDetail.SinkURI
 
 	err = o.apiClient.Changefeeds().Delete(ctx, o.changefeedID)

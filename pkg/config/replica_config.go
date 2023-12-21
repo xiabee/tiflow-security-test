@@ -25,10 +25,8 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/pkg/config/outdated"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/integrity"
 	"github.com/pingcap/tiflow/pkg/redo"
 	"github.com/pingcap/tiflow/pkg/sink"
-	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -71,9 +69,8 @@ var defaultReplicaConfig = &ReplicaConfig{
 		Terminator:               CRLF,
 		DateSeparator:            DateSeparatorDay.String(),
 		EnablePartitionSeparator: true,
-		EnableKafkaSinkV2:        false,
 		TiDBSourceID:             1,
-		AdvanceTimeoutInSec:      util.AddressOf(DefaultAdvanceTimeoutInSec),
+		AdvanceTimeoutInSec:      DefaultAdvanceTimeoutInSec,
 	},
 	Consistent: &ConsistentConfig{
 		Level:                 "none",
@@ -85,17 +82,12 @@ var defaultReplicaConfig = &ReplicaConfig{
 		Storage:               "",
 		UseFileBackend:        false,
 		Compression:           "",
+		MemoryUsage: &ConsistentMemoryUsage{
+			MemoryQuotaPercentage: 50,
+			EventCachePercentage:  0,
+		},
 	},
-	Scheduler: &ChangefeedSchedulerConfig{
-		EnableTableAcrossNodes: false,
-		RegionThreshold:        100_000,
-		WriteKeyThreshold:      0,
-	},
-	Integrity: &integrity.Config{
-		IntegrityCheckLevel:   integrity.CheckLevelNone,
-		CorruptionHandleLevel: integrity.CorruptionHandleLevelWarn,
-	},
-	ChangefeedErrorStuckDuration: util.AddressOf(time.Minute * 30),
+	ChangefeedErrorStuckDuration: time.Minute * 30,
 	SQLMode:                      defaultSQLMode,
 }
 
@@ -129,18 +121,15 @@ type replicaConfig struct {
 	// BDR(Bidirectional Replication) is a feature that allows users to
 	// replicate data of same tables from TiDB-1 to TiDB-2 and vice versa.
 	// This feature is only available for TiDB.
-	BDRMode            bool              `toml:"bdr-mode" json:"bdr-mode"`
-	SyncPointInterval  time.Duration     `toml:"sync-point-interval" json:"sync-point-interval"`
-	SyncPointRetention time.Duration     `toml:"sync-point-retention" json:"sync-point-retention"`
-	Filter             *FilterConfig     `toml:"filter" json:"filter"`
-	Mounter            *MounterConfig    `toml:"mounter" json:"mounter"`
-	Sink               *SinkConfig       `toml:"sink" json:"sink"`
-	Consistent         *ConsistentConfig `toml:"consistent" json:"consistent"`
-	// Scheduler is the configuration for scheduler.
-	Scheduler                    *ChangefeedSchedulerConfig `toml:"scheduler" json:"scheduler"`
-	Integrity                    *integrity.Config          `toml:"integrity" json:"integrity"`
-	ChangefeedErrorStuckDuration *time.Duration             `toml:"changefeed-error-stuck-duration" json:"changefeed-error-stuck-duration,omitempty"`
-	SQLMode                      string                     `toml:"sql-mode" json:"sql-mode"`
+	BDRMode                      bool              `toml:"bdr-mode" json:"bdr-mode"`
+	SyncPointInterval            time.Duration     `toml:"sync-point-interval" json:"sync-point-interval"`
+	SyncPointRetention           time.Duration     `toml:"sync-point-retention" json:"sync-point-retention"`
+	Filter                       *FilterConfig     `toml:"filter" json:"filter"`
+	Mounter                      *MounterConfig    `toml:"mounter" json:"mounter"`
+	Sink                         *SinkConfig       `toml:"sink" json:"sink"`
+	Consistent                   *ConsistentConfig `toml:"consistent" json:"consistent"`
+	ChangefeedErrorStuckDuration time.Duration     `toml:"changefeed-error-stuck-duration" json:"changefeed-error-stuck-duration,omitempty"`
+	SQLMode                      string            `toml:"sql-mode" json:"sql-mode,omitempty"`
 }
 
 // Marshal returns the json marshal format of a ReplicationConfig
@@ -239,36 +228,8 @@ func (c *ReplicaConfig) ValidateAndAdjust(sinkURI *url.URL) error { // check sin
 	if c.MemoryQuota == uint64(0) {
 		c.FixMemoryQuota()
 	}
-	if c.Scheduler == nil {
-		c.FixScheduler(false)
-	} else {
-		err := c.Scheduler.Validate()
-		if err != nil {
-			return err
-		}
-	}
-	// TODO: Remove the hack once span replication is compatible with all sinks.
-	if !isSinkCompatibleWithSpanReplication(sinkURI) {
-		c.Scheduler.EnableTableAcrossNodes = false
-	}
 
-	if c.Integrity != nil {
-		switch strings.ToLower(sinkURI.Scheme) {
-		case sink.KafkaScheme, sink.KafkaSSLScheme:
-		default:
-			if c.Integrity.Enabled() {
-				log.Warn("integrity checksum only support kafka sink now, disable integrity")
-				c.Integrity.IntegrityCheckLevel = integrity.CheckLevelNone
-			}
-		}
-
-		if err := c.Integrity.Validate(); err != nil {
-			return err
-		}
-	}
-
-	if c.ChangefeedErrorStuckDuration != nil &&
-		*c.ChangefeedErrorStuckDuration < minChangeFeedErrorStuckDuration {
+	if c.ChangefeedErrorStuckDuration < minChangeFeedErrorStuckDuration {
 		return cerror.ErrInvalidReplicaConfig.
 			FastGenByArgs(
 				fmt.Sprintf("The ChangefeedErrorStuckDuration:%f must be larger than %f Seconds",
@@ -279,29 +240,26 @@ func (c *ReplicaConfig) ValidateAndAdjust(sinkURI *url.URL) error { // check sin
 	return nil
 }
 
-// FixScheduler adjusts scheduler to default value
-func (c *ReplicaConfig) FixScheduler(inheritV66 bool) {
-	if c.Scheduler == nil {
-		c.Scheduler = defaultReplicaConfig.Clone().Scheduler
-		return
-	}
-	if inheritV66 && c.Scheduler.RegionPerSpan != 0 {
-		c.Scheduler.EnableTableAcrossNodes = true
-		c.Scheduler.RegionThreshold = c.Scheduler.RegionPerSpan
-		c.Scheduler.RegionPerSpan = 0
-	}
-}
-
 // FixMemoryQuota adjusts memory quota to default value
 func (c *ReplicaConfig) FixMemoryQuota() {
 	c.MemoryQuota = DefaultChangefeedMemoryQuota
 }
 
-// isSinkCompatibleWithSpanReplication returns true if the sink uri is
-// compatible with span replication.
-func isSinkCompatibleWithSpanReplication(u *url.URL) bool {
-	return u != nil &&
-		(strings.Contains(u.Scheme, "kafka") || strings.Contains(u.Scheme, "blackhole"))
+// GetSinkURIAndAdjustConfigWithSinkURI parses sinkURI as a URI and adjust config with sinkURI.
+func GetSinkURIAndAdjustConfigWithSinkURI(
+	sinkURIStr string,
+	config *ReplicaConfig,
+) (*url.URL, error) {
+	// parse sinkURI as a URI
+	sinkURI, err := url.Parse(sinkURIStr)
+	if err != nil {
+		return nil, cerror.WrapError(cerror.ErrSinkURIInvalid, err)
+	}
+	if err := config.ValidateAndAdjust(sinkURI); err != nil {
+		return nil, err
+	}
+
+	return sinkURI, nil
 }
 
 // AdjustEnableOldValue adjust the old value configuration by the sink scheme and encoding protocol
@@ -333,10 +291,7 @@ func (c *ReplicaConfig) AdjustEnableOldValue(scheme, protocol string) {
 func (c *ReplicaConfig) AdjustEnableOldValueAndVerifyForceReplicate(sinkURI *url.URL) error {
 	scheme := strings.ToLower(sinkURI.Scheme)
 	protocol := sinkURI.Query().Get(ProtocolKey)
-	if protocol != "" {
-		c.Sink.Protocol = protocol
-	}
-	c.AdjustEnableOldValue(scheme, c.Sink.Protocol)
+	c.AdjustEnableOldValue(scheme, protocol)
 
 	if !c.ForceReplicate {
 		return nil

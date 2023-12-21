@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	_ "github.com/pingcap/tidb/types/parser_driver" // for import parser driver
 	"github.com/pingcap/tidb/util/filter"
-	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
@@ -66,7 +65,7 @@ func Parse(p *parser.Parser, sql, charset, collation string) (stmt []ast.StmtNod
 // ref: https://github.com/pingcap/tidb/blob/09feccb529be2830944e11f5fed474020f50370f/server/sql_info_fetcher.go#L46
 type tableNameExtractor struct {
 	curDB  string
-	flavor conn.LowerCaseTableNamesFlavor
+	flavor utils.LowerCaseTableNamesFlavor
 	names  []*filter.Table
 }
 
@@ -76,7 +75,7 @@ func (tne *tableNameExtractor) Enter(in ast.Node) (ast.Node, bool) {
 	}
 	if t, ok := in.(*ast.TableName); ok {
 		var tb *filter.Table
-		if tne.flavor == conn.LCTableNamesSensitive {
+		if tne.flavor == utils.LCTableNamesSensitive {
 			tb = &filter.Table{Schema: t.Schema.O, Name: t.Name.O}
 		} else {
 			tb = &filter.Table{Schema: t.Schema.L, Name: t.Name.L}
@@ -100,7 +99,7 @@ func (tne *tableNameExtractor) Leave(in ast.Node) (ast.Node, bool) {
 // specifically, for `create table like` DDL, result contains [sourceTable, sourceRefTable]
 // for rename table ddl, result contains [old1, new1, old2, new2, old3, new3, ...] because of TiDB parser
 // for other DDL, order of tableName is the node visit order.
-func FetchDDLTables(schema string, stmt ast.StmtNode, flavor conn.LowerCaseTableNamesFlavor) ([]*filter.Table, error) {
+func FetchDDLTables(schema string, stmt ast.StmtNode, flavor utils.LowerCaseTableNamesFlavor) ([]*filter.Table, error) {
 	switch stmt.(type) {
 	case ast.DDLNode:
 	default:
@@ -363,10 +362,6 @@ func genTableName(schema string, table string) *filter.Table {
 
 // CheckIsDDL checks input SQL whether is a valid DDL statement.
 func CheckIsDDL(sql string, p *parser.Parser) bool {
-	// fast path for begin/comit
-	if sql == "BEGIN" || sql == "COMMIT" {
-		return false
-	}
 	sql = utils.TrimCtrlChars(sql)
 
 	if utils.IsBuildInSkipDDL(sql) {

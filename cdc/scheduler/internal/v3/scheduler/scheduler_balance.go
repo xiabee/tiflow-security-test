@@ -19,10 +19,8 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/member"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/replication"
-	"github.com/pingcap/tiflow/pkg/spanz"
 )
 
 var _ scheduler = &balanceScheduler{}
@@ -57,9 +55,9 @@ func (b *balanceScheduler) Name() string {
 
 func (b *balanceScheduler) Schedule(
 	_ model.Ts,
-	_ []tablepb.Span,
+	currentTables []model.TableID,
 	captures map[model.CaptureID]*member.CaptureStatus,
-	replications *spanz.BtreeMap[*replication.ReplicationSet],
+	replications map[model.TableID]*replication.ReplicationSet,
 ) []*replication.ScheduleTask {
 	if !b.forceBalance {
 		now := time.Now()
@@ -78,17 +76,29 @@ func (b *balanceScheduler) Schedule(
 	}
 
 	tasks := buildBalanceMoveTables(
-		b.random, captures, replications, b.maxTaskConcurrency)
+		b.random, currentTables, captures, replications, b.maxTaskConcurrency)
 	b.forceBalance = len(tasks) != 0
 	return tasks
 }
 
 func buildBalanceMoveTables(
 	random *rand.Rand,
+	currentTables []model.TableID,
 	captures map[model.CaptureID]*member.CaptureStatus,
-	replications *spanz.BtreeMap[*replication.ReplicationSet],
+	replications map[model.TableID]*replication.ReplicationSet,
 	maxTaskConcurrency int,
 ) []*replication.ScheduleTask {
+	captureTables := make(map[model.CaptureID][]model.TableID)
+	for _, tableID := range currentTables {
+		rep, ok := replications[tableID]
+		if !ok {
+			continue
+		}
+		for captureID := range rep.Captures {
+			captureTables[captureID] = append(captureTables[captureID], tableID)
+		}
+	}
+
 	moves := newBalanceMoveTables(
 		random, captures, replications, maxTaskConcurrency, model.ChangeFeedID{})
 	tasks := make([]*replication.ScheduleTask, 0, len(moves))

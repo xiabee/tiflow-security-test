@@ -17,6 +17,7 @@ import (
 	"math"
 	"testing"
 
+	. "github.com/pingcap/check"
 	tiddl "github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
@@ -39,9 +40,7 @@ var (
 	ecWithSafeMode = &eventContext{startLocation: location, endLocation: location, lastLocation: location, safeMode: true}
 )
 
-func TestCastUnsigned(t *testing.T) {
-	t.Parallel()
-
+func (s *testSyncerSuite) TestCastUnsigned(c *C) {
 	// ref: https://dev.mysql.com/doc/refman/5.7/en/integer-types.html
 	cases := []struct {
 		data     interface{}
@@ -66,7 +65,7 @@ func TestCastUnsigned(t *testing.T) {
 			ft.AddFlag(mysql.UnsignedFlag)
 		}
 		obtained := castUnsigned(cs.data, ft)
-		require.Equal(t, cs.expected, obtained)
+		c.Assert(obtained, Equals, cs.expected)
 	}
 }
 
@@ -79,8 +78,6 @@ func createTableInfo(p *parser.Parser, se sessionctx.Context, tableID int64, sql
 }
 
 func TestGenDMLWithSameOp(t *testing.T) {
-	t.Parallel()
-
 	targetTable1 := &cdcmodel.TableName{Schema: "db1", Table: "tb1"}
 	targetTable2 := &cdcmodel.TableName{Schema: "db2", Table: "tb2"}
 	sourceTable11 := &cdcmodel.TableName{Schema: "dba", Table: "tba"}
@@ -333,18 +330,17 @@ func TestGenDMLWithSameOp(t *testing.T) {
 	require.Equal(t, expectArgs, args)
 }
 
-func TestGBKExtractValueFromData(t *testing.T) {
-	t.Parallel()
-
+func (s *testSyncerSuite) TestGBKExtractValueFromData(c *C) {
 	table := `CREATE TABLE t (c INT PRIMARY KEY, d VARCHAR(20) CHARSET GBK);`
 	se := mock.NewContext()
 	p := parser.New()
-	ti, err := createTableInfo(p, se, 0, table)
-	require.NoError(t, err)
+	stmt, _, err := p.Parse(table, "", "")
+	c.Assert(err, IsNil)
+	ti, err := tiddl.MockTableInfo(se, stmt[0].(*ast.CreateTableStmt), 6716)
+	c.Assert(err, IsNil)
 
 	row := []interface{}{1, "\xc4\xe3\xba\xc3"}
 	expect := []interface{}{1, []byte("\xc4\xe3\xba\xc3")}
-	got, err := adjustValueFromBinlogData(row, ti)
-	require.NoError(t, err)
-	require.Equal(t, expect, got)
+	got := extractValueFromData(row, ti.Columns, ti)
+	c.Assert(got, DeepEquals, expect)
 }

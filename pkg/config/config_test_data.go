@@ -53,7 +53,7 @@ const (
       }
     ],
     "enable-partition-separator": true,
-    "protocol": "open-protocol",
+    "protocol": "canal-json",
     "advance-timeout-in-sec": 150
   },
   "consistent": {
@@ -65,16 +65,12 @@ const (
     "encoding-worker-num": 16,
     "flush-worker-num": 8,
     "storage": "",
-    "use-file-backend": false
+    "use-file-backend": false,
+    "memory-usage": {
+        "memory-quota-percentage": 50,
+        "event-cache-percentage": 0
+    }
   },
-  "scheduler": {
-    "enable-table-across-nodes": false,
-    "region-threshold": 100000
-  },
-  "integrity": {
-    "integrity-check-level": "none",
-    "corruption-handle-level": "warn"
- },
   "changefeed-error-stuck-duration": 1800000000000,
   "sql-mode":"ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"
 }`
@@ -102,10 +98,10 @@ const (
     "sort-dir": "/tmp/sorter",
     "cache-size-in-mb": 128,
     "max-memory-percentage": 10,
-    "max-memory-consumption": 0,
-    "num-workerpool-goroutine": 0,
-    "num-concurrent-worker": 0,
-    "chunk-size-limit": 0
+    "num-concurrent-worker": 4,
+    "chunk-size-limit": 999,
+    "max-memory-consumption": 17179869184,
+    "num-workerpool-goroutine": 16
   },
   "security": {
     "ca-path": "",
@@ -113,7 +109,7 @@ const (
     "key-path": "",
     "cert-allowed-cn": null
   },
-  "per-table-memory-quota": 0,
+  "per-table-memory-quota": 10485760,
   "kv-client": {
     "worker-concurrent": 8,
     "worker-pool-size": 0,
@@ -121,6 +117,11 @@ const (
     "region-retry-duration": 60000000000
   },
   "debug": {
+    "table-actor": {
+      "event-batch-size": 32
+    },
+    "enable-pull-based-sink": true,
+    "enable-db-sorter": true,
     "db": {
       "count": 8,
       "concurrency": 128,
@@ -135,6 +136,7 @@ const (
       "iterator-max-alive-duration": 10000,
       "iterator-slow-read-duration": 256
     },
+    "enable-new-scheduler": true,
     "messages": {
       "client-max-batch-interval": 10000000,
       "client-max-batch-size": 8388608,
@@ -154,6 +156,7 @@ const (
       "check-balance-interval": 60000000000,
       "add-table-batch-size": 50
     },
+    "enable-new-sink": true,
     "enable-kv-connect-backoff": false,
     "puller": {
       "enable-resolved-ts-stuck-detection": false,
@@ -188,7 +191,7 @@ const (
   "sink": {
   	"encoder-concurrency": 16,
     "dispatchers": null,
-    "protocol": "open-protocol",
+    "protocol": "canal-json",
     "column-selectors": [
       {
         "matcher": [
@@ -212,69 +215,10 @@ const (
     "terminator": "",
     "date-separator": "month",
     "enable-partition-separator": true,
-    "enable-kafka-sink-v2": true,
-    "only-output-updated-columns": true,
-    "content-compatible": true,
-    "safe-mode": true,
     "kafka-config": {
-      "partition-num": 1,
-      "replication-factor": 1,
-      "kafka-version": "version",
-      "max-message-bytes": 1,
-      "compression": "gzip",
-      "kafka-client-id": "client-id",
-      "auto-create-topic": true,
-      "dial-timeout": "1m",
-      "write-timeout": "1m",
-      "read-timeout": "1m",
-      "required-acks": 1,
-      "sasl-user": "user",
-      "sasl-password": "password",
-      "sasl-mechanism": "mechanism",
-      "sasl-gssapi-auth-type": "type",
-      "sasl-gssapi-keytab-path": "path",
-      "sasl-gssapi-kerberos-config-path": "path",
-      "sasl-gssapi-service-name": "service",
-      "sasl-gssapi-user": "user",
-      "sasl-gssapi-password": "password",
-      "sasl-gssapi-realm": "realm",
-      "sasl-gssapi-disable-pafxfast": true,
-      "enable-tls": true,
-      "ca": "ca",
-      "cert": "cert",
-      "key": "key",
-      "codec-config": {
-        "enable-tidb-extension": true,
-        "max-batch-size": 100000,
-        "avro-enable-watermark": true,
-        "avro-decimal-handling-mode": "string",
-        "avro-bigint-unsigned-handling-mode": "string"
-      },
       "large-message-handle": {
         "large-message-handle-option": "handle-key-only"
       }
-    },
-    "mysql-config": {
-      "worker-count": 8,
-      "max-txn-row": 100000,
-      "max-multi-update-row-size": 100000,
-      "max-multi-update-row": 100000,
-      "tidb-txn-mode": "pessimistic",
-      "ssl-ca": "ca",
-      "ssl-cert": "cert",
-      "ssl-key": "key",
-      "time-zone": "UTC",
-      "write-timeout": "1m",
-      "read-timeout": "1m",
-      "timeout": "1m",
-      "enable-batch-dml": true,
-      "enable-multi-statement": true,
-      "enable-cache-prepared-statement": true
-    },
-    "cloud-storage-config": {
-      "worker-count": 8,
-      "flush-interval": "1m",
-      "file-size": 1024
     },
     "advance-timeout-in-sec": 150
   },
@@ -287,18 +231,11 @@ const (
     "encoding-worker-num": 16,
     "flush-worker-num": 8,
     "storage": "",
-    "use-file-backend": false
-  },
-  "scheduler": {
-    "enable-table-across-nodes": true,
-    "region-per-span": 0,
-    "region-threshold": 100001,
-    "write-key-threshold": 100001,
-    "region-per-span": 0
-  },
-  "integrity": {
-    "integrity-check-level": "none",
-    "corruption-handle-level": "warn"
+    "use-file-backend": false,
+    "memory-usage": {
+        "memory-quota-percentage": 50,
+        "event-cache-percentage": 0
+    }
   },
   "changefeed-error-stuck-duration": 1800000000000,
   "sql-mode":"ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"
@@ -326,7 +263,7 @@ const (
   "sink": {
     "encoder-concurrency": 16,
     "dispatchers": null,
-    "protocol": "open-protocol",
+    "protocol": "canal-json",
     "column-selectors": [
       {
         "matcher": [
@@ -353,67 +290,6 @@ const (
         "large-message-handle-option": "handle-key-only"
       }
     },
-	"enable-kafka-sink-v2": true,
-    "only-output-updated-columns": true,
-    "content-compatible": true,
-    "safe-mode": true,
-    "kafka-config": {
-      "partition-num": 1,
-      "replication-factor": 1,
-      "kafka-version": "version",
-      "max-message-bytes": 1,
-      "compression": "gzip",
-      "kafka-client-id": "client-id",
-      "auto-create-topic": true,
-      "dial-timeout": "1m",
-      "write-timeout": "1m",
-      "read-timeout": "1m",
-      "required-acks": 1,
-      "sasl-user": "user",
-      "sasl-password": "password",
-      "sasl-mechanism": "mechanism",
-      "sasl-gssapi-auth-type": "type",
-      "sasl-gssapi-keytab-path": "path",
-      "sasl-gssapi-kerberos-config-path": "path",
-      "sasl-gssapi-service-name": "service",
-      "sasl-gssapi-user": "user",
-      "sasl-gssapi-password": "password",
-      "sasl-gssapi-realm": "realm",
-      "sasl-gssapi-disable-pafxfast": true,
-      "enable-tls": true,
-      "ca": "ca",
-      "cert": "cert",
-      "key": "key",
-      "codec-config": {
-        "enable-tidb-extension": true,
-        "max-batch-size": 100000,
-        "avro-enable-watermark": true,
-        "avro-decimal-handling-mode": "string",
-        "avro-bigint-unsigned-handling-mode": "string"
-      }
-    },
-    "mysql-config": {
-      "worker-count": 8,
-      "max-txn-row": 100000,
-      "max-multi-update-row-size": 100000,
-      "max-multi-update-row": 100000,
-      "tidb-txn-mode": "pessimistic",
-      "ssl-ca": "ca",
-      "ssl-cert": "cert",
-      "ssl-key": "key",
-      "time-zone": "UTC",
-      "write-timeout": "1m",
-      "read-timeout": "1m",
-      "timeout": "1m",
-      "enable-batch-dml": true,
-      "enable-multi-statement": true,
-      "enable-cache-prepared-statement": true
-    },
-    "cloud-storage-config": {
-      "worker-count": 8,
-      "flush-interval": "1m",
-      "file-size": 1024
-    },
     "advance-timeout-in-sec": 150
   },
   "consistent": {
@@ -425,16 +301,11 @@ const (
     "encoding-worker-num": 16,
     "flush-worker-num": 8,
     "storage": "",
-    "use-file-backend": false
-  },
-  "scheduler": {
-    "enable-table-across-nodes": true,
-    "region-threshold": 100001,
-    "write-key-threshold": 100001
-  },
-  "integrity": {
-    "integrity-check-level": "none",
-    "corruption-handle-level": "warn"
+    "use-file-backend": false,
+    "memory-usage": {
+        "memory-quota-percentage": 50,
+        "event-cache-percentage": 0
+    }
   },
   "changefeed-error-stuck-duration": 1800000000000,
   "sql-mode":"ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"

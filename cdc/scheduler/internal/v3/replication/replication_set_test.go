@@ -16,6 +16,7 @@ package replication
 import (
 	"container/heap"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"testing"
 	"time"
@@ -23,7 +24,6 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/scheduler/schedulepb"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/stretchr/testify/require"
 )
 
@@ -222,8 +222,7 @@ func TestNewReplicationSet(t *testing.T) {
 		status := tc.tableStatus
 		checkpoint := tc.checkpoint
 
-		span := tablepb.Span{TableID: 0}
-		output, err := NewReplicationSet(span, checkpoint, status, model.ChangeFeedID{})
+		output, err := NewReplicationSet(0, checkpoint, status, model.ChangeFeedID{})
 		if set == nil {
 			require.Errorf(t, err, "%d", id)
 		} else {
@@ -262,18 +261,17 @@ func TestReplicationSetPoll(t *testing.T) {
 		status := make(map[string]*tablepb.TableStatus)
 		for id, state := range states {
 			status[id] = &tablepb.TableStatus{
-				Span:       tablepb.Span{TableID: 1},
+				TableID:    1,
 				State:      state,
 				Checkpoint: tablepb.Checkpoint{},
 			}
 		}
-		span := tablepb.Span{TableID: 1}
-		r, _ := NewReplicationSet(span, 0, status, model.ChangeFeedID{})
+		r, _ := NewReplicationSet(1, 0, status, model.ChangeFeedID{})
 		var tableStates []int
 		for state := range tablepb.TableState_name {
 			tableStates = append(tableStates, int(state))
 		}
-		input := &tablepb.TableStatus{Span: tablepb.Span{TableID: model.TableID(1)}}
+		input := &tablepb.TableStatus{TableID: model.TableID(1)}
 		iterPermutation(tableStates, func(tableStateSequence []int) {
 			t.Logf("test %d, %v, %v", seed, status, tableStateSequence)
 			for _, state := range tableStateSequence {
@@ -299,10 +297,9 @@ func TestReplicationSetPollUnknownCapture(t *testing.T) {
 	t.Parallel()
 
 	tableID := model.TableID(1)
-	span := tablepb.Span{TableID: tableID}
-	r, err := NewReplicationSet(span, 0, map[model.CaptureID]*tablepb.TableStatus{
+	r, err := NewReplicationSet(tableID, 0, map[model.CaptureID]*tablepb.TableStatus{
 		"1": {
-			Span:       tablepb.Span{TableID: tableID},
+			TableID:    tableID,
 			State:      tablepb.TableStateReplicating,
 			Checkpoint: tablepb.Checkpoint{},
 		},
@@ -310,22 +307,22 @@ func TestReplicationSetPollUnknownCapture(t *testing.T) {
 	require.Nil(t, err)
 
 	msgs, err := r.poll(&tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 	}, "unknown")
 	require.Nil(t, msgs)
 	require.Nil(t, err)
 
 	msgs, err = r.poll(&tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateAbsent,
+		TableID: tableID,
+		State:   tablepb.TableStateAbsent,
 	}, "unknown")
 	require.Len(t, msgs, 0)
 	require.Nil(t, err)
 
 	msgs, err = r.poll(&tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 	}, "unknown")
 	require.Len(t, msgs, 0)
 	require.Nil(t, err)
@@ -336,8 +333,7 @@ func TestReplicationSetAddTable(t *testing.T) {
 
 	from := "1"
 	tableID := model.TableID(1)
-	span := tablepb.Span{TableID: tableID}
-	r, err := NewReplicationSet(span, 0, nil, model.ChangeFeedID{})
+	r, err := NewReplicationSet(tableID, 0, nil, model.ChangeFeedID{})
 	require.Nil(t, err)
 
 	// Absent -> Prepare
@@ -350,7 +346,7 @@ func TestReplicationSetAddTable(t *testing.T) {
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_AddTable{
 				AddTable: &schedulepb.AddTableRequest{
-					Span:        tablepb.Span{TableID: r.Span.TableID},
+					TableID:     r.TableID,
 					IsSecondary: true,
 					Checkpoint:  r.Checkpoint,
 				},
@@ -367,8 +363,8 @@ func TestReplicationSetAddTable(t *testing.T) {
 
 	// AddTableRequest is lost somehow, send AddTableRequest again.
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateAbsent,
+		TableID: tableID,
+		State:   tablepb.TableStateAbsent,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -378,7 +374,7 @@ func TestReplicationSetAddTable(t *testing.T) {
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_AddTable{
 				AddTable: &schedulepb.AddTableRequest{
-					Span:        tablepb.Span{TableID: r.Span.TableID},
+					TableID:     r.TableID,
 					IsSecondary: true,
 					Checkpoint:  r.Checkpoint,
 				},
@@ -390,8 +386,8 @@ func TestReplicationSetAddTable(t *testing.T) {
 
 	// Prepare is in-progress.
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStatePreparing,
+		TableID: tableID,
+		State:   tablepb.TableStatePreparing,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -400,8 +396,8 @@ func TestReplicationSetAddTable(t *testing.T) {
 
 	// Prepare -> Commit.
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStatePrepared,
+		TableID: tableID,
+		State:   tablepb.TableStatePrepared,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -411,7 +407,7 @@ func TestReplicationSetAddTable(t *testing.T) {
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_AddTable{
 				AddTable: &schedulepb.AddTableRequest{
-					Span:        tablepb.Span{TableID: r.Span.TableID},
+					TableID:     r.TableID,
 					IsSecondary: false,
 					Checkpoint:  r.Checkpoint,
 				},
@@ -423,8 +419,8 @@ func TestReplicationSetAddTable(t *testing.T) {
 	require.False(t, r.hasRole(RoleSecondary))
 	// The secondary AddTable request may be lost.
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStatePrepared,
+		TableID: tableID,
+		State:   tablepb.TableStatePrepared,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -434,7 +430,7 @@ func TestReplicationSetAddTable(t *testing.T) {
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_AddTable{
 				AddTable: &schedulepb.AddTableRequest{
-					Span:        tablepb.Span{TableID: r.Span.TableID},
+					TableID:     r.TableID,
 					IsSecondary: false,
 					Checkpoint:  r.Checkpoint,
 				},
@@ -447,8 +443,8 @@ func TestReplicationSetAddTable(t *testing.T) {
 
 	// Commit -> Replicating
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -458,8 +454,8 @@ func TestReplicationSetAddTable(t *testing.T) {
 
 	// Replicating -> Replicating
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: 3,
 			ResolvedTs:   4,
@@ -481,8 +477,7 @@ func TestReplicationSetRemoveTable(t *testing.T) {
 
 	from := "1"
 	tableID := model.TableID(1)
-	span := tablepb.Span{TableID: tableID}
-	r, err := NewReplicationSet(span, 0, nil, model.ChangeFeedID{})
+	r, err := NewReplicationSet(tableID, 0, nil, model.ChangeFeedID{})
 	require.Nil(t, err)
 
 	// Ignore removing table if it's not in replicating.
@@ -503,9 +498,7 @@ func TestReplicationSetRemoveTable(t *testing.T) {
 		MsgType: schedulepb.MsgDispatchTableRequest,
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_RemoveTable{
-				RemoveTable: &schedulepb.RemoveTableRequest{
-					Span: tablepb.Span{TableID: r.Span.TableID},
-				},
+				RemoveTable: &schedulepb.RemoveTableRequest{TableID: r.TableID},
 			},
 		},
 	}, msgs[0])
@@ -519,8 +512,8 @@ func TestReplicationSetRemoveTable(t *testing.T) {
 
 	// Removing is in-progress.
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateStopping,
+		TableID: tableID,
+		State:   tablepb.TableStateStopping,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -530,8 +523,8 @@ func TestReplicationSetRemoveTable(t *testing.T) {
 	// Removed if the table is absent.
 	rClone := clone(r)
 	msgs, err = rClone.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateStopped,
+		TableID: tableID,
+		State:   tablepb.TableStateStopped,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -540,8 +533,8 @@ func TestReplicationSetRemoveTable(t *testing.T) {
 
 	// Removed if the table is stopped.
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateStopped,
+		TableID: tableID,
+		State:   tablepb.TableStateStopped,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -562,8 +555,7 @@ func TestReplicationSetMoveTable(t *testing.T) {
 	t.Parallel()
 
 	tableID := model.TableID(1)
-	span := tablepb.Span{TableID: tableID}
-	r, err := NewReplicationSet(span, 0, nil, model.ChangeFeedID{})
+	r, err := NewReplicationSet(tableID, 0, nil, model.ChangeFeedID{})
 	require.Nil(t, err)
 
 	source := "1"
@@ -589,7 +581,7 @@ func TestReplicationSetMoveTable(t *testing.T) {
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_AddTable{
 				AddTable: &schedulepb.AddTableRequest{
-					Span:        tablepb.Span{TableID: r.Span.TableID},
+					TableID:     r.TableID,
 					IsSecondary: true,
 					Checkpoint:  r.Checkpoint,
 				},
@@ -607,8 +599,8 @@ func TestReplicationSetMoveTable(t *testing.T) {
 
 	// Source primary sends heartbeat response
 	msgs, err = r.handleTableStatus(source, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: 1,
 			ResolvedTs:   1,
@@ -623,8 +615,8 @@ func TestReplicationSetMoveTable(t *testing.T) {
 
 	// AddTableRequest is lost somehow, send AddTableRequest again.
 	msgs, err = r.handleTableStatus(dest, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateAbsent,
+		TableID: tableID,
+		State:   tablepb.TableStateAbsent,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -634,7 +626,7 @@ func TestReplicationSetMoveTable(t *testing.T) {
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_AddTable{
 				AddTable: &schedulepb.AddTableRequest{
-					Span:        tablepb.Span{TableID: r.Span.TableID},
+					TableID:     r.TableID,
 					IsSecondary: true,
 					Checkpoint:  r.Checkpoint,
 				},
@@ -646,8 +638,8 @@ func TestReplicationSetMoveTable(t *testing.T) {
 
 	// Prepare -> Commit.
 	msgs, err = r.handleTableStatus(dest, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStatePrepared,
+		TableID: tableID,
+		State:   tablepb.TableStatePrepared,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -656,7 +648,7 @@ func TestReplicationSetMoveTable(t *testing.T) {
 		MsgType: schedulepb.MsgDispatchTableRequest,
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_RemoveTable{
-				RemoveTable: &schedulepb.RemoveTableRequest{Span: r.Span},
+				RemoveTable: &schedulepb.RemoveTableRequest{TableID: r.TableID},
 			},
 		},
 	}, msgs[0])
@@ -666,8 +658,8 @@ func TestReplicationSetMoveTable(t *testing.T) {
 
 	// Source updates it's table status
 	msgs, err = r.handleTableStatus(source, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: 2,
 			ResolvedTs:   3,
@@ -680,7 +672,7 @@ func TestReplicationSetMoveTable(t *testing.T) {
 		MsgType: schedulepb.MsgDispatchTableRequest,
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_RemoveTable{
-				RemoveTable: &schedulepb.RemoveTableRequest{Span: r.Span},
+				RemoveTable: &schedulepb.RemoveTableRequest{TableID: r.TableID},
 			},
 		},
 	}, msgs[0])
@@ -694,8 +686,8 @@ func TestReplicationSetMoveTable(t *testing.T) {
 
 	// Removing source is in-progress.
 	msgs, err = r.handleTableStatus(source, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateStopping,
+		TableID: tableID,
+		State:   tablepb.TableStateStopping,
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: 3,
 			ResolvedTs:   3,
@@ -714,8 +706,8 @@ func TestReplicationSetMoveTable(t *testing.T) {
 	// Source is removed.
 	rClone := clone(r)
 	msgs, err = r.handleTableStatus(source, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateStopped,
+		TableID: tableID,
+		State:   tablepb.TableStateStopped,
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: 3,
 			ResolvedTs:   4,
@@ -729,7 +721,7 @@ func TestReplicationSetMoveTable(t *testing.T) {
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_AddTable{
 				AddTable: &schedulepb.AddTableRequest{
-					Span:        tablepb.Span{TableID: r.Span.TableID},
+					TableID:     r.TableID,
 					IsSecondary: false,
 					Checkpoint:  r.Checkpoint,
 				},
@@ -747,8 +739,8 @@ func TestReplicationSetMoveTable(t *testing.T) {
 	// Source stopped message is lost somehow.
 	// rClone has checkpoint ts 3, resolved ts 3
 	msgs, err = rClone.handleTableStatus(source, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateAbsent,
+		TableID: tableID,
+		State:   tablepb.TableStateAbsent,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -758,7 +750,7 @@ func TestReplicationSetMoveTable(t *testing.T) {
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_AddTable{
 				AddTable: &schedulepb.AddTableRequest{
-					Span:        tablepb.Span{TableID: r.Span.TableID},
+					TableID:     r.TableID,
 					IsSecondary: false,
 					Checkpoint: tablepb.Checkpoint{
 						CheckpointTs: 3,
@@ -778,8 +770,8 @@ func TestReplicationSetMoveTable(t *testing.T) {
 
 	// Commit -> Replicating
 	msgs, err = r.handleTableStatus(dest, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -794,8 +786,7 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 
 	from := "1"
 	tableID := model.TableID(1)
-	span := tablepb.Span{TableID: tableID}
-	r, err := NewReplicationSet(span, 0, nil, model.ChangeFeedID{})
+	r, err := NewReplicationSet(tableID, 0, nil, model.ChangeFeedID{})
 	require.Nil(t, err)
 
 	// Add table, Absent -> Prepare
@@ -808,7 +799,7 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 		DispatchTableRequest: &schedulepb.DispatchTableRequest{
 			Request: &schedulepb.DispatchTableRequest_AddTable{
 				AddTable: &schedulepb.AddTableRequest{
-					Span:        tablepb.Span{TableID: r.Span.TableID},
+					TableID:     r.TableID,
 					IsSecondary: true,
 					Checkpoint:  r.Checkpoint,
 				},
@@ -834,8 +825,8 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 
 	// Add table, Prepare -> Commit
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStatePrepared,
+		TableID: tableID,
+		State:   tablepb.TableStatePrepared,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -858,8 +849,8 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 
 	// Add table, Commit -> Replicating
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -928,8 +919,8 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 
 	// Move table, Prepare -> Commit
 	msgs, err = r.handleTableStatus(dest, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStatePrepared,
+		TableID: tableID,
+		State:   tablepb.TableStatePrepared,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -950,7 +941,7 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 			DispatchTableRequest: &schedulepb.DispatchTableRequest{
 				Request: &schedulepb.DispatchTableRequest_AddTable{
 					AddTable: &schedulepb.AddTableRequest{
-						Span:        tablepb.Span{TableID: r.Span.TableID},
+						TableID:     r.TableID,
 						IsSecondary: false,
 						Checkpoint:  r.Checkpoint,
 					},
@@ -990,8 +981,8 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 		t.Run("OriginalPrimaryReplicating", func(t *testing.T) {
 			rClone1 := clone(rClone)
 			msgs, err = rClone1.handleTableStatus(rClone1.Primary, &tablepb.TableStatus{
-				Span:  tablepb.Span{TableID: 1},
-				State: tablepb.TableStateReplicating,
+				TableID: 1,
+				State:   tablepb.TableStateReplicating,
 			})
 			require.Nil(t, err)
 			require.Len(t, msgs, 0)
@@ -1006,8 +997,8 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 		t.Run("OriginalPrimaryStopped", func(t *testing.T) {
 			rClone1 := clone(rClone)
 			msgs, err = rClone1.handleTableStatus(rClone1.Primary, &tablepb.TableStatus{
-				Span:  tablepb.Span{TableID: 1},
-				State: tablepb.TableStateStopped,
+				TableID: 1,
+				State:   tablepb.TableStateStopped,
 			})
 			require.Nil(t, err)
 			require.Len(t, msgs, 0)
@@ -1022,8 +1013,8 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 		t.Run("OriginalPrimaryAbsent", func(t *testing.T) {
 			rClone1 := clone(rClone)
 			msgs, err = rClone1.handleTableStatus(rClone1.Primary, &tablepb.TableStatus{
-				Span:  tablepb.Span{TableID: 1},
-				State: tablepb.TableStateAbsent,
+				TableID: 1,
+				State:   tablepb.TableStateAbsent,
 			})
 			require.Nil(t, err)
 			require.Len(t, msgs, 1)
@@ -1033,7 +1024,7 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 				DispatchTableRequest: &schedulepb.DispatchTableRequest{
 					Request: &schedulepb.DispatchTableRequest_AddTable{
 						AddTable: &schedulepb.AddTableRequest{
-							Span:        tablepb.Span{TableID: r.Span.TableID},
+							TableID:     r.TableID,
 							IsSecondary: true,
 							Checkpoint:  r.Checkpoint,
 						},
@@ -1049,8 +1040,8 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 
 	// Move table, original primary is stopped.
 	msgs, err = r.handleTableStatus(from, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateStopped,
+		TableID: tableID,
+		State:   tablepb.TableStateStopped,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -1071,8 +1062,8 @@ func TestReplicationSetCaptureShutdown(t *testing.T) {
 
 	// Commit -> Replicating
 	msgs, err = r.handleTableStatus(dest, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1098,10 +1089,9 @@ func TestReplicationSetCaptureShutdownAfterReconstructCommitState(t *testing.T) 
 	from := "1"
 	tableID := model.TableID(1)
 	tableStatus := map[model.CaptureID]*tablepb.TableStatus{
-		from: {Span: tablepb.Span{TableID: tableID}, State: tablepb.TableStatePrepared},
+		from: {TableID: tableID, State: tablepb.TableStatePrepared},
 	}
-	span := tablepb.Span{TableID: tableID}
-	r, err := NewReplicationSet(span, 0, tableStatus, model.ChangeFeedID{})
+	r, err := NewReplicationSet(tableID, 0, tableStatus, model.ChangeFeedID{})
 	require.Nil(t, err)
 	require.Equal(t, ReplicationSetStateCommit, r.State)
 	require.Equal(t, "", r.Primary)
@@ -1121,8 +1111,7 @@ func TestReplicationSetMoveTableWithHeartbeatResponse(t *testing.T) {
 	t.Parallel()
 
 	tableID := model.TableID(1)
-	span := tablepb.Span{TableID: tableID}
-	r, err := NewReplicationSet(span, 0, nil, model.ChangeFeedID{})
+	r, err := NewReplicationSet(tableID, 0, nil, model.ChangeFeedID{})
 	require.Nil(t, err)
 
 	source := "1"
@@ -1141,8 +1130,8 @@ func TestReplicationSetMoveTableWithHeartbeatResponse(t *testing.T) {
 
 	// Prepare -> Commit.
 	msgs, err = r.handleTableStatus(dest, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStatePrepared,
+		TableID: tableID,
+		State:   tablepb.TableStatePrepared,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -1153,8 +1142,8 @@ func TestReplicationSetMoveTableWithHeartbeatResponse(t *testing.T) {
 	// Source updates it's table status
 	// Source is removed.
 	msgs, err = r.handleTableStatus(source, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateStopped,
+		TableID: tableID,
+		State:   tablepb.TableStateStopped,
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: 3,
 			ResolvedTs:   4,
@@ -1172,8 +1161,8 @@ func TestReplicationSetMoveTableWithHeartbeatResponse(t *testing.T) {
 
 	// Source sends a heartbeat response.
 	msgs, err = r.handleTableStatus(source, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateAbsent,
+		TableID: tableID,
+		State:   tablepb.TableStateAbsent,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1187,8 +1176,8 @@ func TestReplicationSetMoveTableWithHeartbeatResponse(t *testing.T) {
 
 	// Commit -> Replicating
 	msgs, err = r.handleTableStatus(dest, &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: tableID},
-		State: tablepb.TableStateReplicating,
+		TableID: tableID,
+		State:   tablepb.TableStateReplicating,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1209,8 +1198,7 @@ func TestReplicationSetMoveTableSameDestCapture(t *testing.T) {
 	t.Parallel()
 
 	tableID := model.TableID(1)
-	span := tablepb.Span{TableID: tableID}
-	r, err := NewReplicationSet(span, 0, nil, model.ChangeFeedID{})
+	r, err := NewReplicationSet(tableID, 0, nil, model.ChangeFeedID{})
 	require.Nil(t, err)
 
 	source := "1"
@@ -1242,8 +1230,7 @@ func TestReplicationSetCommitRestart(t *testing.T) {
 			Checkpoint: tablepb.Checkpoint{},
 		},
 	}
-	span := tablepb.Span{TableID: 0}
-	r, err := NewReplicationSet(span, 0, tableStatus, model.ChangeFeedID{})
+	r, err := NewReplicationSet(0, 0, tableStatus, model.ChangeFeedID{})
 	require.Nil(t, err)
 	require.Equal(t, ReplicationSetStateCommit, r.State)
 	require.EqualValues(t, RoleSecondary, r.Captures["1"])
@@ -1252,8 +1239,8 @@ func TestReplicationSetCommitRestart(t *testing.T) {
 
 	// Can not promote to primary as there are other captures.
 	msgs, err := r.handleTableStatus("1", &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: 0},
-		State: tablepb.TableStatePrepared,
+		TableID: 0,
+		State:   tablepb.TableStatePrepared,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1264,8 +1251,8 @@ func TestReplicationSetCommitRestart(t *testing.T) {
 
 	// Table status reported by other captures does not change replication set.
 	msgs, err = r.handleTableStatus("2", &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: 0},
-		State: tablepb.TableStateStopping,
+		TableID: 0,
+		State:   tablepb.TableStateStopping,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1277,8 +1264,8 @@ func TestReplicationSetCommitRestart(t *testing.T) {
 	// Only Stopped or Absent allows secondary to be promoted.
 	rClone := clone(r)
 	msgs, err = rClone.handleTableStatus("2", &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: 0},
-		State: tablepb.TableStateAbsent,
+		TableID: 0,
+		State:   tablepb.TableStateAbsent,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1287,8 +1274,8 @@ func TestReplicationSetCommitRestart(t *testing.T) {
 	require.Equal(t, "", rClone.Primary)
 	require.NotContains(t, rClone.Captures, "2")
 	msgs, err = r.handleTableStatus("2", &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: 0},
-		State: tablepb.TableStateStopped,
+		TableID: 0,
+		State:   tablepb.TableStateStopped,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1299,8 +1286,8 @@ func TestReplicationSetCommitRestart(t *testing.T) {
 
 	// No other captures, promote secondary.
 	msgs, err = r.handleTableStatus("1", &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: 0},
-		State: tablepb.TableStatePrepared,
+		TableID: 0,
+		State:   tablepb.TableStatePrepared,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 1)
@@ -1325,8 +1312,7 @@ func TestReplicationSetRemoveRestart(t *testing.T) {
 			Checkpoint: tablepb.Checkpoint{},
 		},
 	}
-	span := tablepb.Span{TableID: 0}
-	r, err := NewReplicationSet(span, 0, tableStatus, model.ChangeFeedID{})
+	r, err := NewReplicationSet(0, 0, tableStatus, model.ChangeFeedID{})
 	require.Nil(t, err)
 	require.Equal(t, ReplicationSetStateRemoving, r.State)
 	require.False(t, r.hasRole(RoleSecondary))
@@ -1337,8 +1323,8 @@ func TestReplicationSetRemoveRestart(t *testing.T) {
 
 	// A capture reports its status.
 	msgs, err := r.handleTableStatus("2", &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: 0},
-		State: tablepb.TableStateStopping,
+		TableID: 0,
+		State:   tablepb.TableStateStopping,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1346,8 +1332,8 @@ func TestReplicationSetRemoveRestart(t *testing.T) {
 
 	// A capture stopped.
 	msgs, err = r.handleTableStatus("2", &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: 0},
-		State: tablepb.TableStateStopped,
+		TableID: 0,
+		State:   tablepb.TableStateStopped,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1355,8 +1341,8 @@ func TestReplicationSetRemoveRestart(t *testing.T) {
 
 	// Another capture stopped too.
 	msgs, err = r.handleTableStatus("1", &tablepb.TableStatus{
-		Span:  tablepb.Span{TableID: 0},
-		State: tablepb.TableStateAbsent,
+		TableID: 0,
+		State:   tablepb.TableStateAbsent,
 	})
 	require.Nil(t, err)
 	require.Len(t, msgs, 0)
@@ -1369,10 +1355,10 @@ func TestReplicationSetHeap_Len(t *testing.T) {
 	h := NewReplicationSetHeap(defaultSlowTableHeapSize)
 	require.Equal(t, 0, h.Len())
 
-	h = append(h, &ReplicationSet{Span: spanz.TableIDToComparableSpan(0)})
+	h = append(h, &ReplicationSet{TableID: 0})
 	require.Equal(t, 1, h.Len())
 
-	h = append(h, &ReplicationSet{Span: spanz.TableIDToComparableSpan(1)})
+	h = append(h, &ReplicationSet{TableID: 1})
 	require.Equal(t, 2, h.Len())
 }
 
@@ -1380,18 +1366,9 @@ func TestReplicationSetHeap_Less(t *testing.T) {
 	t.Parallel()
 
 	h := NewReplicationSetHeap(defaultSlowTableHeapSize)
-	h = append(h, &ReplicationSet{
-		Span:       spanz.TableIDToComparableSpan(0),
-		Checkpoint: tablepb.Checkpoint{CheckpointTs: 1},
-	})
-	h = append(h, &ReplicationSet{
-		Span:       spanz.TableIDToComparableSpan(1),
-		Checkpoint: tablepb.Checkpoint{CheckpointTs: 2, ResolvedTs: 3},
-	})
-	h = append(h, &ReplicationSet{
-		Span:       spanz.TableIDToComparableSpan(2),
-		Checkpoint: tablepb.Checkpoint{CheckpointTs: 2, ResolvedTs: 4},
-	})
+	h = append(h, &ReplicationSet{TableID: 0, Checkpoint: tablepb.Checkpoint{CheckpointTs: 1}})
+	h = append(h, &ReplicationSet{TableID: 1, Checkpoint: tablepb.Checkpoint{CheckpointTs: 2, ResolvedTs: 3}})
+	h = append(h, &ReplicationSet{TableID: 2, Checkpoint: tablepb.Checkpoint{CheckpointTs: 2, ResolvedTs: 4}})
 	require.True(t, h.Less(1, 0))
 	require.True(t, h.Less(2, 1))
 }
@@ -1401,20 +1378,14 @@ func TestReplicationSetHeap_Basic(t *testing.T) {
 
 	h := NewReplicationSetHeap(defaultSlowTableHeapSize)
 	heap.Init(&h)
-	heap.Push(&h, &ReplicationSet{
-		Span:       spanz.TableIDToComparableSpan(0),
-		Checkpoint: tablepb.Checkpoint{CheckpointTs: 1},
-	})
-	heap.Push(&h, &ReplicationSet{
-		Span:       spanz.TableIDToComparableSpan(1),
-		Checkpoint: tablepb.Checkpoint{CheckpointTs: 2},
-	})
+	heap.Push(&h, &ReplicationSet{TableID: 0, Checkpoint: tablepb.Checkpoint{CheckpointTs: 1}})
+	heap.Push(&h, &ReplicationSet{TableID: 1, Checkpoint: tablepb.Checkpoint{CheckpointTs: 2}})
 	require.Equal(t, 2, h.Len())
 
-	require.Equal(t, int64(1), heap.Pop(&h).(*ReplicationSet).Span.TableID)
+	require.Equal(t, int64(1), heap.Pop(&h).(*ReplicationSet).TableID)
 	require.Equal(t, 1, h.Len())
 
-	require.Equal(t, int64(0), heap.Pop(&h).(*ReplicationSet).Span.TableID)
+	require.Equal(t, int64(0), heap.Pop(&h).(*ReplicationSet).TableID)
 	require.Equal(t, 0, h.Len())
 }
 
@@ -1429,7 +1400,7 @@ func TestReplicationSetHeap_MinK(t *testing.T) {
 
 	for i := 2 * defaultSlowTableHeapSize; i > 0; i-- {
 		replicationSet := &ReplicationSet{
-			Span:       spanz.TableIDToComparableSpan(int64(i)),
+			TableID:    int64(i),
 			Checkpoint: tablepb.Checkpoint{CheckpointTs: uint64(i)},
 		}
 		heap.Push(&h, replicationSet)
@@ -1445,12 +1416,12 @@ func TestReplicationSetHeap_MinK(t *testing.T) {
 		expectedTables = append(expectedTables, int64(i))
 	}
 
-	tables := make([]model.TableID, 0)
+	tables := make([]int64, 0)
 	tableCounts := h.Len()
 	for i := 0; i < tableCounts; i++ {
 		element := heap.Pop(&h).(*ReplicationSet)
-		t.Log(element.Span)
-		tables = append(tables, element.Span.TableID)
+		fmt.Println(element.TableID)
+		tables = append(tables, element.TableID)
 	}
 	require.Equal(t, expectedTables, tables)
 	require.Equal(t, 0, h.Len())

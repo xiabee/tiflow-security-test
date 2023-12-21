@@ -23,6 +23,7 @@ function run() {
 	cd $WORK_DIR
 
 	TOPIC_NAME="ticdc-canal-json-content-compatible"
+
 	run_cdc_server --workdir $WORK_DIR --binary $CDC_BINARY
 
 	if [ "$SINK_TYPE" == "kafka" ]; then
@@ -35,6 +36,10 @@ function run() {
 	# currently only kafka and pulsar are supported
 	if [ "$SINK_TYPE" == "kafka" ]; then
 		run_kafka_consumer $WORK_DIR $SINK_URI
+	fi
+
+	if [ "$SINK_TYPE" == "pulsar" ]; then
+		run_pulsar_consumer $WORK_DIR $SINK_URI
 	fi
 
 	run_sql_file $CUR/data/data.sql ${UP_TIDB_HOST} ${UP_TIDB_PORT}

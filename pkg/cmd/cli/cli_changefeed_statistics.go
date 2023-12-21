@@ -19,6 +19,7 @@ import (
 	"time"
 
 	v2 "github.com/pingcap/tiflow/cdc/api/v2"
+	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
 	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
 	cmdcontext "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
@@ -35,7 +36,8 @@ type status struct {
 
 // statisticsChangefeedOptions defines flags for the `cli changefeed statistics` command.
 type statisticsChangefeedOptions struct {
-	apiClient apiv2client.APIV2Interface
+	apiV1Client apiv1client.APIV1Interface
+	apiV2Client apiv2client.APIV2Interface
 
 	changefeedID string
 	interval     uint
@@ -57,7 +59,11 @@ func (o *statisticsChangefeedOptions) addFlags(cmd *cobra.Command) {
 // complete adapts from the command line args to the data and client required.
 func (o *statisticsChangefeedOptions) complete(f factory.Factory) error {
 	var err error
-	o.apiClient, err = f.APIV2Client()
+	o.apiV1Client, err = f.APIV1Client()
+	if err != nil {
+		return err
+	}
+	o.apiV2Client, err = f.APIV2Client()
 	if err != nil {
 		return err
 	}
@@ -69,19 +75,18 @@ func (o *statisticsChangefeedOptions) runCliWithAPIClient(ctx context.Context, c
 	now := time.Now()
 	var count uint64
 
-	changefeed, err := o.apiClient.Changefeeds().Get(ctx, o.changefeedID)
+	changefeed, err := o.apiV1Client.Changefeeds().Get(ctx, o.changefeedID)
 	if err != nil {
 		return err
 	}
-	ts, err := o.apiClient.Tso().Query(ctx,
+	ts, err := o.apiV2Client.Tso().Query(ctx,
 		&v2.UpstreamConfig{ID: changefeed.UpstreamID})
 	if err != nil {
 		return err
 	}
 
-	sinkGap := oracle.ExtractPhysical(changefeed.ResolvedTs) -
-		oracle.ExtractPhysical(changefeed.CheckpointTs)
-	replicationGap := ts.Timestamp - oracle.ExtractPhysical(changefeed.CheckpointTs)
+	sinkGap := oracle.ExtractPhysical(changefeed.ResolvedTs) - oracle.ExtractPhysical(changefeed.CheckpointTSO)
+	replicationGap := ts.Timestamp - oracle.ExtractPhysical(changefeed.CheckpointTSO)
 	statistics := status{
 		SinkGap:        fmt.Sprintf("%dms", sinkGap),
 		ReplicationGap: fmt.Sprintf("%dms", replicationGap),

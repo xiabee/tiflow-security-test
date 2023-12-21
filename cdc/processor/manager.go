@@ -23,8 +23,8 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/pkg/config"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
+	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
 	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,6 +35,7 @@ type commandTp int
 
 const (
 	commandTpUnknown commandTp = iota
+	commandTpClose
 	commandTpWriteDebugInfo
 	processorLogsWarnDuration = 1 * time.Second
 )
@@ -48,12 +49,8 @@ type command struct {
 // Manager is a manager of processor, which maintains the state and behavior of processors
 type Manager interface {
 	orchestrator.Reactor
-
-	// Close the manager itself and all processors. Can't be called with `Tick` concurrently.
-	// After it's called, all other methods shouldn't be called any more.
-	Close()
-
 	WriteDebugInfo(ctx context.Context, w io.Writer, done chan<- error)
+	AsyncClose()
 }
 
 // managerImpl is a manager of processor, which maintains the state and behavior of processors
@@ -71,9 +68,7 @@ type managerImpl struct {
 		*upstream.Upstream,
 		*model.Liveness,
 		uint64,
-		*config.SchedulerConfig,
 	) *processor
-	cfg *config.SchedulerConfig
 
 	metricProcessorCloseDuration prometheus.Observer
 }
@@ -83,7 +78,6 @@ func NewManager(
 	captureInfo *model.CaptureInfo,
 	upstreamManager *upstream.Manager,
 	liveness *model.Liveness,
-	cfg *config.SchedulerConfig,
 ) Manager {
 	return &managerImpl{
 		captureInfo:                  captureInfo,
@@ -93,7 +87,6 @@ func NewManager(
 		upstreamManager:              upstreamManager,
 		newProcessor:                 newProcessor,
 		metricProcessorCloseDuration: processorCloseDuration,
-		cfg:                          cfg,
 	}
 }
 
@@ -103,13 +96,15 @@ func NewManager(
 func (m *managerImpl) Tick(stdCtx context.Context, state orchestrator.ReactorState) (nextState orchestrator.ReactorState, err error) {
 	ctx := stdCtx.(cdcContext.Context)
 	globalState := state.(*orchestrator.GlobalReactorState)
-	m.handleCommand()
+	if err := m.handleCommand(ctx); err != nil {
+		return state, err
+	}
 
 	var inactiveChangefeedCount int
 	for changefeedID, changefeedState := range globalState.Changefeeds {
 		if !changefeedState.Active(m.captureInfo.ID) {
 			inactiveChangefeedCount++
-			m.closeProcessor(changefeedID)
+			m.closeProcessor(changefeedID, ctx)
 			continue
 		}
 		currentChangefeedEpoch := changefeedState.Info.Epoch
@@ -121,12 +116,9 @@ func (m *managerImpl) Tick(stdCtx context.Context, state orchestrator.ReactorSta
 				up = m.upstreamManager.AddUpstream(upstreamInfo)
 			}
 			failpoint.Inject("processorManagerHandleNewChangefeedDelay", nil)
-
-			cfg := *m.cfg
-			cfg.ChangefeedSettings = changefeedState.Info.Config.Scheduler
 			p = m.newProcessor(
 				changefeedState, m.captureInfo, changefeedID, up, m.liveness,
-				currentChangefeedEpoch, &cfg)
+				currentChangefeedEpoch)
 			m.processors[changefeedID] = p
 		}
 		ctx := cdcContext.WithChangefeedVars(ctx, &cdcContext.ChangefeedVars{
@@ -135,35 +127,36 @@ func (m *managerImpl) Tick(stdCtx context.Context, state orchestrator.ReactorSta
 		})
 		if currentChangefeedEpoch != p.changefeedEpoch {
 			// Changefeed has restarted due to error, the processor is stale.
-			m.closeProcessor(changefeedID)
+			m.closeProcessor(changefeedID, ctx)
 			continue
 		}
 		if err := p.Tick(ctx); err != nil {
 			// processor have already patched its error to tell the owner
 			// manager can just close the processor and continue to tick other processors
-			m.closeProcessor(changefeedID)
+			m.closeProcessor(changefeedID, ctx)
 		}
 	}
 	// check if the processors in memory is leaked
 	if len(globalState.Changefeeds)-inactiveChangefeedCount != len(m.processors) {
 		for changefeedID := range m.processors {
 			if _, exist := globalState.Changefeeds[changefeedID]; !exist {
-				m.closeProcessor(changefeedID)
+				m.closeProcessor(changefeedID, ctx)
 			}
 		}
 	}
 
+	// close upstream
 	if err := m.upstreamManager.Tick(stdCtx, globalState); err != nil {
 		return state, errors.Trace(err)
 	}
 	return state, nil
 }
 
-func (m *managerImpl) closeProcessor(changefeedID model.ChangeFeedID) {
+func (m *managerImpl) closeProcessor(changefeedID model.ChangeFeedID, ctx cdcContext.Context) {
 	processor, exist := m.processors[changefeedID]
 	if exist {
 		startTime := time.Now()
-		err := processor.Close()
+		err := processor.Close(ctx)
 		costTime := time.Since(startTime)
 		if costTime > processorLogsWarnDuration {
 			log.Warn("processor close took too long",
@@ -183,14 +176,16 @@ func (m *managerImpl) closeProcessor(changefeedID model.ChangeFeedID) {
 	}
 }
 
-// Close the manager itself and all processors.
-// Note: This method must not be called with `Tick`. Please be careful.
-func (m *managerImpl) Close() {
-	log.Info("processor.Manager is closing")
-	for changefeedID := range m.processors {
-		m.closeProcessor(changefeedID)
+// AsyncClose sends a signal to Manager to close all processors.
+func (m *managerImpl) AsyncClose() {
+	timeout := 3 * time.Second
+	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
+	defer cancel()
+	done := make(chan error, 1)
+	err := m.sendCommand(ctx, commandTpClose, nil, done)
+	if err != nil {
+		log.Warn("async close failed", zap.Error(err))
 	}
-	// FIXME: we should drain command queue and signal callers an error.
 }
 
 // WriteDebugInfo write the debug info to Writer
@@ -219,15 +214,22 @@ func (m *managerImpl) sendCommand(
 	return nil
 }
 
-func (m *managerImpl) handleCommand() {
+func (m *managerImpl) handleCommand(ctx cdcContext.Context) error {
 	var cmd *command
 	select {
 	case cmd = <-m.commandQueue:
 	default:
-		return
+		return nil
 	}
 	defer close(cmd.done)
 	switch cmd.tp {
+	case commandTpClose:
+		for changefeedID := range m.processors {
+			m.closeProcessor(changefeedID, ctx)
+		}
+		log.Info("All processors are closed in processor manager")
+		// FIXME: we should drain command queue and signal callers an error.
+		return cerrors.ErrReactorFinished
 	case commandTpWriteDebugInfo:
 		w := cmd.payload.(io.Writer)
 		err := m.writeDebugInfo(w)
@@ -237,6 +239,7 @@ func (m *managerImpl) handleCommand() {
 	default:
 		log.Warn("Unknown command in processor manager", zap.Any("command", cmd))
 	}
+	return nil
 }
 
 func (m *managerImpl) writeDebugInfo(w io.Writer) error {

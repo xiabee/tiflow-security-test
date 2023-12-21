@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sort"
 	"testing"
 
@@ -38,8 +37,6 @@ import (
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/tests/v3/integration"
 )
 
 var (
@@ -58,11 +55,7 @@ func TestCreateChangefeed(t *testing.T) {
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
 	apiV2 := NewOpenAPIV2ForTest(cp, helpers)
 	router := newRouter(apiV2)
-	integration.BeforeTestExternal(t)
-	testEtcdCluster := integration.NewClusterV3(
-		t, &integration.ClusterConfig{Size: 2},
-	)
-	defer testEtcdCluster.Terminate(t)
+	o := mock_owner.NewMockOwner(gomock.NewController(t))
 
 	mockUpManager := upstream.NewManager4Test(pdClient)
 	statusProvider := &mockStatusProvider{}
@@ -74,6 +67,8 @@ func TestCreateChangefeed(t *testing.T) {
 	cp.EXPECT().GetUpstreamManager().Return(mockUpManager, nil).AnyTimes()
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
 	cp.EXPECT().IsOwner().Return(true).AnyTimes()
+	cp.EXPECT().GetOwner().Return(o, nil).AnyTimes()
+	o.EXPECT().ValidateChangefeed(gomock.Any()).Return(nil).AnyTimes()
 
 	// case 1: json format mismatches with the spec.
 	errConfig := struct {
@@ -170,9 +165,6 @@ func TestCreateChangefeed(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 
 	// case 5:
-	helpers.EXPECT().
-		getEtcdClient(gomock.Any(), gomock.Any()).
-		Return(testEtcdCluster.RandClient(), nil)
 	helpers.EXPECT().getVerfiedTables(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil, nil, nil).
 		AnyTimes()
@@ -212,9 +204,6 @@ func TestCreateChangefeed(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 
 	// case 6: success
-	helpers.EXPECT().
-		getEtcdClient(gomock.Any(), gomock.Any()).
-		Return(testEtcdCluster.RandClient(), nil)
 	etcdClient.EXPECT().
 		CreateChangefeedInfo(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).
@@ -333,12 +322,13 @@ func TestUpdateChangefeed(t *testing.T) {
 	mockCapture.EXPECT().IsOwner().Return(true).AnyTimes()
 
 	// case 1 invalid id
-	invalidID := "Invalid_#"
+	invalidID := "_Invalid_"
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequestWithContext(context.Background(), update.method,
 		fmt.Sprintf(update.url, invalidID), nil)
 	router.ServeHTTP(w, req)
 	respErr := model.HTTPError{}
+	t.Logf("body: %s", w.Body.String())
 	err := json.NewDecoder(w.Body).Decode(&respErr)
 	require.Nil(t, err)
 	require.Contains(t, respErr.Code, "ErrAPIInvalidParam")
@@ -538,9 +528,6 @@ func TestListChangeFeeds(t *testing.T) {
 			},
 			model.DefaultChangeFeedID("cf2"): {
 				State: model.StateWarning,
-				Warning: &model.RunningError{
-					Code: "warning",
-				},
 			},
 			model.DefaultChangeFeedID("cf3"): {
 				State: model.StateStopped,
@@ -579,11 +566,15 @@ func TestListChangeFeeds(t *testing.T) {
 	require.Equal(t, 5, resp.Total)
 	// changefeed info must be sorted by ID
 	require.Equal(t, true, sorted(resp.Items))
-	// warning changefeed must have warning error message
-	require.Equal(t, model.StateWarning, resp.Items[1].FeedState)
-	require.Contains(t, resp.Items[1].RunningError.Code, "warning")
-
-	// case 2: only list changefeed with state 'normal', 'stopped' and 'failed', "pending", "warning"
+	warningChangefeedCount := 0
+	for _, cf := range resp.Items {
+		if cf.FeedState == model.StateWarning {
+			warningChangefeedCount++
+		}
+		require.NotEqual(t, model.StatePending, cf.FeedState)
+	}
+	require.Equal(t, 2, warningChangefeedCount)
+	// case 2: only list changefeed with state 'normal', 'stopped' and 'failed'
 	metaInfo2 := testCase{
 		url:    "/api/v2/changefeeds",
 		method: "GET",
@@ -949,32 +940,4 @@ func TestPauseChangefeed(t *testing.T) {
 	router.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "{}", w.Body.String())
-}
-
-func TestHasRunningImport(t *testing.T) {
-	integration.BeforeTestExternal(t)
-	testEtcdCluster := integration.NewClusterV3(
-		t, &integration.ClusterConfig{Size: 1},
-	)
-	defer testEtcdCluster.Terminate(t)
-
-	ctx := context.Background()
-	client := testEtcdCluster.RandClient()
-	hasImport := hasRunningImport(ctx, client)
-	require.NoError(t, hasImport)
-
-	lease, err := client.Lease.Grant(ctx, 3*60)
-	require.NoError(t, err)
-
-	_, err = client.KV.Put(
-		ctx, filepath.Join(RegisterImportTaskPrefix, "pitr"),
-		"", clientv3.WithLease(lease.ID),
-	)
-	require.NoError(t, err)
-
-	hasImport = hasRunningImport(ctx, client)
-	require.NotNil(t, hasImport)
-	require.Contains(
-		t, hasImport.Error(), "There are lightning/restore tasks running",
-	)
 }

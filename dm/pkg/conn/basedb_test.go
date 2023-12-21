@@ -23,8 +23,9 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/phayes/freeport"
-	"github.com/pingcap/tiflow/dm/config/dbconfig"
+	"github.com/pingcap/tiflow/dm/config"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
+	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,7 +33,7 @@ func TestGetBaseConn(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 
-	baseDB := NewBaseDBForTest(db)
+	baseDB := NewBaseDB(db)
 
 	tctx := tcontext.Background()
 
@@ -65,7 +66,7 @@ func TestGetBaseConn(t *testing.T) {
 func TestFailDBPing(t *testing.T) {
 	netTimeout = time.Second
 	defer func() {
-		netTimeout = DefaultDBTimeout
+		netTimeout = utils.DefaultDBTimeout
 	}()
 	port := freeport.GetPort()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -74,9 +75,10 @@ func TestFailDBPing(t *testing.T) {
 	require.NoError(t, err)
 	defer l.Close()
 
-	cfg := &dbconfig.DBConfig{User: "root", Host: "127.0.0.1", Port: port}
+	cfg := &config.DBConfig{User: "root", Host: "127.0.0.1", Port: port}
 	cfg.Adjust()
-	db, err := GetUpstreamDB(cfg)
+	impl := &DefaultDBProviderImpl{}
+	db, err := impl.Apply(cfg)
 	require.Error(t, err)
 	require.Nil(t, db)
 }
@@ -84,7 +86,7 @@ func TestFailDBPing(t *testing.T) {
 func TestGetBaseConnWontBlock(t *testing.T) {
 	netTimeout = time.Second
 	defer func() {
-		netTimeout = DefaultDBTimeout
+		netTimeout = utils.DefaultDBTimeout
 	}()
 	ctx := context.Background()
 
@@ -99,7 +101,7 @@ func TestGetBaseConnWontBlock(t *testing.T) {
 	db, err := sql.Open("mysql", "root:@tcp("+addr+")/test")
 	require.NoError(t, err)
 
-	baseDB := NewBaseDBForTest(db)
+	baseDB := NewBaseDB(db)
 
 	_, err = baseDB.GetBaseConn(ctx)
 	require.Error(t, err)

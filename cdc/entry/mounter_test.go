@@ -11,9 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build intest
-// +build intest
-
 package entry
 
 import (
@@ -42,8 +39,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/filter"
-	"github.com/pingcap/tiflow/pkg/integrity"
-	"github.com/pingcap/tiflow/pkg/spanz"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/sqlmodel"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
@@ -312,8 +308,7 @@ func testMounterDisableOldValue(t *testing.T, tc struct {
 	config := config.GetDefaultReplicaConfig()
 	filter, err := filter.NewFilter(config, "")
 	require.Nil(t, err)
-	mounter := NewMounter(scheamStorage,
-		model.DefaultChangeFeedID("c1"), time.UTC, filter, config.Integrity).(*mounter)
+	mounter := NewMounter(scheamStorage, model.DefaultChangeFeedID("c1"), time.UTC, filter).(*mounter)
 	mounter.tz = time.Local
 	ctx := context.Background()
 
@@ -448,8 +443,8 @@ func walkTableSpanInStore(t *testing.T, store tidbkv.Storage, tableID int64, f f
 	txn, err := store.Begin()
 	require.Nil(t, err)
 	defer txn.Rollback() //nolint:errcheck
-	startKey, endKey := spanz.GetTableRange(tableID)
-	kvIter, err := txn.Iter(startKey, endKey)
+	tableSpan := regionspan.GetTableSpan(tableID)
+	kvIter, err := txn.Iter(tableSpan.Start, tableSpan.End)
 	require.Nil(t, err)
 	defer kvIter.Close()
 	for kvIter.Valid() {
@@ -999,86 +994,6 @@ func TestGetDefaultZeroValue(t *testing.T) {
 	}
 }
 
-func TestDecodeRow(t *testing.T) {
-	helper := NewSchemaTestHelper(t)
-	defer helper.Close()
-	helper.Tk().MustExec("set @@tidb_enable_clustered_index=1;")
-	helper.Tk().MustExec("use test;")
-
-	changefeed := model.DefaultChangeFeedID("changefeed-test-decode-row")
-
-	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
-	require.NoError(t, err)
-
-	cfg := config.GetDefaultReplicaConfig()
-
-	cfgWithChecksumEnabled := config.GetDefaultReplicaConfig()
-	cfgWithChecksumEnabled.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-
-	for _, c := range []*config.ReplicaConfig{cfg, cfgWithChecksumEnabled} {
-		filter, err := filter.NewFilter(c, "")
-		require.NoError(t, err)
-
-		schemaStorage, err := NewSchemaStorage(helper.GetCurrentMeta(),
-			ver.Ver, false, changefeed, util.RoleTester, filter)
-		require.NoError(t, err)
-
-		// apply ddl to schemaStorage
-		ddl := "create table test.student(id int primary key, name char(50), age int, gender char(10))"
-		job := helper.DDL2Job(ddl)
-		err = schemaStorage.HandleDDLJob(job)
-		require.NoError(t, err)
-
-		ts := schemaStorage.GetLastSnapshot().CurrentTs()
-
-		schemaStorage.AdvanceResolvedTs(ver.Ver)
-
-		mounter := NewMounter(schemaStorage, changefeed, time.Local, filter, cfg.Integrity).(*mounter)
-
-		helper.Tk().MustExec(`insert into student values(1, "dongmen", 20, "male")`)
-		helper.Tk().MustExec(`update student set age = 27 where id = 1`)
-
-		ctx := context.Background()
-		decodeAndCheckRowInTable := func(tableID int64, f func(key []byte, value []byte) *model.RawKVEntry) {
-			walkTableSpanInStore(t, helper.Storage(), tableID, func(key []byte, value []byte) {
-				rawKV := f(key, value)
-
-				row, err := mounter.unmarshalAndMountRowChanged(ctx, rawKV)
-				require.NoError(t, err)
-				require.NotNil(t, row)
-
-				if row.Columns != nil {
-					require.NotNil(t, mounter.decoder)
-				}
-
-				if row.PreColumns != nil {
-					require.NotNil(t, mounter.preDecoder)
-				}
-			})
-		}
-
-		toRawKV := func(key []byte, value []byte) *model.RawKVEntry {
-			return &model.RawKVEntry{
-				OpType:  model.OpTypePut,
-				Key:     key,
-				Value:   value,
-				StartTs: ts - 1,
-				CRTs:    ts + 1,
-			}
-		}
-
-		tableInfo, ok := schemaStorage.GetLastSnapshot().TableByName("test", "student")
-		require.True(t, ok)
-
-		decodeAndCheckRowInTable(tableInfo.ID, toRawKV)
-		decodeAndCheckRowInTable(tableInfo.ID, toRawKV)
-
-		job = helper.DDL2Job("drop table student")
-		err = schemaStorage.HandleDDLJob(job)
-		require.NoError(t, err)
-	}
-}
-
 // TestDecodeEventIgnoreRow tests a PolymorphicEvent.Row is nil
 // if this event should be filter out by filter.
 func TestDecodeEventIgnoreRow(t *testing.T) {
@@ -1113,7 +1028,7 @@ func TestDecodeEventIgnoreRow(t *testing.T) {
 
 	ts := schemaStorage.GetLastSnapshot().CurrentTs()
 	schemaStorage.AdvanceResolvedTs(ver.Ver)
-	mounter := NewMounter(schemaStorage, cfID, time.Local, f, cfg.Integrity).(*mounter)
+	mounter := NewMounter(schemaStorage, cfID, time.Local, f).(*mounter)
 
 	type testCase struct {
 		schema  string
@@ -1322,7 +1237,7 @@ func TestBuildTableInfo(t *testing.T) {
 		originTI, err := ddl.BuildTableInfoFromAST(stmt.(*ast.CreateTableStmt))
 		require.NoError(t, err)
 		cdcTableInfo := model.WrapTableInfo(0, "test", 0, originTI)
-		cols, _, _, _, err := datum2Column(cdcTableInfo, map[int64]types.Datum{})
+		cols, _, _, err := datum2Column(cdcTableInfo, map[int64]types.Datum{})
 		require.NoError(t, err)
 		recoveredTI := model.BuildTiDBTableInfo(cols, cdcTableInfo.IndexColumnsOffset)
 		handle := sqlmodel.GetWhereHandle(recoveredTI, recoveredTI)

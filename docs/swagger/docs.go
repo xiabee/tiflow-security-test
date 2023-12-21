@@ -247,12 +247,54 @@ var doc = `{
                         "required": true
                     },
                     {
-                        "description": "changefeed config",
-                        "name": "changefeedConfig",
+                        "description": "changefeed target ts",
+                        "name": "target_ts",
                         "in": "body",
-                        "required": true,
                         "schema": {
-                            "$ref": "#/definitions/model.ChangefeedConfig"
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "description": "sink uri",
+                        "name": "sink_uri",
+                        "in": "body",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "description": "filter rules",
+                        "name": "filter_rules",
+                        "in": "body",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    {
+                        "description": "ignore transaction start ts",
+                        "name": "ignore_txn_start_ts",
+                        "in": "body",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "description": "mounter worker nums",
+                        "name": "mounter_worker_num",
+                        "in": "body",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "description": "sink config",
+                        "name": "sink_config",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/config.SinkConfig"
                         }
                     }
                 ],
@@ -372,7 +414,7 @@ var doc = `{
                     {
                         "type": "string",
                         "description": "changefeed_id",
-                        "name": "changefeed_id",
+                        "name": "changefeed-id",
                         "in": "path",
                         "required": true
                     }
@@ -418,12 +460,21 @@ var doc = `{
                         "required": true
                     },
                     {
-                        "description": "move table request",
-                        "name": "MoveTable",
+                        "description": "table_id",
+                        "name": "table_id",
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/model.MoveTableReq"
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "description": "capture_id",
+                        "name": "capture_id",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
                         }
                     }
                 ],
@@ -633,22 +684,6 @@ var doc = `{
                     "processor"
                 ],
                 "summary": "Get processor detail information",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "changefeed ID",
-                        "name": "changefeed_id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "capture ID",
-                        "name": "capture_id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -781,51 +816,6 @@ var doc = `{
                         }
                     }
                 }
-            },
-            "post": {
-                "description": "create a new changefeed",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "changefeed",
-                    "v2"
-                ],
-                "summary": "Create changefeed",
-                "parameters": [
-                    {
-                        "description": "changefeed config",
-                        "name": "changefeed",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/v2.ChangefeedConfig"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/v2.ChangeFeedInfo"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/model.HTTPError"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/model.HTTPError"
-                        }
-                    }
-                }
             }
         },
         "/api/v2/changefeeds/{changefeed_id}": {
@@ -849,58 +839,6 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/v2.ChangeFeedInfo"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/model.HTTPError"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/model.HTTPError"
-                        }
-                    }
-                }
-            },
-            "put": {
-                "description": "Update a changefeed",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "changefeed",
-                    "v2"
-                ],
-                "summary": "Update a changefeed",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "changefeed_id",
-                        "name": "changefeed_id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "changefeed config",
-                        "name": "changefeedConfig",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/v2.ChangefeedConfig"
-                        }
                     }
                 ],
                 "responses": {
@@ -989,60 +927,6 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/v2.EmptyResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/model.HTTPError"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/model.HTTPError"
-                        }
-                    }
-                }
-            }
-        },
-        "/api/v2/changefeeds/{changefeed_id}/resume": {
-            "post": {
-                "description": "Resume a changefeed",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "changefeed",
-                    "v2"
-                ],
-                "summary": "Resume a changefeed",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "changefeed_id",
-                        "name": "changefeed_id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "resume config",
-                        "name": "resumeConfig",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/v2.ResumeChangefeedConfig"
-                        }
                     }
                 ],
                 "responses": {
@@ -1325,40 +1209,6 @@ var doc = `{
                 }
             }
         },
-        "config.CloudStorageConfig": {
-            "type": "object",
-            "properties": {
-                "file-size": {
-                    "type": "integer"
-                },
-                "flush-interval": {
-                    "type": "string"
-                },
-                "worker-count": {
-                    "type": "integer"
-                }
-            }
-        },
-        "config.CodecConfig": {
-            "type": "object",
-            "properties": {
-                "avro-bigint-unsigned-handling-mode": {
-                    "type": "string"
-                },
-                "avro-decimal-handling-mode": {
-                    "type": "string"
-                },
-                "avro-enable-watermark": {
-                    "type": "boolean"
-                },
-                "enable-tidb-extension": {
-                    "type": "boolean"
-                },
-                "max-batch-size": {
-                    "type": "integer"
-                }
-            }
-        },
         "config.ColumnSelector": {
             "type": "object",
             "properties": {
@@ -1401,80 +1251,8 @@ var doc = `{
         "config.KafkaConfig": {
             "type": "object",
             "properties": {
-                "auto-create-topic": {
-                    "type": "boolean"
-                },
-                "ca": {
-                    "type": "string"
-                },
-                "cert": {
-                    "type": "string"
-                },
-                "codec-config": {
-                    "$ref": "#/definitions/config.CodecConfig"
-                },
-                "compression": {
-                    "type": "string"
-                },
-                "dial-timeout": {
-                    "type": "string"
-                },
-                "enable-tls": {
-                    "type": "boolean"
-                },
-                "insecure-skip-verify": {
-                    "type": "boolean"
-                },
-                "kafka-client-id": {
-                    "type": "string"
-                },
-                "kafka-version": {
-                    "type": "string"
-                },
-                "key": {
-                    "type": "string"
-                },
                 "large-message-handle": {
                     "$ref": "#/definitions/config.LargeMessageHandleConfig"
-                },
-                "max-message-bytes": {
-                    "type": "integer"
-                },
-                "partition-num": {
-                    "type": "integer"
-                },
-                "read-timeout": {
-                    "type": "string"
-                },
-                "replication-factor": {
-                    "type": "integer"
-                },
-                "required-acks": {
-                    "type": "integer"
-                },
-                "sasl-gssapi-auth-type": {
-                    "type": "string"
-                },
-                "sasl-gssapi-disable-pafxfast": {
-                    "type": "boolean"
-                },
-                "sasl-gssapi-kerberos-config-path": {
-                    "type": "string"
-                },
-                "sasl-gssapi-keytab-path": {
-                    "type": "string"
-                },
-                "sasl-gssapi-password": {
-                    "type": "string"
-                },
-                "sasl-gssapi-realm": {
-                    "type": "string"
-                },
-                "sasl-gssapi-service-name": {
-                    "type": "string"
-                },
-                "sasl-gssapi-user": {
-                    "type": "string"
                 },
                 "sasl-mechanism": {
                     "type": "string"
@@ -1499,15 +1277,6 @@ var doc = `{
                 },
                 "sasl-oauth-token-url": {
                     "type": "string"
-                },
-                "sasl-password": {
-                    "type": "string"
-                },
-                "sasl-user": {
-                    "type": "string"
-                },
-                "write-timeout": {
-                    "type": "string"
                 }
             }
         },
@@ -1519,65 +1288,12 @@ var doc = `{
                 }
             }
         },
-        "config.MySQLConfig": {
-            "type": "object",
-            "properties": {
-                "enable-batch-dml": {
-                    "type": "boolean"
-                },
-                "enable-cache-prepared-statement": {
-                    "type": "boolean"
-                },
-                "enable-multi-statement": {
-                    "type": "boolean"
-                },
-                "max-multi-update-row": {
-                    "type": "integer"
-                },
-                "max-multi-update-row-size": {
-                    "type": "integer"
-                },
-                "max-txn-row": {
-                    "type": "integer"
-                },
-                "read-timeout": {
-                    "type": "string"
-                },
-                "ssl-ca": {
-                    "type": "string"
-                },
-                "ssl-cert": {
-                    "type": "string"
-                },
-                "ssl-key": {
-                    "type": "string"
-                },
-                "tidb-txn-mode": {
-                    "type": "string"
-                },
-                "time-zone": {
-                    "type": "string"
-                },
-                "timeout": {
-                    "type": "string"
-                },
-                "worker-count": {
-                    "type": "integer"
-                },
-                "write-timeout": {
-                    "type": "string"
-                }
-            }
-        },
         "config.SinkConfig": {
             "type": "object",
             "properties": {
                 "advance-timeout-in-sec": {
                     "description": "AdvanceTimeoutInSec is a duration in second. If a table sink progress hasn't been\nadvanced for this given duration, the sink will be canceled and re-established.",
                     "type": "integer"
-                },
-                "cloud-storage-config": {
-                    "$ref": "#/definitions/config.CloudStorageConfig"
                 },
                 "column-selectors": {
                     "type": "array",
@@ -1597,10 +1313,6 @@ var doc = `{
                         "$ref": "#/definitions/config.DispatchRule"
                     }
                 },
-                "enable-kafka-sink-v2": {
-                    "description": "EnableKafkaSinkV2 enabled then the kafka-go sink will be used.",
-                    "type": "boolean"
-                },
                 "enable-partition-separator": {
                     "type": "boolean"
                 },
@@ -1613,17 +1325,8 @@ var doc = `{
                 "kafka-config": {
                     "$ref": "#/definitions/config.KafkaConfig"
                 },
-                "mysql-config": {
-                    "$ref": "#/definitions/config.MySQLConfig"
-                },
-                "only-output-updated-columns": {
-                    "type": "boolean"
-                },
                 "protocol": {
                     "type": "string"
-                },
-                "safe-mode": {
-                    "type": "boolean"
                 },
                 "schema-registry": {
                     "type": "string"
@@ -1820,17 +1523,6 @@ var doc = `{
                 },
                 "error_msg": {
                     "type": "string"
-                }
-            }
-        },
-        "model.MoveTableReq": {
-            "type": "object",
-            "properties": {
-                "capture_id": {
-                    "type": "string"
-                },
-                "table_id": {
-                    "type": "integer"
                 }
             }
         },
@@ -2043,101 +1735,6 @@ var doc = `{
                 }
             }
         },
-        "v2.ChangefeedConfig": {
-            "type": "object",
-            "properties": {
-                "ca_path": {
-                    "type": "string"
-                },
-                "cert_allowed_cn": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "cert_path": {
-                    "type": "string"
-                },
-                "changefeed_id": {
-                    "type": "string"
-                },
-                "key_path": {
-                    "type": "string"
-                },
-                "namespace": {
-                    "type": "string"
-                },
-                "pd_addrs": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "replica_config": {
-                    "$ref": "#/definitions/v2.ReplicaConfig"
-                },
-                "sink_uri": {
-                    "type": "string"
-                },
-                "start_ts": {
-                    "type": "integer"
-                },
-                "target_ts": {
-                    "type": "integer"
-                }
-            }
-        },
-        "v2.ChangefeedSchedulerConfig": {
-            "type": "object",
-            "properties": {
-                "enable_table_across_nodes": {
-                    "description": "EnableTableAcrossNodes set true to split one table to multiple spans and\ndistribute to multiple TiCDC nodes.",
-                    "type": "boolean"
-                },
-                "region_threshold": {
-                    "description": "RegionThreshold is the region count threshold of splitting a table.",
-                    "type": "integer"
-                },
-                "write_key_threshold": {
-                    "description": "WriteKeyThreshold is the written keys threshold of splitting a table.",
-                    "type": "integer"
-                }
-            }
-        },
-        "v2.CloudStorageConfig": {
-            "type": "object",
-            "properties": {
-                "file_size": {
-                    "type": "integer"
-                },
-                "flush_interval": {
-                    "type": "string"
-                },
-                "worker_count": {
-                    "type": "integer"
-                }
-            }
-        },
-        "v2.CodecConfig": {
-            "type": "object",
-            "properties": {
-                "avro_bigint_unsigned_handling_mode": {
-                    "type": "string"
-                },
-                "avro_decimal_handling_mode": {
-                    "type": "string"
-                },
-                "avro_enable_watermark": {
-                    "type": "boolean"
-                },
-                "enable_tidb_extension": {
-                    "type": "boolean"
-                },
-                "max_batch_size": {
-                    "type": "integer"
-                }
-            }
-        },
         "v2.ColumnSelector": {
             "type": "object",
             "properties": {
@@ -2158,13 +1755,22 @@ var doc = `{
         "v2.ConsistentConfig": {
             "type": "object",
             "properties": {
+                "encoding_worker_num": {
+                    "type": "integer"
+                },
                 "flush_interval": {
+                    "type": "integer"
+                },
+                "flush_worker_num": {
                     "type": "integer"
                 },
                 "level": {
                     "type": "string"
                 },
                 "max_log_size": {
+                    "type": "integer"
+                },
+                "meta_flush_interval": {
                     "type": "integer"
                 },
                 "storage": {
@@ -2283,94 +1889,11 @@ var doc = `{
                 }
             }
         },
-        "v2.IntegrityConfig": {
-            "type": "object",
-            "properties": {
-                "corruption_handle_level": {
-                    "type": "string"
-                },
-                "integrity_check_level": {
-                    "type": "string"
-                }
-            }
-        },
         "v2.KafkaConfig": {
             "type": "object",
             "properties": {
-                "auto_create_topic": {
-                    "type": "boolean"
-                },
-                "ca": {
-                    "type": "string"
-                },
-                "cert": {
-                    "type": "string"
-                },
-                "codec_config": {
-                    "$ref": "#/definitions/v2.CodecConfig"
-                },
-                "compression": {
-                    "type": "string"
-                },
-                "dial_timeout": {
-                    "type": "string"
-                },
-                "enable_tls": {
-                    "type": "boolean"
-                },
-                "insecure_skip_verify": {
-                    "type": "boolean"
-                },
-                "kafka_client_id": {
-                    "type": "string"
-                },
-                "kafka_version": {
-                    "type": "string"
-                },
-                "key": {
-                    "type": "string"
-                },
                 "large_message_handle": {
                     "$ref": "#/definitions/v2.LargeMessageHandleConfig"
-                },
-                "max_message_bytes": {
-                    "type": "integer"
-                },
-                "partition_num": {
-                    "type": "integer"
-                },
-                "read_timeout": {
-                    "type": "string"
-                },
-                "replication_factor": {
-                    "type": "integer"
-                },
-                "required_acks": {
-                    "type": "integer"
-                },
-                "sasl_gssapi_auth_type": {
-                    "type": "string"
-                },
-                "sasl_gssapi_disable_pafxfast": {
-                    "type": "boolean"
-                },
-                "sasl_gssapi_kerberos_config_path": {
-                    "type": "string"
-                },
-                "sasl_gssapi_keytab_path": {
-                    "type": "string"
-                },
-                "sasl_gssapi_password": {
-                    "type": "string"
-                },
-                "sasl_gssapi_realm": {
-                    "type": "string"
-                },
-                "sasl_gssapi_service_name": {
-                    "type": "string"
-                },
-                "sasl_gssapi_user": {
-                    "type": "string"
                 },
                 "sasl_mechanism": {
                     "type": "string"
@@ -2394,15 +1917,6 @@ var doc = `{
                     }
                 },
                 "sasl_oauth_token_url": {
-                    "type": "string"
-                },
-                "sasl_password": {
-                    "type": "string"
-                },
-                "sasl_user": {
-                    "type": "string"
-                },
-                "write_timeout": {
                     "type": "string"
                 }
             }
@@ -2428,56 +1942,6 @@ var doc = `{
             "properties": {
                 "worker_num": {
                     "type": "integer"
-                }
-            }
-        },
-        "v2.MySQLConfig": {
-            "type": "object",
-            "properties": {
-                "enable_batch_dml": {
-                    "type": "boolean"
-                },
-                "enable_cache_prepared_statement": {
-                    "type": "boolean"
-                },
-                "enable_multi_statement": {
-                    "type": "boolean"
-                },
-                "max_multi_update_row_count": {
-                    "type": "integer"
-                },
-                "max_multi_update_row_size": {
-                    "type": "integer"
-                },
-                "max_txn_row": {
-                    "type": "integer"
-                },
-                "read_timeout": {
-                    "type": "string"
-                },
-                "ssl_ca": {
-                    "type": "string"
-                },
-                "ssl_cert": {
-                    "type": "string"
-                },
-                "ssl_key": {
-                    "type": "string"
-                },
-                "tidb_txn_mode": {
-                    "type": "string"
-                },
-                "time_zone": {
-                    "type": "string"
-                },
-                "timeout": {
-                    "type": "string"
-                },
-                "worker_count": {
-                    "type": "integer"
-                },
-                "write_timeout": {
-                    "type": "string"
                 }
             }
         },
@@ -2537,17 +2001,11 @@ var doc = `{
                 "ignore_ineligible_table": {
                     "type": "boolean"
                 },
-                "integrity": {
-                    "$ref": "#/definitions/v2.IntegrityConfig"
-                },
                 "memory_quota": {
                     "type": "integer"
                 },
                 "mounter": {
                     "$ref": "#/definitions/v2.MounterConfig"
-                },
-                "scheduler": {
-                    "$ref": "#/definitions/v2.ChangefeedSchedulerConfig"
                 },
                 "sink": {
                     "$ref": "#/definitions/v2.SinkConfig"
@@ -2557,35 +2015,6 @@ var doc = `{
                 },
                 "sync_point_retention": {
                     "type": "string"
-                }
-            }
-        },
-        "v2.ResumeChangefeedConfig": {
-            "type": "object",
-            "properties": {
-                "ca_path": {
-                    "type": "string"
-                },
-                "cert_allowed_cn": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "cert_path": {
-                    "type": "string"
-                },
-                "key_path": {
-                    "type": "string"
-                },
-                "overwrite_checkpoint_ts": {
-                    "type": "integer"
-                },
-                "pd_addrs": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
                 }
             }
         },
@@ -2638,9 +2067,6 @@ var doc = `{
                 "advance_timeout": {
                     "type": "integer"
                 },
-                "cloud_storage_config": {
-                    "$ref": "#/definitions/v2.CloudStorageConfig"
-                },
                 "column_selectors": {
                     "type": "array",
                     "items": {
@@ -2659,32 +2085,20 @@ var doc = `{
                         "$ref": "#/definitions/v2.DispatchRule"
                     }
                 },
-                "enable_kafka_sink_v2": {
-                    "type": "boolean"
-                },
                 "enable_partition_separator": {
                     "type": "boolean"
                 },
                 "encoder_concurrency": {
                     "type": "integer"
                 },
-                "file_index_digit": {
+                "file_index_width": {
                     "type": "integer"
                 },
                 "kafka_config": {
                     "$ref": "#/definitions/v2.KafkaConfig"
                 },
-                "mysql_config": {
-                    "$ref": "#/definitions/v2.MySQLConfig"
-                },
-                "only_output_updated_columns": {
-                    "type": "boolean"
-                },
                 "protocol": {
                     "type": "string"
-                },
-                "safe_mode": {
-                    "type": "boolean"
                 },
                 "schema_registry": {
                     "type": "string"

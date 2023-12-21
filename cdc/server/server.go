@@ -16,6 +16,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -31,12 +32,14 @@ import (
 	"github.com/pingcap/tiflow/cdc/capture"
 	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/kv"
+	"github.com/pingcap/tiflow/cdc/processor/pipeline/system"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine/factory"
+	ssystem "github.com/pingcap/tiflow/cdc/sorter/db/system"
+	"github.com/pingcap/tiflow/cdc/sorter/unified"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/fsutil"
-	clogutil "github.com/pingcap/tiflow/pkg/logutil"
 	"github.com/pingcap/tiflow/pkg/p2p"
 	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/tcpserver"
@@ -76,17 +79,20 @@ type Server interface {
 // TODO: we need to make server more unit testable and add more test cases.
 // Especially we need to decouple the HTTPServer out of server.
 type server struct {
-	capture      capture.Capture
-	tcpServer    tcpserver.TCPServer
-	grpcService  *p2p.ServerWrapper
-	statusServer *http.Server
-	etcdClient   etcd.CDCEtcdClient
-	// pdClient is the default upstream PD client.
-	// The PD acts as a metadata management service for TiCDC.
-	pdClient          pd.Client
-	pdAPIClient       pdutil.PDAPIClient
-	pdEndpoints       []string
-	sortEngineFactory *factory.SortEngineFactory
+	capture          capture.Capture
+	tcpServer        tcpserver.TCPServer
+	grpcService      *p2p.ServerWrapper
+	statusServer     *http.Server
+	etcdClient       etcd.CDCEtcdClient
+	pdEndpoints      []string
+	pdClient         pd.Client
+	pdAPIClient      *pdutil.PDAPIClient
+	tableActorSystem *system.System
+
+	// If it's true sortEngineManager will be used, otherwise sorterSystem will be used.
+	useEventSortEngine bool
+	sortEngineFactory  *factory.SortEngineFactory
+	sorterSystem       *ssystem.System
 }
 
 // New creates a server instance.
@@ -111,11 +117,16 @@ func New(pdEndpoints []string) (*server, error) {
 		return nil, errors.Trace(err)
 	}
 
+	// TODO(qupeng): adjust it after all sorters are transformed into EventSortEngine.
 	debugConfig := config.GetGlobalServerConfig().Debug
+	useEventSortEngine := debugConfig.EnablePullBasedSink && debugConfig.EnableDBSorter
+
 	s := &server{
 		pdEndpoints: pdEndpoints,
 		grpcService: p2p.NewServerWrapper(debugConfig.Messages.ToMessageServerConfig()),
 		tcpServer:   tcpServer,
+
+		useEventSortEngine: useEventSortEngine,
 	}
 
 	log.Info("CDC server created",
@@ -195,11 +206,14 @@ func (s *server) prepare(ctx context.Context) error {
 		return errors.Trace(err)
 	}
 
-	s.createSortEngineFactory()
+	if err := s.startActorSystems(ctx); err != nil {
+		return errors.Trace(err)
+	}
 	s.setMemoryLimit()
+	s.capture = capture.NewCapture(
+		s.pdEndpoints, cdcEtcdClient, s.grpcService,
+		s.tableActorSystem, s.sortEngineFactory, s.sorterSystem, s.pdClient)
 
-	s.capture = capture.NewCapture(s.pdEndpoints, cdcEtcdClient,
-		s.grpcService, s.sortEngineFactory, s.pdClient)
 	return nil
 }
 
@@ -208,7 +222,7 @@ func (s *server) setMemoryLimit() {
 	if conf.GcTunerMemoryThreshold > maxGcTunerMemory {
 		// If total memory is larger than 512GB, we will not set memory limit.
 		// Because the memory limit is not accurate, and it is not necessary to set memory limit.
-		log.Warn("total memory is larger than 512GB, skip setting memory limit",
+		log.Info("total memory is larger than 512GB, skip setting memory limit",
 			zap.Uint64("bytes", conf.GcTunerMemoryThreshold),
 			zap.String("memory", humanize.IBytes(conf.GcTunerMemoryThreshold)),
 		)
@@ -224,24 +238,53 @@ func (s *server) setMemoryLimit() {
 	}
 }
 
-func (s *server) createSortEngineFactory() {
+func (s *server) startActorSystems(ctx context.Context) error {
+	if s.tableActorSystem != nil {
+		s.tableActorSystem.Stop()
+	}
+	s.tableActorSystem = system.NewSystem()
+	s.tableActorSystem.Start(ctx)
+
 	conf := config.GetGlobalServerConfig()
-	if s.sortEngineFactory != nil {
+	if !conf.Debug.EnableDBSorter {
+		return nil
+	}
+
+	if s.useEventSortEngine && s.sortEngineFactory != nil {
 		if err := s.sortEngineFactory.Close(); err != nil {
 			log.Error("fails to close sort engine manager", zap.Error(err))
 		}
 		s.sortEngineFactory = nil
 	}
+	if !s.useEventSortEngine && s.sorterSystem != nil {
+		s.sorterSystem.Stop()
+	}
 
 	// Sorter dir has been set and checked when server starts.
 	// See https://github.com/pingcap/tiflow/blob/9dad09/cdc/server.go#L275
 	sortDir := config.GetGlobalServerConfig().Sorter.SortDir
-	memInBytes := conf.Sorter.CacheSizeInMB * uint64(1<<20)
-	s.sortEngineFactory = factory.NewForPebble(sortDir, memInBytes, conf.Debug.DB)
-	log.Info("sorter engine memory limit",
-		zap.Uint64("bytes", memInBytes),
-		zap.String("memory", humanize.IBytes(memInBytes)),
-	)
+
+	if s.useEventSortEngine {
+		memInBytes := conf.Sorter.CacheSizeInMB * (1 << 20)
+		if config.GetGlobalServerConfig().Debug.EnableDBSorter {
+			s.sortEngineFactory = factory.NewForPebble(sortDir, memInBytes, conf.Debug.DB)
+		} else {
+			panic("only pebble is transformed to EventSortEngine")
+		}
+		log.Info("sorter engine memory limit",
+			zap.Uint64("bytes", memInBytes),
+			zap.String("memory", humanize.IBytes(memInBytes)),
+		)
+	} else {
+		memPercentage := float64(conf.Sorter.MaxMemoryPercentage) / 100
+		s.sorterSystem = ssystem.NewSystem(sortDir, memPercentage, conf.Debug.DB)
+		err := s.sorterSystem.Start(ctx)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	}
+
+	return nil
 }
 
 // Run runs the server.
@@ -270,11 +313,11 @@ func (s *server) startStatusHTTP(serverCtx context.Context, lis net.Listener) er
 	lis = netutil.LimitListener(lis, maxHTTPConnection)
 	conf := config.GetGlobalServerConfig()
 
-	logWritter := clogutil.InitGinLogWritter()
+	// discard gin log output
+	gin.DefaultWriter = io.Discard
 	router := gin.New()
-	// add gin.RecoveryWithWriter() to handle unexpected panic (logging and
-	// returning status code 500)
-	router.Use(gin.RecoveryWithWriter(logWritter))
+	// add gin.Recovery() to handle unexpected panic
+	router.Use(gin.Recovery())
 	// router.
 	// Register APIs.
 	cdc.RegisterRoutes(router, s.capture, registry)
@@ -341,37 +384,47 @@ func (s *server) run(ctx context.Context) (err error) {
 	defer cancel()
 	defer s.pdAPIClient.Close()
 
-	eg, egCtx := errgroup.WithContext(ctx)
+	wg, cctx := errgroup.WithContext(ctx)
 
-	eg.Go(func() error {
-		return s.upstreamPDHealthChecker(egCtx)
+	wg.Go(func() error {
+		return s.capture.Run(cctx)
 	})
 
-	eg.Go(func() error {
-		return kv.RunWorkerPool(egCtx)
+	wg.Go(func() error {
+		return s.upstreamPDHealthChecker(cctx)
 	})
 
-	eg.Go(func() error {
-		return s.tcpServer.Run(egCtx)
+	wg.Go(func() error {
+		return kv.RunWorkerPool(cctx)
 	})
 
-	grpcServer := grpc.NewServer(s.grpcService.ServerOptions()...)
-	p2pProto.RegisterCDCPeerToPeerServer(grpcServer, s.grpcService)
-
-	eg.Go(func() error {
-		return grpcServer.Serve(s.tcpServer.GrpcListener())
-	})
-	eg.Go(func() error {
-		<-egCtx.Done()
-		grpcServer.Stop()
-		return nil
+	wg.Go(func() error {
+		return s.tcpServer.Run(cctx)
 	})
 
-	eg.Go(func() error {
-		return s.capture.Run(egCtx)
-	})
+	conf := config.GetGlobalServerConfig()
 
-	return eg.Wait()
+	if !conf.Debug.EnableDBSorter {
+		wg.Go(func() error {
+			return unified.RunWorkerPool(cctx)
+		})
+	}
+
+	if conf.Debug.EnableNewScheduler {
+		grpcServer := grpc.NewServer(s.grpcService.ServerOptions()...)
+		p2pProto.RegisterCDCPeerToPeerServer(grpcServer, s.grpcService)
+
+		wg.Go(func() error {
+			return grpcServer.Serve(s.tcpServer.GrpcListener())
+		})
+		wg.Go(func() error {
+			<-cctx.Done()
+			grpcServer.Stop()
+			return nil
+		})
+	}
+
+	return wg.Wait()
 }
 
 // Drain removes tables in the current TiCDC instance.
@@ -382,7 +435,7 @@ func (s *server) Drain() <-chan struct{} {
 
 // Close closes the server.
 func (s *server) Close() {
-	s.closeSortEngineFactory()
+	s.stopActorSystems()
 
 	if s.capture != nil {
 		s.capture.AsyncClose()
@@ -407,13 +460,25 @@ func (s *server) Close() {
 	}
 }
 
-func (s *server) closeSortEngineFactory() {
+func (s *server) stopActorSystems() {
 	start := time.Now()
-	if s.sortEngineFactory != nil {
+	if s.tableActorSystem != nil {
+		s.tableActorSystem.Stop()
+		s.tableActorSystem = nil
+	}
+	log.Info("table actor system closed", zap.Duration("duration", time.Since(start)))
+
+	start = time.Now()
+	if s.useEventSortEngine && s.sortEngineFactory != nil {
 		if err := s.sortEngineFactory.Close(); err != nil {
 			log.Error("fails to close sort engine manager", zap.Error(err))
 		}
 		log.Info("sort engine manager closed", zap.Duration("duration", time.Since(start)))
+	}
+	if !s.useEventSortEngine && s.sorterSystem != nil {
+		s.sorterSystem.Stop()
+		s.sorterSystem = nil
+		log.Info("sorter actor system closed", zap.Duration("duration", time.Since(start)))
 	}
 }
 

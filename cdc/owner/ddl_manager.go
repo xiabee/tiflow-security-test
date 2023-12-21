@@ -447,7 +447,6 @@ func (m *ddlManager) getAllTableNextDDL() []*model.DDLEvent {
 // barrier returns ddlResolvedTs and tableBarrier
 func (m *ddlManager) barrier() *schedulepb.BarrierWithMinTs {
 	barrier := schedulepb.NewBarrierWithMinTs(m.ddlResolvedTs)
-
 	tableBarrierMap := make(map[model.TableID]model.Ts)
 	ddls := m.getAllTableNextDDL()
 	if m.justSentDDL != nil {

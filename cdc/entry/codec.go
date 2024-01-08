@@ -18,12 +18,12 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/tablecodec"
-	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/rowcodec"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/tablecodec"
+	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
@@ -164,16 +164,19 @@ func decodeMetaKey(ek []byte) (meta, error) {
 	return nil, cerror.ErrUnknownMetaType.GenWithStackByArgs(rawTp)
 }
 
-// decodeRow decodes a byte slice into datums with a existing row map.
+// decodeRow decodes a byte slice into datums with an existing row map.
 func decodeRow(b []byte, recordID kv.Handle, tableInfo *model.TableInfo, tz *time.Location) (map[int64]types.Datum, error) {
 	if len(b) == 0 {
 		return map[int64]types.Datum{}, nil
 	}
 	handleColIDs, handleColFt, reqCols := tableInfo.GetRowColInfos()
-	var datums map[int64]types.Datum
-	var err error
+	var (
+		datums map[int64]types.Datum
+		err    error
+	)
 	if rowcodec.IsNewFormat(b) {
-		datums, err = decodeRowV2(b, reqCols, tz)
+		encoder := rowcodec.NewDatumMapDecoder(reqCols, tz)
+		datums, err = decodeRowV2(encoder, b)
 	} else {
 		datums, err = decodeRowV1(b, tableInfo, tz)
 	}
@@ -234,8 +237,9 @@ func decodeRowV1(b []byte, tableInfo *model.TableInfo, tz *time.Location) (map[i
 // Ref: https://github.com/pingcap/tidb/pull/12634
 //
 //	https://github.com/pingcap/tidb/blob/master/docs/design/2018-07-19-row-format.md
-func decodeRowV2(data []byte, columns []rowcodec.ColInfo, tz *time.Location) (map[int64]types.Datum, error) {
-	decoder := rowcodec.NewDatumMapDecoder(columns, tz)
+func decodeRowV2(
+	decoder *rowcodec.DatumMapDecoder, data []byte,
+) (map[int64]types.Datum, error) {
 	datums, err := decoder.DecodeToDatumMap(data, nil)
 	if err != nil {
 		return datums, cerror.WrapError(cerror.ErrDecodeRowToDatum, err)

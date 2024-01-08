@@ -18,8 +18,8 @@ import (
 	"strings"
 
 	"github.com/pingcap/failpoint"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/sessionctx"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
@@ -108,16 +108,17 @@ func NewRowChange(
 		sourceTableInfo: sourceTableInfo,
 	}
 
-	if preValues != nil && len(preValues) != len(sourceTableInfo.Columns) {
+	colCount := ret.ColumnCount()
+	if preValues != nil && len(preValues) != colCount {
 		log.L().DPanic("preValues length not equal to sourceTableInfo columns",
 			zap.Int("preValues", len(preValues)),
-			zap.Int("sourceTableInfo", len(sourceTableInfo.Columns)),
+			zap.Int("sourceTableInfo", colCount),
 			zap.Stringer("sourceTable", sourceTable))
 	}
-	if postValues != nil && len(postValues) != len(sourceTableInfo.Columns) {
+	if postValues != nil && len(postValues) != colCount {
 		log.L().DPanic("postValues length not equal to sourceTableInfo columns",
 			zap.Int("postValues", len(postValues)),
-			zap.Int("sourceTableInfo", len(sourceTableInfo.Columns)),
+			zap.Int("sourceTableInfo", colCount),
 			zap.Stringer("sourceTable", sourceTable))
 	}
 
@@ -176,8 +177,16 @@ func (r *RowChange) TargetTableID() string {
 }
 
 // ColumnCount returns the number of columns of this RowChange.
+// TiDB TableInfo contains some internal columns like expression index, they
+// are not included in this count.
 func (r *RowChange) ColumnCount() int {
-	return len(r.sourceTableInfo.Columns)
+	c := 0
+	for _, col := range r.sourceTableInfo.Columns {
+		if !col.Hidden {
+			c++
+		}
+	}
+	return c
 }
 
 // SourceTableInfo returns the TableInfo of source table.
@@ -298,10 +307,12 @@ func (r *RowChange) genUpdateSQL() (string, []interface{}) {
 	buf.WriteString(r.targetTable.QuoteString())
 	buf.WriteString(" SET ")
 
+	// Build target generated columns lower names set to accelerate following check
+	generatedColumns := generatedColumnsNameSet(r.targetTableInfo.Columns)
 	args := make([]interface{}, 0, len(r.preValues)+len(r.postValues))
 	writtenFirstCol := false
 	for i, col := range r.sourceTableInfo.Columns {
-		if isGenerated(r.targetTableInfo.Columns, col.Name) {
+		if _, ok := generatedColumns[col.Name.L]; ok {
 			continue
 		}
 

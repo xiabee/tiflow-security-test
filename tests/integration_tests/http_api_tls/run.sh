@@ -11,8 +11,8 @@ TLS_DIR=$(cd $CUR/../_certificates && pwd)
 MAX_RETRIES=20
 
 function run() {
-	# mysql and kafka are the same
-	if [ "$SINK_TYPE" == "kafka" ]; then
+	# storage and kafka are the same as mysql
+	if [ "$SINK_TYPE" != "mysql" ]; then
 		return
 	fi
 
@@ -68,6 +68,7 @@ function run() {
 	ensure $MAX_RETRIES check_changefeed_state "https://${TLS_PD_HOST}:${TLS_PD_PORT}" "changefeed-test1" "normal" "null" ${TLS_DIR}
 	ensure $MAX_RETRIES check_changefeed_state "https://${TLS_PD_HOST}:${TLS_PD_PORT}" "changefeed-test2" "normal" "null" ${TLS_DIR}
 	ensure $MAX_RETRIES check_changefeed_state "https://${TLS_PD_HOST}:${TLS_PD_PORT}" "changefeed-test3" "normal" "null" ${TLS_DIR}
+	ensure $MAX_RETRIES check_changefeed_state "https://${TLS_PD_HOST}:${TLS_PD_PORT}" "changefeed-test4" "normal" "null" ${TLS_DIR}
 
 	# test processor query with no attached tables
 	#TODO: comment this test temporary
@@ -120,11 +121,13 @@ function run() {
 		"get_tso"
 		"verify_table"
 		"create_changefeed_v2"
+		"delete_changefeed_v2"
 		"unsafe_apis"
 	)
 
 	for case in ${sequential_cases[@]}; do
 		python3 $CUR/util/test_case.py "$case" $TLS_DIR
+		sleep 1
 	done
 
 	cleanup_process $CDC_BINARY

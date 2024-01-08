@@ -26,10 +26,10 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	. "github.com/pingcap/check"
 	"github.com/pingcap/log"
-	tidbddl "github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/util/dbutil"
-	"github.com/pingcap/tidb/util/filter"
+	tidbddl "github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/util/dbutil"
+	"github.com/pingcap/tidb/pkg/util/filter"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
@@ -39,7 +39,6 @@ import (
 	dlog "github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/retry"
 	"github.com/pingcap/tiflow/dm/pkg/schema"
-	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zapcore"
@@ -122,7 +121,7 @@ func (s *testCheckpointSuite) TestCheckPoint(c *C) {
 
 	dbConn, err := db.Conn(tcontext.Background().Context())
 	c.Assert(err, IsNil)
-	conn := dbconn.NewDBConn(s.cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
+	conn := dbconn.NewDBConn(s.cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
 	cp.(*RemoteCheckPoint).dbConn = conn
 	err = cp.(*RemoteCheckPoint).prepare(tctx)
 	c.Assert(err, IsNil)
@@ -496,7 +495,7 @@ func TestRemoteCheckPointLoadIntoSchemaTracker(t *testing.T) {
 	require.NoError(t, err)
 	dbConn, err := db.Conn(ctx)
 	require.NoError(t, err)
-	downstreamTrackConn := dbconn.NewDBConn(cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
+	downstreamTrackConn := dbconn.NewDBConn(cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
 	schemaTracker, err := schema.NewTestTracker(ctx, cfg.Name, downstreamTrackConn, dlog.L())
 	require.NoError(t, err)
 	defer schemaTracker.Close() //nolint
@@ -513,7 +512,7 @@ func TestRemoteCheckPointLoadIntoSchemaTracker(t *testing.T) {
 	cp := NewRemoteCheckPoint(tcontext.Background(), cfg, nil, "1")
 	checkpoint := cp.(*RemoteCheckPoint)
 
-	parser, err := utils.GetParserFromSQLModeStr("")
+	parser, err := conn.GetParserFromSQLModeStr("")
 	require.NoError(t, err)
 	createNode, err := parser.ParseOneStmt("create table tbl1(id int)", "", "")
 	require.NoError(t, err)

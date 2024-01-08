@@ -14,8 +14,8 @@
 package filter
 
 import (
-	timodel "github.com/pingcap/tidb/parser/model"
-	tfilter "github.com/pingcap/tidb/util/table-filter"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	tfilter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 )
@@ -54,6 +54,11 @@ var allowDDLList = []timodel.ActionType{
 	timodel.ActionAlterIndexVisibility,
 	timodel.ActionMultiSchemaChange,
 	timodel.ActionExchangeTablePartition,
+	timodel.ActionReorganizePartition,
+	timodel.ActionAlterTTLInfo,
+	timodel.ActionAlterTTLRemove,
+	timodel.ActionAlterTablePartitioning,
+	timodel.ActionRemovePartitioning,
 }
 
 // Filter are safe for concurrent use.

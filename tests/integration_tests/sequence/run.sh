@@ -9,8 +9,8 @@ CDC_BINARY=cdc.test
 SINK_TYPE=$1
 
 function run() {
-	# No need to test kafka.
-	if [ "$SINK_TYPE" == "kafka" ]; then
+	# No need to test kafka and storage sink.
+	if [ "$SINK_TYPE" != "mysql" ]; then
 		return
 	fi
 

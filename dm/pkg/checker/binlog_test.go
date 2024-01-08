@@ -17,7 +17,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/pkg/util/dbutil"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/stretchr/testify/require"
 )
@@ -116,7 +116,7 @@ func TestBinlogDB(t *testing.T) {
 	}
 
 	for _, cs := range cases {
-		binlogDBChecker := NewBinlogDBChecker(conn.NewBaseDB(db), &dbutil.DBConfig{}, cs.schemas, cs.caseSensitive)
+		binlogDBChecker := NewBinlogDBChecker(conn.NewBaseDBForTest(db), &dbutil.DBConfig{}, cs.schemas, cs.caseSensitive)
 		versionRow := sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("version", "mysql")
 		masterStatusRow := sqlmock.NewRows([]string{"File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set"}).
 			AddRow("", 0, cs.doDB, cs.ignoreDB, "")

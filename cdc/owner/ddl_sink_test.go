@@ -22,7 +22,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/sink/ddlsink"
+	"github.com/pingcap/tiflow/cdc/sink"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/retry"
@@ -30,14 +30,19 @@ import (
 )
 
 type mockSink struct {
-	ddlsink.Sink
+	sink.Sink
 	checkpointTs model.Ts
 	ddl          *model.DDLEvent
 	ddlMu        sync.Mutex
 	ddlError     error
 }
 
-func (m *mockSink) WriteDDLEvent(ctx context.Context, ddl *model.DDLEvent) error {
+func (m *mockSink) EmitCheckpointTs(_ context.Context, ts uint64, _ []*model.TableInfo) error {
+	atomic.StoreUint64(&m.checkpointTs, ts)
+	return nil
+}
+
+func (m *mockSink) EmitDDLEvent(ctx context.Context, ddl *model.DDLEvent) error {
 	m.ddlMu.Lock()
 	defer m.ddlMu.Unlock()
 	time.Sleep(1 * time.Second)
@@ -45,14 +50,13 @@ func (m *mockSink) WriteDDLEvent(ctx context.Context, ddl *model.DDLEvent) error
 	return m.ddlError
 }
 
-func (m *mockSink) WriteCheckpointTs(ctx context.Context,
-	ts uint64, tables []*model.TableInfo,
-) error {
-	atomic.StoreUint64(&m.checkpointTs, ts)
+func (m *mockSink) Close(ctx context.Context) error {
 	return nil
 }
 
-func (m *mockSink) Close() {}
+func (m *mockSink) Barrier(ctx context.Context, tableID model.TableID) error {
+	return nil
+}
 
 func (m *mockSink) GetDDL() *model.DDLEvent {
 	m.ddlMu.Lock()
@@ -62,15 +66,12 @@ func (m *mockSink) GetDDL() *model.DDLEvent {
 
 func newDDLSink4Test(reportErr func(err error), reportWarn func(err error)) (DDLSink, *mockSink) {
 	mockSink := &mockSink{}
-	ddlSink := newDDLSink(
-		model.DefaultChangeFeedID("changefeed-test"),
+	ddlSink := newDDLSink(model.DefaultChangeFeedID("changefeed-test"),
 		&model.ChangeFeedInfo{
 			Config: config.GetDefaultReplicaConfig(),
-		},
-		reportErr,
-		reportWarn)
+		}, reportErr, reportWarn)
 	ddlSink.(*ddlSinkImpl).sinkInitHandler = func(ctx context.Context, s *ddlSinkImpl) error {
-		s.sink = mockSink
+		s.sinkV1 = mockSink
 		return nil
 	}
 	return ddlSink, mockSink
@@ -487,68 +488,6 @@ func TestAddSpecialComment(t *testing.T) {
 			},
 			result: "",
 		},
-		{
-			event: &model.DDLEvent{
-				Query: "CREATE TABLE t1(t datetime) TTL=`t` + INTERVAL 1 DAY",
-			},
-			result: "CREATE TABLE `t1` (`t` DATETIME) " +
-				"/*T![ttl] TTL = `t` + INTERVAL 1 DAY */ /*T![ttl] TTL_ENABLE = 'OFF' */",
-		},
-		{
-			event: &model.DDLEvent{
-				Query: "CREATE TABLE t1(t datetime) TTL=`t` + INTERVAL 1 DAY TTL_ENABLE='ON'",
-			},
-			result: "CREATE TABLE `t1` (`t` DATETIME) " +
-				"/*T![ttl] TTL = `t` + INTERVAL 1 DAY */ /*T![ttl] TTL_ENABLE = 'OFF' */",
-		},
-		{
-			event: &model.DDLEvent{
-				Query: "ALTER TABLE t1 TTL=`t` + INTERVAL 1 DAY",
-			},
-			result: "ALTER TABLE `t1` " +
-				"/*T![ttl] TTL = `t` + INTERVAL 1 DAY */ /*T![ttl] TTL_ENABLE = 'OFF' */",
-		},
-		{
-			event: &model.DDLEvent{
-				Query: "ALTER TABLE t1 TTL=`t` + INTERVAL 1 DAY TTL_ENABLE='ON'",
-			},
-			result: "ALTER TABLE `t1` " +
-				"/*T![ttl] TTL = `t` + INTERVAL 1 DAY */ /*T![ttl] TTL_ENABLE = 'OFF' */",
-		},
-		{
-			event: &model.DDLEvent{
-				Query: "ALTER TABLE t1 TTL_ENABLE='ON'",
-			},
-			result: "ALTER TABLE `t1`",
-		},
-		{
-			event: &model.DDLEvent{
-				Query: "ALTER TABLE t1 TTL_ENABLE='OFF'",
-			},
-			result: "ALTER TABLE `t1`",
-		},
-		{
-			event: &model.DDLEvent{
-				Query: "ALTER TABLE t1 TTL_JOB_INTERVAL='7h'",
-			},
-			result: "ALTER TABLE `t1` /*T![ttl] TTL_JOB_INTERVAL = '7h' */",
-		},
-		{
-			event: &model.DDLEvent{
-				Query:   "alter table t add index j((cast(j->'$.number[*]' as signed array)))",
-				Charset: "utf8",
-				Collate: "utf8_bin",
-			},
-			result: "ALTER TABLE `t` ADD INDEX `j`((CAST(JSON_EXTRACT(`j`, _UTF8'$.number[*]') " +
-				"AS SIGNED ARRAY)))",
-		},
-		{
-			event: &model.DDLEvent{
-				Query: "alter table t add index j((cast(j->'$.number[*]' as signed array)))",
-			},
-			result: "ALTER TABLE `t` ADD INDEX `j`((CAST(JSON_EXTRACT(`j`, _UTF8MB4'$.number[*]') " +
-				"AS SIGNED ARRAY)))",
-		},
 	}
 
 	s := &ddlSinkImpl{}
@@ -560,9 +499,10 @@ func TestAddSpecialComment(t *testing.T) {
 		require.Nil(t, err)
 		require.Equal(t, ca.result, re)
 	}
-	_, err := s.addSpecialComment(&model.DDLEvent{
-		Query: "alter table t force, auto_increment = 12;alter table t force, " +
-			"auto_increment = 12;",
-	})
-	require.NotNil(t, err)
+	require.Panics(t, func() {
+		_, _ = s.addSpecialComment(&model.DDLEvent{
+			Query: "alter table t force, auto_increment = 12;alter table t force, " +
+				"auto_increment = 12;",
+		})
+	}, "invalid ddlQuery statement size")
 }

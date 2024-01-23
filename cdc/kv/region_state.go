@@ -17,8 +17,7 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/pingcap/tiflow/cdc/kv/regionlock"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/tikv/client-go/v2/tikv"
 )
 
@@ -33,16 +32,15 @@ const (
 
 type singleRegionInfo struct {
 	verID  tikv.RegionVerID
-	span   tablepb.Span
+	span   regionspan.ComparableSpan
 	rpcCtx *tikv.RPCContext
 
-	requestedTable *requestedTable
-	lockedRange    *regionlock.LockedRange
+	lockedRange *regionspan.LockedRange
 }
 
 func newSingleRegionInfo(
 	verID tikv.RegionVerID,
-	span tablepb.Span,
+	span regionspan.ComparableSpan,
 	rpcCtx *tikv.RPCContext,
 ) singleRegionInfo {
 	return singleRegionInfo{
@@ -69,9 +67,6 @@ type regionFeedState struct {
 	state struct {
 		sync.RWMutex
 		v uint32
-		// All region errors should be handled in region workers.
-		// `err` is used to retrieve errors generated outside.
-		err error
 	}
 }
 
@@ -86,39 +81,19 @@ func (s *regionFeedState) start() {
 	s.matcher = newMatcher()
 }
 
-// mark regionFeedState as stopped with the given error if possible.
-func (s *regionFeedState) markStopped(err error) {
+// mark regionFeedState as stopped.
+func (s *regionFeedState) markStopped() {
 	s.state.Lock()
 	defer s.state.Unlock()
 	if s.state.v == stateNormal {
 		s.state.v = stateStopped
-		s.state.err = err
 	}
-}
-
-// mark regionFeedState as removed if possible.
-func (s *regionFeedState) markRemoved() (changed bool) {
-	s.state.Lock()
-	defer s.state.Unlock()
-	if s.state.v == stateStopped {
-		s.state.v = stateRemoved
-		changed = true
-	}
-	return
 }
 
 func (s *regionFeedState) isStale() bool {
 	s.state.RLock()
 	defer s.state.RUnlock()
 	return s.state.v == stateStopped || s.state.v == stateRemoved
-}
-
-func (s *regionFeedState) takeError() (err error) {
-	s.state.Lock()
-	defer s.state.Unlock()
-	err = s.state.err
-	s.state.err = nil
-	return
 }
 
 func (s *regionFeedState) isInitialized() bool {
@@ -149,21 +124,13 @@ func (s *regionFeedState) updateResolvedTs(resolvedTs uint64) {
 			break
 		}
 	}
-	if s.sri.requestedTable != nil {
-		s.sri.requestedTable.postUpdateRegionResolvedTs(
-			s.sri.verID.GetID(),
-			s.sri.verID.GetVer(),
-			state,
-			s.sri.span,
-		)
-	}
 }
 
 func (s *regionFeedState) getRegionInfo() singleRegionInfo {
 	return s.sri
 }
 
-func (s *regionFeedState) getRegionMeta() (uint64, tablepb.Span, string) {
+func (s *regionFeedState) getRegionMeta() (uint64, regionspan.ComparableSpan, string) {
 	return s.sri.verID.GetID(), s.sri.span, s.sri.rpcCtx.Addr
 }
 

@@ -14,20 +14,24 @@
 package conn
 
 import (
-	"context"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	gmysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/dumpling/export"
-	tmysql "github.com/pingcap/tidb/pkg/parser/mysql"
+	tmysql "github.com/pingcap/tidb/parser/mysql"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"go.uber.org/zap"
+)
+
+const (
+	// DefaultDBTimeout represents a DB operation timeout for common usages.
+	DefaultDBTimeout = 30 * time.Second
 )
 
 // GetGlobalVariable gets server's global variable.
@@ -45,15 +49,16 @@ func GetGlobalVariable(ctx *tcontext.Context, db *BaseDB, variable string) (valu
 		if variable == variableName {
 			err = tmysql.NewErr(uint16(errCode))
 			ctx.L().Warn("GetGlobalVariable failed", zap.String("variable", variable), zap.String("failpoint", "GetGlobalVariableFailed"), zap.Error(err))
-			failpoint.Return("", terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError))
+			failpoint.Return("", terror.DBErrorAdapt(err, terror.ErrDBDriverError))
 		}
 	})
 
 	conn, err := db.GetBaseConn(ctx.Context())
 	if err != nil {
-		return "", err
+		return "", terror.DBErrorAdapt(err, terror.ErrDBDriverError)
 	}
-	defer db.CloseConnWithoutErr(conn)
+	// nolint:errcheck
+	defer db.CloseBaseConn(conn)
 	return getVariable(ctx, conn, variable, true)
 }
 
@@ -69,10 +74,7 @@ func getVariable(ctx *tcontext.Context, conn *BaseConn, variable string, isGloba
 	if err != nil {
 		return "", err
 	}
-	defer func() {
-		_ = row.Close()
-		_ = row.Err()
-	}()
+	defer row.Close()
 
 	// Show an example.
 	/*
@@ -85,12 +87,12 @@ func getVariable(ctx *tcontext.Context, conn *BaseConn, variable string, isGloba
 	*/
 
 	if !row.Next() {
-		return "", terror.WithScope(terror.ErrDBDriverError.Generatef("variable %s not found", variable), conn.Scope)
+		return "", terror.ErrDBDriverError.Generatef("variable %s not found", variable)
 	}
 
 	err = row.Scan(&variable, &value)
 	if err != nil {
-		return "", terror.DBErrorAdapt(err, conn.Scope, terror.ErrDBDriverError)
+		return "", terror.DBErrorAdapt(err, terror.ErrDBDriverError)
 	}
 	return value, nil
 }
@@ -98,11 +100,11 @@ func getVariable(ctx *tcontext.Context, conn *BaseConn, variable string, isGloba
 // GetMasterStatus gets status from master.
 // When the returned error is nil, the gtid must be not nil.
 func GetMasterStatus(ctx *tcontext.Context, db *BaseDB, flavor string) (
-	string, uint64, string, string, string, error,
+	string, uint32, string, string, string, error,
 ) {
 	var (
 		binlogName     string
-		pos            uint64
+		pos            uint32
 		binlogDoDB     string
 		binlogIgnoreDB string
 		gtidStr        string
@@ -111,7 +113,7 @@ func GetMasterStatus(ctx *tcontext.Context, db *BaseDB, flavor string) (
 	// need REPLICATION SLAVE privilege
 	rows, err := db.QueryContext(ctx, `SHOW MASTER STATUS`)
 	if err != nil {
-		err = terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
+		err = terror.DBErrorAdapt(err, terror.ErrDBDriverError)
 		return binlogName, pos, binlogDoDB, binlogIgnoreDB, gtidStr, err
 	}
 	defer rows.Close()
@@ -144,7 +146,7 @@ func GetMasterStatus(ctx *tcontext.Context, db *BaseDB, flavor string) (
 	if flavor == gmysql.MySQLFlavor {
 		rowsResult, err = export.GetSpecifiedColumnValuesAndClose(rows, "File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB", "Executed_Gtid_Set")
 		if err != nil {
-			err = terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
+			err = terror.DBErrorAdapt(err, terror.ErrDBDriverError)
 			return binlogName, pos, binlogDoDB, binlogIgnoreDB, gtidStr, err
 		}
 
@@ -158,13 +160,13 @@ func GetMasterStatus(ctx *tcontext.Context, db *BaseDB, flavor string) (
 			return binlogName, pos, binlogDoDB, binlogIgnoreDB, gtidStr, err
 		default:
 			binlogName = rowsResult[0][0]
-			var posInt uint64
-			posInt, err = strconv.ParseUint(rowsResult[0][1], 10, 64)
+			var posInt int64
+			posInt, err = strconv.ParseInt(rowsResult[0][1], 10, 64)
 			if err != nil {
-				err = terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
+				err = terror.DBErrorAdapt(err, terror.ErrDBDriverError)
 				return binlogName, pos, binlogDoDB, binlogIgnoreDB, gtidStr, err
 			}
-			pos = posInt
+			pos = uint32(posInt)
 			binlogDoDB = rowsResult[0][2]
 			binlogIgnoreDB = rowsResult[0][3]
 			gtidStr = rowsResult[0][4]
@@ -172,7 +174,7 @@ func GetMasterStatus(ctx *tcontext.Context, db *BaseDB, flavor string) (
 	} else {
 		rowsResult, err = export.GetSpecifiedColumnValuesAndClose(rows, "File", "Position", "Binlog_Do_DB", "Binlog_Ignore_DB")
 		if err != nil {
-			err = terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
+			err = terror.DBErrorAdapt(err, terror.ErrDBDriverError)
 			return binlogName, pos, binlogDoDB, binlogIgnoreDB, gtidStr, err
 		}
 
@@ -186,13 +188,13 @@ func GetMasterStatus(ctx *tcontext.Context, db *BaseDB, flavor string) (
 			return binlogName, pos, binlogDoDB, binlogIgnoreDB, gtidStr, err
 		default:
 			binlogName = rowsResult[0][0]
-			var posInt uint64
-			posInt, err = strconv.ParseUint(rowsResult[0][1], 10, 64)
+			var posInt int64
+			posInt, err = strconv.ParseInt(rowsResult[0][1], 10, 64)
 			if err != nil {
-				err = terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
+				err = terror.DBErrorAdapt(err, terror.ErrDBDriverError)
 				return binlogName, pos, binlogDoDB, binlogIgnoreDB, gtidStr, err
 			}
-			pos = posInt
+			pos = uint32(posInt)
 			binlogDoDB = rowsResult[0][2]
 			binlogIgnoreDB = rowsResult[0][3]
 		}
@@ -209,11 +211,11 @@ func GetMasterStatus(ctx *tcontext.Context, db *BaseDB, flavor string) (
 		ctx.L().Warn("SHOW MASTER STATUS returns more than one row, will only use first row")
 	}
 	if rows.Close() != nil {
-		err = terror.DBErrorAdapt(rows.Err(), db.Scope, terror.ErrDBDriverError)
+		err = terror.DBErrorAdapt(rows.Err(), terror.ErrDBDriverError)
 		return binlogName, pos, binlogDoDB, binlogIgnoreDB, gtidStr, err
 	}
 	if rows.Err() != nil {
-		err = terror.DBErrorAdapt(rows.Err(), db.Scope, terror.ErrDBDriverError)
+		err = terror.DBErrorAdapt(rows.Err(), terror.ErrDBDriverError)
 		return binlogName, pos, binlogDoDB, binlogIgnoreDB, gtidStr, err
 	}
 
@@ -230,12 +232,9 @@ func GetPosAndGs(ctx *tcontext.Context, db *BaseDB, flavor string) (
 	if err != nil {
 		return
 	}
-	if pos > math.MaxUint32 {
-		ctx.L().Warn("the pos returned by GetMasterStatus beyonds the range of uint32")
-	}
 	binlogPos = gmysql.Position{
 		Name: binlogName,
-		Pos:  uint32(pos),
+		Pos:  pos,
 	}
 
 	gs, err = gtid.ParserGTID(flavor, gtidStr)
@@ -247,63 +246,4 @@ func GetBinlogDB(ctx *tcontext.Context, db *BaseDB, flavor string) (string, stri
 	// nolint:dogsled
 	_, _, binlogDoDB, binlogIgnoreDB, _, err := GetMasterStatus(ctx, db, flavor)
 	return binlogDoDB, binlogIgnoreDB, err
-}
-
-// LowerCaseTableNamesFlavor represents the type of db `lower_case_table_names` settings.
-type LowerCaseTableNamesFlavor uint8
-
-const (
-	// LCTableNamesSensitive represent lower_case_table_names = 0, case sensitive.
-	LCTableNamesSensitive LowerCaseTableNamesFlavor = 0
-	// LCTableNamesInsensitive represent lower_case_table_names = 1, case insensitive.
-	LCTableNamesInsensitive = 1
-	// LCTableNamesMixed represent lower_case_table_names = 2, table names are case-sensitive, but case-insensitive in usage.
-	LCTableNamesMixed = 2
-)
-
-// GetDBCaseSensitive returns the case-sensitive setting of target db.
-func GetDBCaseSensitive(ctx context.Context, db *BaseDB) (bool, error) {
-	conn, err := db.GetBaseConn(ctx)
-	if err != nil {
-		return true, terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
-	}
-	defer db.CloseConnWithoutErr(conn)
-	lcFlavor, err := FetchLowerCaseTableNamesSetting(ctx, conn)
-	if err != nil {
-		return true, err
-	}
-	return lcFlavor == LCTableNamesSensitive, nil
-}
-
-// FetchLowerCaseTableNamesSetting return the `lower_case_table_names` setting of target db.
-func FetchLowerCaseTableNamesSetting(ctx context.Context, conn *BaseConn) (LowerCaseTableNamesFlavor, error) {
-	query := "SELECT @@lower_case_table_names;"
-	row := conn.DBConn.QueryRowContext(ctx, query)
-	if row.Err() != nil {
-		return LCTableNamesSensitive, terror.ErrDBExecuteFailed.Delegate(row.Err(), query)
-	}
-	var res uint8
-	if err := row.Scan(&res); err != nil {
-		return LCTableNamesSensitive, terror.ErrDBExecuteFailed.Delegate(err, query)
-	}
-	if res > LCTableNamesMixed {
-		return LCTableNamesSensitive, terror.ErrDBUnExpect.Generate(fmt.Sprintf("invalid `lower_case_table_names` value '%d'", res))
-	}
-	return LowerCaseTableNamesFlavor(res), nil
-}
-
-// FetchTableEstimatedBytes returns the estimated size (data + index) in bytes of the table.
-func FetchTableEstimatedBytes(ctx context.Context, db *BaseDB, schema string, table string) (int64, error) {
-	failpoint.Inject("VeryLargeTable", func(val failpoint.Value) {
-		tblName := val.(string)
-		if tblName == table {
-			failpoint.Return(1<<62, nil)
-		}
-	})
-	var size int64
-	err := db.DB.QueryRowContext(ctx, "SELECT data_length + index_length FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?", schema, table).Scan(&size)
-	if err != nil {
-		return 0, terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
-	}
-	return size, nil
 }

@@ -178,8 +178,8 @@ function run_case_with_unavailable_tikv() {
 	info=$(echo $synced_status | jq -r '.info')
 	target_message="Please check whether PD is online and TiKV Regions are all available. \
 If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. \
-To check whether TiKV regions are all available, you can view \
-'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. \
+To check whether TiKV regions are all available, \
+you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. \
 If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. \
 Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait"
 
@@ -211,7 +211,7 @@ function run_case_with_unavailable_tidb() {
 	run_sql "USE TEST;Create table t1(a int primary key, b int);insert into t1 values(1,2);insert into t1 values(2,3);"
 	check_table_exists "test.t1" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 
-	sleep 5 # make data inserted into downstream
+	sleep 5 # make data insert into downstream
 	kill_tidb
 
 	# test the case when pdNow - lastSyncedTs < threshold
@@ -277,8 +277,8 @@ function run_case_with_failpoint() {
 	info=$(echo $synced_status | jq -r '.info')
 	target_message="Please check whether PD is online and TiKV Regions are all available. \
 If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. \
-To check whether TiKV regions are all available, you can view \
-'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. \
+To check whether TiKV regions are all available, \
+you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. \
 If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. \
 Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait"
 	if [ "$info" != "$target_message" ]; then

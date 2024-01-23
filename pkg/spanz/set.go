@@ -17,13 +17,13 @@ import "github.com/pingcap/tiflow/cdc/processor/tablepb"
 
 // Set maintains a set of Span.
 type Set struct {
-	memo *BtreeMap[struct{}]
+	memo *Map[struct{}]
 }
 
 // NewSet creates a Set.
 func NewSet() *Set {
 	return &Set{
-		memo: NewBtreeMap[struct{}](),
+		memo: NewMap[struct{}](),
 	}
 }
 

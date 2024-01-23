@@ -9,7 +9,9 @@ CDC_BINARY=cdc.test
 SINK_TYPE=$1
 
 function run() {
-	if [ "$SINK_TYPE" != "storage" ]; then
+	# Now, we run the storage tests in mysql sink tests.
+	# It's a temporary solution, we will move it to a new test pipeline later.
+	if [ "$SINK_TYPE" != "mysql" ]; then
 		return
 	fi
 

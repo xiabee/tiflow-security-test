@@ -33,7 +33,7 @@ const itemLayout = {
 const createPattern = (name: string[]) => {
   if (name.length === 0) return '*'
   if (name.length === 1) return name[0]
-  return '~' + name.map(i => `^${i}$`).join('|')
+  return '~' + name.join('|')
 }
 
 const MigrateRule: StepCompnent = ({ prev, initialValues }) => {

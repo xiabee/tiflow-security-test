@@ -9,6 +9,10 @@ CDC_BINARY=cdc.test
 SINK_TYPE=$1
 
 function prepare() {
+	if [ "$SINK_TYPE" == "kafka" ]; then
+		return
+	fi
+
 	rm -rf $WORK_DIR && mkdir -p $WORK_DIR
 
 	start_tidb_cluster --workdir $WORK_DIR
@@ -25,8 +29,8 @@ function prepare() {
 }
 
 trap stop_tidb_cluster EXIT
-# kafka and storage is not supported yet.
-if [ "$SINK_TYPE" == "mysql" ]; then
+# kafka is not supported yet.
+if [ "$SINK_TYPE" != "kafka" ]; then
 	prepare $*
 
 	cd "$(dirname "$0")"

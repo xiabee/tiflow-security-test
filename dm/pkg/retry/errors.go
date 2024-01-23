@@ -19,7 +19,7 @@ import (
 	gmysql "github.com/go-mysql-org/go-mysql/mysql"
 	dmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
-	tmysql "github.com/pingcap/tidb/pkg/parser/mysql"
+	tmysql "github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 )
 
@@ -37,17 +37,17 @@ var (
 		"Unsupported collation",
 		"Invalid default value for",
 		"Unsupported drop primary key",
-		"Error 1059", // Identifier name '%s' is too long
-		"Error 1117", // Too many columns
-		"Error 1069", // Too many keys specified
+		"Error 1059: Identifier name", // Limitations on identifier length
+		"Error 1117: Too many columns",
+		"Error 1069: Too many keys specified",
 	}
 
 	// UnsupportedDMLMsgs list the error messages of some un-recoverable DML, which is used in task auto recovery.
 	UnsupportedDMLMsgs = []string{
-		"Error 1062", // Duplicate entry
-		"Error 1406", // Data too long for column
+		"Error 1062: Duplicate",
+		"Error 1406: Data too long for column",
 		"Error 1366", // Incorrect %s value: '%s' for column '%s' at row %d
-		"Error 8025", // entry too large
+		"Error 8025: entry too large",
 	}
 
 	// ReplicationErrMsgs list the error message of un-recoverable replication error.
@@ -70,8 +70,6 @@ var (
 		int32(terror.ErrSyncerUnitDMLColumnNotMatch.Code()): {},
 		int32(terror.ErrSyncerCancelledDDL.Code()):          {},
 		int32(terror.ErrLoadLightningRuntime.Code()):        {},
-		int32(terror.ErrLoadLightningHasDup.Code()):         {},
-		int32(terror.ErrLoadLightningChecksum.Code()):       {},
 	}
 
 	// UnresumableRelayErrCodes is a set of unresumeable relay unit err codes.

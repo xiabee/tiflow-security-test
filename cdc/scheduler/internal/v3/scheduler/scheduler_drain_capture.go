@@ -19,10 +19,8 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/member"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/replication"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	"go.uber.org/zap"
 )
 
@@ -72,9 +70,9 @@ func (d *drainCaptureScheduler) setTarget(target model.CaptureID) bool {
 
 func (d *drainCaptureScheduler) Schedule(
 	_ model.Ts,
-	_ []tablepb.Span,
+	_ []model.TableID,
 	captures map[model.CaptureID]*member.CaptureStatus,
-	replications *spanz.BtreeMap[*replication.ReplicationSet],
+	replications map[model.TableID]*replication.ReplicationSet,
 ) []*replication.ScheduleTask {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -125,10 +123,9 @@ func (d *drainCaptureScheduler) Schedule(
 	}
 
 	maxTaskConcurrency := d.maxTaskConcurrency
-	// victimSpans record tables should be moved out from the target capture
-	victimSpans := make([]tablepb.Span, 0, maxTaskConcurrency)
-	skipDrain := false
-	replications.Ascend(func(span tablepb.Span, rep *replication.ReplicationSet) bool {
+	// victimTables record tables should be moved out from the target capture
+	victimTables := make([]model.TableID, 0, maxTaskConcurrency)
+	for tableID, rep := range replications {
 		if rep.State != replication.ReplicationSetStateReplicating {
 			// only drain the target capture if all tables is replicating,
 			log.Debug("schedulerv3: drain capture scheduler skip this tick,"+
@@ -137,13 +134,12 @@ func (d *drainCaptureScheduler) Schedule(
 				zap.String("changefeed", d.changefeedID.ID),
 				zap.String("target", d.target),
 				zap.Any("replication", rep))
-			skipDrain = true
-			return false
+			return nil
 		}
 
 		if rep.Primary == d.target {
-			if len(victimSpans) < maxTaskConcurrency {
-				victimSpans = append(victimSpans, span)
+			if len(victimTables) < maxTaskConcurrency {
+				victimTables = append(victimTables, tableID)
 			}
 		}
 
@@ -151,17 +147,13 @@ func (d *drainCaptureScheduler) Schedule(
 		if rep.Primary != d.target {
 			captureWorkload[rep.Primary]++
 		}
-		return true
-	})
-	if skipDrain {
-		return nil
 	}
 
 	// this always indicate that the whole draining process finished, and can be triggered by:
 	// 1. the target capture has no table at the beginning
 	// 2. all tables moved from the target capture
 	// 3. the target capture cannot be found in the latest captures
-	if len(victimSpans) == 0 {
+	if len(victimTables) == 0 {
 		log.Info("schedulerv3: drain capture scheduler finished, since no table",
 			zap.String("namespace", d.changefeedID.Namespace),
 			zap.String("changefeed", d.changefeedID.ID),
@@ -172,7 +164,7 @@ func (d *drainCaptureScheduler) Schedule(
 
 	// For each victim table, find the target for it
 	result := make([]*replication.ScheduleTask, 0, maxTaskConcurrency)
-	for _, span := range victimSpans {
+	for _, tableID := range victimTables {
 		target := ""
 		minWorkload := math.MaxInt64
 		for captureID, workload := range captureWorkload {
@@ -191,7 +183,7 @@ func (d *drainCaptureScheduler) Schedule(
 
 		result = append(result, &replication.ScheduleTask{
 			MoveTable: &replication.MoveTable{
-				Span:        span,
+				TableID:     tableID,
 				DestCapture: target,
 			},
 			Accept: (replication.Callback)(nil), // No need for accept callback here.

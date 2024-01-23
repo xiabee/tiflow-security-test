@@ -20,7 +20,7 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 )
 
-// DM definition checking items. Don't forget to update AllCheckingItems and LightningPrechecks.
+// DM definition checking items.
 const (
 	AllChecking                  = "all"
 	DumpPrivilegeChecking        = "dump_privilege"
@@ -35,15 +35,12 @@ const (
 	ShardAutoIncrementIDChecking = "auto_increment_ID"
 	OnlineDDLChecking            = "online_ddl"
 	BinlogDBChecking             = "binlog_db"
-	MetaPositionChecking         = "meta_position"
 	ConnNumberChecking           = "conn_number"
 	TargetDBPrivilegeChecking    = "target_privilege"
 	// lighting prechecks.
 	LightningEmptyRegionChecking        = "empty_region"
 	LightningRegionDistributionChecking = "region_distribution"
 	LightningDownstreamVersionChecking  = "downstream_version"
-	LightningFreeSpaceChecking          = "free_space"
-	LightningMutexFeatureChecking       = "downstream_mutex_features"
 )
 
 // AllCheckingItems contains all checking items.
@@ -61,24 +58,12 @@ var AllCheckingItems = map[string]string{
 	ShardAutoIncrementIDChecking: "conflict auto increment ID of shard tables checking item",
 	OnlineDDLChecking:            "online ddl checking item",
 	BinlogDBChecking:             "binlog db checking item",
-	MetaPositionChecking:         "meta position valid checking item",
 	ConnNumberChecking:           "connection number checking item",
 	TargetDBPrivilegeChecking:    "privileges of target DB checking item",
 	// lightning prechecks
 	LightningEmptyRegionChecking:        "physical import mode empty region checking item",
 	LightningRegionDistributionChecking: "physical import mode region distribution checking item",
 	LightningDownstreamVersionChecking:  "physical import mode downstream TiDB/PD/TiKV version checking item",
-	LightningFreeSpaceChecking:          "downstream free space checking item",
-	LightningMutexFeatureChecking:       "physical import mode downstream incompatible feature checking item",
-}
-
-// LightningPrechecks returns all checking items for lightning.
-var LightningPrechecks = []string{
-	LightningEmptyRegionChecking,
-	LightningRegionDistributionChecking,
-	LightningDownstreamVersionChecking,
-	LightningFreeSpaceChecking,
-	LightningMutexFeatureChecking,
 }
 
 // MaxSourceIDLength is the max length for dm-worker source id.

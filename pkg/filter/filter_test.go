@@ -17,7 +17,7 @@ import (
 	"testing"
 
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/stretchr/testify/require"
@@ -67,20 +67,6 @@ func TestShouldUseCustomRules(t *testing.T) {
 	require.False(t, filter.ShouldIgnoreTable("other", ""))
 	require.False(t, filter.ShouldIgnoreTable("school", "student"))
 	require.True(t, filter.ShouldIgnoreTable("school", "teacher"))
-	require.Nil(t, err)
-
-	filter, err = NewFilter(&config.ReplicaConfig{
-		Filter: &config.FilterConfig{
-			// 1. match all schema and table
-			// 2. do not match test.season
-			// 3. match all table of schema school
-			// 4. do not match table school.teacher
-			Rules: []string{"*.*", "!test.t1", "!test.t2"},
-		},
-	}, "")
-	require.False(t, filter.ShouldIgnoreTable("test", "season"))
-	require.True(t, filter.ShouldIgnoreTable("test", "t1"))
-	require.True(t, filter.ShouldIgnoreTable("test", "t2"))
 	require.Nil(t, err)
 }
 

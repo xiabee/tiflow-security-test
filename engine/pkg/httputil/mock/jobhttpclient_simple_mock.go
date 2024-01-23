@@ -13,26 +13,19 @@
 
 package mock
 
-import (
-	"context"
+import context "context"
 
-	"github.com/pingcap/tiflow/engine/pkg/openapi"
-)
-
-// MockNilReturnJobHTTPClient mocks a JobHTTPClient which return (nil, nil)
-//
-//nolint:revive
-type MockNilReturnJobHTTPClient struct{}
+type mockNilReturnJobHTTPClient struct{}
 
 // NewMockNilReturnJobHTTPClient news a JobHTTPClient mocker which return (nil, nil)
-func NewMockNilReturnJobHTTPClient() *MockNilReturnJobHTTPClient {
-	return &MockNilReturnJobHTTPClient{}
+func NewMockNilReturnJobHTTPClient() *mockNilReturnJobHTTPClient {
+	return &mockNilReturnJobHTTPClient{}
 }
 
 // GetJobDetail implements the JobHTTPClient.GetJobDetail
-func (c *MockNilReturnJobHTTPClient) GetJobDetail(ctx context.Context, address string, jobID string) ([]byte, *openapi.HTTPError) {
+func (c *mockNilReturnJobHTTPClient) GetJobDetail(ctx context.Context, address string, jobID string) ([]byte, error) {
 	return nil, nil
 }
 
 // Close implements the JobHTTPClient.Close
-func (c *MockNilReturnJobHTTPClient) Close() {}
+func (c *mockNilReturnJobHTTPClient) Close() {}

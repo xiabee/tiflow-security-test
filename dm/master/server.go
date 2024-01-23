@@ -15,6 +15,7 @@ package master
 
 import (
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math/rand"
@@ -31,14 +32,11 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	toolutils "github.com/pingcap/tidb-tools/pkg/utils"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
+	"github.com/pingcap/tidb/util/dbutil"
 	"github.com/pingcap/tiflow/dm/checker"
 	dmcommon "github.com/pingcap/tiflow/dm/common"
 	"github.com/pingcap/tiflow/dm/config"
-	"github.com/pingcap/tiflow/dm/config/dbconfig"
-	"github.com/pingcap/tiflow/dm/config/security"
 	ctlcommon "github.com/pingcap/tiflow/dm/ctl/common"
-	"github.com/pingcap/tiflow/dm/loader"
 	"github.com/pingcap/tiflow/dm/master/metrics"
 	"github.com/pingcap/tiflow/dm/master/scheduler"
 	"github.com/pingcap/tiflow/dm/master/shardddl"
@@ -511,11 +509,7 @@ func (s *Server) StartTask(ctx context.Context, req *pb.StartTaskRequest) (*pb.S
 	if err != nil {
 		return respWithErr(err)
 	}
-	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
-	if err != nil {
-		return respWithErr(err)
-	}
-	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
+	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgs, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
 	if err != nil {
 		resp.CheckResult = terror.WithClass(err, terror.ClassDMMaster).Error()
 		return resp, nil
@@ -733,14 +727,8 @@ func (s *Server) UpdateTask(ctx context.Context, req *pb.UpdateTaskRequest) (*pb
 		// nolint:nilerr
 		return resp, nil
 	}
-	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
-	if err != nil {
-		resp.Msg = err.Error()
-		// nolint:nilerr
-		return resp, nil
-	}
 
-	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
+	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgs, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
 	if err != nil {
 		resp.CheckResult = terror.WithClass(err, terror.ClassDMMaster).Error()
 		return resp, nil
@@ -1284,13 +1272,13 @@ func (s *Server) getStatusFromWorkers(
 }
 
 // TODO: refine the call stack of this API, query worker configs that we needed only.
-func (s *Server) getSourceConfigs(sources []string) map[string]*config.SourceConfig {
+func (s *Server) getSourceConfigs(sources []*config.MySQLInstance) map[string]*config.SourceConfig {
 	cfgs := make(map[string]*config.SourceConfig)
 	for _, source := range sources {
-		if cfg := s.scheduler.GetSourceCfgByID(source); cfg != nil {
+		if cfg := s.scheduler.GetSourceCfgByID(source.SourceID); cfg != nil {
 			// check the password
 			cfg.DecryptPassword()
-			cfgs[source] = cfg
+			cfgs[source.SourceID] = cfg
 		}
 	}
 	return cfgs
@@ -1324,14 +1312,8 @@ func (s *Server) CheckTask(ctx context.Context, req *pb.CheckTaskRequest) (*pb.C
 		// nolint:nilerr
 		return resp, nil
 	}
-	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
-	if err != nil {
-		resp.Msg = err.Error()
-		// nolint:nilerr
-		return resp, nil
-	}
 
-	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, req.ErrCnt, req.WarnCnt)
+	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgs, req.ErrCnt, req.WarnCnt)
 	if err != nil {
 		resp.Msg = terror.WithClass(err, terror.ClassDMMaster).Error()
 		return resp, nil
@@ -1360,19 +1342,19 @@ func parseAndAdjustSourceConfig(ctx context.Context, contents []string) ([]*conf
 func innerCheckAndAdjustSourceConfig(
 	ctx context.Context,
 	cfg *config.SourceConfig,
-	hook func(sourceConfig *config.SourceConfig, ctx context.Context, db *conn.BaseDB) error,
+	hook func(sourceConfig *config.SourceConfig, ctx context.Context, db *sql.DB) error,
 ) error {
 	dbConfig := cfg.GenerateDBConfig()
-	fromDB, err := conn.GetUpstreamDB(dbConfig)
+	fromDB, err := conn.DefaultDBProvider.Apply(dbConfig)
 	if err != nil {
 		return err
 	}
 	defer fromDB.Close()
-	if err = cfg.Adjust(ctx, fromDB); err != nil {
+	if err = cfg.Adjust(ctx, fromDB.DB); err != nil {
 		return err
 	}
 	if hook != nil {
-		if err = hook(cfg, ctx, fromDB); err != nil {
+		if err = hook(cfg, ctx, fromDB.DB); err != nil {
 			return err
 		}
 	}
@@ -1403,13 +1385,13 @@ func parseSourceConfig(contents []string) ([]*config.SourceConfig, error) {
 }
 
 // GetLatestMeta gets newest meta(binlog name, pos, gtid) from upstream.
-func GetLatestMeta(ctx context.Context, flavor string, dbConfig *dbconfig.DBConfig) (*config.Meta, error) {
+func GetLatestMeta(ctx context.Context, flavor string, dbConfig *config.DBConfig) (*config.Meta, error) {
 	cfg := *dbConfig
 	if len(cfg.Password) > 0 {
 		cfg.Password = utils.DecryptOrPlaintext(cfg.Password)
 	}
 
-	fromDB, err := conn.GetUpstreamDB(&cfg)
+	fromDB, err := conn.DefaultDBProvider.Apply(&cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1427,7 +1409,7 @@ func GetLatestMeta(ctx context.Context, flavor string, dbConfig *dbconfig.DBConf
 	return &config.Meta{BinLogName: pos.Name, BinLogPos: pos.Pos, BinLogGTID: gSet}, nil
 }
 
-func AdjustTargetDB(ctx context.Context, dbConfig *dbconfig.DBConfig) error {
+func AdjustTargetDB(ctx context.Context, dbConfig *config.DBConfig) error {
 	cfg := *dbConfig
 	if len(cfg.Password) > 0 {
 		cfg.Password = utils.DecryptOrPlaintext(cfg.Password)
@@ -1437,7 +1419,7 @@ func AdjustTargetDB(ctx context.Context, dbConfig *dbconfig.DBConfig) error {
 		failpoint.Return(nil)
 	})
 
-	toDB, err := conn.GetDownstreamDB(&cfg)
+	toDB, err := conn.DefaultDBProvider.Apply(&cfg)
 	if err != nil {
 		return err
 	}
@@ -1448,7 +1430,7 @@ func AdjustTargetDB(ctx context.Context, dbConfig *dbconfig.DBConfig) error {
 		return err
 	}
 
-	version, err := conn.ExtractTiDBVersion(value)
+	version, err := utils.ExtractTiDBVersion(value)
 	// Do not adjust if not TiDB
 	if err == nil {
 		config.AdjustTargetDBSessionCfg(dbConfig, version)
@@ -1662,12 +1644,8 @@ func (s *Server) generateSubTask(
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
 
-	sourceIDs := make([]string, 0, len(cfg.MySQLInstances))
-	for _, inst := range cfg.MySQLInstances {
-		sourceIDs = append(sourceIDs, inst.SourceID)
-	}
-	sourceCfgs := s.getSourceConfigs(sourceIDs)
-	dbConfigs := make(map[string]dbconfig.DBConfig, len(sourceCfgs))
+	sourceCfgs := s.getSourceConfigs(cfg.MySQLInstances)
+	dbConfigs := make(map[string]config.DBConfig, len(sourceCfgs))
 	for _, sourceCfg := range sourceCfgs {
 		dbConfigs[sourceCfg.SourceID] = sourceCfg.From
 	}
@@ -1690,51 +1668,10 @@ func (s *Server) generateSubTask(
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
 
-	var firstMode config.LoadMode
-	for _, stCfg := range stCfgs {
-		if firstMode == "" {
-			firstMode = stCfg.LoaderConfig.ImportMode
-		} else if firstMode != stCfg.LoaderConfig.ImportMode {
-			return nil, nil, terror.ErrConfigInvalidLoadMode.Generatef("found two import-mode %s and %s in task config, DM only supports one value", firstMode, stCfg.LoaderConfig.ImportMode)
-		}
-	}
 	return cfg, stCfgs, nil
 }
 
-func (s *Server) generateSubTasksForCheck(stCfgs []*config.SubTaskConfig) ([]*config.SubTaskConfig, error) {
-	sourceIDs := make([]string, 0, len(stCfgs))
-	for _, stCfg := range stCfgs {
-		sourceIDs = append(sourceIDs, stCfg.SourceID)
-	}
-
-	sourceCfgs := s.getSourceConfigs(sourceIDs)
-	stCfgsForCheck := make([]*config.SubTaskConfig, 0, len(stCfgs))
-	for i, stCfg := range stCfgs {
-		stCfgForCheck, err := stCfg.Clone()
-		if err != nil {
-			return nil, err
-		}
-		stCfgsForCheck = append(stCfgsForCheck, stCfgForCheck)
-		if sourceCfg, ok := sourceCfgs[stCfgForCheck.SourceID]; ok {
-			stCfgsForCheck[i].Flavor = sourceCfg.Flavor
-			stCfgsForCheck[i].ServerID = sourceCfg.ServerID
-			stCfgsForCheck[i].EnableGTID = sourceCfg.EnableGTID
-
-			if sourceCfg.EnableRelay {
-				stCfgsForCheck[i].UseRelay = true
-				continue // skip the following check
-			}
-		}
-		workers, err := s.scheduler.GetRelayWorkers(stCfgForCheck.SourceID)
-		if err != nil {
-			return nil, err
-		}
-		stCfgsForCheck[i].UseRelay = len(workers) > 0
-	}
-	return stCfgsForCheck, nil
-}
-
-func setUseTLS(tlsCfg *security.Security) {
+func setUseTLS(tlsCfg *config.Security) {
 	if enableTLS(tlsCfg) {
 		useTLS.Store(true)
 	} else {
@@ -1742,7 +1679,7 @@ func setUseTLS(tlsCfg *security.Security) {
 	}
 }
 
-func enableTLS(tlsCfg *security.Security) bool {
+func enableTLS(tlsCfg *config.Security) bool {
 	if tlsCfg == nil {
 		return false
 	}
@@ -1767,7 +1704,7 @@ func withHost(addr string) string {
 	return addr
 }
 
-func (s *Server) removeMetaData(ctx context.Context, taskName, metaSchema string, toDBCfg *dbconfig.DBConfig) error {
+func (s *Server) removeMetaData(ctx context.Context, taskName, metaSchema string, toDBCfg *config.DBConfig) error {
 	failpoint.Inject("MockSkipRemoveMetaData", func() {
 		failpoint.Return(nil)
 	})
@@ -1782,13 +1719,13 @@ func (s *Server) removeMetaData(ctx context.Context, taskName, metaSchema string
 	if err != nil {
 		return err
 	}
-	err = s.scheduler.RemoveLoadTaskAndLightningStatus(taskName)
+	err = s.scheduler.RemoveLoadTask(taskName)
 	if err != nil {
 		return err
 	}
 
 	// set up db and clear meta data in downstream db
-	baseDB, err := conn.GetDownstreamDB(toDBCfg)
+	baseDB, err := conn.DefaultDBProvider.Apply(toDBCfg)
 	if err != nil {
 		return terror.WithScope(err, terror.ScopeDownstream)
 	}
@@ -1798,7 +1735,7 @@ func (s *Server) removeMetaData(ctx context.Context, taskName, metaSchema string
 		return terror.WithScope(err, terror.ScopeDownstream)
 	}
 	defer func() {
-		err2 := baseDB.ForceCloseConn(dbConn)
+		err2 := baseDB.CloseBaseConn(dbConn)
 		if err2 != nil {
 			log.L().Warn("fail to close connection", zap.Error(err2))
 		}
@@ -1826,9 +1763,6 @@ func (s *Server) removeMetaData(ctx context.Context, taskName, metaSchema string
 		dbutil.TableName(metaSchema, cputil.ValidatorErrorChange(taskName))))
 	sqls = append(sqls, fmt.Sprintf("DROP TABLE IF EXISTS %s",
 		dbutil.TableName(metaSchema, cputil.ValidatorTableStatus(taskName))))
-	// clear lightning error manager table
-	sqls = append(sqls, fmt.Sprintf("DROP DATABASE IF EXISTS %s",
-		dbutil.ColumnName(loader.GetTaskInfoSchemaName(metaSchema, taskName))))
 
 	_, err = dbConn.ExecuteSQL(ctctx, nil, taskName, sqls)
 	if err == nil {
@@ -2706,7 +2640,7 @@ func (s *Server) OperateRelay(ctx context.Context, req *pb.OperateRelayRequest) 
 		} else {
 			resp2.Sources = append(resp2.Sources, &pb.CommonWorkerResponse{
 				Result: true,
-				Msg:    "source relay is operated but the bound worker is offline",
+				Msg:    "source relay is operated but the bounded worker is offline",
 				Source: req.Source,
 				Worker: worker,
 			})
@@ -3217,93 +3151,4 @@ func genValidationWorkerErrorResp(req *workerrpc.Request, err error, logMsg, wor
 	default:
 		return nil
 	}
-}
-
-func (s *Server) UpdateValidation(ctx context.Context, req *pb.UpdateValidationRequest) (*pb.UpdateValidationResponse, error) {
-	var (
-		resp2 *pb.UpdateValidationResponse
-		err   error
-	)
-	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
-	if shouldRet {
-		return resp2, err
-	}
-	resp := &pb.UpdateValidationResponse{
-		Result: false,
-	}
-	subTaskCfgs := s.scheduler.GetSubTaskCfgsByTaskAndSource(req.TaskName, req.Sources)
-	if len(subTaskCfgs) == 0 {
-		if len(req.Sources) > 0 {
-			resp.Msg = fmt.Sprintf("cannot get subtask by task name `%s` and sources `%v`",
-				req.TaskName, req.Sources)
-		} else {
-			resp.Msg = fmt.Sprintf("cannot get subtask by task name `%s`", req.TaskName)
-		}
-		return resp, nil
-	}
-
-	workerReq := workerrpc.Request{
-		Type: workerrpc.CmdUpdateValidation,
-		UpdateValidation: &pb.UpdateValidationWorkerRequest{
-			TaskName:   req.TaskName,
-			BinlogPos:  req.BinlogPos,
-			BinlogGTID: req.BinlogGTID,
-		},
-	}
-
-	sourcesLen := 0
-	for _, subTaskCfg := range subTaskCfgs {
-		sourcesLen += len(subTaskCfg)
-	}
-	workerRespCh := make(chan *pb.CommonWorkerResponse, sourcesLen)
-	var wg sync.WaitGroup
-	for _, subTaskCfg := range subTaskCfgs {
-		for sourceID := range subTaskCfg {
-			wg.Add(1)
-			go func(source string) {
-				defer wg.Done()
-				sourceCfg := s.scheduler.GetSourceCfgByID(source)
-				// can't directly use subtaskCfg here, because it will be overwritten by sourceCfg
-				if sourceCfg.EnableGTID {
-					if len(req.BinlogGTID) == 0 {
-						workerRespCh <- errorCommonWorkerResponse(fmt.Sprintf("source %s didn't specify cutover-binlog-gtid when enableGTID is true", source), source, "")
-						return
-					}
-				} else if len(req.BinlogPos) == 0 {
-					workerRespCh <- errorCommonWorkerResponse(fmt.Sprintf("source %s didn't specify cutover-binlog-pos when enableGTID is false", source), source, "")
-					return
-				}
-				worker := s.scheduler.GetWorkerBySource(source)
-				if worker == nil {
-					workerRespCh <- errorCommonWorkerResponse(fmt.Sprintf("source %s relevant worker-client not found", source), source, "")
-					return
-				}
-				var workerResp *pb.CommonWorkerResponse
-				resp, err := worker.SendRequest(ctx, &workerReq, s.cfg.RPCTimeout)
-				if err != nil {
-					workerResp = errorCommonWorkerResponse(err.Error(), source, worker.BaseInfo().Name)
-				} else {
-					workerResp = resp.UpdateValidation
-				}
-				workerResp.Source = source
-				workerRespCh <- workerResp
-			}(sourceID)
-		}
-	}
-	wg.Wait()
-
-	workerResps := make([]*pb.CommonWorkerResponse, 0, sourcesLen)
-	for len(workerRespCh) > 0 {
-		workerResp := <-workerRespCh
-		workerResps = append(workerResps, workerResp)
-	}
-
-	sort.Slice(workerResps, func(i, j int) bool {
-		return workerResps[i].Source < workerResps[j].Source
-	})
-
-	return &pb.UpdateValidationResponse{
-		Result:  true,
-		Sources: workerResps,
-	}, nil
 }

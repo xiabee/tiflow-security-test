@@ -24,11 +24,11 @@ import (
 	"github.com/benbjohnson/clock"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
+	tidbkv "github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tiflow/cdc/kv"
+	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/pdutil"
-	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
 	"github.com/pingcap/tiflow/pkg/version"
 	tikvconfig "github.com/tikv/client-go/v2/config"
@@ -59,7 +59,7 @@ const (
 type Upstream struct {
 	ID             uint64
 	PdEndpoints    []string
-	SecurityConfig *security.Credential
+	SecurityConfig *config.SecurityConfig
 
 	PDClient    pd.Client
 	KVStorage   tidbkv.Storage
@@ -82,7 +82,7 @@ type Upstream struct {
 }
 
 func newUpstream(pdEndpoints []string,
-	securityConfig *security.Credential,
+	securityConfig *config.SecurityConfig,
 ) *Upstream {
 	return &Upstream{
 		PdEndpoints: pdEndpoints, status: uninit,
@@ -104,7 +104,7 @@ func NewUpstream4Test(pdClient pd.Client) *Upstream {
 		status:         normal,
 		wg:             new(sync.WaitGroup),
 		clock:          clock.New(),
-		SecurityConfig: &security.Credential{},
+		SecurityConfig: &config.SecurityConfig{},
 		cancel:         func() {},
 	}
 
@@ -220,7 +220,7 @@ func initUpstream(ctx context.Context, up *Upstream, gcServiceID string) error {
 // initGlobalConfig initializes the global config for tikv client tls.
 // region cache health check will use the global config.
 // TODO: remove this function after tikv client tls is refactored.
-func initGlobalConfig(secCfg *security.Credential) {
+func initGlobalConfig(secCfg *config.SecurityConfig) {
 	if secCfg.CAPath != "" || secCfg.CertPath != "" || secCfg.KeyPath != "" {
 		conf := tikvconfig.GetGlobalConfig()
 		conf.Security.ClusterSSLCA = secCfg.CAPath

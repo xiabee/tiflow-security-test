@@ -55,23 +55,16 @@ func TestUpstream(t *testing.T) {
 	require.NotNil(t, up)
 
 	// test Tick
-	globalState := &orchestrator.GlobalReactorState{
-		Changefeeds: make(map[model.ChangeFeedID]*orchestrator.ChangefeedReactorState),
-	}
-	// add one changefeed state whose info is nil to make sure it won't be checked
-	globalState.Changefeeds[model.DefaultChangeFeedID("1")] = &orchestrator.ChangefeedReactorState{
-		Info: nil,
-	}
-	_ = manager.Tick(context.Background(), globalState)
+	_ = manager.Tick(context.Background(), &orchestrator.GlobalReactorState{})
 	mockClock.Add(maxIdleDuration * 2)
 	manager.lastTickTime = atomic.Time{}
-	_ = manager.Tick(context.Background(), globalState)
+	_ = manager.Tick(context.Background(), &orchestrator.GlobalReactorState{})
 	// wait until up2 is closed
 	for !up2.IsClosed() {
 	}
 	manager.lastTickTime = atomic.Time{}
-	_ = manager.Tick(context.Background(), globalState)
-	_ = manager.Tick(context.Background(), globalState)
+	_ = manager.Tick(context.Background(), &orchestrator.GlobalReactorState{})
+	_ = manager.Tick(context.Background(), &orchestrator.GlobalReactorState{})
 	up, ok = manager.Get(testID)
 	require.False(t, ok)
 	require.Nil(t, up)

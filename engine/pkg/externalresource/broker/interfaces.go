@@ -45,7 +45,7 @@ type Broker interface {
 		jobID resModel.JobID,
 	)
 
-	GetEnabledBucketStorage() (bool, resModel.ResourceType)
+	IsS3StorageEnabled() bool
 
 	Close()
 }

@@ -30,9 +30,8 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	toolutils "github.com/pingcap/tidb-tools/pkg/utils"
-	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tiflow/dm/config"
-	"github.com/pingcap/tiflow/dm/config/security"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	parserpkg "github.com/pingcap/tiflow/dm/pkg/parser"
@@ -157,7 +156,7 @@ func InitUtils(cfg *Config) error {
 }
 
 // InitClient initializes dm-master client.
-func InitClient(addr string, securityCfg security.Security) error {
+func InitClient(addr string, securityCfg config.Security) error {
 	tls, err := toolutils.NewTLS(securityCfg.SSLCA, securityCfg.SSLCert, securityCfg.SSLKey, "", securityCfg.CertAllowedCN)
 	if err != nil {
 		return terror.ErrCtlInvalidTLSCfg.Delegate(err)

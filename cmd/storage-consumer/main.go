@@ -31,23 +31,23 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/storage"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/sink/ddlsink"
-	ddlfactory "github.com/pingcap/tiflow/cdc/sink/ddlsink/factory"
-	dmlfactory "github.com/pingcap/tiflow/cdc/sink/dmlsink/factory"
-	"github.com/pingcap/tiflow/cdc/sink/tablesink"
-	sinkutil "github.com/pingcap/tiflow/cdc/sink/util"
+	"github.com/pingcap/tiflow/cdc/sink/codec"
+	"github.com/pingcap/tiflow/cdc/sink/codec/canal"
+	"github.com/pingcap/tiflow/cdc/sink/codec/common"
+	"github.com/pingcap/tiflow/cdc/sink/codec/csv"
+	"github.com/pingcap/tiflow/cdc/sinkv2/ddlsink"
+	ddlfactory "github.com/pingcap/tiflow/cdc/sinkv2/ddlsink/factory"
+	dmlfactory "github.com/pingcap/tiflow/cdc/sinkv2/eventsink/factory"
+	"github.com/pingcap/tiflow/cdc/sinkv2/tablesink"
+	sinkutil "github.com/pingcap/tiflow/cdc/sinkv2/util"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/logutil"
 	"github.com/pingcap/tiflow/pkg/quotes"
 	psink "github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/sink/cloudstorage"
-	"github.com/pingcap/tiflow/pkg/sink/codec"
-	"github.com/pingcap/tiflow/pkg/sink/codec/canal"
-	"github.com/pingcap/tiflow/pkg/sink/codec/common"
-	"github.com/pingcap/tiflow/pkg/sink/codec/csv"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	putil "github.com/pingcap/tiflow/pkg/util"
 	"github.com/pingcap/tiflow/pkg/version"
 	"github.com/prometheus/client_golang/prometheus"
@@ -117,7 +117,7 @@ type fileIndexRange struct {
 
 type consumer struct {
 	sinkFactory     *dmlfactory.SinkFactory
-	ddlSink         ddlsink.Sink
+	ddlSink         ddlsink.DDLEventSink
 	replicationCfg  *config.ReplicaConfig
 	codecCfg        *common.Config
 	externalStorage storage.ExternalStorage
@@ -135,13 +135,11 @@ type consumer struct {
 }
 
 func newConsumer(ctx context.Context) (*consumer, error) {
-	_, err := putil.GetTimezone(timezone)
+	tz, err := putil.GetTimezone(timezone)
 	if err != nil {
 		return nil, errors.Annotate(err, "can not load timezone")
 	}
-	serverCfg := config.GetGlobalServerConfig().Clone()
-	serverCfg.TZ = timezone
-	config.StoreGlobalServerConfig(serverCfg)
+	ctx = contextutil.PutTimezoneInCtx(ctx, tz)
 	replicaConfig := config.GetDefaultReplicaConfig()
 	if len(configFile) > 0 {
 		err := util.StrictDecodeFile(configFile, "storage consumer", replicaConfig)
@@ -157,17 +155,15 @@ func newConsumer(ctx context.Context) (*consumer, error) {
 		return nil, err
 	}
 
-	switch putil.GetOrZero(replicaConfig.Sink.Protocol) {
+	switch replicaConfig.Sink.Protocol {
 	case config.ProtocolCsv.String():
 	case config.ProtocolCanalJSON.String():
 	default:
-		return nil, fmt.Errorf(
-			"data encoded in protocol %s is not supported yet",
-			putil.GetOrZero(replicaConfig.Sink.Protocol),
-		)
+		return nil, fmt.Errorf("data encoded in protocol %s is not supported yet",
+			replicaConfig.Sink.Protocol)
 	}
 
-	protocol, err := config.ParseSinkProtocolFromString(putil.GetOrZero(replicaConfig.Sink.Protocol))
+	protocol, err := config.ParseSinkProtocolFromString(replicaConfig.Sink.Protocol)
 	if err != nil {
 		return nil, err
 	}
@@ -187,10 +183,10 @@ func newConsumer(ctx context.Context) (*consumer, error) {
 	}
 
 	errCh := make(chan error, 1)
-	stdCtx := ctx
+	stdCtx := contextutil.PutChangefeedIDInCtx(ctx,
+		model.DefaultChangeFeedID(defaultChangefeedName))
 	sinkFactory, err := dmlfactory.New(
 		stdCtx,
-		model.DefaultChangeFeedID(defaultChangefeedName),
 		downstreamURIStr,
 		config.GetDefaultReplicaConfig(),
 		errCh,
@@ -200,8 +196,7 @@ func newConsumer(ctx context.Context) (*consumer, error) {
 		return nil, err
 	}
 
-	ddlSink, err := ddlfactory.New(ctx, model.DefaultChangeFeedID(defaultChangefeedName),
-		downstreamURIStr, config.GetDefaultReplicaConfig())
+	ddlSink, err := ddlfactory.New(ctx, downstreamURIStr, config.GetDefaultReplicaConfig())
 	if err != nil {
 		log.Error("failed to create ddl sink", zap.Error(err))
 		return nil, err
@@ -295,7 +290,7 @@ func (c *consumer) emitDMLEvents(
 	content []byte,
 ) error {
 	var (
-		decoder codec.RowEventDecoder
+		decoder codec.EventBatchDecoder
 		err     error
 	)
 
@@ -318,7 +313,8 @@ func (c *consumer) emitDMLEvents(
 		if err != nil {
 			return errors.Trace(err)
 		}
-		err := decoder.AddKeyValue(nil, content)
+
+		err = decoder.AddKeyValue(nil, content)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -347,7 +343,7 @@ func (c *consumer) emitDMLEvents(
 			if _, ok := c.tableSinkMap[tableID]; !ok {
 				c.tableSinkMap[tableID] = c.sinkFactory.CreateTableSinkForConsumer(
 					model.DefaultChangeFeedID(defaultChangefeedName),
-					spanz.TableIDToComparableSpan(tableID),
+					tableID,
 					row.CommitTs,
 					prometheus.NewCounter(prometheus.CounterOpts{}))
 			}
@@ -441,10 +437,7 @@ func (c *consumer) syncExecDMLEvents(
 
 func (c *consumer) parseDMLFilePath(_ context.Context, path string) error {
 	var dmlkey cloudstorage.DmlPathKey
-	fileIdx, err := dmlkey.ParseDMLFilePath(
-		putil.GetOrZero(c.replicationCfg.Sink.DateSeparator),
-		path,
-	)
+	fileIdx, err := dmlkey.ParseDMLFilePath(c.replicationCfg.Sink.DateSeparator, path)
 	if err != nil {
 		return errors.Trace(err)
 	}

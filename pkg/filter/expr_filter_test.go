@@ -17,7 +17,7 @@ import (
 	"testing"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/planner/core"
+	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -318,9 +318,7 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 		},
 	}
 
-	sessCtx := utils.NewSessionCtx(map[string]string{
-		"time_zone": "System",
-	})
+	sessCtx := utils.ZeroSessionCtx
 
 	for _, tc := range testCases {
 		tableInfo := helper.execDDL(tc.ddl)
@@ -332,9 +330,11 @@ func TestShouldSkipDMLBasic(t *testing.T) {
 			preRowDatums, err := utils.AdjustBinaryProtocolForDatum(sessCtx, c.preRow, tableInfo.Columns)
 			require.Nil(t, err)
 			row := &model.RowChangedEvent{
-				Table: &model.TableName{
-					Schema: c.schema,
-					Table:  c.table,
+				TableInfo: &model.TableInfo{
+					TableName: model.TableName{
+						Schema: c.schema,
+						Table:  c.table,
+					},
 				},
 				Columns:    c.columns,
 				PreColumns: c.preColumns,
@@ -436,7 +436,7 @@ func TestShouldSkipDMLError(t *testing.T) {
 	}
 
 	sessCtx := utils.NewSessionCtx(map[string]string{
-		"time_zone": "System",
+		"time_zone": "UTC",
 	})
 
 	for _, tc := range testCases {
@@ -449,9 +449,11 @@ func TestShouldSkipDMLError(t *testing.T) {
 			preRowDatums, err := utils.AdjustBinaryProtocolForDatum(sessCtx, c.preRow, tableInfo.Columns)
 			require.Nil(t, err)
 			row := &model.RowChangedEvent{
-				Table: &model.TableName{
-					Schema: c.schema,
-					Table:  c.table,
+				TableInfo: &model.TableInfo{
+					TableName: model.TableName{
+						Schema: c.schema,
+						Table:  c.table,
+					},
 				},
 				Columns:    c.columns,
 				PreColumns: c.preColumns,
@@ -629,7 +631,7 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 	}
 
 	sessCtx := utils.NewSessionCtx(map[string]string{
-		"time_zone": "System",
+		"time_zone": "UTC",
 	})
 
 	for _, tc := range testCases {
@@ -645,9 +647,11 @@ func TestShouldSkipDMLTableUpdated(t *testing.T) {
 			preRowDatums, err := utils.AdjustBinaryProtocolForDatum(sessCtx, c.preRow, tableInfo.Columns)
 			require.Nil(t, err)
 			row := &model.RowChangedEvent{
-				Table: &model.TableName{
-					Schema: c.schema,
-					Table:  c.table,
+				TableInfo: &model.TableInfo{
+					TableName: model.TableName{
+						Schema: c.schema,
+						Table:  c.table,
+					},
 				},
 				Columns:    c.columns,
 				PreColumns: c.preColumns,

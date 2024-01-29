@@ -25,9 +25,10 @@ import (
 	dmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser/charset"
-	tmysql "github.com/pingcap/tidb/parser/mysql"
-	dmutils "github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/pingcap/tidb/pkg/parser/charset"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	tmysql "github.com/pingcap/tidb/pkg/parser/mysql"
+	dmutils "github.com/pingcap/tiflow/dm/pkg/conn"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -328,6 +329,17 @@ func CheckIsTiDB(ctx context.Context, db *sql.DB) (bool, error) {
 	return true, nil
 }
 
+// QueryMaxPreparedStmtCount gets the value of max_prepared_stmt_count
+func QueryMaxPreparedStmtCount(ctx context.Context, db *sql.DB) (int, error) {
+	row := db.QueryRowContext(ctx, "select @@global.max_prepared_stmt_count;")
+	var maxPreparedStmtCount sql.NullInt32
+	err := row.Scan(&maxPreparedStmtCount)
+	if err != nil {
+		err = cerror.WrapError(cerror.ErrMySQLQueryError, err)
+	}
+	return int(maxPreparedStmtCount.Int32), err
+}
+
 // QueryMaxAllowedPacket gets the value of max_allowed_packet
 func QueryMaxAllowedPacket(ctx context.Context, db *sql.DB) (int64, error) {
 	row := db.QueryRowContext(ctx, "select @@global.max_allowed_packet;")
@@ -336,4 +348,25 @@ func QueryMaxAllowedPacket(ctx context.Context, db *sql.DB) (int64, error) {
 		return 0, cerror.WrapError(cerror.ErrMySQLQueryError, err)
 	}
 	return maxAllowedPacket.Int64, nil
+}
+
+// SetWriteSource sets write source for the transaction.
+func SetWriteSource(ctx context.Context, cfg *Config, txn *sql.Tx) error {
+	// we only set write source when donwstream is TiDB and write source is existed.
+	if !cfg.IsWriteSourceExisted {
+		return nil
+	}
+	// downstream is TiDB, set system variables.
+	// We should always try to set this variable, and ignore the error if
+	// downstream does not support this variable, it is by design.
+	query := fmt.Sprintf("SET SESSION %s = %d", "tidb_cdc_write_source", cfg.SourceID)
+	_, err := txn.ExecContext(ctx, query)
+	if err != nil {
+		if mysqlErr, ok := errors.Cause(err).(*dmysql.MySQLError); ok &&
+			mysqlErr.Number == mysql.ErrUnknownSystemVariable {
+			return nil
+		}
+		return err
+	}
+	return nil
 }

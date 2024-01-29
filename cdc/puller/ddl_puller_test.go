@@ -11,6 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build intest
+// +build intest
+
 package puller
 
 import (
@@ -20,16 +23,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
-	"github.com/benbjohnson/clock"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/codec"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tiflow/cdc/entry"
-	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
@@ -75,10 +75,6 @@ func (m *mockPuller) Run(ctx context.Context) error {
 	}
 }
 
-func (m *mockPuller) GetResolvedTs() uint64 {
-	return atomic.LoadUint64(&m.resolvedTs)
-}
-
 func (m *mockPuller) Output() <-chan *model.RawKVEntry {
 	return m.outCh
 }
@@ -121,24 +117,22 @@ func newMockDDLJobPuller(
 	needSchemaStorage bool,
 ) (DDLJobPuller, *entry.SchemaTestHelper) {
 	res := &ddlJobPullerImpl{
-		puller: puller,
 		outputCh: make(
 			chan *model.DDLJobEntry,
 			defaultPullerOutputChanSize),
-		metricDiscardedDDLCounter: discardedDDLCounter.
-			WithLabelValues("ddl", "test"),
 	}
+	res.multiplexing = false
+	res.puller.Puller = puller
+
 	var helper *entry.SchemaTestHelper
 	if needSchemaStorage {
 		helper = entry.NewSchemaTestHelper(t)
 		kvStorage := helper.Storage()
 		ts := helper.GetCurrentMeta().StartTS
-		meta, err := kv.GetSnapshotMeta(kvStorage, ts)
-		require.Nil(t, err)
 		f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 		require.Nil(t, err)
 		schemaStorage, err := entry.NewSchemaStorage(
-			meta,
+			kvStorage,
 			ts,
 			false,
 			model.DefaultChangeFeedID("test"),
@@ -440,7 +434,7 @@ func TestHandleJob(t *testing.T) {
 		job = helper.DDL2Job("alter table test1.t1 add column c1 int")
 		skip, err = ddlJobPullerImpl.handleJob(job)
 		require.NoError(t, err)
-		require.True(t, skip)
+		require.False(t, skip)
 
 		job = helper.DDL2Job("create table test1.testStartTs(id int)")
 		skip, err = ddlJobPullerImpl.handleJob(job)
@@ -451,7 +445,7 @@ func TestHandleJob(t *testing.T) {
 		job.StartTS = 1
 		skip, err = ddlJobPullerImpl.handleJob(job)
 		require.NoError(t, err)
-		require.True(t, skip)
+		require.False(t, skip)
 
 		job = helper.DDL2Job("create table test1.t2(id int)")
 		skip, err = ddlJobPullerImpl.handleJob(job)
@@ -611,13 +605,7 @@ func TestDDLPuller(t *testing.T) {
 		f,
 	)
 	require.Nil(t, err)
-	p, err := NewDDLPuller(
-		ctx, ctx.ChangefeedVars().Info.Config,
-		up, startTs,
-		ctx.ChangefeedVars().ID,
-		schemaStorage,
-		f)
-	require.Nil(t, err)
+	p := NewDDLPuller(ctx, up, startTs, ctx.ChangefeedVars().ID, schemaStorage, f)
 	p.(*ddlPullerImpl).ddlJobPuller, _ = newMockDDLJobPuller(t, mockPuller, false)
 
 	var wg sync.WaitGroup
@@ -741,16 +729,7 @@ func TestResolvedTsStuck(t *testing.T) {
 		f,
 	)
 	require.Nil(t, err)
-	p, err := NewDDLPuller(
-		ctx, ctx.ChangefeedVars().Info.Config,
-		up, startTs,
-		ctx.ChangefeedVars().ID,
-		schemaStorage,
-		f)
-	require.Nil(t, err)
-
-	mockClock := clock.NewMock()
-	p.(*ddlPullerImpl).clock = mockClock
+	p := NewDDLPuller(ctx, up, startTs, ctx.ChangefeedVars().ID, schemaStorage, f)
 
 	p.(*ddlPullerImpl).ddlJobPuller, _ = newMockDDLJobPuller(t, mockPuller, false)
 	var wg sync.WaitGroup
@@ -774,18 +753,6 @@ func TestResolvedTsStuck(t *testing.T) {
 	mockPuller.appendResolvedTs(30)
 	waitResolvedTsGrowing(t, p, 30)
 	require.Equal(t, 0, logs.Len())
-
-	mockClock.Add(2 * ddlPullerStuckWarnDuration)
-	for i := 0; i < 20; i++ {
-		mockClock.Add(time.Second)
-		if logs.Len() > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-		if i == 19 {
-			t.Fatal("warning log not printed")
-		}
-	}
 
 	mockPuller.appendResolvedTs(40)
 	waitResolvedTsGrowing(t, p, 40)

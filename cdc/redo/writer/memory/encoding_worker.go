@@ -22,6 +22,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/redo"
@@ -70,7 +71,7 @@ func (e *polymorphicRedoEvent) encode() (err error) {
 	redoLog := e.event.ToRedoLog()
 	e.commitTs = redoLog.GetCommitTs()
 
-	rawData, err := redoLog.MarshalMsg(nil)
+	rawData, err := codec.MarshalRedoLog(redoLog, nil)
 	if err != nil {
 		return err
 	}
@@ -183,7 +184,7 @@ func (e *encodingWorkerGroup) input(
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-e.closed:
-		return errors.ErrRedoWriterStopped.GenWithStackByArgs("encoding worker is closed")
+		return errors.ErrRedoWriterStopped.GenWithStack("encoding worker is closed")
 	case e.inputChs[idx] <- event:
 		return nil
 	}
@@ -196,7 +197,7 @@ func (e *encodingWorkerGroup) output(
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-e.closed:
-		return errors.ErrRedoWriterStopped.GenWithStackByArgs("encoding worker is closed")
+		return errors.ErrRedoWriterStopped.GenWithStack("encoding worker is closed")
 	case e.outputCh <- event:
 		return nil
 	}
@@ -221,7 +222,7 @@ func (e *encodingWorkerGroup) FlushAll(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-e.closed:
-		return errors.ErrRedoWriterStopped.GenWithStackByArgs("encoding worker is closed")
+		return errors.ErrRedoWriterStopped.GenWithStack("encoding worker is closed")
 	case <-flushCh:
 	}
 	return nil
@@ -245,7 +246,7 @@ func (e *encodingWorkerGroup) broadcastAndWaitEncoding(ctx context.Context) erro
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-e.closed:
-			return errors.ErrRedoWriterStopped.GenWithStackByArgs("encoding worker is closed")
+			return errors.ErrRedoWriterStopped.GenWithStack("encoding worker is closed")
 		case <-ch:
 		}
 	}

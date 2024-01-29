@@ -33,6 +33,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
 	"github.com/pingcap/tiflow/cdc/redo/writer/file"
 	"github.com/pingcap/tiflow/pkg/compression"
@@ -288,7 +289,7 @@ func sortAndWriteFile(
 			// If the commitTs is equal or less than startTs, we should skip this log.
 			continue
 		}
-		data, err := item.MarshalMsg(nil)
+		data, err := codec.MarshalRedoLog(item, nil)
 		if err != nil {
 			return cerror.WrapError(cerror.ErrMarshalFailed, err)
 		}
@@ -346,8 +347,7 @@ func (r *reader) Read() (*model.RedoLog, error) {
 		return nil, cerror.WrapError(cerror.ErrRedoFileOp, err)
 	}
 
-	redoLog := new(model.RedoLog)
-	_, err = redoLog.UnmarshalMsg(data[:recBytes])
+	redoLog, _, err := codec.UnmarshalRedoLog(data[:recBytes])
 	if err != nil {
 		if r.isTornEntry(data) {
 			// just return io.EOF, since if torn write it is the last redoLog entry

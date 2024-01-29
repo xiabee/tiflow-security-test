@@ -17,10 +17,10 @@ import (
 	"fmt"
 
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb/parser"
-	timodel "github.com/pingcap/tidb/parser/model"
-	tifilter "github.com/pingcap/tidb/util/filter"
-	tfilter "github.com/pingcap/tidb/util/table-filter"
+	"github.com/pingcap/tidb/pkg/parser"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	tifilter "github.com/pingcap/tidb/pkg/util/filter"
+	tfilter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
@@ -36,9 +36,7 @@ func isSysSchema(db string) bool {
 func VerifyTableRules(cfg *config.FilterConfig) (tfilter.Filter, error) {
 	var f tfilter.Filter
 	var err error
-	if len(cfg.Rules) == 0 && cfg.MySQLReplicationRules != nil {
-		f, err = tfilter.ParseMySQLReplicationRules(cfg.MySQLReplicationRules)
-	} else {
+	if len(cfg.Rules) != 0 {
 		rules := cfg.Rules
 		if len(rules) == 0 {
 			rules = []string{"*.*"}

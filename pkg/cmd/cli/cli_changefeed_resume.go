@@ -19,8 +19,6 @@ import (
 	"strings"
 
 	v2 "github.com/pingcap/tiflow/cdc/api/v2"
-	"github.com/pingcap/tiflow/cdc/model"
-	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
 	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
 	cmdcontext "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
@@ -32,11 +30,11 @@ import (
 
 // resumeChangefeedOptions defines flags for the `cli changefeed resume` command.
 type resumeChangefeedOptions struct {
-	apiV1Client apiv1client.APIV1Interface
-	apiV2Client apiv2client.APIV2Interface
+	apiClient apiv2client.APIV2Interface
 
 	changefeedID          string
-	changefeedDetail      *model.ChangefeedDetail
+	namespace             string
+	changefeedDetail      *v2.ChangeFeedInfo
 	noConfirm             bool
 	overwriteCheckpointTs string
 	currentTso            *v2.Tso
@@ -56,6 +54,7 @@ func newResumeChangefeedOptions() *resumeChangefeedOptions {
 // addFlags receives a *cobra.Command reference and binds
 // flags related to template printing to it.
 func (o *resumeChangefeedOptions) addFlags(cmd *cobra.Command) {
+	cmd.PersistentFlags().StringVarP(&o.namespace, "namespace", "n", "default", "Replication task (changefeed) Namespace")
 	cmd.PersistentFlags().StringVarP(&o.changefeedID, "changefeed-id", "c", "", "Replication task (changefeed) ID")
 	cmd.PersistentFlags().BoolVar(&o.noConfirm, "no-confirm", false, "Don't ask user whether to ignore ineligible table")
 	cmd.PersistentFlags().StringVar(&o.overwriteCheckpointTs, "overwrite-checkpoint-ts", "",
@@ -79,16 +78,11 @@ func (o *resumeChangefeedOptions) addFlags(cmd *cobra.Command) {
 
 // complete adapts from the command line args to the data and client required.
 func (o *resumeChangefeedOptions) complete(f factory.Factory) error {
-	apiClient, err := f.APIV1Client()
+	apiClient, err := f.APIV2Client()
 	if err != nil {
 		return err
 	}
-	o.apiV1Client = apiClient
-	apiClient2, err := f.APIV2Client()
-	if err != nil {
-		return err
-	}
-	o.apiV2Client = apiClient2
+	o.apiClient = apiClient
 	return nil
 }
 
@@ -125,7 +119,7 @@ func (o *resumeChangefeedOptions) getResumeChangefeedConfig() *v2.ResumeChangefe
 }
 
 func (o *resumeChangefeedOptions) getTSO(ctx context.Context) (*v2.Tso, error) {
-	tso, err := o.apiV2Client.Tso().Query(ctx,
+	tso, err := o.apiClient.Tso().Query(ctx,
 		&v2.UpstreamConfig{ID: o.changefeedDetail.UpstreamID})
 	if err != nil {
 		return nil, err
@@ -135,9 +129,9 @@ func (o *resumeChangefeedOptions) getTSO(ctx context.Context) (*v2.Tso, error) {
 }
 
 func (o *resumeChangefeedOptions) getChangefeedInfo(ctx context.Context) (
-	*model.ChangefeedDetail, error,
+	*v2.ChangeFeedInfo, error,
 ) {
-	detail, err := o.apiV1Client.Changefeeds().Get(ctx, o.changefeedID)
+	detail, err := o.apiClient.Changefeeds().Get(ctx, o.namespace, o.changefeedID)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +144,7 @@ func (o *resumeChangefeedOptions) confirmResumeChangefeedCheck(cmd *cobra.Comman
 	if !o.noConfirm {
 		if len(o.overwriteCheckpointTs) == 0 {
 			return confirmLargeDataGap(cmd, o.currentTso.Timestamp,
-				o.changefeedDetail.CheckpointTSO, "resume")
+				o.changefeedDetail.CheckpointTs, "resume")
 		}
 
 		return confirmOverwriteCheckpointTs(cmd, o.changefeedID, o.checkpointTs)
@@ -211,7 +205,7 @@ func (o *resumeChangefeedOptions) run(cmd *cobra.Command) error {
 	if err := o.confirmResumeChangefeedCheck(cmd); err != nil {
 		return err
 	}
-	err := o.apiV2Client.Changefeeds().Resume(ctx, cfg, o.changefeedID)
+	err := o.apiClient.Changefeeds().Resume(ctx, cfg, o.namespace, o.changefeedID)
 
 	return err
 }

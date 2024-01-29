@@ -19,18 +19,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	tidbkv "github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tiflow/cdc/contextutil"
+	tidbkv "github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/puller/frontier"
 	"github.com/pingcap/tiflow/pkg/config"
+	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/pdutil"
-	"github.com/pingcap/tiflow/pkg/regionspan"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/pingcap/tiflow/pkg/txnutil"
-	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
@@ -55,7 +54,6 @@ type Stats struct {
 type Puller interface {
 	// Run the puller, continually fetch event from TiKV and add event into buffer.
 	Run(ctx context.Context) error
-	GetResolvedTs() uint64
 	Output() <-chan *model.RawKVEntry
 	Stats() Stats
 }
@@ -63,7 +61,7 @@ type Puller interface {
 type pullerImpl struct {
 	kvCli     kv.CDCKVClient
 	kvStorage tikv.Storage
-	spans     []regionspan.ComparableSpan
+	spans     []tablepb.Span
 	outputCh  chan *model.RawKVEntry
 	tsTracker frontier.Frontier
 	// The commit ts of the latest raw kv event that puller has sent.
@@ -80,6 +78,8 @@ type pullerImpl struct {
 	lastForwardResolvedTs uint64
 	// startResolvedTs is the resolvedTs when puller is initialized
 	startResolvedTs uint64
+
+	enableTableMonitor bool
 }
 
 // New create a new Puller fetch event start from checkpointTs and put into buf.
@@ -90,38 +90,30 @@ func New(ctx context.Context,
 	kvStorage tidbkv.Storage,
 	pdClock pdutil.Clock,
 	checkpointTs uint64,
-	spans []regionspan.Span,
+	spans []tablepb.Span,
 	cfg *config.ServerConfig,
 	changefeed model.ChangeFeedID,
 	tableID model.TableID,
 	tableName string,
 	filterLoop bool,
+	enableTableMonitor bool,
 ) Puller {
 	tikvStorage, ok := kvStorage.(tikv.Storage)
 	if !ok {
 		log.Panic("can't create puller for non-tikv storage")
 	}
-	comparableSpans := make([]regionspan.ComparableSpan, len(spans))
-	for i := range spans {
-		comparableSpans[i] = regionspan.ToComparableSpan(spans[i])
-	}
+
 	// To make puller level resolved ts initialization distinguishable, we set
 	// the initial ts for frontier to 0. Once the puller level resolved ts
 	// initialized, the ts should advance to a non-zero value.
-	pullerType := "dml"
-	if len(spans) > 1 {
-		pullerType = "ddl"
-	}
-	metricMissedRegionCollectCounter := missedRegionCollectCounter.
-		WithLabelValues(changefeed.Namespace, changefeed.ID, pullerType)
-	tsTracker := frontier.NewFrontier(0, metricMissedRegionCollectCounter, comparableSpans...)
+	tsTracker := frontier.NewFrontier(0, spans...)
 	kvCli := kv.NewCDCKVClient(
 		ctx, pdCli, grpcPool, regionCache, pdClock, cfg, changefeed, tableID, tableName, filterLoop)
 	p := &pullerImpl{
 		kvCli:        kvCli,
 		kvStorage:    tikvStorage,
 		checkpointTs: checkpointTs,
-		spans:        comparableSpans,
+		spans:        spans,
 		outputCh:     make(chan *model.RawKVEntry, defaultPullerOutputChanSize),
 		tsTracker:    tsTracker,
 		resolvedTs:   checkpointTs,
@@ -130,7 +122,8 @@ func New(ctx context.Context,
 		tableName:    tableName,
 		cfg:          cfg,
 
-		startResolvedTs: checkpointTs,
+		startResolvedTs:    checkpointTs,
+		enableTableMonitor: enableTableMonitor,
 	}
 	return p
 }
@@ -143,40 +136,26 @@ func (p *pullerImpl) Run(ctx context.Context) error {
 	eventCh := make(chan model.RegionFeedEvent, defaultPullerEventChanSize)
 
 	lockResolver := txnutil.NewLockerResolver(p.kvStorage,
-		p.changefeed, contextutil.RoleFromCtx(ctx))
+		p.changefeed)
 	for _, span := range p.spans {
 		span := span
 
 		g.Go(func() error {
-			return p.kvCli.EventFeed(ctx, span, checkpointTs, lockResolver, eventCh)
+			return p.kvCli.EventFeed(ctx, span, checkpointTs, lockResolver, eventCh, p.enableTableMonitor)
 		})
 	}
 
-	metricOutputChanSize := outputChanSizeHistogram.
-		WithLabelValues(p.changefeed.Namespace, p.changefeed.ID)
-	metricEventChanSize := eventChanSizeHistogram.
-		WithLabelValues(p.changefeed.Namespace, p.changefeed.ID)
-	metricPullerResolvedTs := pullerResolvedTsGauge.
-		WithLabelValues(p.changefeed.Namespace, p.changefeed.ID)
-	metricTxnCollectCounterKv := txnCollectCounter.
+	metricPullerEventCounterKv := PullerEventCounter.
 		WithLabelValues(p.changefeed.Namespace, p.changefeed.ID, "kv")
-	metricTxnCollectCounterResolved := txnCollectCounter.
+	metricPullerEventCounterResolved := PullerEventCounter.
 		WithLabelValues(p.changefeed.Namespace, p.changefeed.ID, "resolved")
-	defer func() {
-		outputChanSizeHistogram.DeleteLabelValues(p.changefeed.Namespace, p.changefeed.ID)
-		eventChanSizeHistogram.DeleteLabelValues(p.changefeed.Namespace, p.changefeed.ID)
-		memBufferSizeGauge.DeleteLabelValues(p.changefeed.Namespace, p.changefeed.ID)
-		pullerResolvedTsGauge.DeleteLabelValues(p.changefeed.Namespace, p.changefeed.ID)
-		txnCollectCounter.DeleteLabelValues(p.changefeed.Namespace, p.changefeed.ID, "kv")
-		txnCollectCounter.DeleteLabelValues(p.changefeed.Namespace, p.changefeed.ID, "resolved")
-	}()
 
 	lastResolvedTs := p.checkpointTs
 	lastAdvancedTime := time.Now()
 	lastLogSlowRangeTime := time.Now()
+	var lastSlowestRange *tablepb.Span
+	lastCheckSlowestRangeTime := time.Now()
 	g.Go(func() error {
-		metricsTicker := time.NewTicker(15 * time.Second)
-		defer metricsTicker.Stop()
 		stuckDetectorTicker := time.NewTicker(1 * time.Minute)
 		defer stuckDetectorTicker.Stop()
 		output := func(raw *model.RawKVEntry) error {
@@ -215,10 +194,6 @@ func (p *pullerImpl) Run(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return errors.Trace(ctx.Err())
-			case <-metricsTicker.C:
-				metricEventChanSize.Observe(float64(len(eventCh)))
-				metricOutputChanSize.Observe(float64(len(p.outputCh)))
-				metricPullerResolvedTs.Set(float64(oracle.ExtractPhysical(atomic.LoadUint64(&p.resolvedTs))))
 			case <-stuckDetectorTicker.C:
 				if err := p.detectResolvedTsStuck(); err != nil {
 					return errors.Trace(err)
@@ -228,7 +203,7 @@ func (p *pullerImpl) Run(ctx context.Context) error {
 			}
 
 			if e.Val != nil {
-				metricTxnCollectCounterKv.Inc()
+				metricPullerEventCounterKv.Inc()
 				if err := output(e.Val); err != nil {
 					return errors.Trace(err)
 				}
@@ -236,9 +211,9 @@ func (p *pullerImpl) Run(ctx context.Context) error {
 			}
 
 			if e.Resolved != nil {
-				metricTxnCollectCounterResolved.Add(float64(len(e.Resolved.Spans)))
+				metricPullerEventCounterResolved.Add(float64(len(e.Resolved.Spans)))
 				for _, resolvedSpan := range e.Resolved.Spans {
-					if !regionspan.IsSubSpan(resolvedSpan.Span, p.spans...) {
+					if !spanz.IsSubSpan(resolvedSpan.Span, p.spans...) {
 						log.Panic("the resolved span is not in the total span",
 							zap.String("namespace", p.changefeed.Namespace),
 							zap.String("changefeed", p.changefeed.ID),
@@ -247,6 +222,27 @@ func (p *pullerImpl) Run(ctx context.Context) error {
 							zap.Any("resolved", e.Resolved),
 							zap.Any("spans", p.spans),
 						)
+					}
+					if lastSlowestRange != nil {
+						intersectSpan, err := spanz.Intersect(resolvedSpan.Span, *lastSlowestRange)
+						isEmptySpan := len(intersectSpan.StartKey) == 0 && len(intersectSpan.EndKey) == 0
+						if err == nil && !isEmptySpan {
+							if time.Since(lastCheckSlowestRangeTime) > 30*time.Second {
+								log.Info("resolved span is not in the slowest range",
+									zap.String("namespace", p.changefeed.Namespace),
+									zap.String("changefeed", p.changefeed.ID),
+									zap.Int64("tableID", p.tableID),
+									zap.String("tableName", p.tableName),
+									zap.Uint64("resolvedTs", e.Resolved.ResolvedTs),
+									zap.Stringer("resolvedSpan", &resolvedSpan.Span),
+									zap.Stringer("slowestRange", lastSlowestRange),
+									zap.Uint64("resolvedTs", lastResolvedTs),
+									zap.Uint64("regionID", resolvedSpan.Region),
+									zap.String("tsTracker", p.tsTracker.SpanString(*lastSlowestRange)),
+								)
+								lastCheckSlowestRangeTime = time.Now()
+							}
+						}
 					}
 					// Forward is called in a single thread
 					p.tsTracker.Forward(resolvedSpan.Region, resolvedSpan.Span, e.Resolved.ResolvedTs)
@@ -274,15 +270,15 @@ func (p *pullerImpl) Run(ctx context.Context) error {
 				if resolvedTs <= lastResolvedTs {
 					if time.Since(lastAdvancedTime) > 30*time.Second && time.Since(lastLogSlowRangeTime) > 30*time.Second {
 						var slowestTs uint64 = math.MaxUint64
-						slowestRange := regionspan.ComparableSpan{}
+						slowestRange := tablepb.Span{}
 						rangeFilled := true
 						p.tsTracker.Entries(func(key []byte, ts uint64) {
 							if ts < slowestTs {
 								slowestTs = ts
-								slowestRange.Start = key
+								slowestRange.StartKey = key
 								rangeFilled = false
 							} else if !rangeFilled {
-								slowestRange.End = key
+								slowestRange.EndKey = key
 								rangeFilled = true
 							}
 						})
@@ -292,12 +288,16 @@ func (p *pullerImpl) Run(ctx context.Context) error {
 							zap.Int64("tableID", p.tableID),
 							zap.String("tableName", p.tableName),
 							zap.Uint64("resolvedTs", resolvedTs),
+							zap.Uint64("lastResolvedTs", lastResolvedTs),
 							zap.Uint64("slowestRangeTs", slowestTs),
-							zap.Stringer("range", &slowestRange))
+							zap.Stringer("range", &slowestRange),
+							zap.String("tsTracker", p.tsTracker.SpanString(slowestRange)))
 						lastLogSlowRangeTime = time.Now()
+						lastSlowestRange = &slowestRange
 					}
 					continue
 				}
+				lastSlowestRange = nil
 				lastResolvedTs = resolvedTs
 				lastAdvancedTime = time.Now()
 				err := output(&model.RawKVEntry{CRTs: resolvedTs, OpType: model.OpTypeResolved, RegionID: e.RegionID})
@@ -309,10 +309,6 @@ func (p *pullerImpl) Run(ctx context.Context) error {
 		}
 	})
 	return g.Wait()
-}
-
-func (p *pullerImpl) GetResolvedTs() uint64 {
-	return atomic.LoadUint64(&p.resolvedTs)
 }
 
 func (p *pullerImpl) detectResolvedTsStuck() error {

@@ -15,14 +15,18 @@ package checker
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/pingcap/tidb/br/pkg/lightning/restore"
+	"github.com/docker/go-units"
+	"github.com/pingcap/tidb/br/pkg/lightning/importer"
+	"github.com/pingcap/tidb/br/pkg/lightning/precheck"
+	"github.com/pingcap/tiflow/dm/pkg/log"
 )
 
 func convertLightningPrecheck(
 	ctx context.Context,
 	dmResult *Result,
-	lightningPrechecker restore.PrecheckItem,
+	lightningPrechecker precheck.Checker,
 	failLevel State,
 	instruction string,
 ) {
@@ -42,11 +46,11 @@ func convertLightningPrecheck(
 
 // LightningEmptyRegionChecker checks whether there are too many empty regions in the cluster.
 type LightningEmptyRegionChecker struct {
-	inner restore.PrecheckItem
+	inner precheck.Checker
 }
 
 // NewLightningEmptyRegionChecker creates a new LightningEmptyRegionChecker.
-func NewLightningEmptyRegionChecker(lightningChecker restore.PrecheckItem) RealChecker {
+func NewLightningEmptyRegionChecker(lightningChecker precheck.Checker) RealChecker {
 	return &LightningEmptyRegionChecker{inner: lightningChecker}
 }
 
@@ -59,7 +63,7 @@ func (c *LightningEmptyRegionChecker) Name() string {
 func (c *LightningEmptyRegionChecker) Check(ctx context.Context) *Result {
 	result := &Result{
 		Name:  c.Name(),
-		Desc:  "check whether there are too many empty Regions in the TiKV under Physical import mode",
+		Desc:  "check whether there are too many empty regions in the TiKV under physical import mode",
 		State: StateFailure,
 	}
 	convertLightningPrecheck(
@@ -74,11 +78,11 @@ func (c *LightningEmptyRegionChecker) Check(ctx context.Context) *Result {
 
 // LightningRegionDistributionChecker checks whether the region distribution is balanced.
 type LightningRegionDistributionChecker struct {
-	inner restore.PrecheckItem
+	inner precheck.Checker
 }
 
 // NewLightningRegionDistributionChecker creates a new LightningRegionDistributionChecker.
-func NewLightningRegionDistributionChecker(lightningChecker restore.PrecheckItem) RealChecker {
+func NewLightningRegionDistributionChecker(lightningChecker precheck.Checker) RealChecker {
 	return &LightningRegionDistributionChecker{inner: lightningChecker}
 }
 
@@ -91,7 +95,7 @@ func (c *LightningRegionDistributionChecker) Name() string {
 func (c *LightningRegionDistributionChecker) Check(ctx context.Context) *Result {
 	result := &Result{
 		Name:  c.Name(),
-		Desc:  "check whether the Regions in the TiKV cluster are distributed evenly under Physical import mode",
+		Desc:  "check whether the Regions in the TiKV cluster are distributed evenly under physical import mode",
 		State: StateFailure,
 	}
 	convertLightningPrecheck(
@@ -106,11 +110,11 @@ func (c *LightningRegionDistributionChecker) Check(ctx context.Context) *Result 
 
 // LightningClusterVersionChecker checks whether the cluster version is compatible with Lightning.
 type LightningClusterVersionChecker struct {
-	inner restore.PrecheckItem
+	inner precheck.Checker
 }
 
 // NewLightningClusterVersionChecker creates a new LightningClusterVersionChecker.
-func NewLightningClusterVersionChecker(lightningChecker restore.PrecheckItem) RealChecker {
+func NewLightningClusterVersionChecker(lightningChecker precheck.Checker) RealChecker {
 	return &LightningClusterVersionChecker{inner: lightningChecker}
 }
 
@@ -123,7 +127,7 @@ func (c *LightningClusterVersionChecker) Name() string {
 func (c *LightningClusterVersionChecker) Check(ctx context.Context) *Result {
 	result := &Result{
 		Name:  c.Name(),
-		Desc:  "check whether the downstream TiDB/PD/TiKV version meets the requirements of Physical import mode",
+		Desc:  "check whether the downstream TiDB/PD/TiKV version meets the requirements of physical import mode",
 		State: StateFailure,
 	}
 	convertLightningPrecheck(
@@ -132,6 +136,110 @@ func (c *LightningClusterVersionChecker) Check(ctx context.Context) *Result {
 		c.inner,
 		StateFailure,
 		`you can switch to logical import mode which has no requirements on downstream cluster version`,
+	)
+	return result
+}
+
+// LightningFreeSpaceChecker checks whether the cluster has enough free space.
+type LightningFreeSpaceChecker struct {
+	sourceDataSize int64
+	infoGetter     importer.TargetInfoGetter
+}
+
+// NewLightningFreeSpaceChecker creates a new LightningFreeSpaceChecker.
+func NewLightningFreeSpaceChecker(sourceDataSize int64, getter importer.TargetInfoGetter) RealChecker {
+	return &LightningFreeSpaceChecker{
+		sourceDataSize: sourceDataSize,
+		infoGetter:     getter,
+	}
+}
+
+// Name implements the RealChecker interface.
+func (c *LightningFreeSpaceChecker) Name() string {
+	return "lightning_free_space"
+}
+
+// Check implements the RealChecker interface.
+func (c *LightningFreeSpaceChecker) Check(ctx context.Context) *Result {
+	result := &Result{
+		Name:  c.Name(),
+		Desc:  "check whether the downstream has enough free space to store the data to be migrated",
+		State: StateFailure,
+	}
+	storeInfo, err := c.infoGetter.GetStorageInfo(ctx)
+	if err != nil {
+		markCheckError(result, err)
+		return result
+	}
+	clusterAvail := uint64(0)
+	for _, store := range storeInfo.Stores {
+		clusterAvail += uint64(store.Status.Available)
+	}
+	if clusterAvail < uint64(c.sourceDataSize) {
+		result.State = StateFailure
+		result.Errors = append(result.Errors, &Error{
+			Severity: StateFailure,
+			ShortErr: fmt.Sprintf("Downstream doesn't have enough space, available is %s, but we need %s",
+				units.BytesSize(float64(clusterAvail)), units.BytesSize(float64(c.sourceDataSize))),
+		})
+		result.Instruction = "you can try to scale-out TiKV storage or TiKV instance to gain more storage space"
+		return result
+	}
+
+	replConfig, err := c.infoGetter.GetReplicationConfig(ctx)
+	if err != nil {
+		markCheckError(result, err)
+		return result
+	}
+	safeSize := uint64(c.sourceDataSize) * replConfig.MaxReplicas * 2
+	if clusterAvail < safeSize {
+		result.State = StateWarning
+		result.Errors = append(result.Errors, &Error{
+			Severity: StateWarning,
+			ShortErr: fmt.Sprintf("Cluster may not have enough space, available is %s, but we need %s",
+				units.BytesSize(float64(clusterAvail)), units.BytesSize(float64(safeSize))),
+		})
+		result.Instruction = "you can try to scale-out TiKV storage or TiKV instance to gain more storage space"
+		return result
+	}
+	result.State = StateSuccess
+	return result
+}
+
+// LightningCDCPiTRChecker checks whether the cluster has running CDC PiTR tasks.
+type LightningCDCPiTRChecker struct {
+	inner precheck.Checker
+}
+
+// NewLightningCDCPiTRChecker creates a new LightningCDCPiTRChecker.
+func NewLightningCDCPiTRChecker(lightningChecker precheck.Checker) RealChecker {
+	c, ok := lightningChecker.(*importer.CDCPITRCheckItem)
+	if ok {
+		c.Instruction = "physical import mode is not compatible with them. Please switch to logical import mode then try again."
+	} else {
+		log.L().DPanic("lightningChecker is not CDCPITRCheckItem")
+	}
+	return &LightningCDCPiTRChecker{inner: lightningChecker}
+}
+
+// Name implements the RealChecker interface.
+func (c *LightningCDCPiTRChecker) Name() string {
+	return "lightning_downstream_mutex_features"
+}
+
+// Check implements the RealChecker interface.
+func (c *LightningCDCPiTRChecker) Check(ctx context.Context) *Result {
+	result := &Result{
+		Name:  c.Name(),
+		Desc:  "check whether the downstream has tasks incompatible with physical import mode",
+		State: StateFailure,
+	}
+	convertLightningPrecheck(
+		ctx,
+		result,
+		c.inner,
+		StateFailure,
+		`you can switch to logical import mode which has no requirements on this`,
 	)
 	return result
 }

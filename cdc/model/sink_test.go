@@ -17,9 +17,10 @@ import (
 	"sort"
 	"testing"
 
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/types"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,9 +89,11 @@ func TestTableNameFuncs(t *testing.T) {
 func TestRowChangedEventFuncs(t *testing.T) {
 	t.Parallel()
 	deleteRow := &RowChangedEvent{
-		Table: &TableName{
-			Schema: "test",
-			Table:  "t1",
+		TableInfo: &TableInfo{
+			TableName: TableName{
+				Schema: "test",
+				Table:  "t1",
+			},
 		},
 		PreColumns: []*Column{
 			{
@@ -104,65 +107,7 @@ func TestRowChangedEventFuncs(t *testing.T) {
 			},
 		},
 	}
-	expectedKeyCols := []*Column{
-		{
-			Name:  "a",
-			Value: 1,
-			Flag:  HandleKeyFlag | PrimaryKeyFlag,
-		},
-	}
 	require.True(t, deleteRow.IsDelete())
-	require.Equal(t, expectedKeyCols, deleteRow.PrimaryKeyColumns())
-	require.Equal(t, expectedKeyCols, deleteRow.HandleKeyColumns())
-
-	insertRow := &RowChangedEvent{
-		Table: &TableName{
-			Schema: "test",
-			Table:  "t1",
-		},
-		Columns: []*Column{
-			{
-				Name:  "a",
-				Value: 1,
-				Flag:  HandleKeyFlag,
-			}, {
-				Name:  "b",
-				Value: 2,
-				Flag:  0,
-			},
-		},
-	}
-	expectedPrimaryKeyCols := []*Column{}
-	expectedHandleKeyCols := []*Column{
-		{
-			Name:  "a",
-			Value: 1,
-			Flag:  HandleKeyFlag,
-		},
-	}
-	require.False(t, insertRow.IsDelete())
-	require.Equal(t, expectedPrimaryKeyCols, insertRow.PrimaryKeyColumns())
-	require.Equal(t, expectedHandleKeyCols, insertRow.HandleKeyColumns())
-
-	forceReplicaRow := &RowChangedEvent{
-		Table: &TableName{
-			Schema: "test",
-			Table:  "t1",
-		},
-		Columns: []*Column{
-			{
-				Name:  "a",
-				Value: 1,
-				Flag:  0,
-			}, {
-				Name:  "b",
-				Value: 2,
-				Flag:  0,
-			},
-		},
-	}
-	require.Empty(t, forceReplicaRow.PrimaryKeyColumns())
-	require.Empty(t, forceReplicaRow.HandleKeyColumns())
 }
 
 func TestColumnValueString(t *testing.T) {
@@ -620,4 +565,79 @@ func TestTrySplitAndSortUpdateEvent(t *testing.T) {
 	result, err = trySplitAndSortUpdateEvent(events)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(result))
+}
+
+var ukUpdatedEvent = &RowChangedEvent{
+	PreColumns: []*Column{
+		{
+			Name:  "col1",
+			Flag:  BinaryFlag,
+			Value: "col1-value",
+		},
+		{
+			Name:  "col2",
+			Flag:  HandleKeyFlag | UniqueKeyFlag,
+			Value: "col2-value",
+		},
+	},
+
+	Columns: []*Column{
+		{
+			Name:  "col1",
+			Flag:  BinaryFlag,
+			Value: "col1-value",
+		},
+		{
+			Name:  "col2",
+			Flag:  HandleKeyFlag | UniqueKeyFlag,
+			Value: "col2-value-updated",
+		},
+	},
+}
+
+func TestTrySplitAndSortUpdateEventOne(t *testing.T) {
+	txn := &SingleTableTxn{
+		Rows: []*RowChangedEvent{ukUpdatedEvent},
+	}
+
+	err := txn.TrySplitAndSortUpdateEvent(sink.KafkaScheme)
+	require.NoError(t, err)
+	require.Len(t, txn.Rows, 2)
+
+	txn = &SingleTableTxn{
+		Rows: []*RowChangedEvent{ukUpdatedEvent},
+	}
+	err = txn.TrySplitAndSortUpdateEvent(sink.MySQLScheme)
+	require.NoError(t, err)
+	require.Len(t, txn.Rows, 1)
+}
+
+func TestToRedoLog(t *testing.T) {
+	event := &RowChangedEvent{
+		StartTs:         100,
+		CommitTs:        1000,
+		PhysicalTableID: 1,
+		TableInfo: &TableInfo{
+			TableName: TableName{Schema: "test", Table: "t"},
+		},
+		Columns: []*Column{
+			{
+				Name:  "col1",
+				Flag:  BinaryFlag,
+				Value: "col1-value",
+			},
+			{
+				Name:  "col2",
+				Flag:  HandleKeyFlag | UniqueKeyFlag,
+				Value: "col2-value-updated",
+			},
+		},
+	}
+	eventInRedoLog := event.ToRedoLog()
+	require.Equal(t, event.StartTs, eventInRedoLog.RedoRow.Row.StartTs)
+	require.Equal(t, event.CommitTs, eventInRedoLog.RedoRow.Row.CommitTs)
+	require.Equal(t, event.PhysicalTableID, eventInRedoLog.RedoRow.Row.Table.TableID)
+	require.Equal(t, event.TableInfo.GetSchemaName(), eventInRedoLog.RedoRow.Row.Table.Schema)
+	require.Equal(t, event.TableInfo.GetTableName(), eventInRedoLog.RedoRow.Row.Table.Table)
+	require.Equal(t, event.Columns, eventInRedoLog.RedoRow.Row.Columns)
 }

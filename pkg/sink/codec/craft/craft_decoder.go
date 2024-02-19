@@ -76,17 +76,14 @@ func (b *batchDecoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 		}
 	}
 	ev.CommitTs = b.headers.GetTs(b.index)
-	ev.TableInfo = &model.TableInfo{
-		TableName: model.TableName{
-			Schema:      b.headers.GetSchema(b.index),
-			Table:       b.headers.GetTable(b.index),
-			IsPartition: false,
-		},
+	ev.Table = &model.TableName{
+		Schema: b.headers.GetSchema(b.index),
+		Table:  b.headers.GetTable(b.index),
 	}
 	partition := b.headers.GetPartition(b.index)
 	if partition >= 0 {
-		ev.PhysicalTableID = partition
-		ev.TableInfo.TableName.IsPartition = true
+		ev.Table.TableID = partition
+		ev.Table.IsPartition = true
 	}
 	b.index++
 	return ev, nil

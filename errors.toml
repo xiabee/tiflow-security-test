@@ -221,11 +221,6 @@ error = '''
 unflatten datume data
 '''
 
-["CDC:ErrDebeziumEncodeFailed"]
-error = '''
-debezium encode failed
-'''
-
 ["CDC:ErrDecodeFailed"]
 error = '''
 decode failed: %s
@@ -248,7 +243,7 @@ dispatcher failed
 
 ["CDC:ErrEncodeFailed"]
 error = '''
-encode failed
+encode failed: %s
 '''
 
 ["CDC:ErrEtcdIgnore"]
@@ -348,7 +343,7 @@ get tikv grpc context failed
 
 ["CDC:ErrHandleDDLFailed"]
 error = '''
-handle ddl failed, query: %s, startTs: %d. If you want to skip this DDL and continue with replication, you can manually execute this DDL downstream. Afterwards, add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.
+handle ddl failed, job: %s, query: %s, startTs: %d. If you want to skip this DDL and continue with replication, you can manually execute this DDL downstream. Afterwards, add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.
 '''
 
 ["CDC:ErrIllegalSorterParameter"]
@@ -1004,11 +999,6 @@ generate tls config failed
 ["CDC:ErrURLFormatInvalid"]
 error = '''
 url format is invalid
-'''
-
-["CDC:ErrUnexpected"]
-error = '''
-cdc met unexpected error: %s
 '''
 
 ["CDC:ErrUnknownKVEventType"]

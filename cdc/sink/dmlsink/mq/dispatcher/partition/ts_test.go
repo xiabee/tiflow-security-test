@@ -28,56 +28,44 @@ func TestTsDispatcher(t *testing.T) {
 		expectPartition int32
 	}{
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t1",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
 			},
 			CommitTs: 1,
 		}, expectPartition: 1},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t1",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
 			},
 			CommitTs: 2,
 		}, expectPartition: 2},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t1",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
 			},
 			CommitTs: 3,
 		}, expectPartition: 3},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			CommitTs: 1,
 		}, expectPartition: 1},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			CommitTs: 2,
 		}, expectPartition: 2},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			CommitTs: 3,
 		}, expectPartition: 3},

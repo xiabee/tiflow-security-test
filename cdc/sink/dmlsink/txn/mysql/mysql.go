@@ -28,10 +28,10 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/parser/charset"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/parser/charset"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/metrics"
@@ -207,7 +207,7 @@ func NewMySQLBackends(
 func (s *mysqlBackend) OnTxnEvent(event *dmlsink.TxnCallbackableEvent) (needFlush bool) {
 	s.events = append(s.events, event)
 	s.rows += len(event.Event.Rows)
-	return s.rows >= s.cfg.MaxTxnRow
+	return event.Event.ToWaitFlush() || s.rows >= s.cfg.MaxTxnRow
 }
 
 // Flush implements interface backend.
@@ -314,7 +314,7 @@ func convert2RowChanges(
 	switch changeType {
 	case sqlmodel.RowChangeInsert:
 		res = sqlmodel.NewRowChange(
-			&row.TableInfo.TableName,
+			row.Table,
 			nil,
 			nil,
 			postValues,
@@ -322,7 +322,7 @@ func convert2RowChanges(
 			nil, nil)
 	case sqlmodel.RowChangeUpdate:
 		res = sqlmodel.NewRowChange(
-			&row.TableInfo.TableName,
+			row.Table,
 			nil,
 			preValues,
 			postValues,
@@ -330,7 +330,7 @@ func convert2RowChanges(
 			nil, nil)
 	case sqlmodel.RowChangeDelete:
 		res = sqlmodel.NewRowChange(
-			&row.TableInfo.TableName,
+			row.Table,
 			nil,
 			preValues,
 			nil,
@@ -491,11 +491,12 @@ func (s *mysqlBackend) batchSingleTxnDmls(
 }
 
 func (s *mysqlBackend) genUpdateSQL(rows ...*sqlmodel.RowChange) ([]string, [][]interface{}) {
-	size := 0
+	size, count := 0, 0
 	for _, r := range rows {
 		size += int(r.GetApproximateDataSize())
+		count++
 	}
-	if size < s.cfg.MaxMultiUpdateRowSize*len(rows) {
+	if size < s.cfg.MaxMultiUpdateRowSize*count {
 		// use multi update in one SQL
 		sql, value := sqlmodel.GenUpdateSQL(rows...)
 		return []string{sql}, [][]interface{}{value}
@@ -570,11 +571,8 @@ func (s *mysqlBackend) prepareDMLs() *preparedDMLs {
 			}
 			// only use batch dml when the table has a handle key
 			if hasHandleKey(tableColumns) {
-				// TODO: will use firstRow.TableInfo.TableInfo directly after we build a more complete TableInfo in later pr
-				tableInfo := model.BuildTiDBTableInfo(
-					firstRow.TableInfo.GetTableName(),
-					tableColumns,
-					firstRow.TableInfo.IndexColumnsOffset)
+				// TODO(dongmen): find a better way to get table info.
+				tableInfo := model.BuildTiDBTableInfo(tableColumns, firstRow.IndexColumns)
 				sql, value := s.batchSingleTxnDmls(event, tableInfo, translateToInsert)
 				sqls = append(sqls, sql...)
 				values = append(values, value...)
@@ -589,7 +587,7 @@ func (s *mysqlBackend) prepareDMLs() *preparedDMLs {
 			}
 		}
 
-		quoteTable := firstRow.TableInfo.TableName.QuoteString()
+		quoteTable := firstRow.Table.QuoteString()
 		for _, row := range event.Event.Rows {
 			var query string
 			var args []interface{}
@@ -735,11 +733,10 @@ func (s *mysqlBackend) sequenceExecute(
 
 func (s *mysqlBackend) execDMLWithMaxRetries(pctx context.Context, dmls *preparedDMLs) error {
 	if len(dmls.sqls) != len(dmls.values) {
-		log.Error("unexpected number of sqls and values",
+		log.Panic("unexpected number of sqls and values",
 			zap.String("changefeed", s.changefeed),
 			zap.Strings("sqls", dmls.sqls),
 			zap.Any("values", dmls.values))
-		return cerror.ErrUnexpected.FastGenByArgs("unexpected number of sqls and values")
 	}
 
 	start := time.Now()
@@ -765,24 +762,6 @@ func (s *mysqlBackend) execDMLWithMaxRetries(pctx context.Context, dmls *prepare
 					start, s.changefeed, "BEGIN", dmls.rowCount, dmls.startTs)
 			}
 
-			// Set session variables first and then execute the transaction.
-			// we try to set write source for each txn,
-			// so we can use it to trace the data source
-			if err = pmysql.SetWriteSource(pctx, s.cfg, tx); err != nil {
-				err := logDMLTxnErr(
-					cerror.WrapError(cerror.ErrMySQLTxnError, err),
-					start, s.changefeed,
-					fmt.Sprintf("SET SESSION %s = %d", "tidb_cdc_write_source",
-						s.cfg.SourceID),
-					dmls.rowCount, dmls.startTs)
-				if rbErr := tx.Rollback(); rbErr != nil {
-					if errors.Cause(rbErr) != context.Canceled {
-						log.Warn("failed to rollback txn", zap.String("changefeed", s.changefeed), zap.Error(rbErr))
-					}
-				}
-				return 0, 0, err
-			}
-
 			// If interplated SQL size exceeds maxAllowedPacket, mysql driver will
 			// fall back to the sequantial way.
 			// error can be ErrPrepareMulti, ErrBadConn etc.
@@ -799,6 +778,23 @@ func (s *mysqlBackend) execDMLWithMaxRetries(pctx context.Context, dmls *prepare
 				if err != nil {
 					return 0, 0, err
 				}
+			}
+
+			// we try to set write source for each txn,
+			// so we can use it to trace the data source
+			if err = s.setWriteSource(pctx, tx); err != nil {
+				err := logDMLTxnErr(
+					cerror.WrapError(cerror.ErrMySQLTxnError, err),
+					start, s.changefeed,
+					fmt.Sprintf("SET SESSION %s = %d", "tidb_cdc_write_source",
+						s.cfg.SourceID),
+					dmls.rowCount, dmls.startTs)
+				if rbErr := tx.Rollback(); rbErr != nil {
+					if errors.Cause(rbErr) != context.Canceled {
+						log.Warn("failed to rollback txn", zap.String("changefeed", s.changefeed), zap.Error(rbErr))
+					}
+				}
+				return 0, 0, err
 			}
 
 			if err = tx.Commit(); err != nil {
@@ -873,4 +869,25 @@ func getSQLErrCode(err error) (errors.ErrCode, bool) {
 // Only for testing.
 func (s *mysqlBackend) setDMLMaxRetry(maxRetry uint64) {
 	s.dmlMaxRetry = maxRetry
+}
+
+// setWriteSource sets write source for the transaction.
+func (s *mysqlBackend) setWriteSource(ctx context.Context, txn *sql.Tx) error {
+	// we only set write source when donwstream is TiDB and write source is existed.
+	if !s.cfg.IsWriteSourceExisted {
+		return nil
+	}
+	// downstream is TiDB, set system variables.
+	// We should always try to set this variable, and ignore the error if
+	// downstream does not support this variable, it is by design.
+	query := fmt.Sprintf("SET SESSION %s = %d", "tidb_cdc_write_source", s.cfg.SourceID)
+	_, err := txn.ExecContext(ctx, query)
+	if err != nil {
+		if mysqlErr, ok := errors.Cause(err).(*dmysql.MySQLError); ok &&
+			mysqlErr.Number == mysql.ErrUnknownSystemVariable {
+			return nil
+		}
+		return err
+	}
+	return nil
 }

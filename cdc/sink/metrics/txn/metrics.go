@@ -44,16 +44,15 @@ var (
 			Name:      "txn_worker_flush_duration",
 			Help:      "Flush duration (s) for txn worker.",
 			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 20), // 1ms~524s
-		}, []string{"namespace", "changefeed", "id"})
+		}, []string{"namespace", "changefeed"})
 
-	WorkerTotalDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
+	WorkerBusyRatio = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
 			Namespace: "ticdc",
 			Subsystem: "sink",
-			Name:      "txn_worker_total_duration",
-			Help:      "total duration (s) for txn worker.",
-			Buckets:   prometheus.ExponentialBuckets(0.0001, 2, 20), // 1ms~524s
-		}, []string{"namespace", "changefeed", "id"})
+			Name:      "txn_worker_busy_ratio",
+			Help:      "Busy ratio (X ms in 1s) for all workers.",
+		}, []string{"namespace", "changefeed"})
 
 	WorkerHandledRows = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -95,7 +94,7 @@ func InitMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(ConflictDetectDuration)
 	registry.MustRegister(QueueDuration)
 	registry.MustRegister(WorkerFlushDuration)
-	registry.MustRegister(WorkerTotalDuration)
+	registry.MustRegister(WorkerBusyRatio)
 	registry.MustRegister(WorkerHandledRows)
 	registry.MustRegister(SinkDMLBatchCommit)
 	registry.MustRegister(SinkDMLBatchCallback)

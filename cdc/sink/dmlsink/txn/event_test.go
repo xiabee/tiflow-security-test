@@ -17,7 +17,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/stretchr/testify/require"
 )
@@ -59,13 +59,9 @@ func TestGenKeys(t *testing.T) {
 		txn: &model.SingleTableTxn{
 			Rows: []*model.RowChangedEvent{
 				{
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-					TableInfo: &model.TableInfo{
-						TableName:          model.TableName{Schema: "common_1", Table: "uk_without_pk"},
-						IndexColumnsOffset: [][]int{{1, 2}},
-					},
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
 					PreColumns: []*model.Column{
 						nil,
 						{
@@ -81,15 +77,11 @@ func TestGenKeys(t *testing.T) {
 							Value: 1,
 						},
 					},
+					IndexColumns: [][]int{{1, 2}},
 				}, {
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-
-					TableInfo: &model.TableInfo{
-						TableName:          model.TableName{Schema: "common_1", Table: "uk_without_pk"},
-						IndexColumnsOffset: [][]int{{1, 2}},
-					},
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
 					PreColumns: []*model.Column{
 						nil,
 						{
@@ -105,6 +97,7 @@ func TestGenKeys(t *testing.T) {
 							Value: 21,
 						},
 					},
+					IndexColumns: [][]int{{1, 2}},
 				},
 			},
 		},
@@ -113,14 +106,9 @@ func TestGenKeys(t *testing.T) {
 		txn: &model.SingleTableTxn{
 			Rows: []*model.RowChangedEvent{
 				{
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-
-					TableInfo: &model.TableInfo{
-						TableName:          model.TableName{Schema: "common_1", Table: "uk_without_pk"},
-						IndexColumnsOffset: [][]int{{1}, {2}},
-					},
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
 					PreColumns: []*model.Column{
 						nil,
 						{
@@ -136,14 +124,11 @@ func TestGenKeys(t *testing.T) {
 							Value: 1,
 						},
 					},
+					IndexColumns: [][]int{{1}, {2}},
 				}, {
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-					TableInfo: &model.TableInfo{
-						TableName:          model.TableName{Schema: "common_1", Table: "uk_without_pk"},
-						IndexColumnsOffset: [][]int{{1}, {2}},
-					},
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
 					PreColumns: []*model.Column{
 						nil,
 						{
@@ -159,6 +144,7 @@ func TestGenKeys(t *testing.T) {
 							Value: 21,
 						},
 					},
+					IndexColumns: [][]int{{1}, {2}},
 				},
 			},
 		},
@@ -167,13 +153,9 @@ func TestGenKeys(t *testing.T) {
 		txn: &model.SingleTableTxn{
 			Rows: []*model.RowChangedEvent{
 				{
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-					TableInfo: &model.TableInfo{
-						TableName:          model.TableName{Schema: "common_1", Table: "uk_without_pk"},
-						IndexColumnsOffset: [][]int{{1}, {2}},
-					},
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
 					PreColumns: []*model.Column{
 						nil,
 						{
@@ -189,14 +171,11 @@ func TestGenKeys(t *testing.T) {
 							Value: nil,
 						},
 					},
+					IndexColumns: [][]int{{1}, {2}},
 				}, {
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-					TableInfo: &model.TableInfo{
-						TableName:          model.TableName{Schema: "common_1", Table: "uk_without_pk"},
-						IndexColumnsOffset: [][]int{{1}, {2}},
-					},
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
 					PreColumns: []*model.Column{
 						nil,
 						{
@@ -212,6 +191,7 @@ func TestGenKeys(t *testing.T) {
 							Value: 21,
 						},
 					},
+					IndexColumns: [][]int{{1}, {2}},
 				},
 			},
 		},
@@ -225,7 +205,7 @@ func TestGenKeys(t *testing.T) {
 }
 
 func TestSortAndDedupHash(t *testing.T) {
-	// If a transaction contains multiple rows, these rows may generate the same hash
+	// If a transaction contains multiple rows, those rows may generate the same hash
 	// in some rare cases. We should dedup these hashes to avoid unnecessary self cyclic
 	// dependency in the causality dependency graph.
 	t.Parallel()

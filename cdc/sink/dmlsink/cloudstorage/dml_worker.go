@@ -16,7 +16,6 @@ import (
 	"bytes"
 	"context"
 	"path"
-	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -42,63 +41,58 @@ type dmlWorker struct {
 	changeFeedID model.ChangeFeedID
 	storage      storage.ExternalStorage
 	config       *cloudstorage.Config
-	// toBeFlushedCh contains a set of batchedTask waiting to be flushed to cloud storage.
-	toBeFlushedCh          chan batchedTask
-	inputCh                *chann.DrainableChann[eventFragment]
-	isClosed               uint64
-	statistics             *metrics.Statistics
-	filePathGenerator      *cloudstorage.FilePathGenerator
-	metricWriteBytes       prometheus.Gauge
-	metricFileCount        prometheus.Gauge
-	metricWriteDuration    prometheus.Observer
-	metricFlushDuration    prometheus.Observer
-	metricsWorkerBusyRatio prometheus.Counter
+	// flushNotifyCh is used to notify that several tables can be flushed.
+	flushNotifyCh     chan dmlTask
+	inputCh           *chann.DrainableChann[eventFragment]
+	isClosed          uint64
+	statistics        *metrics.Statistics
+	filePathGenerator *cloudstorage.FilePathGenerator
+	metricWriteBytes  prometheus.Gauge
+	metricFileCount   prometheus.Gauge
 }
 
-// batchedTask contains a set of singleTableTask.
-// We batch message of different tables together to reduce the overhead of calling external storage API.
-type batchedTask struct {
-	batch map[cloudstorage.VersionedTableName]*singleTableTask
+// dmlTask defines a task containing the tables to be flushed.
+type dmlTask struct {
+	tasks map[cloudstorage.VersionedTableName]*singleTableTask
 }
 
-// singleTableTask contains a set of messages belonging to the same table.
 type singleTableTask struct {
 	size      uint64
 	tableInfo *model.TableInfo
 	msgs      []*common.Message
 }
 
-func newBatchedTask() batchedTask {
-	return batchedTask{
-		batch: make(map[cloudstorage.VersionedTableName]*singleTableTask),
+func newDMLTask() dmlTask {
+	return dmlTask{
+		tasks: make(map[cloudstorage.VersionedTableName]*singleTableTask),
 	}
 }
 
-func (t *batchedTask) handleSingleTableEvent(event eventFragment) {
+func (t *dmlTask) handleSingleTableEvent(event eventFragment) {
 	table := event.versionedTable
-	if _, ok := t.batch[table]; !ok {
-		t.batch[table] = &singleTableTask{
+	if _, ok := t.tasks[table]; !ok {
+		t.tasks[table] = &singleTableTask{
 			size:      0,
 			tableInfo: event.event.Event.TableInfo,
 		}
 	}
 
-	v := t.batch[table]
+	v := t.tasks[table]
 	for _, msg := range event.encodedMsgs {
 		v.size += uint64(len(msg.Value))
 	}
 	v.msgs = append(v.msgs, event.encodedMsgs...)
 }
 
-func (t *batchedTask) generateTaskByTable(table cloudstorage.VersionedTableName) batchedTask {
-	v := t.batch[table]
+func (t *dmlTask) generateTaskByTable(table cloudstorage.VersionedTableName) dmlTask {
+	v := t.tasks[table]
 	if v == nil {
 		log.Panic("table not found in dml task", zap.Any("table", table), zap.Any("task", t))
 	}
-	delete(t.batch, table)
+	delete(t.tasks, table)
 
-	return batchedTask{
-		batch: map[cloudstorage.VersionedTableName]*singleTableTask{table: v},
+	return dmlTask{
+		tasks: map[cloudstorage.VersionedTableName]*singleTableTask{table: v},
 	}
 }
 
@@ -118,19 +112,13 @@ func newDMLWorker(
 		storage:           storage,
 		config:            config,
 		inputCh:           inputCh,
-		toBeFlushedCh:     make(chan batchedTask, 64),
+		flushNotifyCh:     make(chan dmlTask, 64),
 		statistics:        statistics,
 		filePathGenerator: cloudstorage.NewFilePathGenerator(changefeedID, config, storage, extension, pdClock),
 		metricWriteBytes: mcloudstorage.CloudStorageWriteBytesGauge.
 			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
 		metricFileCount: mcloudstorage.CloudStorageFileCountGauge.
 			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
-		metricWriteDuration: mcloudstorage.CloudStorageWriteDurationHistogram.
-			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
-		metricFlushDuration: mcloudstorage.CloudStorageFlushDurationHistogram.
-			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
-		metricsWorkerBusyRatio: mcloudstorage.CloudStorageWorkerBusyRatioCounter.
-			WithLabelValues(changefeedID.Namespace, changefeedID.ID, strconv.Itoa(id)),
 	}
 
 	return d
@@ -148,35 +136,24 @@ func (d *dmlWorker) run(ctx context.Context) error {
 	})
 
 	eg.Go(func() error {
-		return d.genAndDispatchTask(ctx, d.inputCh)
+		return d.dispatchFlushTasks(ctx, d.inputCh)
 	})
 
 	return eg.Wait()
 }
 
-// flushMessages flushed messages of active tables to cloud storage.
-// active tables are those tables that have received events after the last flush.
+// flushMessages flush messages from active tables to cloud storage.
+// active means that a table has events since last flushing.
 func (d *dmlWorker) flushMessages(ctx context.Context) error {
-	var flushTimeSlice, totalTimeSlice time.Duration
-	overseerTicker := time.NewTicker(d.config.FlushInterval * 2)
-	defer overseerTicker.Stop()
-	startToWork := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return errors.Trace(ctx.Err())
-		case now := <-overseerTicker.C:
-			totalTimeSlice = now.Sub(startToWork)
-			busyRatio := flushTimeSlice.Seconds() / totalTimeSlice.Seconds() * 1000
-			d.metricsWorkerBusyRatio.Add(busyRatio)
-			startToWork = now
-			flushTimeSlice = 0
-		case batchedTask := <-d.toBeFlushedCh:
+		case task := <-d.flushNotifyCh:
 			if atomic.LoadUint64(&d.isClosed) == 1 {
 				return nil
 			}
-			start := time.Now()
-			for table, task := range batchedTask.batch {
+			for table, task := range task.tasks {
 				if len(task.msgs) == 0 {
 					continue
 				}
@@ -240,15 +217,12 @@ func (d *dmlWorker) flushMessages(ctx context.Context) error {
 					zap.String("path", dataFilePath),
 				)
 			}
-			flushTimeSlice += time.Since(start)
 		}
 	}
 }
 
 func (d *dmlWorker) writeIndexFile(ctx context.Context, path, content string) error {
-	start := time.Now()
 	err := d.storage.WriteFile(ctx, path, []byte(content))
-	d.metricFlushDuration.Observe(time.Since(start).Seconds())
 	return err
 }
 
@@ -265,7 +239,6 @@ func (d *dmlWorker) writeDataFile(ctx context.Context, path string, task *single
 	}
 
 	if err := d.statistics.RecordBatchExecution(func() (int, int64, error) {
-		start := time.Now()
 		if d.config.FlushConcurrency <= 1 {
 			return rowsCnt, bytesCnt, d.storage.WriteFile(ctx, path, buf.Bytes())
 		}
@@ -293,8 +266,6 @@ func (d *dmlWorker) writeDataFile(ctx context.Context, path string, task *single
 		if _, inErr = writer.Write(ctx, buf.Bytes()); inErr != nil {
 			return 0, 0, inErr
 		}
-
-		d.metricFlushDuration.Observe(time.Since(start).Seconds())
 		return rowsCnt, bytesCnt, nil
 	}); err != nil {
 		return err
@@ -311,13 +282,13 @@ func (d *dmlWorker) writeDataFile(ctx context.Context, path string, task *single
 	return nil
 }
 
-// genAndDispatchTask dispatches flush tasks in two conditions:
+// dispatchFlushTasks dispatches flush tasks in two conditions:
 // 1. the flush interval exceeds the upper limit.
 // 2. the file size exceeds the upper limit.
-func (d *dmlWorker) genAndDispatchTask(ctx context.Context,
+func (d *dmlWorker) dispatchFlushTasks(ctx context.Context,
 	ch *chann.DrainableChann[eventFragment],
 ) error {
-	batchedTask := newBatchedTask()
+	flushTask := newDMLTask()
 	ticker := time.NewTicker(d.config.FlushInterval)
 
 	for {
@@ -331,29 +302,29 @@ func (d *dmlWorker) genAndDispatchTask(ctx context.Context,
 			select {
 			case <-ctx.Done():
 				return errors.Trace(ctx.Err())
-			case d.toBeFlushedCh <- batchedTask:
+			case d.flushNotifyCh <- flushTask:
 				log.Debug("flush task is emitted successfully when flush interval exceeds",
-					zap.Int("tablesLength", len(batchedTask.batch)))
-				batchedTask = newBatchedTask()
+					zap.Int("tablesLength", len(flushTask.tasks)))
+				flushTask = newDMLTask()
 			default:
 			}
 		case frag, ok := <-ch.Out():
 			if !ok || atomic.LoadUint64(&d.isClosed) == 1 {
 				return nil
 			}
-			batchedTask.handleSingleTableEvent(frag)
+			flushTask.handleSingleTableEvent(frag)
 			// if the file size exceeds the upper limit, emit the flush task containing the table
 			// as soon as possible.
 			table := frag.versionedTable
-			if batchedTask.batch[table].size >= uint64(d.config.FileSize) {
-				task := batchedTask.generateTaskByTable(table)
+			if flushTask.tasks[table].size >= uint64(d.config.FileSize) {
+				task := flushTask.generateTaskByTable(table)
 				select {
 				case <-ctx.Done():
 					return errors.Trace(ctx.Err())
-				case d.toBeFlushedCh <- task:
+				case d.flushNotifyCh <- task:
 					log.Debug("flush task is emitted successfully when file size exceeds",
 						zap.Any("table", table),
-						zap.Int("eventsLenth", len(task.batch[table].msgs)))
+						zap.Int("eventsLenth", len(task.tasks[table].msgs)))
 				}
 			}
 		}

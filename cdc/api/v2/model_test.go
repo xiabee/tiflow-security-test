@@ -20,6 +20,7 @@ import (
 	"time"
 
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/redo"
@@ -34,7 +35,6 @@ var defaultAPIConfig = &ReplicaConfig{
 	CheckGCSafePoint:   true,
 	BDRMode:            util.AddressOf(false),
 	EnableSyncPoint:    util.AddressOf(false),
-	EnableTableMonitor: util.AddressOf(false),
 	SyncPointInterval:  &JSONDuration{10 * time.Minute},
 	SyncPointRetention: &JSONDuration{24 * time.Hour},
 	Filter: &FilterConfig{
@@ -57,12 +57,7 @@ var defaultAPIConfig = &ReplicaConfig{
 		EnableKafkaSinkV2:                util.AddressOf(false),
 		OnlyOutputUpdatedColumns:         util.AddressOf(false),
 		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
-		ContentCompatible:                util.AddressOf(false),
 		AdvanceTimeoutInSec:              util.AddressOf(uint(150)),
-		SendBootstrapIntervalInSec:       util.AddressOf(int64(120)),
-		SendBootstrapInMsgCount:          util.AddressOf(int32(10000)),
-		SendBootstrapToAllPartition:      util.AddressOf(true),
-		DebeziumDisableSchema:            util.AddressOf(false),
 	},
 	Consistent: &ConsistentConfig{
 		Level:                 "none",
@@ -75,6 +70,7 @@ var defaultAPIConfig = &ReplicaConfig{
 		UseFileBackend:        false,
 		MemoryUsage: &ConsistentMemoryUsage{
 			MemoryQuotaPercentage: 50,
+			EventCachePercentage:  0,
 		},
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
@@ -136,7 +132,21 @@ func TestToAPIReplicaConfig(t *testing.T) {
 		Storage:           "s3",
 	}
 	cfg.Filter = &config.FilterConfig{
-		Rules:            []string{"a", "b", "c"},
+		Rules: []string{"a", "b", "c"},
+		MySQLReplicationRules: &filter.MySQLReplicationRules{
+			DoTables: []*filter.Table{{
+				Schema: "testdo",
+				Name:   "testgotable",
+			}},
+			DoDBs: []string{"ad", "bdo"},
+			IgnoreTables: []*filter.Table{
+				{
+					Schema: "testignore",
+					Name:   "testaaaingore",
+				},
+			},
+			IgnoreDBs: []string{"aa", "b2"},
+		},
 		IgnoreTxnStartTs: []uint64{1, 2, 3},
 		EventFilters: []*config.EventFilterRule{{
 			Matcher:                  []string{"test.t1", "test.t2"},

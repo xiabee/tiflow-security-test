@@ -18,17 +18,16 @@ import (
 	"math"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/golang/protobuf/proto" // nolint:staticcheck
 	"github.com/pingcap/errors"
-	mm "github.com/pingcap/tidb/pkg/parser/model"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	mm "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/codec/internal"
-	"github.com/pingcap/tiflow/pkg/sink/codec/utils"
 	canal "github.com/pingcap/tiflow/proto/canal"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
@@ -44,14 +43,12 @@ const (
 
 type canalEntryBuilder struct {
 	bytesDecoder *encoding.Decoder // default charset is ISO-8859-1
-	config       *common.Config
 }
 
 // newCanalEntryBuilder creates a new canalEntryBuilder
-func newCanalEntryBuilder(config *common.Config) *canalEntryBuilder {
+func newCanalEntryBuilder() *canalEntryBuilder {
 	return &canalEntryBuilder{
 		bytesDecoder: charmap.ISO8859_1.NewDecoder(),
-		config:       config,
 	}
 }
 
@@ -81,7 +78,7 @@ func (b *canalEntryBuilder) buildHeader(commitTs uint64, schema string, table st
 // see https://github.com/alibaba/canal/blob/b54bea5e3337c9597c427a53071d214ff04628d1/dbsync/src/main/java/com/taobao/tddl/dbsync/binlog/event/RowsLogBuffer.java#L276-L1147
 // all value will be represented in string type
 // see https://github.com/alibaba/canal/blob/b54bea5e3337c9597c427a53071d214ff04628d1/parse/src/main/java/com/alibaba/otter/canal/parse/inbound/mysql/dbsync/LogEventConvert.java#L760-L855
-func (b *canalEntryBuilder) formatValue(value interface{}, isBinary bool) (result string, err error) {
+func (b *canalEntryBuilder) formatValue(value interface{}, javaType internal.JavaSQLType) (result string, err error) {
 	// value would be nil, if no value insert for the column.
 	if value == nil {
 		return "", nil
@@ -99,15 +96,20 @@ func (b *canalEntryBuilder) formatValue(value interface{}, isBinary bool) (resul
 	case string:
 		result = v
 	case []byte:
+		//  JavaSQLTypeVARCHAR / JavaSQLTypeCHAR / JavaSQLTypeBLOB / JavaSQLTypeCLOB /
+		// special handle for text and blob
 		// see https://github.com/alibaba/canal/blob/9f6021cf36f78cc8ac853dcf37a1769f359b868b/parse/src/main/java/com/alibaba/otter/canal/parse/inbound/mysql/dbsync/LogEventConvert.java#L801
-		if isBinary {
+		switch javaType {
+		// for normal text
+		case internal.JavaSQLTypeVARCHAR, internal.JavaSQLTypeCHAR, internal.JavaSQLTypeCLOB:
+			result = string(v)
+		default:
+			// JavaSQLTypeBLOB
 			decoded, err := b.bytesDecoder.Bytes(v)
 			if err != nil {
 				return "", err
 			}
 			result = string(decoded)
-		} else {
-			result = string(v)
 		}
 	default:
 		result = fmt.Sprintf("%v", v)
@@ -117,21 +119,21 @@ func (b *canalEntryBuilder) formatValue(value interface{}, isBinary bool) (resul
 
 // build the Column in the canal RowData
 // see https://github.com/alibaba/canal/blob/b54bea5e3337c9597c427a53071d214ff04628d1/parse/src/main/java/com/alibaba/otter/canal/parse/inbound/mysql/dbsync/LogEventConvert.java#L756-L872
-func (b *canalEntryBuilder) buildColumn(c *model.Column, columnInfo *timodel.ColumnInfo, updated bool) (*canal.Column, error) {
-	mysqlType := utils.GetMySQLType(columnInfo, b.config.ContentCompatible)
-	javaType, err := getJavaSQLType(c.Value, c.Type, c.Flag)
+func (b *canalEntryBuilder) buildColumn(c *model.Column, colName string, updated bool) (*canal.Column, error) {
+	mysqlType := getMySQLType(c)
+	javaType, err := getJavaSQLType(c, mysqlType)
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrCanalEncodeFailed, err)
 	}
 
-	value, err := b.formatValue(c.Value, c.Flag.IsBinary())
+	value, err := b.formatValue(c.Value, javaType)
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrCanalEncodeFailed, err)
 	}
 
 	canalColumn := &canal.Column{
 		SqlType:       int32(javaType),
-		Name:          c.Name,
+		Name:          colName,
 		IsKey:         c.Flag.IsPrimaryKey(),
 		Updated:       updated,
 		IsNullPresent: &canal.Column_IsNull{IsNull: c.Value == nil},
@@ -144,16 +146,11 @@ func (b *canalEntryBuilder) buildColumn(c *model.Column, columnInfo *timodel.Col
 // build the RowData of a canal entry
 func (b *canalEntryBuilder) buildRowData(e *model.RowChangedEvent, onlyHandleKeyColumns bool) (*canal.RowData, error) {
 	var columns []*canal.Column
-	for idx, column := range e.Columns {
+	for _, column := range e.Columns {
 		if column == nil {
 			continue
 		}
-		columnInfo, ok := e.TableInfo.GetColumnInfo(e.ColInfos[idx].ID)
-		if !ok {
-			return nil, cerror.ErrCanalEncodeFailed.GenWithStack(
-				"column info not found for column id: %d", e.ColInfos[idx].ID)
-		}
-		c, err := b.buildColumn(column, columnInfo, !e.IsDelete())
+		c, err := b.buildColumn(column, column.Name, !e.IsDelete())
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -162,19 +159,14 @@ func (b *canalEntryBuilder) buildRowData(e *model.RowChangedEvent, onlyHandleKey
 
 	onlyHandleKeyColumns = onlyHandleKeyColumns && e.IsDelete()
 	var preColumns []*canal.Column
-	for idx, column := range e.PreColumns {
+	for _, column := range e.PreColumns {
 		if column == nil {
 			continue
 		}
 		if onlyHandleKeyColumns && !column.Flag.IsHandleKey() {
 			continue
 		}
-		columnInfo, ok := e.TableInfo.GetColumnInfo(e.ColInfos[idx].ID)
-		if !ok {
-			return nil, cerror.ErrCanalEncodeFailed.GenWithStack(
-				"column info not found for column id: %d", e.ColInfos[idx].ID)
-		}
-		c, err := b.buildColumn(column, columnInfo, !e.IsDelete())
+		c, err := b.buildColumn(column, column.Name, !e.IsDelete())
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -190,7 +182,7 @@ func (b *canalEntryBuilder) buildRowData(e *model.RowChangedEvent, onlyHandleKey
 // fromRowEvent builds canal entry from cdc RowChangedEvent
 func (b *canalEntryBuilder) fromRowEvent(e *model.RowChangedEvent, onlyHandleKeyColumns bool) (*canal.Entry, error) {
 	eventType := convertRowEventType(e)
-	header := b.buildHeader(e.CommitTs, e.TableInfo.GetSchemaName(), e.TableInfo.GetTableName(), eventType, 1)
+	header := b.buildHeader(e.CommitTs, e.Table.Schema, e.Table.Table, eventType, 1)
 	isDdl := isCanalDDL(eventType) // false
 	rowData, err := b.buildRowData(e, onlyHandleKeyColumns)
 	if err != nil {
@@ -308,30 +300,40 @@ func isCanalDDL(t canal.EventType) bool {
 	return false
 }
 
-func getJavaSQLType(value interface{}, tp byte, flag model.ColumnFlagType) (result internal.JavaSQLType, err error) {
-	javaType := internal.MySQLType2JavaType(tp, flag.IsBinary())
+func getJavaSQLType(c *model.Column, mysqlType string) (result internal.JavaSQLType, err error) {
+	javaType := internal.MySQLType2JavaType(c.Type, c.Flag.IsBinary())
+
+	switch javaType {
+	case internal.JavaSQLTypeBINARY, internal.JavaSQLTypeVARBINARY, internal.JavaSQLTypeLONGVARBINARY:
+		if strings.Contains(mysqlType, "text") {
+			return internal.JavaSQLTypeCLOB, nil
+		}
+		return internal.JavaSQLTypeBLOB, nil
+	}
+
 	// flag `isUnsigned` only for `numerical` and `bit`, `year` data type.
-	if !flag.IsUnsigned() {
+	if !c.Flag.IsUnsigned() {
 		return javaType, nil
 	}
 
-	switch tp {
 	// for year, to `int64`, others to `uint64`.
 	// no need to promote type for `year` and `bit`
-	case mysql.TypeYear, mysql.TypeBit:
+	if c.Type == mysql.TypeYear || c.Type == mysql.TypeBit {
 		return javaType, nil
-	case mysql.TypeFloat, mysql.TypeDouble, mysql.TypeNewDecimal:
+	}
+
+	if c.Type == mysql.TypeFloat || c.Type == mysql.TypeDouble || c.Type == mysql.TypeNewDecimal {
 		return javaType, nil
 	}
 
 	// for **unsigned** integral types, type would be `uint64` or `string`. see reference:
 	// https://github.com/pingcap/tiflow/blob/1e3dd155049417e3fd7bf9b0a0c7b08723b33791/cdc/entry/mounter.go#L501
 	// https://github.com/pingcap/tidb/blob/6495a5a116a016a3e077d181b8c8ad81f76ac31b/types/datum.go#L423-L455
-	if value == nil {
+	if c.Value == nil {
 		return javaType, nil
 	}
 	var number uint64
-	switch v := value.(type) {
+	switch v := c.Value.(type) {
 	case uint64:
 		number = v
 	case string:
@@ -341,7 +343,7 @@ func getJavaSQLType(value interface{}, tp byte, flag model.ColumnFlagType) (resu
 		}
 		number = a
 	default:
-		return javaType, errors.Errorf("unexpected type for unsigned value: %+v, tp: %+v", reflect.TypeOf(v), tp)
+		return javaType, errors.Errorf("unexpected type for unsigned value: %+v, column: %+v", reflect.TypeOf(v), c)
 	}
 
 	// Some special cases handled in canal
@@ -351,7 +353,7 @@ func getJavaSQLType(value interface{}, tp byte, flag model.ColumnFlagType) (resu
 	// SmallInt, 2byte, [-32768, 32767], [0, 65535], if a > 32767
 	// Int,      4byte, [-2147483648, 2147483647], [0, 4294967295], if a > 2147483647
 	// BigInt,   8byte, [-2<<63, 2 << 63 - 1], [0, 2 << 64 - 1], if a > 2 << 63 - 1
-	switch tp {
+	switch c.Type {
 	case mysql.TypeTiny:
 		if number > math.MaxInt8 {
 			javaType = internal.JavaSQLTypeSMALLINT
@@ -371,4 +373,38 @@ func getJavaSQLType(value interface{}, tp byte, flag model.ColumnFlagType) (resu
 	}
 
 	return javaType, nil
+}
+
+// when encoding the canal format, for unsigned mysql type, add `unsigned` keyword.
+// it should have the form `t unsigned`, such as `int unsigned`
+func withUnsigned4MySQLType(mysqlType string, unsigned bool) string {
+	if unsigned && mysqlType != "bit" && mysqlType != "year" {
+		return mysqlType + " unsigned"
+	}
+	return mysqlType
+}
+
+// when decoding the canal format, remove `unsigned` to get the original `mysql type`.
+func trimUnsignedFromMySQLType(mysqlType string) string {
+	return strings.TrimSuffix(mysqlType, " unsigned")
+}
+
+func getMySQLType(c *model.Column) string {
+	mysqlType := types.TypeStr(c.Type)
+	// make `mysqlType` representation keep the same as the canal official implementation
+	mysqlType = withUnsigned4MySQLType(mysqlType, c.Flag.IsUnsigned())
+
+	if !c.Flag.IsBinary() {
+		return mysqlType
+	}
+
+	if types.IsTypeBlob(c.Type) {
+		return strings.Replace(mysqlType, "text", "blob", 1)
+	}
+
+	if types.IsTypeChar(c.Type) {
+		return strings.Replace(mysqlType, "char", "binary", 1)
+	}
+
+	return mysqlType
 }

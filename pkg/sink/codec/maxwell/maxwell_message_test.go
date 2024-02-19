@@ -16,7 +16,7 @@ package maxwell
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/stretchr/testify/require"
 )
@@ -50,9 +50,7 @@ func TestEncodeBinaryToMaxwell(t *testing.T) {
 	}
 
 	e := &model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "a", Table: "b"},
-		},
+		Table:   &model.TableName{Schema: "a", Table: "b"},
 		Columns: []*model.Column{column},
 	}
 

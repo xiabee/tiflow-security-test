@@ -14,7 +14,7 @@
 package columnselector
 
 import (
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher/partition"
@@ -58,9 +58,9 @@ func (s *selector) Match(schema, table string) bool {
 // the caller's should make sure the given event match the selector first before apply it.
 func (s *selector) Apply(event *model.RowChangedEvent) error {
 	// defensive check, this should not happen.
-	if !s.Match(event.TableInfo.GetSchemaName(), event.TableInfo.GetTableName()) {
+	if !s.Match(event.Table.Schema, event.Table.Table) {
 		return errors.ErrColumnSelectorFailed.GenWithStack(
-			"the given event does not match the column selector, table: %v", event.TableInfo.TableName)
+			"the given event does not match the column selector, table: %v", event.Table)
 	}
 
 	retainedColumns := make(map[string]struct{}, len(event.Columns))
@@ -76,7 +76,7 @@ func (s *selector) Apply(event *model.RowChangedEvent) error {
 		if !verifyIndices(event.TableInfo, retainedColumns) {
 			return errors.ErrColumnSelectorFailed.GenWithStack(
 				"no primary key columns or unique key columns obtained after filter out, "+
-					"table: %+v", event.TableInfo.TableName)
+					"table: %+v", event.Table)
 		}
 	}
 
@@ -92,7 +92,7 @@ func (s *selector) Apply(event *model.RowChangedEvent) error {
 		if !verifyIndices(event.TableInfo, retainedColumns) {
 			return errors.ErrColumnSelectorFailed.GenWithStack(
 				"no primary key columns or unique key columns obtained after filter out, "+
-					"table: %+v", event.TableInfo.TableName)
+					"table: %+v", event.Table)
 		}
 	}
 
@@ -124,7 +124,7 @@ func New(cfg *config.ReplicaConfig) (*ColumnSelector, error) {
 // Apply the column selector to the given event.
 func (c *ColumnSelector) Apply(event *model.RowChangedEvent) error {
 	for _, s := range c.selectors {
-		if s.Match(event.TableInfo.GetSchemaName(), event.TableInfo.GetTableName()) {
+		if s.Match(event.Table.Schema, event.Table.Table) {
 			return s.Apply(event)
 		}
 	}
@@ -190,7 +190,7 @@ func verifyIndices(table *model.TableInfo, retainedColumns map[string]struct{}) 
 	primaryKeyColumns := table.GetPrimaryKeyColumnNames()
 
 	retained := true
-	for _, name := range primaryKeyColumns {
+	for name := range primaryKeyColumns {
 		if _, ok := retainedColumns[name]; !ok {
 			retained = false
 			break

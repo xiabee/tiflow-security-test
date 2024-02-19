@@ -73,11 +73,11 @@ func createMockETCD(dir string, host string) (*embed.Etcd, error) {
 	cfg := embed.NewConfig()
 	cfg.Dir = dir
 	lcurl, _ := url.Parse(host)
-	cfg.ListenClientUrls = []url.URL{*lcurl}
-	cfg.AdvertiseClientUrls = []url.URL{*lcurl}
+	cfg.LCUrls = []url.URL{*lcurl}
+	cfg.ACUrls = []url.URL{*lcurl}
 	lpurl, _ := url.Parse(tempurl.Alloc())
-	cfg.ListenPeerUrls = []url.URL{*lpurl}
-	cfg.AdvertisePeerUrls = []url.URL{*lpurl}
+	cfg.LPUrls = []url.URL{*lpurl}
+	cfg.APUrls = []url.URL{*lpurl}
 	cfg.InitialCluster = "default=" + lpurl.String()
 	cfg.Logger = "zap"
 	metricsURL, _ := url.Parse(tempurl.Alloc())

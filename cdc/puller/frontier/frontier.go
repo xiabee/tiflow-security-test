@@ -15,7 +15,6 @@ package frontier
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"strings"
@@ -32,7 +31,6 @@ type Frontier interface {
 	Forward(regionID uint64, span tablepb.Span, ts uint64)
 	Frontier() uint64
 	String() string
-	SpanString(span tablepb.Span) string
 	Entries(fn func(key []byte, ts uint64))
 }
 
@@ -65,7 +63,7 @@ func NewFrontier(checkpointTs uint64, spans ...tablepb.Span) Frontier {
 			firstSpan = false
 			continue
 		}
-		s.insert(fakeRegionID, span, checkpointTs)
+		s.insert(0, span, checkpointTs)
 	}
 
 	return s
@@ -90,7 +88,7 @@ func (s *spanFrontier) Forward(regionID uint64, span tablepb.Span, ts uint64) {
 }
 
 func (s *spanFrontier) insert(regionID uint64, span tablepb.Span, ts uint64) {
-	// clear the seek result
+	// clear the  seek result
 	for i := 0; i < len(s.seekTempResult); i++ {
 		s.seekTempResult[i] = nil
 	}
@@ -98,7 +96,6 @@ func (s *spanFrontier) insert(regionID uint64, span tablepb.Span, ts uint64) {
 	// if there is no change in the region span
 	// We just need to update the ts corresponding to the span in list
 	next := seekRes.Node().Next()
-	// next is nil means the span.StartKey is larger than all the spans in list
 	if next != nil {
 		if bytes.Equal(seekRes.Node().Key(), span.StartKey) &&
 			bytes.Equal(next.Key(), span.EndKey) {
@@ -117,11 +114,9 @@ func (s *spanFrontier) insert(regionID uint64, span tablepb.Span, ts uint64) {
 	node := seekRes.Node()
 	delete(s.cachedRegions, node.regionID)
 	lastNodeTs := uint64(math.MaxUint64)
-	lastRegionID := uint64(fakeRegionID)
 	shouldInsertStartNode := true
 	if node.Value() != nil {
 		lastNodeTs = node.Value().key
-		lastRegionID = node.regionID
 	}
 	for ; node != nil; node = node.Next() {
 		delete(s.cachedRegions, node.regionID)
@@ -133,10 +128,8 @@ func (s *spanFrontier) insert(regionID uint64, span tablepb.Span, ts uint64) {
 			break
 		}
 		lastNodeTs = node.Value().key
-		lastRegionID = node.regionID
 		if cmpStart == 0 {
 			s.minTsHeap.UpdateKey(node.Value(), ts)
-			node.regionID = regionID
 			shouldInsertStartNode = false
 		} else {
 			s.spanList.Remove(seekRes, node)
@@ -144,10 +137,10 @@ func (s *spanFrontier) insert(regionID uint64, span tablepb.Span, ts uint64) {
 		}
 	}
 	if shouldInsertStartNode {
-		s.spanList.InsertNextToNode(seekRes, span.StartKey, s.minTsHeap.Insert(ts), regionID)
+		s.spanList.InsertNextToNode(seekRes, span.StartKey, s.minTsHeap.Insert(ts))
 		seekRes.Next()
 	}
-	s.spanList.InsertNextToNode(seekRes, span.EndKey, s.minTsHeap.Insert(lastNodeTs), lastRegionID)
+	s.spanList.InsertNextToNode(seekRes, span.EndKey, s.minTsHeap.Insert(lastNodeTs))
 }
 
 // Entries visit all traced spans.
@@ -166,44 +159,6 @@ func (s *spanFrontier) String() string {
 		} else {
 			buf.WriteString(fmt.Sprintf("[%s @ %d] ", key, ts))
 		}
-	})
-	return buf.String()
-}
-
-func (s *spanFrontier) stringWtihRegionID() string {
-	var buf strings.Builder
-	s.spanList.Entries(func(n *skipListNode) bool {
-		if n.Value().key == math.MaxUint64 {
-			buf.WriteString(fmt.Sprintf("[%d:%s @ Max] ", n.regionID, hex.EncodeToString(n.Key())))
-		} else { // the next span
-			buf.WriteString(fmt.Sprintf("[%d:%s @ %d] ", n.regionID, hex.EncodeToString(n.Key()), n.Value().key))
-		}
-		return true
-	})
-	return buf.String()
-}
-
-// SpanString returns the string of the span's frontier.
-func (s *spanFrontier) SpanString(span tablepb.Span) string {
-	var buf strings.Builder
-	idx := 0
-	s.spanList.Entries(func(n *skipListNode) bool {
-		key := n.Key()
-		nextKey := []byte{}
-		if n.Next() != nil {
-			nextKey = n.Next().Key()
-		}
-		if n.Value().key == math.MaxUint64 {
-			buf.WriteString(fmt.Sprintf("[%d:%s @ Max] ", n.regionID, hex.EncodeToString(n.Key())))
-		} else if idx == 0 || // head
-			bytes.Equal(key, span.StartKey) || // start key sapn
-			bytes.Equal(nextKey, span.StartKey) || // the previous sapn of start key
-			bytes.Equal(key, span.EndKey) { // the end key span
-			buf.WriteString(fmt.Sprintf("[%d:%s @ %d] ", n.regionID,
-				hex.EncodeToString(n.Key()), n.Value().key))
-		}
-		idx++
-		return true
 	})
 	return buf.String()
 }

@@ -23,8 +23,8 @@ import (
 	"github.com/pingcap/tiflow/cdc/kv/sharedconn"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/memquota"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	pullerwrapper "github.com/pingcap/tiflow/cdc/processor/sourcemanager/puller"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/puller"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -68,15 +68,13 @@ type SourceManager struct {
 	// mg is the mounter group for mount the raw kv entry.
 	mg entry.MounterGroup
 	// engine is the source engine.
-	engine sorter.SortEngine
+	engine engine.SortEngine
 	// Used to indicate whether the changefeed is in BDR mode.
 	bdrMode bool
 
-	// if `multiplexing` is true (the default value) then `multiplexingPuller` will be used.
-	//  * tables in one changefeed will share grpc streams and region workers
-	//  * tables in one changefeed will share goroutines
+	// if `config.GetGlobalServerConfig().KVClient.EnableMultiplexing` is true `tablePullers`
+	// will be used. Otherwise `multiplexingPuller` will be used instead.
 	multiplexing       bool
-	enableTableMonitor bool
 	tablePullers       tablePullers
 	multiplexingPuller multiplexingPuller
 }
@@ -86,12 +84,11 @@ func New(
 	changefeedID model.ChangeFeedID,
 	up *upstream.Upstream,
 	mg entry.MounterGroup,
-	engine sorter.SortEngine,
+	engine engine.SortEngine,
 	bdrMode bool,
-	enableTableMonitor bool,
 ) *SourceManager {
 	multiplexing := config.GetGlobalServerConfig().KVClient.EnableMultiplexing
-	return newSourceManager(changefeedID, up, mg, engine, bdrMode, multiplexing, pullerwrapper.NewPullerWrapper, enableTableMonitor)
+	return newSourceManager(changefeedID, up, mg, engine, bdrMode, multiplexing, pullerwrapper.NewPullerWrapper)
 }
 
 // NewForTest creates a new source manager for testing.
@@ -99,31 +96,29 @@ func NewForTest(
 	changefeedID model.ChangeFeedID,
 	up *upstream.Upstream,
 	mg entry.MounterGroup,
-	engine sorter.SortEngine,
+	engine engine.SortEngine,
 	bdrMode bool,
 ) *SourceManager {
-	return newSourceManager(changefeedID, up, mg, engine, bdrMode, false, pullerwrapper.NewPullerWrapperForTest, false)
+	return newSourceManager(changefeedID, up, mg, engine, bdrMode, false, pullerwrapper.NewPullerWrapperForTest)
 }
 
 func newSourceManager(
 	changefeedID model.ChangeFeedID,
 	up *upstream.Upstream,
 	mg entry.MounterGroup,
-	engine sorter.SortEngine,
+	engine engine.SortEngine,
 	bdrMode bool,
 	multiplexing bool,
 	pullerWrapperCreator pullerWrapperCreator,
-	enableTableMonitor bool,
 ) *SourceManager {
 	mgr := &SourceManager{
-		ready:              make(chan struct{}),
-		changefeedID:       changefeedID,
-		up:                 up,
-		mg:                 mg,
-		engine:             engine,
-		bdrMode:            bdrMode,
-		multiplexing:       multiplexing,
-		enableTableMonitor: enableTableMonitor,
+		ready:        make(chan struct{}),
+		changefeedID: changefeedID,
+		up:           up,
+		mg:           mg,
+		engine:       engine,
+		bdrMode:      bdrMode,
+		multiplexing: multiplexing,
 	}
 	if !multiplexing {
 		mgr.tablePullers.errChan = make(chan error, 16)
@@ -143,7 +138,7 @@ func (m *SourceManager) AddTable(span tablepb.Span, tableName string, startTs mo
 	}
 
 	p := m.tablePullers.pullerWrapperCreator(m.changefeedID, span, tableName, startTs, m.bdrMode)
-	p.Start(m.tablePullers.ctx, m.up, m.engine, m.tablePullers.errChan, m.enableTableMonitor)
+	p.Start(m.tablePullers.ctx, m.up, m.engine, m.tablePullers.errChan)
 	m.tablePullers.Store(span, p)
 }
 
@@ -168,15 +163,15 @@ func (m *SourceManager) OnResolve(action func(tablepb.Span, model.Ts)) {
 
 // FetchByTable just wrap the engine's FetchByTable method.
 func (m *SourceManager) FetchByTable(
-	span tablepb.Span, lowerBound, upperBound sorter.Position,
+	span tablepb.Span, lowerBound, upperBound engine.Position,
 	quota *memquota.MemQuota,
-) *sorter.MountedEventIter {
+) *engine.MountedEventIter {
 	iter := m.engine.FetchByTable(span, lowerBound, upperBound)
-	return sorter.NewMountedEventIter(m.changefeedID, iter, m.mg, defaultMaxBatchSize, quota)
+	return engine.NewMountedEventIter(m.changefeedID, iter, m.mg, defaultMaxBatchSize, quota)
 }
 
 // CleanByTable just wrap the engine's CleanByTable method.
-func (m *SourceManager) CleanByTable(span tablepb.Span, upperBound sorter.Position) error {
+func (m *SourceManager) CleanByTable(span tablepb.Span, upperBound engine.Position) error {
 	return m.engine.CleanByTable(span, upperBound)
 }
 
@@ -197,7 +192,7 @@ func (m *SourceManager) GetTablePullerStats(span tablepb.Span) puller.Stats {
 }
 
 // GetTableSorterStats returns the sorter stats of the table.
-func (m *SourceManager) GetTableSorterStats(span tablepb.Span) sorter.TableStats {
+func (m *SourceManager) GetTableSorterStats(span tablepb.Span) engine.TableStats {
 	return m.engine.GetStatsByTable(span)
 }
 

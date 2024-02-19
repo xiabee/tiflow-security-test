@@ -17,7 +17,7 @@ import (
 	"strings"
 
 	"github.com/pingcap/log"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher/partition"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher/topic"
@@ -89,8 +89,8 @@ func NewEventRouter(
 
 // GetTopicForRowChange returns the target topic for row changes.
 func (s *EventRouter) GetTopicForRowChange(row *model.RowChangedEvent) string {
-	topicDispatcher, _ := s.matchDispatcher(row.TableInfo.GetSchemaName(), row.TableInfo.GetTableName())
-	return topicDispatcher.Substitute(row.TableInfo.GetSchemaName(), row.TableInfo.GetTableName())
+	topicDispatcher, _ := s.matchDispatcher(row.Table.Schema, row.Table.Table)
+	return topicDispatcher.Substitute(row.Table.Schema, row.Table.Table)
 }
 
 // GetTopicForDDL returns the target topic for DDL.
@@ -119,7 +119,7 @@ func (s *EventRouter) GetPartitionForRowChange(
 	row *model.RowChangedEvent,
 	partitionNum int32,
 ) (int32, string, error) {
-	return s.GetPartitionDispatcher(row.TableInfo.GetSchemaName(), row.TableInfo.GetTableName()).
+	return s.GetPartitionDispatcher(row.Table.Schema, row.Table.Table).
 		DispatchRowChangedEvent(row, partitionNum)
 }
 

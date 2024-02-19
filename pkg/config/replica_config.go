@@ -23,7 +23,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/pkg/config/outdated"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/integrity"
@@ -52,7 +52,6 @@ var defaultReplicaConfig = &ReplicaConfig{
 	CaseSensitive:      false,
 	CheckGCSafePoint:   true,
 	EnableSyncPoint:    util.AddressOf(false),
-	EnableTableMonitor: util.AddressOf(false),
 	SyncPointInterval:  util.AddressOf(10 * time.Minute),
 	SyncPointRetention: util.AddressOf(24 * time.Hour),
 	BDRMode:            util.AddressOf(false),
@@ -76,13 +75,8 @@ var defaultReplicaConfig = &ReplicaConfig{
 		EnableKafkaSinkV2:                util.AddressOf(false),
 		OnlyOutputUpdatedColumns:         util.AddressOf(false),
 		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
-		ContentCompatible:                util.AddressOf(false),
 		TiDBSourceID:                     1,
 		AdvanceTimeoutInSec:              util.AddressOf(DefaultAdvanceTimeoutInSec),
-		SendBootstrapIntervalInSec:       util.AddressOf(DefaultSendBootstrapIntervalInSec),
-		SendBootstrapInMsgCount:          util.AddressOf(DefaultSendBootstrapInMsgCount),
-		SendBootstrapToAllPartition:      util.AddressOf(DefaultSendBootstrapToAllPartition),
-		DebeziumDisableSchema:            util.AddressOf(false),
 	},
 	Consistent: &ConsistentConfig{
 		Level:                 "none",
@@ -96,6 +90,7 @@ var defaultReplicaConfig = &ReplicaConfig{
 		Compression:           "",
 		MemoryUsage: &ConsistentMemoryUsage{
 			MemoryQuotaPercentage: 50,
+			EventCachePercentage:  0,
 		},
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
@@ -138,8 +133,7 @@ type replicaConfig struct {
 	ForceReplicate   bool   `toml:"force-replicate" json:"force-replicate"`
 	CheckGCSafePoint bool   `toml:"check-gc-safe-point" json:"check-gc-safe-point"`
 	// EnableSyncPoint is only available when the downstream is a Database.
-	EnableSyncPoint    *bool `toml:"enable-sync-point" json:"enable-sync-point,omitempty"`
-	EnableTableMonitor *bool `toml:"enable-table-monitor" json:"enable-table-monitor"`
+	EnableSyncPoint *bool `toml:"enable-sync-point" json:"enable-sync-point,omitempty"`
 	// IgnoreIneligibleTable is used to store the user's config when creating a changefeed.
 	// not used in the changefeed's lifecycle.
 	IgnoreIneligibleTable bool `toml:"ignore-ineligible-table" json:"ignore-ineligible-table"`
@@ -168,13 +162,7 @@ type replicaConfig struct {
 
 // Value implements the driver.Valuer interface
 func (c ReplicaConfig) Value() (driver.Value, error) {
-	cfg, err := c.Marshal()
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: refactor the meaningless type conversion.
-	return []byte(cfg), nil
+	return c.Marshal()
 }
 
 // Scan implements the sql.Scanner interface

@@ -14,10 +14,17 @@
 package filter
 
 import (
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	tfilter "github.com/pingcap/tidb/pkg/util/table-filter"
+	timodel "github.com/pingcap/tidb/parser/model"
+	tfilter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
+)
+
+const (
+	// SyncPointTable is the tale name use to write ts-map when sync-point is enable.
+	SyncPointTable = "syncpoint_v1"
+	// TiCDCSystemSchema is the schema only use by TiCDC.
+	TiCDCSystemSchema = "tidb_cdc"
 )
 
 // allowDDLList is a list of DDL types that can be applied to cdc's schema storage.
@@ -136,7 +143,7 @@ func (f *filter) ShouldIgnoreDMLEvent(
 		return true, nil
 	}
 
-	if f.ShouldIgnoreTable(dml.TableInfo.GetSchemaName(), dml.TableInfo.GetTableName()) {
+	if f.ShouldIgnoreTable(dml.Table.Schema, dml.Table.Table) {
 		return true, nil
 	}
 

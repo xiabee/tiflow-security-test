@@ -85,7 +85,7 @@ func mockBackendEtcd() (*embed.Etcd, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	cfg.ListenPeerUrls = []url.URL{*u}
+	cfg.LPUrls = []url.URL{*u}
 	advertises, err := allocTempURL()
 	if err != nil {
 		return nil, "", err
@@ -95,7 +95,7 @@ func mockBackendEtcd() (*embed.Etcd, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	cfg.ListenClientUrls = []url.URL{*u}
+	cfg.LCUrls = []url.URL{*u}
 	svr, err := embed.StartEtcd(cfg)
 	if err != nil {
 		return nil, "", err

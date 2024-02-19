@@ -25,6 +25,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/entry"
+	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/sinkmanager"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager"
@@ -62,9 +63,6 @@ type Processor interface {
 	// It can be called in etcd ticks, so it should never be blocked.
 	// Tick Returns: error and warnings. error will be propagated to the owner, and warnings will be record.
 	Tick(cdcContext.Context, *model.ChangeFeedInfo, *model.ChangeFeedStatus) (error, error)
-
-	// Close closes the processor.
-	Close() error
 }
 
 var _ Processor = (*processor)(nil)
@@ -140,14 +138,13 @@ func (p *processor) AddTableSpan(
 
 	startTs := checkpoint.CheckpointTs
 	if startTs == 0 {
-		log.Error("table start ts must not be 0",
+		log.Panic("table start ts must not be 0",
 			zap.String("captureID", p.captureInfo.ID),
 			zap.String("namespace", p.changefeedID.Namespace),
 			zap.String("changefeed", p.changefeedID.ID),
 			zap.Stringer("span", &span),
 			zap.Uint64("checkpointTs", startTs),
 			zap.Bool("isPrepare", isPrepare))
-		return false, cerror.ErrUnexpected.FastGenByArgs("table start ts must not be 0")
 	}
 
 	state, alreadyExist := p.sinkManager.r.GetTableState(span)
@@ -494,11 +491,10 @@ func (p *processor) Tick(
 		return err, nil
 	}
 	if p.upstream.IsClosed() {
-		log.Error("upstream is closed",
+		log.Panic("upstream is closed",
 			zap.Uint64("upstreamID", p.upstream.ID),
 			zap.String("namespace", p.changefeedID.Namespace),
 			zap.String("changefeed", p.changefeedID.ID))
-		return cerror.ErrUnexpected.FastGenByArgs("upstream is closed"), nil
 	}
 	// skip this tick
 	if !p.upstream.IsNormal() {
@@ -626,8 +622,7 @@ func (p *processor) lazyInitImpl(etcdCtx cdcContext.Context) (err error) {
 
 	p.sourceManager.r = sourcemanager.New(
 		p.changefeedID, p.upstream, p.mg.r,
-		sortEngine, util.GetOrZero(p.latestInfo.Config.BDRMode),
-		util.GetOrZero(p.latestInfo.Config.EnableTableMonitor))
+		sortEngine, util.GetOrZero(p.latestInfo.Config.BDRMode))
 	p.sourceManager.name = "SourceManager"
 	p.sourceManager.changefeedID = p.changefeedID
 	p.sourceManager.spawn(prcCtx)
@@ -713,21 +708,29 @@ func (p *processor) initDDLHandler(ctx context.Context) error {
 		ddlStartTs = checkpointTs - 1
 	}
 
+	meta, err := kv.GetSnapshotMeta(p.upstream.KVStorage, ddlStartTs)
+	if err != nil {
+		return errors.Trace(err)
+	}
 	f, err := filter.NewFilter(p.latestInfo.Config, "")
 	if err != nil {
 		return errors.Trace(err)
 	}
-	schemaStorage, err := entry.NewSchemaStorage(p.upstream.KVStorage, ddlStartTs,
+	schemaStorage, err := entry.NewSchemaStorage(meta, ddlStartTs,
 		forceReplicate, p.changefeedID, util.RoleProcessor, f)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
 	serverCfg := config.GetGlobalServerConfig()
-	changefeedID := model.DefaultChangeFeedID(p.changefeedID.ID + "_processor_ddl_puller")
-	ddlPuller := puller.NewDDLJobPuller(
-		ctx, p.upstream, ddlStartTs, serverCfg, changefeedID, schemaStorage, p.filter,
+	ddlPuller, err := puller.NewDDLJobPuller(
+		ctx, p.upstream, ddlStartTs,
+		serverCfg, p.changefeedID, schemaStorage,
+		f, false, /* isOwner */
 	)
+	if err != nil {
+		return errors.Trace(err)
+	}
 	p.ddlHandler.r = &ddlHandler{puller: ddlPuller, schemaStorage: schemaStorage}
 	return nil
 }
@@ -1007,6 +1010,10 @@ func (d *ddlHandler) Run(ctx context.Context, _ ...chan<- error) error {
 			failpoint.Inject("processorDDLResolved", nil)
 			if jobEntry.OpType == model.OpTypeResolved {
 				d.schemaStorage.AdvanceResolvedTs(jobEntry.CRTs)
+			}
+			err := jobEntry.Err
+			if err != nil {
+				return errors.Trace(err)
 			}
 		}
 	})

@@ -32,6 +32,7 @@ type redoWorker struct {
 	sourceManager  *sourcemanager.SourceManager
 	memQuota       *memquota.MemQuota
 	redoDMLManager redo.DMLManager
+	eventCache     *redoEventCache
 }
 
 func newRedoWorker(
@@ -39,12 +40,14 @@ func newRedoWorker(
 	sourceManager *sourcemanager.SourceManager,
 	quota *memquota.MemQuota,
 	redoDMLMgr redo.DMLManager,
+	eventCache *redoEventCache,
 ) *redoWorker {
 	return &redoWorker{
 		changefeedID:   changefeedID,
 		sourceManager:  sourceManager,
 		memQuota:       quota,
 		redoDMLManager: redoDMLMgr,
+		eventCache:     eventCache,
 	}
 }
 
@@ -74,8 +77,14 @@ func (w *redoWorker) handleTask(ctx context.Context, task *redoTask) (finalErr e
 	)
 	advancer.lastPos = lowerBound.Prev()
 
+	var cache *eventAppender
+	if w.eventCache != nil {
+		cache = w.eventCache.maybeCreateAppender(task.span, lowerBound)
+	}
+
 	iter := w.sourceManager.FetchByTable(task.span, lowerBound, upperBound, w.memQuota)
 	allEventCount := 0
+	cachedSize := uint64(0)
 
 	defer func() {
 		eventCount := newRangeEventCount(advancer.lastPos, allEventCount)
@@ -111,7 +120,12 @@ func (w *redoWorker) handleTask(ctx context.Context, task *redoTask) (finalErr e
 		}
 		// There is no more data. It means that we finish this scan task.
 		if e == nil {
-			return advancer.finish(ctx, upperBound)
+			if cache != nil {
+				// Still need to update cache upper boundary even if no events.
+				cache.pushBatch(nil, 0, upperBound)
+			}
+
+			return advancer.finish(ctx, cachedSize, upperBound)
 		}
 
 		allEventCount += 1
@@ -132,17 +146,30 @@ func (w *redoWorker) handleTask(ctx context.Context, task *redoTask) (finalErr e
 			advancer.appendEvents(x, size)
 		}
 
-		err = advancer.tryAdvanceAndAcquireMem(
+		if cache != nil {
+			cached, brokenSize := cache.pushBatch(x, size, pos)
+			if cached {
+				cachedSize += size
+			} else {
+				cachedSize -= brokenSize
+			}
+		}
+
+		advanced, err := advancer.tryAdvanceAndAcquireMem(
 			ctx,
+			cachedSize,
 			false,
 			pos.Valid(),
 		)
 		if err != nil {
 			return errors.Trace(err)
 		}
+		if advanced {
+			cachedSize = 0
+		}
 	}
 
 	// Even if task is canceled we still call this again, to avoid something
 	// are left and leak forever.
-	return advancer.advance(ctx)
+	return advancer.advance(ctx, cachedSize)
 }

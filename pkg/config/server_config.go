@@ -134,11 +134,9 @@ var defaultServerConfig = &ServerConfig{
 
 		Scheduler:              NewDefaultSchedulerConfig(),
 		EnableKVConnectBackOff: false,
-		CDCV2:                  &CDCV2{Enable: false},
 		Puller: &PullerConfig{
 			EnableResolvedTsStuckDetection: false,
 			ResolvedTsStuckInterval:        TomlDuration(5 * time.Minute),
-			LogRegionDetails:               false,
 		},
 	},
 	ClusterID:              "default",

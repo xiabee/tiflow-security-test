@@ -110,7 +110,7 @@ func newSink(ctx context.Context,
 	g, ctx1 := errgroup.WithContext(ctx)
 	for i, backend := range backends {
 		w := newWorker(ctx1, changefeedID, i, backend, len(backends))
-		g.Go(func() error { return w.run() })
+		g.Go(func() error { return w.runLoop() })
 		sink.workers = append(sink.workers, w)
 	}
 

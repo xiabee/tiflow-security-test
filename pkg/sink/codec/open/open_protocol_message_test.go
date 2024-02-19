@@ -16,7 +16,7 @@ package open
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
@@ -100,15 +100,13 @@ func TestOnlyOutputUpdatedColumn(t *testing.T) {
 	codecConfig := common.NewConfig(config.ProtocolOpen)
 	codecConfig.OnlyOutputUpdatedColumns = true
 
-	tableInfo := &model.TableInfo{
-		TableName: model.TableName{
-			Schema: "test",
-			Table:  "test",
-		},
+	table := &model.TableName{
+		Schema: "test",
+		Table:  "test",
 	}
 
 	event := &model.RowChangedEvent{
-		TableInfo: tableInfo,
+		Table: table,
 		PreColumns: []*model.Column{
 			{
 				Name:  "test",
@@ -130,7 +128,7 @@ func TestOnlyOutputUpdatedColumn(t *testing.T) {
 	require.False(t, ok)
 
 	event = &model.RowChangedEvent{
-		TableInfo: tableInfo,
+		Table: table,
 		PreColumns: []*model.Column{
 			{
 				Name:  "test",
@@ -151,7 +149,7 @@ func TestOnlyOutputUpdatedColumn(t *testing.T) {
 
 	// column type updated, so output it.
 	event = &model.RowChangedEvent{
-		TableInfo: tableInfo,
+		Table: table,
 		PreColumns: []*model.Column{
 			{
 				Name:  "test",
@@ -171,7 +169,7 @@ func TestOnlyOutputUpdatedColumn(t *testing.T) {
 	require.True(t, ok)
 
 	event = &model.RowChangedEvent{
-		TableInfo: tableInfo,
+		Table: table,
 		PreColumns: []*model.Column{
 			{
 				Name:  "test",
@@ -196,11 +194,9 @@ func TestRowChanged2MsgOnlyHandleKeyColumns(t *testing.T) {
 
 	insertEvent := &model.RowChangedEvent{
 		CommitTs: 417318403368288260,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{
-				Schema: "schema",
-				Table:  "table",
-			},
+		Table: &model.TableName{
+			Schema: "schema",
+			Table:  "table",
 		},
 		Columns: []*model.Column{
 			{Name: "id", Flag: model.HandleKeyFlag, Type: mysql.TypeLonglong, Value: 1},
@@ -225,11 +221,9 @@ func TestRowChanged2MsgOnlyHandleKeyColumns(t *testing.T) {
 
 	insertEventNoHandleKey := &model.RowChangedEvent{
 		CommitTs: 417318403368288260,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{
-				Schema: "schema",
-				Table:  "table",
-			},
+		Table: &model.TableName{
+			Schema: "schema",
+			Table:  "table",
 		},
 		Columns: []*model.Column{
 			{Name: "id", Type: mysql.TypeLonglong, Value: 1},
@@ -241,11 +235,9 @@ func TestRowChanged2MsgOnlyHandleKeyColumns(t *testing.T) {
 
 	updateEvent := &model.RowChangedEvent{
 		CommitTs: 417318403368288260,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{
-				Schema: "schema",
-				Table:  "table",
-			},
+		Table: &model.TableName{
+			Schema: "schema",
+			Table:  "table",
 		},
 		Columns: []*model.Column{
 			{Name: "id", Flag: model.HandleKeyFlag, Type: mysql.TypeLonglong, Value: 1},
@@ -271,11 +263,9 @@ func TestRowChanged2MsgOnlyHandleKeyColumns(t *testing.T) {
 
 	updateEventNoHandleKey := &model.RowChangedEvent{
 		CommitTs: 417318403368288260,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{
-				Schema: "schema",
-				Table:  "table",
-			},
+		Table: &model.TableName{
+			Schema: "schema",
+			Table:  "table",
 		},
 		Columns: []*model.Column{
 			{Name: "id", Type: mysql.TypeLonglong, Value: 1},
@@ -291,11 +281,9 @@ func TestRowChanged2MsgOnlyHandleKeyColumns(t *testing.T) {
 
 	deleteEvent := &model.RowChangedEvent{
 		CommitTs: 417318403368288260,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{
-				Schema: "schema",
-				Table:  "table",
-			},
+		Table: &model.TableName{
+			Schema: "schema",
+			Table:  "table",
 		},
 		PreColumns: []*model.Column{
 			{Name: "id", Flag: model.HandleKeyFlag, Type: mysql.TypeLonglong, Value: 1},
@@ -320,11 +308,9 @@ func TestRowChanged2MsgOnlyHandleKeyColumns(t *testing.T) {
 
 	deleteEventNoHandleKey := &model.RowChangedEvent{
 		CommitTs: 417318403368288260,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{
-				Schema: "schema",
-				Table:  "table",
-			},
+		Table: &model.TableName{
+			Schema: "schema",
+			Table:  "table",
 		},
 		PreColumns: []*model.Column{
 			{Name: "id", Type: mysql.TypeLonglong, Value: 1},

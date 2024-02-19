@@ -194,7 +194,6 @@ func (c *Config) Apply(
 	if err = getDuration(urlParameter.Timeout, &c.DialTimeout); err != nil {
 		return err
 	}
-
 	getBatchDMLEnable(urlParameter, &c.BatchDMLEnable)
 	getMultiStmtEnable(urlParameter, &c.MultiStmtEnable)
 	getCachePrepStmts(urlParameter, &c.CachePrepStmts)

@@ -113,7 +113,7 @@ var (
 
 	// codec related errors
 	ErrEncodeFailed = errors.Normalize(
-		"encode failed",
+		"encode failed: %s",
 		errors.RFCCodeText("CDC:ErrEncodeFailed"),
 	)
 	ErrDecodeFailed = errors.Normalize(
@@ -415,10 +415,6 @@ var (
 	ErrCSVDecodeFailed = errors.Normalize(
 		"csv decode failed",
 		errors.RFCCodeText("CDC:ErrCSVDecodeFailed"),
-	)
-	ErrDebeziumEncodeFailed = errors.Normalize(
-		"debezium encode failed",
-		errors.RFCCodeText("CDC:ErrDebeziumEncodeFailed"),
 	)
 	ErrStorageSinkInvalidConfig = errors.Normalize(
 		"storage sink config invalid",
@@ -939,7 +935,7 @@ var (
 	)
 
 	ErrHandleDDLFailed = errors.Normalize(
-		"handle ddl failed, query: %s, startTs: %d. "+
+		"handle ddl failed, job: %s, query: %s, startTs: %d. "+
 			"If you want to skip this DDL and continue with replication, "+
 			"you can manually execute this DDL downstream. Afterwards, "+
 			"add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.",
@@ -976,10 +972,5 @@ var (
 	ErrInconsistentMetaCache = errors.Normalize(
 		"meta cache is inconsistent: %s",
 		errors.RFCCodeText("DFLOW:ErrInconsistentMetaCache"),
-	)
-
-	ErrUnexpected = errors.Normalize(
-		"cdc met unexpected error: %s",
-		errors.RFCCodeText("CDC:ErrUnexpected"),
 	)
 )

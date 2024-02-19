@@ -17,7 +17,7 @@ import (
 	"testing"
 
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/stretchr/testify/require"
@@ -33,7 +33,7 @@ func TestShouldUseDefaultRules(t *testing.T) {
 	require.True(t, filter.ShouldIgnoreTable("performance_schema", ""))
 	require.False(t, filter.ShouldIgnoreTable("metric_schema", "query_duration"))
 	require.False(t, filter.ShouldIgnoreTable("sns", "user"))
-	require.False(t, filter.ShouldIgnoreTable("tidb_cdc", "repl_mark_a_a"))
+	require.True(t, filter.ShouldIgnoreTable("tidb_cdc", "repl_mark_a_a"))
 }
 
 func TestShouldUseCustomRules(t *testing.T) {
@@ -142,12 +142,7 @@ func TestShouldIgnoreDMLEvent(t *testing.T) {
 		require.Nil(t, err)
 		for _, tc := range ftc.cases {
 			dml := &model.RowChangedEvent{
-				TableInfo: &model.TableInfo{
-					TableName: model.TableName{
-						Schema: tc.schema,
-						Table:  tc.table,
-					},
-				},
+				Table:   &model.TableName{Table: tc.table, Schema: tc.schema},
 				StartTs: tc.ts,
 			}
 			ignoreDML, err := filter.ShouldIgnoreDMLEvent(dml, model.RowChangedDatums{}, nil)

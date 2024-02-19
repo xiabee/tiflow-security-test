@@ -93,8 +93,6 @@ type SharedClient struct {
 		sync.RWMutex
 		v map[SubscriptionID]*requestedTable
 	}
-
-	logRegionDetails func(msg string, fields ...zap.Field)
 }
 
 type resolveLockTask struct {
@@ -128,7 +126,7 @@ type requestedTable struct {
 	stopped atomic.Bool
 
 	// To handle lock resolvings.
-	postUpdateRegionResolvedTs func(regionID, version uint64, state *regionlock.LockedRange, span tablepb.Span)
+	postUpdateRegionResolvedTs func(regionID uint64, state *regionlock.LockedRange)
 	staleLocksVersion          atomic.Uint64
 }
 
@@ -164,12 +162,6 @@ func NewSharedClient(
 		requestedStores: make(map[string]*requestedStore),
 	}
 	s.totalSpans.v = make(map[SubscriptionID]*requestedTable)
-	if cfg.Debug.Puller.LogRegionDetails {
-		s.logRegionDetails = log.Info
-	} else {
-		s.logRegionDetails = log.Debug
-	}
-
 	s.initMetrics()
 	return s
 }
@@ -418,7 +410,7 @@ func (s *SharedClient) createRegionRequest(sri singleRegionInfo) *cdcpb.ChangeDa
 
 func (s *SharedClient) appendRequest(r *requestedStore, sri singleRegionInfo) {
 	offset := r.nextStream.Add(1) % uint32(len(r.streams))
-	s.logRegionDetails("event feed will request a region",
+	log.Info("event feed will request a region",
 		zap.String("namespace", s.changefeed.Namespace),
 		zap.String("changefeed", s.changefeed.ID),
 		zap.Uint64("streamID", r.streams[offset].streamID),
@@ -586,7 +578,7 @@ func (s *SharedClient) handleError(ctx context.Context, errInfo regionErrorInfo)
 	switch eerr := err.(type) {
 	case *eventError:
 		innerErr := eerr.err
-		s.logRegionDetails("cdc region error",
+		log.Info("cdc region error",
 			zap.String("namespace", s.changefeed.Namespace),
 			zap.String("changefeed", s.changefeed.ID),
 			zap.Any("subscriptionID", errInfo.requestedTable.subscriptionID),
@@ -606,11 +598,6 @@ func (s *SharedClient) handleError(ctx context.Context, errInfo regionErrorInfo)
 		if innerErr.GetRegionNotFound() != nil {
 			metricFeedRegionNotFoundCounter.Inc()
 			s.scheduleRangeRequest(ctx, errInfo.span, errInfo.requestedTable)
-			return nil
-		}
-		if innerErr.GetServerIsBusy() != nil {
-			metricKvIsBusyCounter.Inc()
-			s.scheduleRegionRequest(ctx, errInfo.singleRegionInfo)
 			return nil
 		}
 		if duplicated := innerErr.GetDuplicateRequest(); duplicated != nil {
@@ -778,7 +765,7 @@ func (s *SharedClient) newRequestedTable(
 		eventCh:        eventCh,
 	}
 
-	rt.postUpdateRegionResolvedTs = func(regionID, _ uint64, state *regionlock.LockedRange, _ tablepb.Span) {
+	rt.postUpdateRegionResolvedTs = func(regionID uint64, state *regionlock.LockedRange) {
 		maxVersion := rt.staleLocksVersion.Load()
 		if state.CheckpointTs.Load() <= maxVersion && state.Initialzied.Load() {
 			enter := time.Now()
@@ -825,8 +812,6 @@ type sharedClientMetrics struct {
 }
 
 func (s *SharedClient) initMetrics() {
-	eventFeedGauge.Inc()
-
 	s.metrics.regionLockDuration = regionConnectDuration.
 		WithLabelValues(s.changefeed.Namespace, s.changefeed.ID, "lock")
 	s.metrics.regionLocateDuration = regionConnectDuration.
@@ -844,8 +829,6 @@ func (s *SharedClient) initMetrics() {
 }
 
 func (s *SharedClient) clearMetrics() {
-	eventFeedGauge.Dec()
-
 	regionConnectDuration.DeleteLabelValues(s.changefeed.Namespace, s.changefeed.ID, "lock")
 	regionConnectDuration.DeleteLabelValues(s.changefeed.Namespace, s.changefeed.ID, "locate")
 	regionConnectDuration.DeleteLabelValues(s.changefeed.Namespace, s.changefeed.ID, "connect")

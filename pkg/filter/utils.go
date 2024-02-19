@@ -17,17 +17,24 @@ import (
 	"fmt"
 
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb/pkg/parser"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	tifilter "github.com/pingcap/tidb/pkg/util/filter"
-	tfilter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/parser"
+	timodel "github.com/pingcap/tidb/parser/model"
+	tifilter "github.com/pingcap/tidb/util/filter"
+	tfilter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
 
 // isSysSchema returns true if the given schema is a system schema
 func isSysSchema(db string) bool {
-	return tifilter.IsSystemSchema(db)
+	switch db {
+	// TiCDCSystemSchema is used by TiCDC only.
+	// Tables in TiCDCSystemSchema should not be replicated by cdc.
+	case TiCDCSystemSchema:
+		return true
+	default:
+		return tifilter.IsSystemSchema(db)
+	}
 }
 
 // VerifyTableRules checks the table filter rules in the configuration
@@ -36,7 +43,9 @@ func isSysSchema(db string) bool {
 func VerifyTableRules(cfg *config.FilterConfig) (tfilter.Filter, error) {
 	var f tfilter.Filter
 	var err error
-	if len(cfg.Rules) != 0 {
+	if len(cfg.Rules) == 0 && cfg.MySQLReplicationRules != nil {
+		f, err = tfilter.ParseMySQLReplicationRules(cfg.MySQLReplicationRules)
+	} else {
 		rules := cfg.Rules
 		if len(rules) == 0 {
 			rules = []string{"*.*"}

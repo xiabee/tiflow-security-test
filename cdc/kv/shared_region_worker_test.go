@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/tiflow/cdc/kv/regionlock"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
-	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/tikv"
@@ -30,8 +29,7 @@ import (
 
 func newSharedClientForTestSharedRegionWorker() *SharedClient {
 	// sharedRegionWorker only requires `SharedClient.onRegionFail`.
-	cfg := &config.ServerConfig{Debug: &config.DebugConfig{Puller: &config.PullerConfig{LogRegionDetails: false}}}
-	return NewSharedClient(model.ChangeFeedID{}, cfg, false, nil, nil, nil, nil, nil)
+	return NewSharedClient(model.ChangeFeedID{}, nil, false, nil, nil, nil, nil, nil)
 }
 
 // For UPDATE SQL, its prewrite event has both value and old value.

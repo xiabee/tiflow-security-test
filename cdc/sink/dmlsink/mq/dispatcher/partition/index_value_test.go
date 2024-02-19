@@ -16,7 +16,7 @@ package partition
 import (
 	"testing"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/stretchr/testify/require"
@@ -30,11 +30,9 @@ func TestIndexValueDispatcher(t *testing.T) {
 		expectPartition int32
 	}{
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t1",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
 			},
 			Columns: []*model.Column{
 				{
@@ -49,11 +47,9 @@ func TestIndexValueDispatcher(t *testing.T) {
 			},
 		}, expectPartition: 2},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t1",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
 			},
 			Columns: []*model.Column{
 				{
@@ -68,11 +64,9 @@ func TestIndexValueDispatcher(t *testing.T) {
 			},
 		}, expectPartition: 11},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t1",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
 			},
 			Columns: []*model.Column{
 				{
@@ -87,11 +81,9 @@ func TestIndexValueDispatcher(t *testing.T) {
 			},
 		}, expectPartition: 2},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			Columns: []*model.Column{
 				{
@@ -106,11 +98,9 @@ func TestIndexValueDispatcher(t *testing.T) {
 			},
 		}, expectPartition: 5},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			Columns: []*model.Column{
 				{
@@ -125,11 +115,9 @@ func TestIndexValueDispatcher(t *testing.T) {
 			},
 		}, expectPartition: 5},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			Columns: []*model.Column{
 				{
@@ -144,11 +132,9 @@ func TestIndexValueDispatcher(t *testing.T) {
 			},
 		}, expectPartition: 14},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			Columns: []*model.Column{
 				{
@@ -174,30 +160,29 @@ func TestIndexValueDispatcher(t *testing.T) {
 func TestIndexValueDispatcherWithIndexName(t *testing.T) {
 	t.Parallel()
 
-	tableInfo := &model.TableInfo{
-		TableName: model.TableName{
+	event := &model.RowChangedEvent{
+		Table: &model.TableName{
 			Schema: "test",
 			Table:  "t1",
 		},
-		TableInfo: &timodel.TableInfo{
-			Indices: []*timodel.IndexInfo{
-				{
-					Name: timodel.CIStr{
-						O: "index1",
-					},
-					Columns: []*timodel.IndexColumn{
-						{
-							Name: timodel.CIStr{
-								O: "a",
+		TableInfo: &model.TableInfo{
+			TableInfo: &timodel.TableInfo{
+				Indices: []*timodel.IndexInfo{
+					{
+						Name: timodel.CIStr{
+							O: "index1",
+						},
+						Columns: []*timodel.IndexColumn{
+							{
+								Name: timodel.CIStr{
+									O: "a",
+								},
 							},
 						},
 					},
 				},
 			},
 		},
-	}
-	event := &model.RowChangedEvent{
-		TableInfo: tableInfo,
 		Columns: []*model.Column{
 			{
 				Name:  "a",

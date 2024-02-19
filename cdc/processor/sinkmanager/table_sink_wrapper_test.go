@@ -219,15 +219,13 @@ func TestHandleRowChangedEventNormalEvent(t *testing.T) {
 			CRTs:  1,
 			RawKV: &model.RawKVEntry{OpType: model.OpTypePut},
 			Row: &model.RowChangedEvent{
-				CommitTs: 1,
-				TableInfo: &model.TableInfo{
-					TableName: model.TableName{
-						Schema: "test",
-						Table:  "test",
-					},
-				},
+				CommitTs:   1,
 				Columns:    columns,
 				PreColumns: preColumns,
+				Table: &model.TableName{
+					Schema: "test",
+					Table:  "test",
+				},
 			},
 		},
 	}
@@ -235,7 +233,7 @@ func TestHandleRowChangedEventNormalEvent(t *testing.T) {
 	span := spanz.TableIDToComparableSpan(1)
 	result, size := handleRowChangedEvents(changefeedID, span, events...)
 	require.Equal(t, 1, len(result))
-	require.Equal(t, uint64(testEventSize), size)
+	require.Equal(t, uint64(224), size)
 }
 
 func TestGetUpperBoundTs(t *testing.T) {

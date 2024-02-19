@@ -17,7 +17,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +29,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/owner"
 	"github.com/pingcap/tiflow/cdc/processor"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter/factory"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine/factory"
 	"github.com/pingcap/tiflow/pkg/config"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
@@ -73,7 +72,6 @@ type Capture interface {
 	// IsReady returns if the cdc server is ready
 	// currently only check if ettcd data migration is done
 	IsReady() bool
-	GetUpstreamInfo(context.Context, model.UpstreamID, string) (*model.UpstreamInfo, error)
 }
 
 type captureImpl struct {
@@ -123,12 +121,8 @@ type captureImpl struct {
 		liveness *model.Liveness,
 		cfg *config.SchedulerConfig,
 	) processor.Manager
-	newOwner      func(upstreamManager *upstream.Manager, cfg *config.SchedulerConfig, etcdClient etcd.CDCEtcdClient) owner.Owner
+	newOwner      func(upstreamManager *upstream.Manager, cfg *config.SchedulerConfig) owner.Owner
 	newController func(upstreamManager *upstream.Manager, captureInfo *model.CaptureInfo, client etcd.CDCEtcdClient) controller.Controller
-}
-
-func (c *captureImpl) GetUpstreamInfo(ctx context.Context, id model.UpstreamID, namespace string) (*model.UpstreamInfo, error) {
-	return c.GetEtcdClient().GetUpstreamInfo(ctx, id, namespace)
 }
 
 // NewCapture returns a new Capture instance
@@ -226,17 +220,10 @@ func (c *captureImpl) reset(ctx context.Context) error {
 
 	c.captureMu.Lock()
 	defer c.captureMu.Unlock()
-	deployPath, err := os.Executable()
-	if err != nil {
-		deployPath = ""
-	}
 	c.info = &model.CaptureInfo{
-		ID:             uuid.New().String(),
-		AdvertiseAddr:  c.config.AdvertiseAddr,
-		Version:        version.ReleaseVersion,
-		GitHash:        version.GitHash,
-		DeployPath:     deployPath,
-		StartTimestamp: time.Now().Unix(),
+		ID:            uuid.New().String(),
+		AdvertiseAddr: c.config.AdvertiseAddr,
+		Version:       version.ReleaseVersion,
 	}
 
 	if c.upstreamManager != nil {
@@ -499,7 +486,8 @@ func (c *captureImpl) campaignOwner(ctx cdcContext.Context) error {
 			zap.Int64("ownerRev", ownerRev))
 
 		controller := c.newController(c.upstreamManager, c.info, c.EtcdClient)
-		owner := c.newOwner(c.upstreamManager, c.config.Debug.Scheduler, c.EtcdClient)
+
+		owner := c.newOwner(c.upstreamManager, c.config.Debug.Scheduler)
 		c.setOwner(owner)
 		c.setController(controller)
 
@@ -525,12 +513,12 @@ func (c *captureImpl) campaignOwner(ctx cdcContext.Context) error {
 		ctx, cancelOwner := context.WithCancel(ctx)
 		ownerCtx := cdcContext.NewContext(ctx, newGlobalVars)
 		g.Go(func() error {
-			return c.runEtcdWorker(ownerCtx, owner.(orchestrator.Reactor),
+			return c.runEtcdWorker(ownerCtx, owner,
 				orchestrator.NewGlobalState(c.EtcdClient.GetClusterID(), c.config.CaptureSessionTTL),
 				ownerFlushInterval, util.RoleOwner.String())
 		})
 		g.Go(func() error {
-			er := c.runEtcdWorker(ownerCtx, controller.(orchestrator.Reactor),
+			er := c.runEtcdWorker(ownerCtx, controller,
 				globalState,
 				// todo: do not use owner flush interval
 				ownerFlushInterval, util.RoleController.String())

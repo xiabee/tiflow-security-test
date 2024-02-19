@@ -463,13 +463,13 @@ func (c *Consumer) HandleMsg(msg pulsar.Message) error {
 				continue
 			}
 			var partitionID int64
-			if row.TableInfo.TableName.IsPartition {
-				partitionID = row.PhysicalTableID
+			if row.Table.IsPartition {
+				partitionID = row.Table.TableID
 			}
 			// use schema, table and tableID to identify a table
 			tableID := c.fakeTableIDGenerator.
-				generateFakeTableID(row.TableInfo.GetSchemaName(), row.TableInfo.GetTableName(), partitionID)
-			row.TableInfo.TableName.TableID = tableID
+				generateFakeTableID(row.Table.Schema, row.Table.Table, partitionID)
+			row.Table.TableID = tableID
 
 			group, ok := c.eventGroups[tableID]
 			if !ok {

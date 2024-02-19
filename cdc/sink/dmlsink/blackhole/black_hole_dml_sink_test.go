@@ -29,13 +29,8 @@ func TestWriteEventsCallback(t *testing.T) {
 	tableStatus := state.TableSinkSinking
 	row := &model.RowChangedEvent{
 		CommitTs: 1,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{
-				Schema: "a",
-				Table:  "b",
-			},
-		},
-		Columns: []*model.Column{{Name: "col1", Type: 1, Value: "aa"}},
+		Table:    &model.TableName{Schema: "a", Table: "b"},
+		Columns:  []*model.Column{{Name: "col1", Type: 1, Value: "aa"}},
 	}
 
 	count := 0

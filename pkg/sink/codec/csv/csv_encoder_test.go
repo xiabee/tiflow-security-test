@@ -16,25 +16,22 @@ package csv
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/rowcodec"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCSVBatchCodec(t *testing.T) {
-	tableInfo := &model.TableInfo{
-		TableName: model.TableName{Schema: "test", Table: "table1"},
-	}
 	testCases := []*model.SingleTableTxn{
 		{
-			TableInfo: tableInfo,
+			Table: &model.TableName{Schema: "test", Table: "table1"},
 			Rows: []*model.RowChangedEvent{
 				{
-					CommitTs:  1,
-					TableInfo: tableInfo,
+					CommitTs: 1,
+					Table:    &model.TableName{Schema: "test", Table: "table1"},
 					Columns: []*model.Column{{
 						Name:  "tiny",
 						Value: int64(1), Type: mysql.TypeTiny,
@@ -47,8 +44,8 @@ func TestCSVBatchCodec(t *testing.T) {
 					}},
 				},
 				{
-					CommitTs:  2,
-					TableInfo: tableInfo,
+					CommitTs: 2,
+					Table:    &model.TableName{Schema: "test", Table: "table1"},
 					Columns: []*model.Column{{
 						Name:  "tiny",
 						Value: int64(2), Type: mysql.TypeTiny,
@@ -63,8 +60,8 @@ func TestCSVBatchCodec(t *testing.T) {
 			},
 		},
 		{
-			TableInfo: tableInfo,
-			Rows:      nil,
+			Table: &model.TableName{Schema: "test", Table: "table1"},
+			Rows:  nil,
 		},
 	}
 
@@ -101,10 +98,8 @@ func TestCSVAppendRowChangedEventWithCallback(t *testing.T) {
 	count := 0
 	row := &model.RowChangedEvent{
 		CommitTs: 1,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "test", Table: "table1"},
-		},
-		Columns: []*model.Column{{Name: "tiny", Value: int64(1), Type: mysql.TypeTiny}},
+		Table:    &model.TableName{Schema: "test", Table: "table1"},
+		Columns:  []*model.Column{{Name: "tiny", Value: int64(1), Type: mysql.TypeTiny}},
 		ColInfos: []rowcodec.ColInfo{{
 			ID:            1,
 			IsPKHandle:    false,
@@ -114,8 +109,8 @@ func TestCSVAppendRowChangedEventWithCallback(t *testing.T) {
 	}
 
 	txn := &model.SingleTableTxn{
-		TableInfo: row.TableInfo,
-		Rows:      []*model.RowChangedEvent{row},
+		Table: row.Table,
+		Rows:  []*model.RowChangedEvent{row},
 	}
 	callback := func() {
 		count += 1

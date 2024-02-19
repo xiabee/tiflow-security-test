@@ -16,7 +16,7 @@ package dispatcher
 import (
 	"testing"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher/partition"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher/topic"
@@ -160,37 +160,27 @@ func TestGetTopicForRowChange(t *testing.T) {
 	require.NoError(t, err)
 
 	topicName := d.GetTopicForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "test_default1", Table: "table"},
-		},
+		Table: &model.TableName{Schema: "test_default1", Table: "table"},
 	})
 	require.Equal(t, "test", topicName)
 
 	topicName = d.GetTopicForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "test_default2", Table: "table"},
-		},
+		Table: &model.TableName{Schema: "test_default2", Table: "table"},
 	})
 	require.Equal(t, "test", topicName)
 
 	topicName = d.GetTopicForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "test_table", Table: "table"},
-		},
+		Table: &model.TableName{Schema: "test_table", Table: "table"},
 	})
 	require.Equal(t, "hello_test_table_world", topicName)
 
 	topicName = d.GetTopicForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "test_index_value", Table: "table"},
-		},
+		Table: &model.TableName{Schema: "test_index_value", Table: "table"},
 	})
 	require.Equal(t, "test_index_value_world", topicName)
 
 	topicName = d.GetTopicForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "a", Table: "table"},
-		},
+		Table: &model.TableName{Schema: "a", Table: "table"},
 	})
 	require.Equal(t, "a_table", topicName)
 }
@@ -203,10 +193,7 @@ func TestGetPartitionForRowChange(t *testing.T) {
 	require.NoError(t, err)
 
 	p, _, err := d.GetPartitionForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName:          model.TableName{Schema: "test_default1", Table: "table"},
-			IndexColumnsOffset: [][]int{{0}},
-		},
+		Table: &model.TableName{Schema: "test_default1", Table: "table"},
 		Columns: []*model.Column{
 			{
 				Name:  "id",
@@ -214,15 +201,13 @@ func TestGetPartitionForRowChange(t *testing.T) {
 				Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
 			},
 		},
+		IndexColumns: [][]int{{0}},
 	}, 16)
 	require.NoError(t, err)
 	require.Equal(t, int32(14), p)
 
 	p, _, err = d.GetPartitionForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName:          model.TableName{Schema: "test_default2", Table: "table"},
-			IndexColumnsOffset: [][]int{{0}},
-		},
+		Table: &model.TableName{Schema: "test_default2", Table: "table"},
 		Columns: []*model.Column{
 			{
 				Name:  "id",
@@ -230,23 +215,20 @@ func TestGetPartitionForRowChange(t *testing.T) {
 				Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
 			},
 		},
+		IndexColumns: [][]int{{0}},
 	}, 16)
 	require.NoError(t, err)
 	require.Equal(t, int32(0), p)
 
 	p, _, err = d.GetPartitionForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "test_table", Table: "table"},
-		},
+		Table:    &model.TableName{Schema: "test_table", Table: "table"},
 		CommitTs: 1,
 	}, 16)
 	require.NoError(t, err)
 	require.Equal(t, int32(15), p)
 
 	p, _, err = d.GetPartitionForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "test_index_value", Table: "table"},
-		},
+		Table: &model.TableName{Schema: "test_index_value", Table: "table"},
 		Columns: []*model.Column{
 			{
 				Name:  "a",
@@ -263,9 +245,7 @@ func TestGetPartitionForRowChange(t *testing.T) {
 	require.Equal(t, int32(1), p)
 
 	p, _, err = d.GetPartitionForRowChange(&model.RowChangedEvent{
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "a", Table: "table"},
-		},
+		Table:    &model.TableName{Schema: "a", Table: "table"},
 		CommitTs: 1,
 	}, 2)
 	require.NoError(t, err)

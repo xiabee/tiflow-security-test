@@ -165,7 +165,7 @@ func (s *SchedState) fromString(str string) error {
 
 // Value implements the driver.Valuer interface.
 func (s SchedState) Value() (driver.Value, error) {
-	return []byte(s.toString()), nil
+	return s.toString(), nil
 }
 
 // Scan implements the sql.Scanner interface.

@@ -26,13 +26,11 @@ import (
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
-	"github.com/pingcap/tiflow/pkg/sink/codec/utils"
 	"github.com/pingcap/tiflow/pkg/sink/kafka/claimcheck"
 	"go.uber.org/zap"
 )
 
-func fillColumns(
-	columns []*model.Column,
+func fillColumns(columns []*model.Column,
 	onlyOutputUpdatedColumn bool,
 	onlyHandleKeyColumn bool,
 	newColumnMap map[string]*model.Column,
@@ -60,7 +58,12 @@ func fillColumns(
 			} else {
 				out.RawByte(',')
 			}
-			value, err := builder.formatValue(col.Value, col.Flag.IsBinary())
+			mysqlType := getMySQLType(col)
+			javaType, err := getJavaSQLType(col, mysqlType)
+			if err != nil {
+				return cerror.WrapError(cerror.ErrCanalEncodeFailed, err)
+			}
+			value, err := builder.formatValue(col.Value, javaType)
 			if err != nil {
 				return cerror.WrapError(cerror.ErrCanalEncodeFailed, err)
 			}
@@ -93,6 +96,7 @@ func newJSONMessageForDML(
 	}
 
 	mysqlTypeMap := make(map[string]string, len(e.Columns))
+
 	out := &jwriter.Writer{}
 	out.RawByte('{')
 	{
@@ -103,12 +107,12 @@ func newJSONMessageForDML(
 	{
 		const prefix string = ",\"database\":"
 		out.RawString(prefix)
-		out.String(e.TableInfo.GetSchemaName())
+		out.String(e.Table.Schema)
 	}
 	{
 		const prefix string = ",\"table\":"
 		out.RawString(prefix)
-		out.String(e.TableInfo.GetTableName())
+		out.String(e.Table.Table)
 	}
 	{
 		const prefix string = ",\"pkNames\":"
@@ -160,7 +164,7 @@ func newJSONMessageForDML(
 		const prefix string = ",\"sqlType\":"
 		out.RawString(prefix)
 		emptyColumn := true
-		for idx, col := range columns {
+		for _, col := range columns {
 			if col != nil {
 				if onlyHandleKey && !col.Flag.IsHandleKey() {
 					continue
@@ -171,19 +175,15 @@ func newJSONMessageForDML(
 				} else {
 					out.RawByte(',')
 				}
-				javaType, err := getJavaSQLType(col.Value, col.Type, col.Flag)
+				mysqlType := getMySQLType(col)
+				javaType, err := getJavaSQLType(col, mysqlType)
 				if err != nil {
 					return nil, cerror.WrapError(cerror.ErrCanalEncodeFailed, err)
 				}
 				out.String(col.Name)
 				out.RawByte(':')
 				out.Int32(int32(javaType))
-				columnInfo, ok := e.TableInfo.GetColumnInfo(e.ColInfos[idx].ID)
-				if !ok {
-					return nil, cerror.ErrCanalEncodeFailed.GenWithStack(
-						"cannot found the column info by the column ID: %d", e.ColInfos[idx].ID)
-				}
-				mysqlTypeMap[col.Name] = utils.GetMySQLType(columnInfo, config.ContentCompatible)
+				mysqlTypeMap[col.Name] = mysqlType
 			}
 		}
 		if emptyColumn {
@@ -217,17 +217,13 @@ func newJSONMessageForDML(
 	if e.IsDelete() {
 		out.RawString(",\"old\":null")
 		out.RawString(",\"data\":")
-		if err := fillColumns(
-			e.PreColumns, false, onlyHandleKey, nil, out, builder,
-		); err != nil {
+		if err := fillColumns(e.PreColumns, false, onlyHandleKey, nil, out, builder); err != nil {
 			return nil, err
 		}
 	} else if e.IsInsert() {
 		out.RawString(",\"old\":null")
 		out.RawString(",\"data\":")
-		if err := fillColumns(
-			e.Columns, false, onlyHandleKey, nil, out, builder,
-		); err != nil {
+		if err := fillColumns(e.Columns, false, onlyHandleKey, nil, out, builder); err != nil {
 			return nil, err
 		}
 	} else if e.IsUpdate() {
@@ -239,15 +235,11 @@ func newJSONMessageForDML(
 			}
 		}
 		out.RawString(",\"old\":")
-		if err := fillColumns(
-			e.PreColumns, config.OnlyOutputUpdatedColumns, onlyHandleKey, newColsMap, out, builder,
-		); err != nil {
+		if err := fillColumns(e.PreColumns, config.OnlyOutputUpdatedColumns, onlyHandleKey, newColsMap, out, builder); err != nil {
 			return nil, err
 		}
 		out.RawString(",\"data\":")
-		if err := fillColumns(
-			e.Columns, false, onlyHandleKey, nil, out, builder,
-		); err != nil {
+		if err := fillColumns(e.Columns, false, onlyHandleKey, nil, out, builder); err != nil {
 			return nil, err
 		}
 	} else {
@@ -311,7 +303,7 @@ func newJSONRowEventEncoder(
 	config *common.Config, claimCheck *claimcheck.ClaimCheck,
 ) codec.RowEventEncoder {
 	return &JSONRowEventEncoder{
-		builder:    newCanalEntryBuilder(config),
+		builder:    newCanalEntryBuilder(),
 		messages:   make([]*common.Message, 0, 1),
 		config:     config,
 		claimCheck: claimCheck,
@@ -399,8 +391,8 @@ func (c *JSONRowEventEncoder) AppendRowChangedEvent(
 		Key:      nil,
 		Value:    value,
 		Ts:       e.CommitTs,
-		Schema:   e.TableInfo.GetSchemaNamePtr(),
-		Table:    e.TableInfo.GetTableNamePtr(),
+		Schema:   &e.Table.Schema,
+		Table:    &e.Table.Table,
 		Type:     model.MessageTypeRow,
 		Protocol: config.ProtocolCanalJSON,
 		Callback: callback,
@@ -414,7 +406,7 @@ func (c *JSONRowEventEncoder) AppendRowChangedEvent(
 			log.Error("Single message is too large for canal-json",
 				zap.Int("maxMessageBytes", c.config.MaxMessageBytes),
 				zap.Int("length", originLength),
-				zap.Any("table", e.TableInfo.TableName))
+				zap.Any("table", e.Table))
 			return cerror.ErrMessageTooLarge.GenWithStackByArgs()
 		}
 
@@ -437,14 +429,14 @@ func (c *JSONRowEventEncoder) AppendRowChangedEvent(
 					zap.Int("maxMessageBytes", c.config.MaxMessageBytes),
 					zap.Int("originLength", originLength),
 					zap.Int("length", length),
-					zap.Any("table", e.TableInfo.TableName))
+					zap.Any("table", e.Table))
 				return cerror.ErrMessageTooLarge.GenWithStackByArgs()
 			}
 			log.Warn("Single message is too large for canal-json, only encode handle-key columns",
 				zap.Int("maxMessageBytes", c.config.MaxMessageBytes),
 				zap.Int("originLength", originLength),
 				zap.Int("length", length),
-				zap.Any("table", e.TableInfo.TableName))
+				zap.Any("table", e.Table))
 		}
 
 		if c.config.LargeMessageHandle.EnableClaimCheck() {
@@ -489,7 +481,7 @@ func (c *JSONRowEventEncoder) newClaimCheckLocationMessage(
 		log.Warn("Single message is too large for canal-json, when create the claim check location message",
 			zap.Int("maxMessageBytes", c.config.MaxMessageBytes),
 			zap.Int("length", length),
-			zap.Any("table", event.TableInfo.TableName))
+			zap.Any("table", event.Table))
 		return nil, cerror.ErrMessageTooLarge.GenWithStackByArgs(length)
 	}
 	return result, nil

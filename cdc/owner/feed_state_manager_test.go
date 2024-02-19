@@ -74,7 +74,6 @@ func TestHandleJob(t *testing.T) {
 	manager := newFeedStateManager4Test(200, 1600, 0, 2.0)
 	state := orchestrator.NewChangefeedReactorState(etcd.DefaultCDCClusterID,
 		ctx.ChangefeedVars().ID)
-	manager.state = state
 	tester := orchestrator.NewReactorStateTester(t, state, nil)
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
 		require.Nil(t, info)
@@ -85,7 +84,7 @@ func TestHandleJob(t *testing.T) {
 		return &model.ChangeFeedStatus{}, true, nil
 	})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 
@@ -94,7 +93,7 @@ func TestHandleJob(t *testing.T) {
 		CfID: model.DefaultChangeFeedID("fake-changefeed-id"),
 		Type: model.AdminStop,
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 
@@ -103,7 +102,7 @@ func TestHandleJob(t *testing.T) {
 		CfID: ctx.ChangefeedVars().ID,
 		Type: model.AdminResume,
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 
@@ -112,7 +111,7 @@ func TestHandleJob(t *testing.T) {
 		CfID: ctx.ChangefeedVars().ID,
 		Type: model.AdminStop,
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 
 	require.False(t, manager.ShouldRunning())
@@ -126,7 +125,7 @@ func TestHandleJob(t *testing.T) {
 		CfID: ctx.ChangefeedVars().ID,
 		Type: model.AdminResume,
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 	require.False(t, manager.ShouldRemoved())
@@ -139,7 +138,7 @@ func TestHandleJob(t *testing.T) {
 		CfID: ctx.ChangefeedVars().ID,
 		Type: model.AdminRemove,
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 
 	require.False(t, manager.ShouldRunning())
@@ -162,8 +161,7 @@ func TestResumeChangefeedWithCheckpointTs(t *testing.T) {
 		return &model.ChangeFeedStatus{}, true, nil
 	})
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 
@@ -172,7 +170,7 @@ func TestResumeChangefeedWithCheckpointTs(t *testing.T) {
 		CfID: ctx.ChangefeedVars().ID,
 		Type: model.AdminStop,
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 
 	require.False(t, manager.ShouldRunning())
@@ -187,7 +185,7 @@ func TestResumeChangefeedWithCheckpointTs(t *testing.T) {
 		Type:                  model.AdminResume,
 		OverwriteCheckpointTs: 100,
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 	require.False(t, manager.ShouldRemoved())
@@ -205,7 +203,7 @@ func TestResumeChangefeedWithCheckpointTs(t *testing.T) {
 			}}, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.Equal(t, state.Info.State, model.StateFailed)
 	require.Equal(t, state.Info.AdminJobType, model.AdminStop)
@@ -218,7 +216,7 @@ func TestResumeChangefeedWithCheckpointTs(t *testing.T) {
 		Type:                  model.AdminResume,
 		OverwriteCheckpointTs: 200,
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 	require.False(t, manager.ShouldRemoved())
@@ -243,13 +241,12 @@ func TestMarkFinished(t *testing.T) {
 		return &model.ChangeFeedStatus{}, true, nil
 	})
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 
 	manager.MarkFinished()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 
 	require.False(t, manager.ShouldRunning())
@@ -278,13 +275,12 @@ func TestCleanUpInfos(t *testing.T) {
 		})
 	tester.MustApplyPatches()
 	require.Contains(t, state.TaskPositions, ctx.GlobalVars().CaptureInfo.ID)
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 
 	manager.MarkFinished()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.False(t, manager.ShouldRunning())
 	require.Equal(t, state.Info.State, model.StateFinished)
@@ -311,8 +307,7 @@ func TestHandleError(t *testing.T) {
 	})
 
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 
 	intervals := []time.Duration{200, 400, 800, 1600, 1600}
@@ -331,19 +326,19 @@ func TestHandleError(t *testing.T) {
 				}}, true, nil
 			})
 		tester.MustApplyPatches()
-		manager.Tick(0, state.Status, state.Info)
+		manager.Tick(state, 0)
 		tester.MustApplyPatches()
 		require.False(t, manager.ShouldRunning())
 		require.Equal(t, state.Info.State, model.StatePending)
 		require.Equal(t, state.Info.AdminJobType, model.AdminStop)
 		require.Equal(t, state.Status.AdminJobType, model.AdminStop)
 		time.Sleep(d)
-		manager.Tick(0, state.Status, state.Info)
+		manager.Tick(state, 0)
 		tester.MustApplyPatches()
 	}
 
 	// no error tick, state should be transferred from pending to warning
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	require.True(t, manager.ShouldRunning())
 	require.Equal(t, model.StateWarning, state.Info.State)
 	require.Equal(t, model.AdminNone, state.Info.AdminJobType)
@@ -357,7 +352,7 @@ func TestHandleError(t *testing.T) {
 			return status, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.True(t, manager.ShouldRunning())
 	state.PatchStatus(
@@ -365,7 +360,7 @@ func TestHandleError(t *testing.T) {
 			status.CheckpointTs += 1
 			return status, true, nil
 		})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateNormal, state.Info.State)
 	require.Equal(t, model.AdminNone, state.Info.AdminJobType)
@@ -391,8 +386,7 @@ func TestHandleFastFailError(t *testing.T) {
 			}}, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	// test handling fast failed error with non-nil ChangeFeedInfo
 	tester.MustApplyPatches()
 	// test handling fast failed error with nil ChangeFeedInfo
@@ -400,7 +394,7 @@ func TestHandleFastFailError(t *testing.T) {
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
 		return nil, true, nil
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	// When the patches are applied, the callback function of PatchInfo in feedStateManager.HandleError will be called.
 	// At that time, the nil pointer will be checked instead of throwing a panic. See issue #3128 for more detail.
 	tester.MustApplyPatches()
@@ -416,11 +410,11 @@ func TestHandleErrorWhenChangefeedIsPaused(t *testing.T) {
 		Code:    "CDC:ErrReachMaxTry",
 		Message: "fake error for test",
 	}
-	manager.state.(*orchestrator.ChangefeedReactorState).Info = &model.ChangeFeedInfo{
+	manager.state.Info = &model.ChangeFeedInfo{
 		State: model.StateStopped,
 	}
-	manager.HandleError(err)
-	require.Equal(t, model.StateStopped, manager.state.(*orchestrator.ChangefeedReactorState).Info.State)
+	manager.handleError(err)
+	require.Equal(t, model.StateStopped, manager.state.Info.State)
 }
 
 func TestChangefeedStatusNotExist(t *testing.T) {
@@ -480,8 +474,7 @@ func TestChangefeedStatusNotExist(t *testing.T) {
 			etcd.DefaultClusterAndMetaPrefix,
 		): "d563bfc0-f406-4f34-bc7d-6dc2e35a44e5",
 	})
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	require.False(t, manager.ShouldRunning())
 	require.False(t, manager.ShouldRemoved())
 	tester.MustApplyPatches()
@@ -490,7 +483,7 @@ func TestChangefeedStatusNotExist(t *testing.T) {
 		CfID: ctx.ChangefeedVars().ID,
 		Type: model.AdminRemove,
 	})
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	require.False(t, manager.ShouldRunning())
 	require.True(t, manager.ShouldRemoved())
 	tester.MustApplyPatches()
@@ -511,8 +504,7 @@ func TestChangefeedNotRetry(t *testing.T) {
 		return &model.ChangeFeedInfo{SinkURI: "123", Config: &config.ReplicaConfig{}, State: model.StateNormal}, true, nil
 	})
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	require.True(t, manager.ShouldRunning())
 
 	// changefeed in error state but error can be retried
@@ -530,7 +522,7 @@ func TestChangefeedNotRetry(t *testing.T) {
 		}, true, nil
 	})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	require.True(t, manager.ShouldRunning())
 
 	state.PatchTaskPosition("test",
@@ -547,7 +539,7 @@ func TestChangefeedNotRetry(t *testing.T) {
 			return position, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	require.False(t, manager.ShouldRunning())
 
 	state.PatchTaskPosition("test",
@@ -563,7 +555,7 @@ func TestChangefeedNotRetry(t *testing.T) {
 			return position, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	// should be false
 	require.False(t, manager.ShouldRunning())
 
@@ -580,7 +572,7 @@ func TestChangefeedNotRetry(t *testing.T) {
 			return position, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	// should be false
 	require.False(t, manager.ShouldRunning())
 }
@@ -602,8 +594,7 @@ func TestBackoffStopsUnexpectedly(t *testing.T) {
 	})
 
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 
 	for i := 1; i <= 10; i++ {
@@ -631,7 +622,7 @@ func TestBackoffStopsUnexpectedly(t *testing.T) {
 					}}, true, nil
 				})
 			tester.MustApplyPatches()
-			manager.Tick(0, state.Status, state.Info)
+			manager.Tick(state, 0)
 			tester.MustApplyPatches()
 			// If an error occurs, backing off from running the task.
 			require.False(t, manager.ShouldRunning())
@@ -643,7 +634,7 @@ func TestBackoffStopsUnexpectedly(t *testing.T) {
 		// 500ms is the backoff interval, so sleep 500ms and after a manager
 		// tick, the changefeed will turn into normal state
 		time.Sleep(500 * time.Millisecond)
-		manager.Tick(0, state.Status, state.Info)
+		manager.Tick(state, 0)
 		tester.MustApplyPatches()
 	}
 }
@@ -665,8 +656,7 @@ func TestBackoffNeverStops(t *testing.T) {
 	})
 
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 
 	for i := 1; i <= 30; i++ {
@@ -685,7 +675,7 @@ func TestBackoffNeverStops(t *testing.T) {
 				}}, true, nil
 			})
 		tester.MustApplyPatches()
-		manager.Tick(0, state.Status, state.Info)
+		manager.Tick(state, 0)
 		tester.MustApplyPatches()
 		require.False(t, manager.ShouldRunning())
 		require.Equal(t, model.StatePending, state.Info.State)
@@ -694,7 +684,7 @@ func TestBackoffNeverStops(t *testing.T) {
 		// 100ms is the backoff interval, so sleep 100ms and after a manager tick,
 		// the changefeed will turn into normal state
 		time.Sleep(100 * time.Millisecond)
-		manager.Tick(0, state.Status, state.Info)
+		manager.Tick(state, 0)
 		tester.MustApplyPatches()
 	}
 }
@@ -716,8 +706,7 @@ func TestUpdateChangefeedEpoch(t *testing.T) {
 	})
 
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.Equal(t, state.Info.State, model.StateNormal)
 	require.True(t, manager.ShouldRunning())
@@ -737,7 +726,7 @@ func TestUpdateChangefeedEpoch(t *testing.T) {
 				}}, true, nil
 			})
 		tester.MustApplyPatches()
-		manager.Tick(0, state.Status, state.Info)
+		manager.Tick(state, 0)
 		tester.MustApplyPatches()
 		require.False(t, manager.ShouldRunning())
 		require.Equal(t, model.StatePending, state.Info.State, i)
@@ -773,8 +762,7 @@ func TestHandleWarning(t *testing.T) {
 	})
 
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateNormal, state.Info.State)
 	require.True(t, manager.ShouldRunning())
@@ -790,7 +778,7 @@ func TestHandleWarning(t *testing.T) {
 			}}, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	// some patches will be generated when the manager.Tick is called
 	// so we need to apply the patches before we check the state
 	tester.MustApplyPatches()
@@ -806,7 +794,7 @@ func TestHandleWarning(t *testing.T) {
 		}, true, nil
 	})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateWarning, state.Info.State)
 	require.True(t, manager.ShouldRunning())
@@ -820,7 +808,7 @@ func TestHandleWarning(t *testing.T) {
 		}, true, nil
 	})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateNormal, state.Info.State)
 	require.True(t, manager.ShouldRunning())
@@ -837,7 +825,7 @@ func TestHandleWarning(t *testing.T) {
 			}}, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	// some patches will be generated when the manager.Tick is called
 	// so we need to apply the patches before we check the state
 	tester.MustApplyPatches()
@@ -857,7 +845,7 @@ func TestHandleWarning(t *testing.T) {
 	manager.checkpointTsAdvanced = manager.
 		checkpointTsAdvanced.Add(-(manager.changefeedErrorStuckDuration + 1))
 	// resolveTs = 202 > checkpointTs = 201
-	manager.Tick(202, state.Status, state.Info)
+	manager.Tick(state, 202)
 	// some patches will be generated when the manager.Tick is called
 	// so we need to apply the patches before we check the state
 	tester.MustApplyPatches()
@@ -886,8 +874,7 @@ func TestErrorAfterWarning(t *testing.T) {
 	})
 
 	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateNormal, state.Info.State)
 	require.True(t, manager.ShouldRunning())
@@ -903,7 +890,7 @@ func TestErrorAfterWarning(t *testing.T) {
 			}}, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	// some patches will be generated when the manager.Tick is called
 	// so we need to apply the patches before we check the state
 	tester.MustApplyPatches()
@@ -919,7 +906,7 @@ func TestErrorAfterWarning(t *testing.T) {
 		}, true, nil
 	})
 	tester.MustApplyPatches()
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateWarning, state.Info.State)
 	require.True(t, manager.ShouldRunning())
@@ -938,13 +925,13 @@ func TestErrorAfterWarning(t *testing.T) {
 		})
 	tester.MustApplyPatches()
 
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 	// some patches will be generated when the manager.Tick is called
 	// so we need to apply the patches before we check the state
 	tester.MustApplyPatches()
 	require.Equal(t, model.StatePending, state.Info.State)
 	require.False(t, manager.ShouldRunning())
-	manager.Tick(0, state.Status, state.Info)
+	manager.Tick(state, 0)
 
 	// some patches will be generated when the manager.Tick is called
 	// so we need to apply the patches before we check the state
@@ -961,7 +948,6 @@ func TestHandleWarningWhileAdvanceResolvedTs(t *testing.T) {
 	manager := newFeedStateManager4Test(200, 1600, maxElapsedTimeInMs, 2.0)
 	state := orchestrator.NewChangefeedReactorState(etcd.DefaultCDCClusterID,
 		ctx.ChangefeedVars().ID)
-	manager.state = state
 	tester := orchestrator.NewReactorStateTester(t, state, nil)
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
 		require.Nil(t, info)
@@ -975,7 +961,7 @@ func TestHandleWarningWhileAdvanceResolvedTs(t *testing.T) {
 	})
 
 	tester.MustApplyPatches()
-	manager.Tick(200, state.Status, state.Info)
+	manager.Tick(state, 200)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateNormal, state.Info.State)
 	require.True(t, manager.ShouldRunning())
@@ -991,7 +977,7 @@ func TestHandleWarningWhileAdvanceResolvedTs(t *testing.T) {
 			}}, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(200, state.Status, state.Info)
+	manager.Tick(state, 200)
 	// some patches will be generated when the manager.Tick is called
 	// so we need to apply the patches before we check the state
 	tester.MustApplyPatches()
@@ -1016,7 +1002,7 @@ func TestHandleWarningWhileAdvanceResolvedTs(t *testing.T) {
 			}}, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(200, state.Status, state.Info)
+	manager.Tick(state, 200)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateWarning, state.Info.State)
 	require.True(t, manager.ShouldRunning())
@@ -1037,7 +1023,7 @@ func TestHandleWarningWhileAdvanceResolvedTs(t *testing.T) {
 			}}, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(400, state.Status, state.Info)
+	manager.Tick(state, 400)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateWarning, state.Info.State)
 	require.True(t, manager.ShouldRunning())
@@ -1059,7 +1045,7 @@ func TestHandleWarningWhileAdvanceResolvedTs(t *testing.T) {
 			}}, true, nil
 		})
 	tester.MustApplyPatches()
-	manager.Tick(400, state.Status, state.Info)
+	manager.Tick(state, 400)
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateFailed, state.Info.State)
 	require.False(t, manager.ShouldRunning())

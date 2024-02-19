@@ -60,7 +60,7 @@ func (j *JSONTxnEventEncoder) AppendTxnEvent(
 			log.Warn("Single message is too large for canal-json",
 				zap.Int("maxMessageBytes", j.config.MaxMessageBytes),
 				zap.Int("length", length),
-				zap.Any("table", row.TableInfo.TableName))
+				zap.Any("table", row.Table))
 			return cerror.ErrMessageTooLarge.GenWithStackByArgs()
 		}
 		j.valueBuf.Write(value)
@@ -69,8 +69,8 @@ func (j *JSONTxnEventEncoder) AppendTxnEvent(
 	}
 	j.callback = callback
 	j.txnCommitTs = txn.CommitTs
-	j.txnSchema = txn.TableInfo.GetSchemaNamePtr()
-	j.txnTable = txn.TableInfo.GetTableNamePtr()
+	j.txnSchema = &txn.Table.Schema
+	j.txnTable = &txn.Table.Table
 	return nil
 }
 
@@ -84,11 +84,7 @@ func (j *JSONTxnEventEncoder) Build() []*common.Message {
 		j.valueBuf.Bytes(), j.txnCommitTs, model.MessageTypeRow, j.txnSchema, j.txnTable)
 	ret.SetRowsCount(j.batchSize)
 	ret.Callback = j.callback
-	if j.valueBuf.Cap() > codec.MemBufShrinkThreshold {
-		j.valueBuf = &bytes.Buffer{}
-	} else {
-		j.valueBuf.Reset()
-	}
+	j.valueBuf.Reset()
 	j.callback = nil
 	j.batchSize = 0
 	j.txnCommitTs = 0
@@ -101,7 +97,7 @@ func (j *JSONTxnEventEncoder) Build() []*common.Message {
 // newJSONTxnEventEncoder creates a new JSONTxnEventEncoder
 func newJSONTxnEventEncoder(config *common.Config) codec.TxnEventEncoder {
 	encoder := &JSONTxnEventEncoder{
-		builder:    newCanalEntryBuilder(config),
+		builder:    newCanalEntryBuilder(),
 		valueBuf:   &bytes.Buffer{},
 		terminator: []byte(config.Terminator),
 

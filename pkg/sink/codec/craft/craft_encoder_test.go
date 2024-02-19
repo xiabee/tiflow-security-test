@@ -17,7 +17,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec"
@@ -33,9 +33,7 @@ func TestCraftMaxMessageBytes(t *testing.T) {
 
 	testEvent := &model.RowChangedEvent{
 		CommitTs: 1,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "a", Table: "b"},
-		},
+		Table:    &model.TableName{Schema: "a", Table: "b"},
 		Columns: []*model.Column{{
 			Name:  "col1",
 			Type:  mysql.TypeVarchar,
@@ -62,9 +60,7 @@ func TestCraftMaxBatchSize(t *testing.T) {
 
 	testEvent := &model.RowChangedEvent{
 		CommitTs: 1,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "a", Table: "b"},
-		},
+		Table:    &model.TableName{Schema: "a", Table: "b"},
 		Columns: []*model.Column{{
 			Name:  "col1",
 			Type:  mysql.TypeVarchar,
@@ -224,9 +220,7 @@ func TestCraftAppendRowChangedEventWithCallback(t *testing.T) {
 
 	row := &model.RowChangedEvent{
 		CommitTs: 1,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "a", Table: "b"},
-		},
+		Table:    &model.TableName{Schema: "a", Table: "b"},
 		Columns: []*model.Column{{
 			Name:  "col1",
 			Type:  mysql.TypeVarchar,

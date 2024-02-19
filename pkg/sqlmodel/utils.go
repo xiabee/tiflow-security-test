@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"strings"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/parser/model"
 )
 
 func getColsAndValuesOfIdx(
@@ -50,15 +50,13 @@ func valuesHolder(n int) string {
 	return builder.String()
 }
 
-// generatedColumnsNameSet returns a set of generated columns' name.
-func generatedColumnsNameSet(columns []*timodel.ColumnInfo) map[string]struct{} {
-	m := make(map[string]struct{})
+func isGenerated(columns []*timodel.ColumnInfo, name timodel.CIStr) bool {
 	for _, col := range columns {
-		if col.IsGenerated() {
-			m[col.Name.L] = struct{}{}
+		if col.Name.L == name.L {
+			return col.IsGenerated()
 		}
 	}
-	return m
+	return false
 }
 
 // ColValAsStr convert column value as string

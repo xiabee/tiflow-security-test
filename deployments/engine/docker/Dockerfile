@@ -13,9 +13,6 @@ RUN mkdir -p /dataflow-engine
 WORKDIR /dataflow-engine
 
 COPY . .
-ARG GOPROXY="https://proxy.golang.org,direct"
-ENV GOPROXY=$GOPROXY
-
 RUN make engine
 
 FROM gcr.io/pingcap-public/pingcap/alpine:alpine-3.14.6

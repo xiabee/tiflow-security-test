@@ -25,7 +25,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
+	tidbkv "github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tiflow/cdc/api"
 	"github.com/pingcap/tiflow/cdc/capture"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -409,12 +409,6 @@ func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 		return
 	}
 
-	owner, err := h.capture.GetOwner()
-	if err != nil {
-		_ = c.Error(errors.Trace(err))
-		return
-	}
-
 	oldCfInfo, err := h.capture.StatusProvider().GetChangeFeedInfo(ctx, changefeedID)
 	if err != nil {
 		_ = c.Error(err)
@@ -440,7 +434,7 @@ func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 
 	oldCfInfo.Namespace = changefeedID.Namespace
 	oldCfInfo.ID = changefeedID.ID
-	OldUpInfo, err := h.capture.GetUpstreamInfo(ctx, oldCfInfo.UpstreamID,
+	OldUpInfo, err := h.capture.GetEtcdClient().GetUpstreamInfo(ctx, oldCfInfo.UpstreamID,
 		oldCfInfo.Namespace)
 	if err != nil {
 		_ = c.Error(err)
@@ -498,7 +492,7 @@ func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 		zap.String("changefeedInfo", newCfInfo.String()),
 		zap.Any("upstreamInfo", newUpInfo))
 
-	err = owner.
+	err = h.capture.GetEtcdClient().
 		UpdateChangefeedAndUpstream(ctx, newUpInfo, newCfInfo)
 	if err != nil {
 		_ = c.Error(errors.Trace(err))
@@ -739,11 +733,6 @@ func (h *OpenAPIV2) resumeChangefeed(c *gin.Context) {
 		_ = c.Error(cerror.WrapError(cerror.ErrAPIInvalidParam, err))
 		return
 	}
-	status, err := h.capture.StatusProvider().GetChangeFeedStatus(ctx, changefeedID)
-	if err != nil {
-		_ = c.Error(err)
-		return
-	}
 
 	var pdClient pd.Client
 	// if PDAddrs is empty, use the default pdClient
@@ -765,17 +754,13 @@ func (h *OpenAPIV2) resumeChangefeed(c *gin.Context) {
 		}
 		defer pdClient.Close()
 	}
-	// If there is no overrideCheckpointTs, then check whether the currentCheckpointTs is smaller than gc safepoint or not.
-	newCheckpointTs := status.CheckpointTs
-	if cfg.OverwriteCheckpointTs != 0 {
-		newCheckpointTs = cfg.OverwriteCheckpointTs
-	}
+
 	if err := h.helpers.verifyResumeChangefeedConfig(
 		ctx,
 		pdClient,
 		h.capture.GetEtcdClient().GetEnsureGCServiceID(gc.EnsureGCServiceResuming),
 		changefeedID,
-		newCheckpointTs); err != nil {
+		cfg.OverwriteCheckpointTs); err != nil {
 		_ = c.Error(err)
 		return
 	}
@@ -803,7 +788,9 @@ func (h *OpenAPIV2) resumeChangefeed(c *gin.Context) {
 	}
 
 	if err := api.HandleOwnerJob(ctx, h.capture, job); err != nil {
-		needRemoveGCSafePoint = true
+		if cfg.OverwriteCheckpointTs > 0 {
+			needRemoveGCSafePoint = true
+		}
 		_ = c.Error(err)
 		return
 	}
@@ -1011,8 +998,8 @@ func (h *OpenAPIV2) synced(c *gin.Context) {
 			cfg.ReplicaConfig.SyncedStatus.CheckpointInterval*1000 {
 			message = fmt.Sprintf("Please check whether PD is online and TiKV Regions are all available. " +
 				"If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. " +
-				"To check whether TiKV regions are all available, you can view " +
-				"'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. " +
+				"To check whether TiKV regions are all available, " +
+				"you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. " +
 				"If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. " +
 				"Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait")
 		} else {

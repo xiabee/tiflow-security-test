@@ -25,7 +25,7 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
+	tidbkv "github.com/pingcap/tidb/kv"
 	mock_capture "github.com/pingcap/tiflow/cdc/capture/mock"
 	"github.com/pingcap/tiflow/cdc/controller"
 	mock_controller "github.com/pingcap/tiflow/cdc/controller/mock"
@@ -334,7 +334,6 @@ func TestUpdateChangefeed(t *testing.T) {
 	t.Parallel()
 	update := testCase{url: "/api/v2/changefeeds/%s", method: "PUT"}
 	helpers := NewMockAPIV2Helpers(gomock.NewController(t))
-	mockOwner := mock_owner.NewMockOwner(gomock.NewController(t))
 	mockCapture := mock_capture.NewMockCapture(gomock.NewController(t))
 	apiV2 := NewOpenAPIV2ForTest(mockCapture, helpers)
 	router := newRouter(apiV2)
@@ -343,7 +342,6 @@ func TestUpdateChangefeed(t *testing.T) {
 	mockCapture.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
 	mockCapture.EXPECT().IsReady().Return(true).AnyTimes()
 	mockCapture.EXPECT().IsController().Return(true).AnyTimes()
-	mockCapture.EXPECT().GetOwner().Return(mockOwner, nil).AnyTimes()
 
 	// case 1 invalid id
 	invalidID := "Invalid_#"
@@ -393,9 +391,11 @@ func TestUpdateChangefeed(t *testing.T) {
 	// case 4: changefeed stopped, but get upstream failed: not found
 	oldCfInfo.UpstreamID = 100
 	oldCfInfo.State = "stopped"
-	mockCapture.EXPECT().
+	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
+	etcdClient.EXPECT().
 		GetUpstreamInfo(gomock.Any(), gomock.Eq(uint64(100)), gomock.Any()).
 		Return(nil, cerrors.ErrUpstreamNotFound).Times(1)
+	mockCapture.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), update.method,
@@ -409,9 +409,10 @@ func TestUpdateChangefeed(t *testing.T) {
 
 	// case 5: json failed
 	oldCfInfo.UpstreamID = 1
-	mockCapture.EXPECT().
+	etcdClient.EXPECT().
 		GetUpstreamInfo(gomock.Any(), gomock.Eq(uint64(1)), gomock.Any()).
 		Return(nil, nil).AnyTimes()
+	mockCapture.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), update.method,
@@ -473,7 +474,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		verifyUpdateChangefeedConfig(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(&model.ChangeFeedInfo{}, &model.UpstreamInfo{}, nil).
 		Times(1)
-	mockOwner.EXPECT().
+	etcdClient.EXPECT().
 		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(cerrors.ErrEtcdAPIError).Times(1)
 
@@ -493,7 +494,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		Return(oldCfInfo, &model.UpstreamInfo{}, nil).
 		Times(1)
 	mockCapture.EXPECT().GetUpstreamManager().Return(upstream.NewManager4Test(&mockPDClient{}), nil).AnyTimes()
-	mockOwner.EXPECT().
+	etcdClient.EXPECT().
 		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).Times(1)
 
@@ -510,7 +511,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		Return(oldCfInfo, &model.UpstreamInfo{}, nil).
 		Times(1)
 	mockCapture.EXPECT().GetUpstreamManager().Return(upstream.NewManager4Test(&mockPDClient{}), nil).AnyTimes()
-	mockOwner.EXPECT().
+	etcdClient.EXPECT().
 		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).Times(1)
 
@@ -714,9 +715,7 @@ func TestResumeChangefeed(t *testing.T) {
 	pdClient := &mockPDClient{}
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
 	mockUpManager := upstream.NewManager4Test(pdClient)
-	statusProvider := &mockStatusProvider{
-		changefeedStatus: &model.ChangeFeedStatusForAPI{},
-	}
+	statusProvider := &mockStatusProvider{}
 
 	etcdClient.EXPECT().
 		GetEnsureGCServiceID(gomock.Any()).
@@ -1119,8 +1118,8 @@ func TestChangefeedSynced(t *testing.T) {
 		require.Equal(t, false, resp.Synced)
 		require.Equal(t, "Please check whether PD is online and TiKV Regions are all available. "+
 			"If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. "+
-			"To check whether TiKV regions are all available, you can view "+
-			"'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. "+
+			"To check whether TiKV regions are all available, "+
+			"you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. "+
 			"If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. "+
 			"Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait", resp.Info)
 	}

@@ -18,7 +18,7 @@ import (
 	"math"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/types"
 	"go.uber.org/zap"
 )
 

@@ -130,8 +130,8 @@
   "editable": true,
   "gnetId": null,
   "graphTooltip": 1,
-  "id": null,
-  "iteration": 1705047462154,
+  "id": 29,
+  "iteration": 1671613058905,
   "links": [],
   "panels": [
     {
@@ -1026,7 +1026,7 @@
           "hiddenSeries": false,
           "id": 218,
           "legend": {
-            "alignAsTable": true,
+            "alignAsTable": false,
             "avg": false,
             "current": true,
             "max": true,
@@ -1082,8 +1082,7 @@
           },
           "yaxes": [
             {
-              "$$hashKey": "object:234",
-              "format": "short",
+              "format": "none",
               "label": null,
               "logBase": 1,
               "max": null,
@@ -1091,7 +1090,6 @@
               "show": true
             },
             {
-              "$$hashKey": "object:235",
               "format": "short",
               "label": null,
               "logBase": 1,
@@ -1129,7 +1127,7 @@
           "hiddenSeries": false,
           "id": 229,
           "legend": {
-            "alignAsTable": true,
+            "alignAsTable": false,
             "avg": false,
             "current": true,
             "max": true,
@@ -1230,7 +1228,7 @@
           "hiddenSeries": false,
           "id": 228,
           "legend": {
-            "alignAsTable": true,
+            "alignAsTable": false,
             "avg": false,
             "current": true,
             "max": true,
@@ -1286,8 +1284,7 @@
           },
           "yaxes": [
             {
-              "$$hashKey": "object:279",
-              "format": "short",
+              "format": "none",
               "label": null,
               "logBase": 1,
               "max": null,
@@ -1295,7 +1292,6 @@
               "show": true
             },
             {
-              "$$hashKey": "object:280",
               "format": "short",
               "label": null,
               "logBase": 1,
@@ -1333,7 +1329,7 @@
           "hiddenSeries": false,
           "id": 220,
           "legend": {
-            "alignAsTable": true,
+            "alignAsTable": false,
             "avg": false,
             "current": true,
             "max": true,
@@ -1434,7 +1430,7 @@
           "hiddenSeries": false,
           "id": 219,
           "legend": {
-            "alignAsTable": true,
+            "alignAsTable": false,
             "avg": false,
             "current": true,
             "max": true,
@@ -1490,8 +1486,7 @@
           },
           "yaxes": [
             {
-              "$$hashKey": "object:344",
-              "format": "short",
+              "format": "none",
               "label": null,
               "logBase": 1,
               "max": null,
@@ -1499,7 +1494,6 @@
               "show": true
             },
             {
-              "$$hashKey": "object:345",
               "format": "short",
               "label": null,
               "logBase": 1,
@@ -1537,7 +1531,7 @@
           "hiddenSeries": false,
           "id": 224,
           "legend": {
-            "alignAsTable": true,
+            "alignAsTable": false,
             "avg": false,
             "current": true,
             "max": true,
@@ -1638,7 +1632,7 @@
           "hiddenSeries": false,
           "id": 664,
           "legend": {
-            "alignAsTable": true,
+            "alignAsTable": false,
             "avg": false,
             "current": true,
             "max": true,
@@ -1697,8 +1691,7 @@
           },
           "yaxes": [
             {
-              "$$hashKey": "object:389",
-              "format": "short",
+              "format": "none",
               "label": null,
               "logBase": 1,
               "max": null,
@@ -1706,7 +1699,6 @@
               "show": true
             },
             {
-              "$$hashKey": "object:390",
               "format": "none",
               "label": null,
               "logBase": 1,
@@ -1744,7 +1736,7 @@
           "hiddenSeries": false,
           "id": 665,
           "legend": {
-            "alignAsTable": true,
+            "alignAsTable": false,
             "avg": false,
             "current": true,
             "max": true,
@@ -1856,7 +1848,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 20
+            "y": 4
           },
           "hiddenSeries": false,
           "id": 635,
@@ -1961,7 +1953,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 20
+            "y": 4
           },
           "hiddenSeries": false,
           "id": 620,
@@ -2861,7 +2853,12 @@
     "list": [
       {
         "allValue": null,
-        "current": {},
+        "current": {
+          "isNone": true,
+          "selected": false,
+          "text": "None",
+          "value": ""
+        },
         "datasource": "${DS_TEST-CLUSTER}",
         "definition": "",
         "description": null,
@@ -2888,7 +2885,12 @@
       },
       {
         "allValue": null,
-        "current": {},
+        "current": {
+          "isNone": true,
+          "selected": false,
+          "text": "None",
+          "value": ""
+        },
         "datasource": "${DS_TEST-CLUSTER}",
         "definition": "",
         "description": null,
@@ -2915,7 +2917,15 @@
       },
       {
         "allValue": ".*",
-        "current": {},
+        "current": {
+          "selected": true,
+          "text": [
+            "default"
+          ],
+          "value": [
+            "default"
+          ]
+        },
         "datasource": "${DS_TEST-CLUSTER}",
         "definition": "label_values(ticdc_processor_processor_tick_duration_count{k8s_cluster=\"$k8s_cluster\", tidb_cluster=\"$tidb_cluster\"}, namespace)",
         "description": null,
@@ -2942,7 +2952,11 @@
       },
       {
         "allValue": ".*",
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": "${DS_TEST-CLUSTER}",
         "definition": "label_values(ticdc_processor_resolved_ts{k8s_cluster=\"$k8s_cluster\", tidb_cluster=\"$tidb_cluster\"}, changefeed)",
         "description": null,
@@ -2969,7 +2983,11 @@
       },
       {
         "allValue": ".*",
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": "${DS_TEST-CLUSTER}",
         "definition": "label_values(process_start_time_seconds{k8s_cluster=\"$k8s_cluster\", tidb_cluster=\"$tidb_cluster\", job=\"ticdc\"}, instance)",
         "description": null,
@@ -2996,7 +3014,11 @@
       },
       {
         "allValue": ".*",
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": "${DS_TEST-CLUSTER}",
         "definition": "label_values(tikv_engine_size_bytes{k8s_cluster=\"$k8s_cluster\", tidb_cluster=\"$tidb_cluster\"}, instance)",
         "description": null,
@@ -3078,7 +3100,11 @@
       },
       {
         "allValue": "",
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": "${DS_TEST-CLUSTER}",
         "definition": "label_values(process_start_time_seconds{k8s_cluster=\"$k8s_cluster\", tidb_cluster=\"$tidb_cluster\", job=\"ticdc\"}, instance)",
         "description": null,
@@ -3105,7 +3131,11 @@
       },
       {
         "allValue": null,
-        "current": {},
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": "${DS_TEST-CLUSTER}",
         "definition": "label_values(ticdc_actor_number_of_workers{k8s_cluster=\"$k8s_cluster\", tidb_cluster=\"$tidb_cluster\", job=\"ticdc\"}, name)",
         "description": null,

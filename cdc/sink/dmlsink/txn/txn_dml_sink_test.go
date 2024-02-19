@@ -79,9 +79,7 @@ func TestTxnSinkNolocking(t *testing.T) {
 			Event: &model.SingleTableTxn{
 				Rows: []*model.RowChangedEvent{
 					{
-						TableInfo: &model.TableInfo{
-							TableName: model.TableName{Schema: "test", Table: "t1"},
-						},
+						Table: &model.TableName{Schema: "test", Table: "t1"},
 						Columns: []*model.Column{
 							{Name: "a", Value: 1},
 							{Name: "b", Value: 2},

@@ -301,11 +301,9 @@ func TestShouldSkipDML(t *testing.T) {
 			require.NoError(t, err)
 			for _, c := range tc.cases {
 				event := &model.RowChangedEvent{
-					TableInfo: &model.TableInfo{
-						TableName: model.TableName{
-							Schema: c.schema,
-							Table:  c.table,
-						},
+					Table: &model.TableName{
+						Schema: c.schema,
+						Table:  c.table,
 					},
 				}
 				if c.columns != "" {

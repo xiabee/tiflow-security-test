@@ -26,14 +26,14 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/kv"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
-	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/rowcodec"
+	"github.com/pingcap/tidb/kv"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	pfilter "github.com/pingcap/tiflow/pkg/filter"
@@ -112,7 +112,9 @@ func NewMounter(schemaStorage SchemaStorage,
 		integrity: integrity,
 
 		encoder: &rowcodec.Encoder{},
-		sctx:    stmtctx.NewStmtCtxWithTimeZone(tz),
+		sctx: &stmtctx.StatementContext{
+			TimeZone: tz,
+		},
 	}
 }
 
@@ -323,21 +325,20 @@ func ParseDDLJob(tblInfo *model.TableInfo, rawKV *model.RawKVEntry, id int64) (*
 
 // parseJob unmarshal the job from "v".
 func parseJob(v []byte, startTs, CRTs uint64) (*timodel.Job, error) {
-	var job timodel.Job
-	err := json.Unmarshal(v, &job)
+	job := &timodel.Job{}
+	err := json.Unmarshal(v, job)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	log.Debug("get new DDL job", zap.String("detail", job.String()))
 	if !job.IsDone() {
 		return nil, nil
 	}
 	// FinishedTS is only set when the job is synced,
 	// but we can use the entry's ts here
 	job.StartTS = startTs
-	// Since ddl in stateDone doesn't contain the FinishedTS,
-	// we need to set it as the txn's commit ts.
 	job.BinlogInfo.FinishedTS = CRTs
-	return &job, nil
+	return job, nil
 }
 
 func datum2Column(
@@ -383,7 +384,7 @@ func datum2Column(
 				zap.String("column", colInfo.Name.String()))
 		}
 
-		defaultValue := GetColumnDefaultValue(colInfo)
+		defaultValue := GetDDLDefaultDefinition(colInfo)
 		offset := tableInfo.RowColumnsOffset[colID]
 		rawCols[offset] = colDatums
 		cols[offset] = &model.Column{
@@ -558,6 +559,8 @@ func (m *mounter) mountRowKVEntry(tableInfo *model.TableInfo, row *rowKVEntry, d
 		}
 	}
 
+	schemaName := tableInfo.TableName.Schema
+	tableName := tableInfo.TableName.Table
 	var intRowID int64
 	if row.RecordID.IsInt() {
 		intRowID = row.RecordID.IntValue()
@@ -578,17 +581,23 @@ func (m *mounter) mountRowKVEntry(tableInfo *model.TableInfo, row *rowKVEntry, d
 	}
 
 	return &model.RowChangedEvent{
-		StartTs:         row.StartTs,
-		CommitTs:        row.CRTs,
-		RowID:           intRowID,
-		PhysicalTableID: row.PhysicalTableID,
-		ColInfos:        extendColumnInfos,
-		TableInfo:       tableInfo,
-		Columns:         cols,
-		PreColumns:      preCols,
+		StartTs:  row.StartTs,
+		CommitTs: row.CRTs,
+		RowID:    intRowID,
+		Table: &model.TableName{
+			Schema:      schemaName,
+			Table:       tableName,
+			TableID:     row.PhysicalTableID,
+			IsPartition: tableInfo.GetPartitionInfo() != nil,
+		},
+		ColInfos:   extendColumnInfos,
+		TableInfo:  tableInfo,
+		Columns:    cols,
+		PreColumns: preCols,
 
 		Checksum: checksum,
 
+		IndexColumns:        tableInfo.IndexColumnsOffset,
 		ApproximateDataSize: dataSize,
 	}, rawRow, nil
 }
@@ -651,7 +660,7 @@ func formatColVal(datum types.Datum, col *timodel.ColumnInfo) (
 		return v, int(sizeOfV), "", nil
 	case mysql.TypeBit:
 		// Encode bits as integers to avoid pingcap/tidb#10988 (which also affects MySQL itself)
-		v, err := datum.GetBinaryLiteral().ToInt(types.DefaultStmtNoWarningContext)
+		v, err := datum.GetBinaryLiteral().ToInt(nil)
 		const sizeOfV = unsafe.Sizeof(v)
 		return v, int(sizeOfV), "", err
 	case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar,
@@ -738,8 +747,8 @@ func getDefaultOrZeroValue(col *timodel.ColumnInfo) (types.Datum, any, int, stri
 	return d, v, size, warn, err
 }
 
-// GetColumnDefaultValue returns the default definition of a column.
-func GetColumnDefaultValue(col *timodel.ColumnInfo) interface{} {
+// GetDDLDefaultDefinition returns the default definition of a column.
+func GetDDLDefaultDefinition(col *timodel.ColumnInfo) interface{} {
 	defaultValue := col.GetDefaultValue()
 	if defaultValue == nil {
 		defaultValue = col.GetOriginDefaultValue()

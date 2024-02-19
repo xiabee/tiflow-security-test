@@ -19,10 +19,10 @@ import (
 
 	"github.com/pingcap/log"
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb/pkg/parser"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	tifilter "github.com/pingcap/tidb/pkg/util/filter"
+	"github.com/pingcap/tidb/parser"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	tifilter "github.com/pingcap/tidb/util/filter"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/stretchr/testify/require"
@@ -42,6 +42,7 @@ func TestIsSchema(t *testing.T) {
 		{tifilter.InspectionSchemaName, true},
 		{tifilter.PerformanceSchemaName, true},
 		{tifilter.MetricSchemaName, true},
+		{TiCDCSystemSchema, true},
 	}
 	for _, c := range cases {
 		require.Equal(t, c.result, isSysSchema(c.schema))

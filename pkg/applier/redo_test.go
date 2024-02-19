@@ -22,7 +22,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 	"github.com/phayes/freeport"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/redo/reader"
 	mysqlDDL "github.com/pingcap/tiflow/cdc/sink/ddlsink/mysql"
@@ -129,15 +129,12 @@ func TestApply(t *testing.T) {
 		{
 			StartTs:  1100,
 			CommitTs: 1200,
-			TableInfo: &model.TableInfo{
-				TableName:          model.TableName{Schema: "test", Table: "t1"},
-				IndexColumnsOffset: [][]int{{0}},
-			},
+			Table:    &model.TableName{Schema: "test", Table: "t1"},
 			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 1,
-					Flag:  model.HandleKeyFlag | model.UniqueKeyFlag,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "2",
@@ -148,15 +145,12 @@ func TestApply(t *testing.T) {
 		{
 			StartTs:  1200,
 			CommitTs: resolvedTs,
-			TableInfo: &model.TableInfo{
-				TableName:          model.TableName{Schema: "test", Table: "t1"},
-				IndexColumnsOffset: [][]int{{0}},
-			},
+			Table:    &model.TableName{Schema: "test", Table: "t1"},
 			PreColumns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 1,
-					Flag:  model.HandleKeyFlag | model.UniqueKeyFlag,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "2",
@@ -167,7 +161,7 @@ func TestApply(t *testing.T) {
 				{
 					Name:  "a",
 					Value: 2,
-					Flag:  model.HandleKeyFlag | model.UniqueKeyFlag,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "3",
@@ -197,7 +191,7 @@ func TestApply(t *testing.T) {
 					Schema: "test", Table: "resolved",
 				},
 			},
-			Query: "create table resolved(id int not null unique key)",
+			Query: "create table resolved(id int)",
 			Type:  timodel.ActionCreateTable,
 		},
 	}
@@ -251,10 +245,6 @@ func getMockDB(t *testing.T) *sql.DB {
 		Number:  1305,
 		Message: "FUNCTION test.tidb_version does not exist",
 	})
-	mock.ExpectQuery("select tidb_version()").WillReturnError(&mysql.MySQLError{
-		Number:  1305,
-		Message: "FUNCTION test.tidb_version does not exist",
-	})
 
 	mock.ExpectBegin()
 	mock.ExpectExec("USE `test`;").WillReturnResult(sqlmock.NewResult(1, 1))
@@ -269,8 +259,8 @@ func getMockDB(t *testing.T) *sql.DB {
 
 	// First, apply row which commitTs equal to resolvedTs
 	mock.ExpectBegin()
-	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a` = ?)").
-		WithArgs(1).
+	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a` = ? AND `b` = ?)").
+		WithArgs(1, "2").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("REPLACE INTO `test`.`t1` (`a`,`b`) VALUES (?,?)").
 		WithArgs(2, "3").
@@ -280,7 +270,7 @@ func getMockDB(t *testing.T) *sql.DB {
 	// Then, apply ddl which commitTs equal to resolvedTs
 	mock.ExpectBegin()
 	mock.ExpectExec("USE `test`;").WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("create table resolved(id int not null unique key)").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("create table resolved(id int)").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
 	mock.ExpectClose()

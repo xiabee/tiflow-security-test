@@ -21,7 +21,6 @@ const (
   "ignore-ineligible-table":false,
   "check-gc-safe-point": true,
   "enable-sync-point": false,
-  "enable-table-monitor": false,
   "bdr-mode": false,
   "sync-point-interval": 600000000000,
   "sync-point-retention": 86400000000000,
@@ -56,21 +55,16 @@ const (
       }
     ],
     "enable-partition-separator": true,
-    "protocol": "canal-json",
+    "protocol": "open-protocol",
 	"enable-kafka-sink-v2": false,
 	"only-output-updated-columns": false,
 	"delete-only-output-handle-key-columns": false,
-    "content-compatible": false,
     "large-message-handle": {
       "large-message-handle-option": "none",
       "large-message-handle-compression": "",
       "claim-check-storage-uri": ""
     },
-    "advance-timeout-in-sec": 150,
-    "send-bootstrap-interval-in-sec": 120,
-    "send-bootstrap-in-msg-count": 10000,
-    "send-bootstrap-to-all-partition": true,
-    "debezium-disable-schema": false
+    "advance-timeout-in-sec": 150
   },
   "consistent": {
     "level": "none",
@@ -83,7 +77,8 @@ const (
     "storage": "",
     "use-file-backend": false,
     "memory-usage": {
-        "memory-quota-percentage": 50
+        "memory-quota-percentage": 50,
+        "event-cache-percentage": 0
     }
   },
   "scheduler": {
@@ -134,8 +129,7 @@ const (
     "ca-path": "",
     "cert-path": "",
     "key-path": "",
-    "cert-allowed-cn": null,
-    "mtls": false
+    "cert-allowed-cn": null
   },
   "per-table-memory-quota": 0,
   "kv-client": {
@@ -177,19 +171,9 @@ const (
       "add-table-batch-size": 50
     },
     "enable-kv-connect-backoff": false,
-    "cdc-v2": {
-      "enable": false,
-      "meta-store": {
-        "uri": "",
-        "ssl-ca": "",
-        "ssl-cert": "",
-        "ssl-key": ""
-      }
-    },
     "puller": {
       "enable-resolved-ts-stuck-detection": false,
-      "resolved-ts-stuck-interval": 300000000000,
-      "log-region-details": false
+      "resolved-ts-stuck-interval": 300000000000
     }
   },
   "cluster-id": "default",
@@ -204,7 +188,6 @@ const (
   "ignore-ineligible-table":false,
   "check-gc-safe-point": true,
   "enable-sync-point": false,
-  "enable-table-monitor": false,
   "bdr-mode": false,
   "sync-point-interval": 600000000000,
   "sync-point-retention": 86400000000000,
@@ -220,7 +203,7 @@ const (
   },
   "sink": {
   	"encoder-concurrency": 32,
-    "protocol": "canal-json",
+    "protocol": "open-protocol",
     "column-selectors": [
       {
         "matcher": [
@@ -237,15 +220,13 @@ const (
       "quote": "\"",
       "null": "\\N",
       "include-commit-ts": true,
-      "binary-encoding-method":"base64",
-      "output-old-value": false
+      "binary-encoding-method":"base64"
     },
     "date-separator": "month",
     "enable-partition-separator": true,
     "enable-kafka-sink-v2": true,
     "only-output-updated-columns": true,
 	"delete-only-output-handle-key-columns": true,
-    "content-compatible": true,
     "safe-mode": true,
 	"terminator": "\r\n",
 	"transaction-atomicity": "",
@@ -281,8 +262,7 @@ const (
         "max-batch-size": 100000,
         "avro-enable-watermark": true,
         "avro-decimal-handling-mode": "string",
-        "avro-bigint-unsigned-handling-mode": "string",
-		"encoding-format": "json"
+        "avro-bigint-unsigned-handling-mode": "string"
       },
       "large-message-handle": {
         "large-message-handle-option": "handle-key-only",
@@ -325,11 +305,7 @@ const (
       "file-size": 1024,
       "output-column-id":false
     },
-    "advance-timeout-in-sec": 150,
-    "send-bootstrap-interval-in-sec": 120,
-    "send-bootstrap-in-msg-count": 10000,
-    "send-bootstrap-to-all-partition": true,
-    "debezium-disable-schema": false
+    "advance-timeout-in-sec": 150
   },
   "consistent": {
     "level": "none",
@@ -342,7 +318,8 @@ const (
     "storage": "",
     "use-file-backend": false,
     "memory-usage": {
-        "memory-quota-percentage": 50
+        "memory-quota-percentage": 50,
+        "event-cache-percentage": 0
     }
   },
   "scheduler": {
@@ -371,7 +348,6 @@ const (
   "ignore-ineligible-table":false,
   "check-gc-safe-point": true,
   "enable-sync-point": false,
-  "enable-table-monitor": false,
   "bdr-mode": false,
   "sync-point-interval": 600000000000,
   "sync-point-retention": 86400000000000,
@@ -387,7 +363,7 @@ const (
   "sink": {
     "encoder-concurrency": 32,
     "dispatchers": null,
-    "protocol": "canal-json",
+    "protocol": "open-protocol",
     "column-selectors": [
       {
         "matcher": [
@@ -413,7 +389,6 @@ const (
 	"enable-kafka-sink-v2": true,
     "only-output-updated-columns": true,
 	"delete-only-output-handle-key-columns": true,
-    "content-compatible": true,
     "safe-mode": true,
     "kafka-config": {
       "partition-num": 1,
@@ -447,8 +422,7 @@ const (
         "max-batch-size": 100000,
         "avro-enable-watermark": true,
         "avro-decimal-handling-mode": "string",
-        "avro-bigint-unsigned-handling-mode": "string",
-        "encoding-format": "json"
+        "avro-bigint-unsigned-handling-mode": "string"
       },
       "large-message-handle": {
         "large-message-handle-option": "handle-key-only",
@@ -491,11 +465,7 @@ const (
       "file-size": 1024,
       "output-column-id":false
     },
-    "advance-timeout-in-sec": 150,
-    "send-bootstrap-interval-in-sec": 120,
-    "send-bootstrap-in-msg-count": 10000,
-    "send-bootstrap-to-all-partition": true,
-    "debezium-disable-schema": false
+    "advance-timeout-in-sec": 150
   },
   "consistent": {
     "level": "none",
@@ -508,7 +478,8 @@ const (
     "storage": "",
     "use-file-backend": false,
     "memory-usage": {
-        "memory-quota-percentage": 50
+        "memory-quota-percentage": 50,
+        "event-cache-percentage": 0
     }
   },
   "scheduler": {

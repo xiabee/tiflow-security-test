@@ -22,10 +22,10 @@ import (
 	"testing"
 	"time"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
-	"github.com/pingcap/tidb/pkg/util/rowcodec"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
+	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
@@ -72,6 +72,7 @@ func generateTxnEvents(
 		txn := &dmlsink.TxnCallbackableEvent{
 			Event: &model.SingleTableTxn{
 				CommitTs:         100,
+				Table:            &model.TableName{Schema: "test", Table: "table1"},
 				TableInfoVersion: 33,
 				TableInfo: &model.TableInfo{
 					TableName: model.TableName{
@@ -94,6 +95,7 @@ func generateTxnEvents(
 		for j := 0; j < batch; j++ {
 			row := &model.RowChangedEvent{
 				CommitTs:  100,
+				Table:     &model.TableName{Schema: "test", Table: "table1"},
 				TableInfo: &model.TableInfo{TableName: model.TableName{Schema: "test", Table: "table1"}, Version: 33},
 				Columns: []*model.Column{
 					{Name: "c1", Value: i*batch + j},

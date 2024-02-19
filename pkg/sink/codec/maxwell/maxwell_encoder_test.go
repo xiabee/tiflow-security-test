@@ -17,8 +17,8 @@ import (
 	"context"
 	"testing"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/stretchr/testify/require"
@@ -30,10 +30,8 @@ func TestMaxwellBatchCodec(t *testing.T) {
 
 	rowCases := [][]*model.RowChangedEvent{{{
 		CommitTs: 1,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "a", Table: "b"},
-		},
-		Columns: []*model.Column{{Name: "col1", Type: 3, Value: 10}},
+		Table:    &model.TableName{Schema: "a", Table: "b"},
+		Columns:  []*model.Column{{Name: "col1", Type: 3, Value: 10}},
 	}}, {}}
 	for _, cs := range rowCases {
 		encoder := newEncoder(&common.Config{})
@@ -79,9 +77,7 @@ func TestMaxwellAppendRowChangedEventWithCallback(t *testing.T) {
 
 	row := &model.RowChangedEvent{
 		CommitTs: 1,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{Schema: "a", Table: "b"},
-		},
+		Table:    &model.TableName{Schema: "a", Table: "b"},
 		Columns: []*model.Column{{
 			Name:  "col1",
 			Type:  mysql.TypeVarchar,

@@ -62,7 +62,7 @@ func (c *LargeMessageHandleConfig) AdjustAndValidate(protocol Protocol, enableTi
 	}
 
 	switch protocol {
-	case ProtocolOpen, ProtocolSimple:
+	case ProtocolOpen:
 	case ProtocolCanalJSON:
 		if !enableTiDBExtension {
 			return cerror.ErrInvalidReplicaConfig.GenWithStack(

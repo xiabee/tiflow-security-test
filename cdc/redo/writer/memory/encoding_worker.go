@@ -22,6 +22,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/redo"
@@ -70,7 +71,7 @@ func (e *polymorphicRedoEvent) encode() (err error) {
 	redoLog := e.event.ToRedoLog()
 	e.commitTs = redoLog.GetCommitTs()
 
-	rawData, err := redoLog.MarshalMsg(nil)
+	rawData, err := codec.MarshalRedoLog(redoLog, nil)
 	if err != nil {
 		return err
 	}

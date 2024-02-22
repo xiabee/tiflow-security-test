@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 
 	"github.com/pingcap/log"
+	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/errors"
@@ -82,7 +83,7 @@ func (l *logWriter) WriteEvents(ctx context.Context, events ...writer.RedoEvent)
 		}
 
 		rl := event.ToRedoLog()
-		data, err := rl.MarshalMsg(nil)
+		data, err := codec.MarshalRedoLog(rl, nil)
 		if err != nil {
 			return errors.WrapError(errors.ErrMarshalFailed, err)
 		}

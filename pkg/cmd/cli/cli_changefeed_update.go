@@ -15,7 +15,6 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/pingcap/log"
@@ -24,6 +23,7 @@ import (
 	cmdcontext "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
+	putil "github.com/pingcap/tiflow/pkg/util"
 	"github.com/r3labs/diff"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -36,6 +36,7 @@ type updateChangefeedOptions struct {
 
 	commonChangefeedOptions *changefeedCommonOptions
 	changefeedID            string
+	namespace               string
 }
 
 // newUpdateChangefeedOptions creates new options for the `cli changefeed update` command.
@@ -49,6 +50,7 @@ func newUpdateChangefeedOptions(commonChangefeedOptions *changefeedCommonOptions
 // flags related to template printing to it.
 func (o *updateChangefeedOptions) addFlags(cmd *cobra.Command) {
 	o.commonChangefeedOptions.addFlags(cmd)
+	cmd.PersistentFlags().StringVarP(&o.namespace, "namespace", "n", "default", "Replication task (changefeed) Namespace")
 	cmd.PersistentFlags().StringVarP(&o.changefeedID, "changefeed-id", "c", "", "Replication task (changefeed) ID")
 	_ = cmd.MarkPersistentFlagRequired("changefeed-id")
 }
@@ -91,7 +93,7 @@ func (o *updateChangefeedOptions) complete(f factory.Factory) error {
 func (o *updateChangefeedOptions) run(cmd *cobra.Command) error {
 	ctx := cmdcontext.GetDefaultContext()
 
-	old, err := o.apiV2Client.Changefeeds().GetInfo(ctx, o.changefeedID)
+	old, err := o.apiV2Client.Changefeeds().Get(ctx, o.namespace, o.changefeedID)
 	if err != nil {
 		return err
 	}
@@ -100,7 +102,10 @@ func (o *updateChangefeedOptions) run(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-
+	// sink uri is not changed, set old to empty to skip diff
+	if newInfo.SinkURI == "" {
+		old.SinkURI = ""
+	}
 	changelog, err := diff.Diff(old, newInfo)
 	if err != nil {
 		return err
@@ -116,19 +121,15 @@ func (o *updateChangefeedOptions) run(cmd *cobra.Command) error {
 
 	if !o.commonChangefeedOptions.noConfirm {
 		cmd.Printf("Could you agree to apply changes above to changefeed [Y/N]\n")
-		var yOrN string
-		_, err = fmt.Scan(&yOrN)
-		if err != nil {
-			return err
-		}
-		if strings.ToLower(strings.TrimSpace(yOrN)) != "y" {
+		confirmed := readInput(cmd)
+		if !confirmed {
 			cmd.Printf("No update to changefeed.\n")
 			return nil
 		}
 	}
 
 	changefeedConfig := o.getChangefeedConfig(cmd, newInfo)
-	info, err := o.apiV2Client.Changefeeds().Update(ctx, changefeedConfig, o.changefeedID)
+	info, err := o.apiV2Client.Changefeeds().Update(ctx, changefeedConfig, o.namespace, o.changefeedID)
 	if err != nil {
 		return err
 	}
@@ -150,6 +151,7 @@ func (o *updateChangefeedOptions) applyChanges(oldInfo *v2.ChangeFeedInfo,
 	if err != nil {
 		return nil, err
 	}
+	newInfo.SinkURI = ""
 	cmd.Flags().Visit(func(flag *pflag.Flag) {
 		switch flag.Name {
 		case "target-ts":
@@ -163,7 +165,7 @@ func (o *updateChangefeedOptions) applyChanges(oldInfo *v2.ChangeFeedInfo,
 			}
 			newInfo.Config = v2.ToAPIReplicaConfig(cfg)
 		case "schema-registry":
-			newInfo.Config.Sink.SchemaRegistry = o.commonChangefeedOptions.schemaRegistry
+			newInfo.Config.Sink.SchemaRegistry = putil.AddressOf(o.commonChangefeedOptions.schemaRegistry)
 		case "sort-engine":
 		case "sort-dir":
 			log.Warn("this flag cannot be updated and will be ignored", zap.String("flagName", flag.Name))

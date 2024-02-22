@@ -120,6 +120,13 @@ var (
 			Name:      "ignored_ddl_event_count",
 			Help:      "The total count of ddl events that are ignored in changefeed.",
 		}, []string{"namespace", "changefeed"})
+	changefeedStartTimeGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "ticdc",
+			Subsystem: "owner",
+			Name:      "changefeed_start_time",
+			Help:      "The start time of changefeeds",
+		}, []string{"namespace", "changefeed", "type"})
 )
 
 const (
@@ -127,6 +134,9 @@ const (
 	// should print a warning log, and if necessary, the timeout should be exposed externally through
 	// monitor.
 	changefeedLogsWarnDuration = 1 * time.Second
+
+	// TiDB collects metric data every 1 minute
+	downstreamObserverTickDuration = 30 * time.Second
 )
 
 // InitMetrics registers all metrics used in owner
@@ -147,6 +157,7 @@ func InitMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(changefeedTickDuration)
 	registry.MustRegister(changefeedCloseDuration)
 	registry.MustRegister(changefeedIgnoredDDLEventCounter)
+	registry.MustRegister(changefeedStartTimeGauge)
 }
 
 // lagBucket returns the lag buckets for prometheus metric
@@ -156,6 +167,6 @@ func InitMetrics(registry *prometheus.Registry) {
 func lagBucket() []float64 {
 	buckets := prometheus.LinearBuckets(0.5, 0.5, 20)
 	buckets = append(buckets, prometheus.LinearBuckets(11, 1, 10)...)
-	buckets = append(buckets, prometheus.ExponentialBuckets(40, 2, 10)...)
+	buckets = append(buckets, prometheus.ExponentialBuckets(21, 2, 10)...)
 	return buckets
 }

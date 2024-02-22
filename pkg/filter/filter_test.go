@@ -33,7 +33,7 @@ func TestShouldUseDefaultRules(t *testing.T) {
 	require.True(t, filter.ShouldIgnoreTable("performance_schema", ""))
 	require.False(t, filter.ShouldIgnoreTable("metric_schema", "query_duration"))
 	require.False(t, filter.ShouldIgnoreTable("sns", "user"))
-	require.False(t, filter.ShouldIgnoreTable("tidb_cdc", "repl_mark_a_a"))
+	require.True(t, filter.ShouldIgnoreTable("tidb_cdc", "repl_mark_a_a"))
 }
 
 func TestShouldUseCustomRules(t *testing.T) {
@@ -67,6 +67,20 @@ func TestShouldUseCustomRules(t *testing.T) {
 	require.False(t, filter.ShouldIgnoreTable("other", ""))
 	require.False(t, filter.ShouldIgnoreTable("school", "student"))
 	require.True(t, filter.ShouldIgnoreTable("school", "teacher"))
+	require.Nil(t, err)
+
+	filter, err = NewFilter(&config.ReplicaConfig{
+		Filter: &config.FilterConfig{
+			// 1. match all schema and table
+			// 2. do not match test.season
+			// 3. match all table of schema school
+			// 4. do not match table school.teacher
+			Rules: []string{"*.*", "!test.t1", "!test.t2"},
+		},
+	}, "")
+	require.False(t, filter.ShouldIgnoreTable("test", "season"))
+	require.True(t, filter.ShouldIgnoreTable("test", "t1"))
+	require.True(t, filter.ShouldIgnoreTable("test", "t2"))
 	require.Nil(t, err)
 }
 

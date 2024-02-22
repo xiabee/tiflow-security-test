@@ -49,7 +49,8 @@ type TableInfo struct {
 	Version       uint64
 	columnsOffset map[int64]int
 	indicesOffset map[int64]int
-	uniqueColumns map[int64]struct{}
+
+	hasUniqueColumn bool
 
 	// It's a mapping from ColumnID to the offset of the columns in row changed events.
 	RowColumnsOffset map[int64]int
@@ -83,10 +84,10 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 			TableID:     info.ID,
 			IsPartition: info.GetPartitionInfo() != nil,
 		},
+		hasUniqueColumn:  false,
 		Version:          version,
 		columnsOffset:    make(map[int64]int, len(info.Columns)),
 		indicesOffset:    make(map[int64]int, len(info.Indices)),
-		uniqueColumns:    make(map[int64]struct{}),
 		RowColumnsOffset: make(map[int64]int, len(info.Columns)),
 		ColumnsFlag:      make(map[int64]ColumnFlagType, len(info.Columns)),
 		handleColID:      []int64{-1},
@@ -108,7 +109,7 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 				// pk is handle
 				ti.handleColID = []int64{col.ID}
 				ti.HandleIndexID = HandleIndexPKIsHandle
-				ti.uniqueColumns[col.ID] = struct{}{}
+				ti.hasUniqueColumn = true
 				ti.IndexColumnsOffset = append(ti.IndexColumnsOffset, []int{ti.RowColumnsOffset[col.ID]})
 			} else if ti.IsCommonHandle {
 				ti.HandleIndexID = HandleIndexPKIsHandle
@@ -133,9 +134,7 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 	for i, idx := range ti.Indices {
 		ti.indicesOffset[idx.ID] = i
 		if ti.IsIndexUnique(idx) {
-			for _, col := range idx.Columns {
-				ti.uniqueColumns[ti.Columns[col.Offset].ID] = struct{}{}
-			}
+			ti.hasUniqueColumn = true
 		}
 		if idx.Primary || idx.Unique {
 			indexColOffset := make([]int, 0, len(idx.Columns))
@@ -212,9 +211,6 @@ func (ti *TableInfo) initColumnsFlag() {
 		if mysql.HasUnsignedFlag(colInfo.GetFlag()) {
 			flag.SetIsUnsigned()
 		}
-		if mysql.HasZerofillFlag(colInfo.GetFlag()) {
-			flag.SetZeroFill()
-		}
 		ti.ColumnsFlag[colInfo.ID] = flag
 	}
 
@@ -270,12 +266,12 @@ func IsColCDCVisible(col *model.ColumnInfo) bool {
 	if col.IsGenerated() && !col.GeneratedStored {
 		return false
 	}
-	return col.State == model.StatePublic
+	return true
 }
 
 // ExistTableUniqueColumn returns whether the table has a unique column
 func (ti *TableInfo) ExistTableUniqueColumn() bool {
-	return len(ti.uniqueColumns) != 0
+	return ti.hasUniqueColumn
 }
 
 // IsEligible returns whether the table is a eligible table
@@ -318,4 +314,75 @@ func (ti *TableInfo) IsIndexUnique(indexInfo *model.IndexInfo) bool {
 // Clone clones the TableInfo
 func (ti *TableInfo) Clone() *TableInfo {
 	return WrapTableInfo(ti.SchemaID, ti.TableName.Schema, ti.Version, ti.TableInfo.Clone())
+}
+
+// GetIndex return the corresponding index by the given name.
+func (ti *TableInfo) GetIndex(name string) *model.IndexInfo {
+	for _, index := range ti.Indices {
+		if index != nil && index.Name.O == name {
+			return index
+		}
+	}
+	return nil
+}
+
+// IndexByName returns the index columns and offsets of the corresponding index by name
+func (ti *TableInfo) IndexByName(name string) ([]string, []int, bool) {
+	index := ti.GetIndex(name)
+	if index == nil {
+		return nil, nil, false
+	}
+	names := make([]string, 0, len(index.Columns))
+	offset := make([]int, 0, len(index.Columns))
+	for _, col := range index.Columns {
+		names = append(names, col.Name.O)
+		offset = append(offset, col.Offset)
+	}
+	return names, offset, true
+}
+
+// OffsetsByNames returns the column offsets of the corresponding columns by names
+// If any column does not exist, return false
+func (ti *TableInfo) OffsetsByNames(names []string) ([]int, bool) {
+	// todo: optimize it
+	columnOffsets := make(map[string]int, len(ti.Columns))
+	for _, col := range ti.Columns {
+		if col != nil {
+			columnOffsets[col.Name.O] = col.Offset
+		}
+	}
+
+	result := make([]int, 0, len(names))
+	for _, col := range names {
+		offset, ok := columnOffsets[col]
+		if !ok {
+			return nil, false
+		}
+		result = append(result, offset)
+	}
+
+	return result, true
+}
+
+// GetPrimaryKeyColumnNames returns the primary key column names
+func (ti *TableInfo) GetPrimaryKeyColumnNames() map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, index := range ti.Indices {
+		if index.Primary {
+			for _, col := range index.Columns {
+				result[col.Name.O] = struct{}{}
+			}
+			return result
+		}
+	}
+
+	for _, columnsOffsets := range ti.IndexColumnsOffset {
+		for _, offset := range columnsOffsets {
+			columnInfo := ti.Columns[offset]
+			if mysql.HasPriKeyFlag(columnInfo.FieldType.GetFlag()) {
+				result[columnInfo.Name.O] = struct{}{}
+			}
+		}
+	}
+	return result
 }

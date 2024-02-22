@@ -14,10 +14,10 @@
 package orchestrator
 
 import (
-	"encoding/json"
 	"reflect"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"

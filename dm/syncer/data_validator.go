@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -29,10 +30,12 @@ import (
 	"github.com/pingcap/tidb/util/filter"
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/config"
+	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
+	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/schema"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -193,8 +196,10 @@ type DataValidator struct {
 
 	validateInterval time.Duration
 	checkInterval    time.Duration
-	workers          []*validateWorker
-	workerCnt        int
+	cutOverLocation  atomic.Pointer[binlog.Location]
+
+	workers   []*validateWorker
+	workerCnt int
 
 	// whether we start to mark failed rows as error rows
 	// if it's false, we don't mark failed row change as error to reduce false-positive
@@ -278,16 +283,16 @@ func (v *DataValidator) initialize() error {
 	}()
 
 	dbCfg := v.cfg.From
-	dbCfg.RawDBCfg = config.DefaultRawDBConfig().SetReadTimeout(maxDMLConnectionTimeout).SetMaxIdleConns(1)
-	v.fromDB, err = dbconn.CreateBaseDB(&dbCfg)
+	dbCfg.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(maxDMLConnectionTimeout).SetMaxIdleConns(1)
+	v.fromDB, err = conn.GetUpstreamDB(&dbCfg)
 	if err != nil {
 		return err
 	}
 
 	dbCfg = v.cfg.To
 	// worker count + checkpoint connection, others concurrent access can create it on the fly
-	dbCfg.RawDBCfg = config.DefaultRawDBConfig().SetReadTimeout(maxDMLConnectionTimeout).SetMaxIdleConns(v.workerCnt + 1)
-	v.toDB, err = dbconn.CreateBaseDB(&dbCfg)
+	dbCfg.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(maxDMLConnectionTimeout).SetMaxIdleConns(v.workerCnt + 1)
+	v.toDB, err = conn.GetDownstreamDB(&dbCfg)
 	if err != nil {
 		return err
 	}
@@ -300,11 +305,11 @@ func (v *DataValidator) initialize() error {
 	failpoint.Inject("ValidatorMockUpstreamTZ", func() {
 		defaultUpstreamTZ = "UTC"
 	})
-	v.upstreamTZ, _, err = str2TimezoneOrFromDB(newCtx, defaultUpstreamTZ, &v.cfg.From)
+	v.upstreamTZ, _, err = str2TimezoneOrFromDB(newCtx, defaultUpstreamTZ, conn.UpstreamDBConfig(&v.cfg.From))
 	if err != nil {
 		return err
 	}
-	v.timezone, _, err = str2TimezoneOrFromDB(newCtx, v.cfg.Timezone, &v.cfg.To)
+	v.timezone, _, err = str2TimezoneOrFromDB(newCtx, v.cfg.Timezone, conn.DownstreamDBConfig(&v.cfg.To))
 	if err != nil {
 		return err
 	}
@@ -953,7 +958,12 @@ func (v *DataValidator) processRowsEvent(header *replication.EventHeader, ev *re
 
 func (v *DataValidator) checkAndPersistCheckpointAndData(loc binlog.Location) error {
 	metaFlushInterval := v.cfg.ValidatorCfg.MetaFlushInterval.Duration
-	if time.Since(v.lastFlushTime) > metaFlushInterval {
+	cutOverLocation := v.cutOverLocation.Load()
+	needCutOver := cutOverLocation != nil && binlog.CompareLocation(*cutOverLocation, loc, v.cfg.EnableGTID) <= 0
+	if time.Since(v.lastFlushTime) > metaFlushInterval || needCutOver {
+		if needCutOver {
+			v.cutOverLocation.Store(nil)
+		}
 		v.lastFlushTime = time.Now()
 		if err := v.persistCheckpointAndData(loc); err != nil {
 			v.L.Warn("failed to flush checkpoint: ", zap.Error(err))
@@ -1260,7 +1270,7 @@ func (v *DataValidator) GetValidatorError(errState pb.ValidateErrorState) ([]*pb
 	var (
 		toDB  *conn.BaseDB
 		err   error
-		dbCfg config.DBConfig
+		dbCfg dbconfig.DBConfig
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), validatorDmctlOpTimeout)
 	tctx := tcontext.NewContext(ctx, v.L)
@@ -1270,8 +1280,8 @@ func (v *DataValidator) GetValidatorError(errState pb.ValidateErrorState) ([]*pb
 		failpoint.Return(v.persistHelper.loadError(tctx, toDB, errState))
 	})
 	dbCfg = v.cfg.To
-	dbCfg.RawDBCfg = config.DefaultRawDBConfig().SetMaxIdleConns(1)
-	toDB, err = dbconn.CreateBaseDB(&dbCfg)
+	dbCfg.RawDBCfg = dbconfig.DefaultRawDBConfig().SetMaxIdleConns(1)
+	toDB, err = conn.GetDownstreamDB(&dbCfg)
 	if err != nil {
 		v.L.Warn("failed to create downstream db", zap.Error(err))
 		return nil, err
@@ -1289,7 +1299,7 @@ func (v *DataValidator) OperateValidatorError(validateOp pb.ValidationErrOp, err
 	var (
 		toDB  *conn.BaseDB
 		err   error
-		dbCfg config.DBConfig
+		dbCfg dbconfig.DBConfig
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), validatorDmctlOpTimeout)
 	tctx := tcontext.NewContext(ctx, v.L)
@@ -1299,13 +1309,37 @@ func (v *DataValidator) OperateValidatorError(validateOp pb.ValidationErrOp, err
 		failpoint.Return(v.persistHelper.operateError(tctx, toDB, validateOp, errID, isAll))
 	})
 	dbCfg = v.cfg.To
-	dbCfg.RawDBCfg = config.DefaultRawDBConfig().SetMaxIdleConns(1)
-	toDB, err = dbconn.CreateBaseDB(&dbCfg)
+	dbCfg.RawDBCfg = dbconfig.DefaultRawDBConfig().SetMaxIdleConns(1)
+	toDB, err = conn.GetDownstreamDB(&dbCfg)
 	if err != nil {
 		return err
 	}
 	defer dbconn.CloseBaseDB(tctx, toDB)
 	return v.persistHelper.operateError(tctx, toDB, validateOp, errID, isAll)
+}
+
+func (v *DataValidator) UpdateValidator(req *pb.UpdateValidationWorkerRequest) error {
+	var (
+		pos = mysql.Position{}
+		gs  mysql.GTIDSet
+		err error
+	)
+	if len(req.BinlogPos) > 0 {
+		pos, err = binlog.PositionFromPosStr(req.BinlogPos)
+		if err != nil {
+			return err
+		}
+	}
+	if len(req.BinlogGTID) > 0 {
+		gs, err = gtid.ParserGTID(v.cfg.Flavor, req.BinlogGTID)
+		if err != nil {
+			return err
+		}
+	}
+	cutOverLocation := binlog.NewLocation(pos, gs)
+	v.cutOverLocation.Store(&cutOverLocation)
+	v.syncer.cutOverLocation.Store(&cutOverLocation)
+	return nil
 }
 
 func (v *DataValidator) getErrorRowCount(timeout time.Duration) ([errorStateTypeCount]int64, error) {
@@ -1315,9 +1349,9 @@ func (v *DataValidator) getErrorRowCount(timeout time.Duration) ([errorStateType
 
 	// use a separate db to get error count, since validator maybe stopped or initializing
 	dbCfg := v.cfg.To
-	dbCfg.RawDBCfg = config.DefaultRawDBConfig().SetMaxIdleConns(1)
+	dbCfg.RawDBCfg = dbconfig.DefaultRawDBConfig().SetMaxIdleConns(1)
 	countMap := map[pb.ValidateErrorState]int64{}
-	toDB, err := dbconn.CreateBaseDB(&dbCfg)
+	toDB, err := conn.GetDownstreamDB(&dbCfg)
 	if err != nil {
 		v.L.Warn("failed to create downstream db", zap.Error(err))
 	} else {
@@ -1371,6 +1405,14 @@ func (v *DataValidator) GetValidatorStatus() *pb.ValidationStatus {
 			validatorBinlogGtid = flushedLoc.GetGTID().String()
 		}
 	}
+	var cutoverBinlogPos, cutoverBinlogGTID string
+	if cutOverLoc := v.cutOverLocation.Load(); cutOverLoc != nil {
+		cutoverBinlogPos = cutOverLoc.Position.String()
+		if cutOverLoc.GetGTID() != nil {
+			cutoverBinlogGTID = cutOverLoc.GetGTID().String()
+		}
+	}
+
 	return &pb.ValidationStatus{
 		Task:                v.cfg.Name,
 		Source:              v.cfg.SourceID,
@@ -1382,5 +1424,7 @@ func (v *DataValidator) GetValidatorStatus() *pb.ValidationStatus {
 		ProcessedRowsStatus: processedRows,
 		PendingRowsStatus:   pendingRows,
 		ErrorRowsStatus:     errorRows,
+		CutoverBinlogPos:    cutoverBinlogPos,
+		CutoverBinlogGtid:   cutoverBinlogGTID,
 	}
 }

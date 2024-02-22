@@ -71,10 +71,11 @@ type metaManager struct {
 
 	startTs model.Ts
 
-	flushIntervalInMs      int64
 	lastFlushTime          time.Time
 	cfg                    *config.ConsistentConfig
 	metricFlushLogDuration prometheus.Observer
+
+	flushIntervalInMs int64
 }
 
 // NewDisabledMetaManager creates a disabled Meta Manager.
@@ -94,8 +95,8 @@ func NewMetaManager(
 	}
 
 	m := &metaManager{
-		changeFeedID:      changefeedID,
 		captureID:         config.GetGlobalServerConfig().AdvertiseAddr,
+		changeFeedID:      changefeedID,
 		uuidGenerator:     uuid.NewGenerator(),
 		enabled:           true,
 		cfg:               cfg,
@@ -165,7 +166,7 @@ func (m *metaManager) preStart(ctx context.Context) error {
 }
 
 // Run runs bgFlushMeta and bgGC.
-func (m *metaManager) Run(ctx context.Context) error {
+func (m *metaManager) Run(ctx context.Context, _ ...chan<- error) error {
 	if err := m.preStart(ctx); err != nil {
 		return err
 	}
@@ -180,6 +181,10 @@ func (m *metaManager) Run(ctx context.Context) error {
 	m.running.Store(true)
 	return eg.Wait()
 }
+
+func (m *metaManager) WaitForReady(_ context.Context) {}
+
+func (m *metaManager) Close() {}
 
 // UpdateMeta updates meta.
 func (m *metaManager) UpdateMeta(checkpointTs, resolvedTs model.Ts) {
@@ -278,6 +283,7 @@ func (m *metaManager) initMeta(ctx context.Context) error {
 		zap.String("changefeed", m.changeFeedID.ID),
 		zap.Uint64("checkpointTs", flushedMeta.CheckpointTs),
 		zap.Uint64("resolvedTs", flushedMeta.ResolvedTs))
+
 	return util.DeleteFilesInExtStorage(ctx, m.extStorage, toRemoveMetaFiles)
 }
 

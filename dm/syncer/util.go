@@ -117,7 +117,7 @@ func printServerVersion(tctx *tcontext.Context, db *conn.BaseDB, scope string) {
 	version.ParseServerInfo(versionInfo)
 }
 
-func str2TimezoneOrFromDB(tctx *tcontext.Context, tzStr string, dbCfg *config.DBConfig) (*time.Location, string, error) {
+func str2TimezoneOrFromDB(tctx *tcontext.Context, tzStr string, dbCfg conn.ScopedDBConfig) (*time.Location, string, error) {
 	var err error
 	if len(tzStr) == 0 {
 		baseDB, err2 := conn.DefaultDBProvider.Apply(dbCfg)
@@ -196,6 +196,11 @@ func subtaskCfg2BinlogSyncerCfg(cfg *config.SubTaskConfig, timezone *time.Locati
 		}
 	}
 
+	h := cfg.WorkerName
+	// https://github.com/mysql/mysql-server/blob/1bfe02bdad6604d54913c62614bde57a055c8332/include/my_hostname.h#L33-L42
+	if len(h) > 60 {
+		h = h[:60]
+	}
 	syncCfg := replication.BinlogSyncerConfig{
 		ServerID:                cfg.ServerID,
 		Flavor:                  cfg.Flavor,
@@ -206,6 +211,7 @@ func subtaskCfg2BinlogSyncerCfg(cfg *config.SubTaskConfig, timezone *time.Locati
 		TimestampStringLocation: timezone,
 		TLSConfig:               tlsConfig,
 		RowsEventDecodeFunc:     rowsEventDecodeFunc,
+		Localhost:               h,
 	}
 	// when retry count > 1, go-mysql will retry sync from the previous GTID set in GTID mode,
 	// which may get duplicate binlog event after retry success. so just set retry count = 1, and task
@@ -235,6 +241,7 @@ func getDDLStatusFromTiDB(tctx *tcontext.Context, db *dbconn.DBConn, ddl string,
 	for {
 		// every attempt try 10 history jobs
 		showJobs := fmt.Sprintf("ADMIN SHOW DDL JOBS %d", rowNum)
+		//nolint:rowserrcheck
 		jobsRows, err := db.QuerySQL(tctx, nil, showJobs)
 		if err != nil {
 			return "", err
@@ -269,6 +276,7 @@ func getDDLStatusFromTiDB(tctx *tcontext.Context, db *dbconn.DBConn, ddl string,
 						// jobID does not exist, expand queryMap for deeper search
 						showJobsLimitNext := fmt.Sprintf("ADMIN SHOW DDL JOB QUERIES LIMIT 10 OFFSET %d", rowOffset)
 						var rowsLimitNext *sql.Rows
+						//nolint:rowserrcheck
 						rowsLimitNext, err = db.QuerySQL(tctx, nil, showJobsLimitNext)
 						if err != nil {
 							return "", err

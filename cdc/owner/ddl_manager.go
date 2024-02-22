@@ -78,6 +78,8 @@ var nonGlobalDDLs = map[timodel.ActionType]struct{}{
 	timodel.ActionReorganizePartition:          {},
 	timodel.ActionAlterTTLInfo:                 {},
 	timodel.ActionAlterTTLRemove:               {},
+	timodel.ActionAlterTablePartitioning:       {},
+	timodel.ActionRemovePartitioning:           {},
 }
 
 var redoBarrierDDLs = map[timodel.ActionType]struct{}{
@@ -87,6 +89,8 @@ var redoBarrierDDLs = map[timodel.ActionType]struct{}{
 	timodel.ActionTruncateTablePartition: {},
 	timodel.ActionRecoverTable:           {},
 	timodel.ActionReorganizePartition:    {},
+	timodel.ActionAlterTablePartitioning: {},
+	timodel.ActionRemovePartitioning:     {},
 }
 
 // ddlManager holds the pending DDL events of all tables and responsible for

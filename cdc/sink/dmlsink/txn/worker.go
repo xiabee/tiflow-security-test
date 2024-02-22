@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/sink/metrics/txn"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
 	"github.com/pingcap/tiflow/pkg/chann"
@@ -29,7 +29,7 @@ import (
 
 type txnWithNotifier struct {
 	*txnEvent
-	postTxnExecuted func()
+	wantMore func()
 }
 
 type worker struct {
@@ -49,15 +49,14 @@ type worker struct {
 	metricTxnWorkerHandledRows   prometheus.Counter
 
 	// Fields only used in the background loop.
-	flushInterval            time.Duration
-	hasPending               bool
-	postTxnExecutedCallbacks []func()
+	flushInterval     time.Duration
+	hasPending        bool
+	wantMoreCallbacks []func()
 }
 
-func newWorker(ctx context.Context, changefeedID model.ChangeFeedID,
-	ID int, backend backend, workerCount int,
-) *worker {
+func newWorker(ctx context.Context, ID int, backend backend, workerCount int) *worker {
 	wid := fmt.Sprintf("%d", ID)
+	changefeedID := contextutil.ChangefeedIDFromCtx(ctx)
 	return &worker{
 		ctx:         ctx,
 		changefeed:  fmt.Sprintf("%s.%s", changefeedID.Namespace, changefeedID.ID),
@@ -73,19 +72,17 @@ func newWorker(ctx context.Context, changefeedID model.ChangeFeedID,
 		metricTxnWorkerBusyRatio:     txn.WorkerBusyRatio.WithLabelValues(changefeedID.Namespace, changefeedID.ID),
 		metricTxnWorkerHandledRows:   txn.WorkerHandledRows.WithLabelValues(changefeedID.Namespace, changefeedID.ID, wid),
 
-		flushInterval:            backend.MaxFlushInterval(),
-		hasPending:               false,
-		postTxnExecutedCallbacks: make([]func(), 0, 1024),
+		flushInterval:     backend.MaxFlushInterval(),
+		hasPending:        false,
+		wantMoreCallbacks: make([]func(), 0, 1024),
 	}
 }
 
 // Add adds a txnEvent to the worker.
-// The worker will call postTxnExecuted() after the txn executed.
-// The postTxnExecuted will remove the txn related Node in the conflict detector's
-// dependency graph and resolve related dependencies for these transacitons
-// which depend on this executed txn.
-func (w *worker) Add(txn *txnEvent, postTxnExecuted func()) {
-	w.txnCh.In() <- txnWithNotifier{txn, postTxnExecuted}
+// The worker will call unlock() when it's ready to receive more events.
+// In other words, it maybe advances the conflict detector.
+func (w *worker) Add(txn *txnEvent, unlock func()) {
+	w.txnCh.In() <- txnWithNotifier{txn, unlock}
 }
 
 func (w *worker) close() {
@@ -156,15 +153,15 @@ func (w *worker) onEvent(txn txnWithNotifier) bool {
 		// The table where the event comes from is in stopping, so it's safe
 		// to drop the event directly.
 		txn.txnEvent.Callback()
-		// Still necessary to append the callbacks into the pending list.
-		w.postTxnExecutedCallbacks = append(w.postTxnExecutedCallbacks, txn.postTxnExecuted)
+		// Still necessary to append the wantMore callback into the pending list.
+		w.wantMoreCallbacks = append(w.wantMoreCallbacks, txn.wantMore)
 		return false
 	}
 
 	w.metricConflictDetectDuration.Observe(txn.conflictResolved.Sub(txn.start).Seconds())
 	w.metricQueueDuration.Observe(time.Since(txn.start).Seconds())
 	w.metricTxnWorkerHandledRows.Add(float64(len(txn.Event.Rows)))
-	w.postTxnExecutedCallbacks = append(w.postTxnExecutedCallbacks, txn.postTxnExecuted)
+	w.wantMoreCallbacks = append(w.wantMoreCallbacks, txn.wantMore)
 	return w.backend.OnTxnEvent(txn.txnEvent.TxnCallbackableEvent)
 }
 
@@ -187,13 +184,13 @@ func (w *worker) doFlush(flushTimeSlice *time.Duration) error {
 			return err
 		}
 		// Flush successfully, call callbacks to notify conflict detector.
-		for _, postTxnExecuted := range w.postTxnExecutedCallbacks {
-			postTxnExecuted()
+		for _, wantMore := range w.wantMoreCallbacks {
+			wantMore()
 		}
-		w.postTxnExecutedCallbacks = w.postTxnExecutedCallbacks[:0]
-		if cap(w.postTxnExecutedCallbacks) > 1024 {
+		w.wantMoreCallbacks = w.wantMoreCallbacks[:0]
+		if cap(w.wantMoreCallbacks) > 1024 {
 			// Resize the buffer if it's too big.
-			w.postTxnExecutedCallbacks = make([]func(), 0, 1024)
+			w.wantMoreCallbacks = make([]func(), 0, 1024)
 		}
 	}
 

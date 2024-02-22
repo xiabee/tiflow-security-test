@@ -112,8 +112,8 @@ type DMLManager interface {
 }
 
 // NewDMLManager creates a new dml Manager.
-func NewDMLManager(changefeedID model.ChangeFeedID,
-	cfg *config.ConsistentConfig,
+func NewDMLManager(
+	changefeedID model.ChangeFeedID, cfg *config.ConsistentConfig,
 ) *dmlManager {
 	return &dmlManager{
 		logManager: newLogManager(changefeedID, cfg, redo.RedoRowLogFileType),
@@ -374,10 +374,7 @@ func (m *logManager) GetResolvedTs(span tablepb.Span) model.Ts {
 func (m *logManager) AddTable(span tablepb.Span, startTs uint64) {
 	_, loaded := m.rtsMap.LoadOrStore(span, &statefulRts{flushed: startTs, unflushed: startTs})
 	if loaded {
-		log.Warn("add duplicated table in redo log manager",
-			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
-			zap.String("changefeed", m.cfg.ChangeFeedID.ID),
-			zap.Stringer("span", &span))
+		log.Warn("add duplicated table in redo log manager", zap.Stringer("span", &span))
 		return
 	}
 }
@@ -385,10 +382,7 @@ func (m *logManager) AddTable(span tablepb.Span, startTs uint64) {
 // RemoveTable removes a table from redo log manager
 func (m *logManager) RemoveTable(span tablepb.Span) {
 	if _, ok := m.rtsMap.LoadAndDelete(span); !ok {
-		log.Warn("remove a table not maintained in redo log manager",
-			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
-			zap.String("changefeed", m.cfg.ChangeFeedID.ID),
-			zap.Stringer("span", &span))
+		log.Warn("remove a table not maintained in redo log manager", zap.Stringer("span", &span))
 		return
 	}
 }
@@ -414,8 +408,6 @@ func (m *logManager) postFlush(tableRtsMap *spanz.HashMap[model.Ts]) {
 			changed := value.(*statefulRts).checkAndSetFlushed(flushed)
 			if !changed {
 				log.Debug("flush redo with regressed resolved ts",
-					zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
-					zap.String("changefeed", m.cfg.ChangeFeedID.ID),
 					zap.Stringer("span", &span),
 					zap.Uint64("flushed", flushed),
 					zap.Uint64("current", value.(*statefulRts).getFlushed()))
@@ -433,15 +425,12 @@ func (m *logManager) flushLog(
 		*workTimeSlice += time.Since(start)
 	}()
 	if !atomic.CompareAndSwapInt64(&m.flushing, 0, 1) {
-		log.Debug("Fail to update flush flag, "+
-			"the previous flush operation hasn't finished yet",
-			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
-			zap.String("changefeed", m.cfg.ChangeFeedID.ID))
+		log.Debug("Fail to update flush flag, " +
+			"the previous flush operation hasn't finished yet")
 		if time.Since(m.lastFlushTime) > redo.FlushWarnDuration {
 			log.Warn("flushLog blocking too long, the redo manager may be stuck",
-				zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
-				zap.String("changefeed", m.cfg.ChangeFeedID.ID),
-				zap.Duration("duration", time.Since(m.lastFlushTime)))
+				zap.Duration("duration", time.Since(m.lastFlushTime)),
+				zap.Any("changfeed", m.cfg.ChangeFeedID))
 		}
 		return
 	}

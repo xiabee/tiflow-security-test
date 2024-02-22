@@ -22,15 +22,16 @@ import (
 	"sync/atomic"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/metrics"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
 	"github.com/pingcap/tiflow/cdc/sink/util"
+	"github.com/pingcap/tiflow/engine/pkg/clock"
 	"github.com/pingcap/tiflow/pkg/chann"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/sink/cloudstorage"
 	"github.com/pingcap/tiflow/pkg/sink/codec/builder"
@@ -93,8 +94,6 @@ type DMLSink struct {
 
 // NewDMLSink creates a cloud storage sink.
 func NewDMLSink(ctx context.Context,
-	changefeedID model.ChangeFeedID,
-	pdClock pdutil.Clock,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
 	errCh chan error,
@@ -113,9 +112,7 @@ func NewDMLSink(ctx context.Context,
 	}
 
 	// fetch protocol from replicaConfig defined by changefeed config file.
-	protocol, err := util.GetProtocol(
-		putil.GetOrZero(replicaConfig.Sink.Protocol),
-	)
+	protocol, err := util.GetProtocol(replicaConfig.Sink.Protocol)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -124,7 +121,7 @@ func NewDMLSink(ctx context.Context,
 	ext := util.GetFileExtension(protocol)
 	// the last param maxMsgBytes is mainly to limit the size of a single message for
 	// batch protocols in mq scenario. In cloud storage sink, we just set it to max int.
-	encoderConfig, err := util.GetEncoderConfig(changefeedID, sinkURI, protocol, replicaConfig, math.MaxInt)
+	encoderConfig, err := util.GetEncoderConfig(sinkURI, protocol, replicaConfig, math.MaxInt)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -135,11 +132,11 @@ func NewDMLSink(ctx context.Context,
 
 	wgCtx, wgCancel := context.WithCancel(ctx)
 	s := &DMLSink{
-		changefeedID:    changefeedID,
+		changefeedID:    contextutil.ChangefeedIDFromCtx(wgCtx),
 		scheme:          strings.ToLower(sinkURI.Scheme),
 		encodingWorkers: make([]*encodingWorker, defaultEncodingConcurrency),
 		workers:         make([]*dmlWorker, cfg.WorkerCount),
-		statistics:      metrics.NewStatistics(wgCtx, changefeedID, sink.TxnSink),
+		statistics:      metrics.NewStatistics(wgCtx, sink.TxnSink),
 		cancel:          wgCancel,
 		dead:            make(chan struct{}),
 	}
@@ -156,10 +153,11 @@ func NewDMLSink(ctx context.Context,
 	// create defragmenter.
 	s.defragmenter = newDefragmenter(encodedCh, workerChannels)
 	// create a group of dml workers.
+	clock := clock.New()
 	for i := 0; i < cfg.WorkerCount; i++ {
 		inputCh := chann.NewAutoDrainChann[eventFragment]()
 		s.workers[i] = newDMLWorker(i, s.changefeedID, storage, cfg, ext,
-			inputCh, pdClock, s.statistics)
+			inputCh, clock, s.statistics)
 		workerChannels[i] = inputCh
 	}
 
@@ -246,6 +244,11 @@ func (s *DMLSink) WriteEvents(txns ...*dmlsink.CallbackableEvent[*model.SingleTa
 	return nil
 }
 
+// Scheme returns the sink scheme.
+func (s *DMLSink) Scheme() string {
+	return s.scheme
+}
+
 // Close closes the cloud storage sink.
 func (s *DMLSink) Close() {
 	if s.cancel != nil {
@@ -269,9 +272,4 @@ func (s *DMLSink) Close() {
 // Dead checks whether it's dead or not.
 func (s *DMLSink) Dead() <-chan struct{} {
 	return s.dead
-}
-
-// Scheme returns the sink scheme.
-func (s *DMLSink) Scheme() string {
-	return s.scheme
 }

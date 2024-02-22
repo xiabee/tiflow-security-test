@@ -191,7 +191,7 @@ func TestAndWriteExampleReplicaTOML(t *testing.T) {
 	err = cfg.ValidateAndAdjust(sinkURL)
 	require.NoError(t, err)
 	require.Equal(t, &config.SinkConfig{
-		EncoderConcurrency: util.AddressOf(config.DefaultEncoderGroupConcurrency),
+		EncoderConcurrency: 16,
 		DispatchRules: []*config.DispatchRule{
 			{PartitionRule: "ts", TopicRule: "hello_{schema}", Matcher: []string{"test1.*", "test2.*"}},
 			{PartitionRule: "rowid", TopicRule: "{schema}_world", Matcher: []string{"test3.*", "test4.*"}},
@@ -206,14 +206,11 @@ func TestAndWriteExampleReplicaTOML(t *testing.T) {
 			NullString:           config.NULL,
 			BinaryEncodingMethod: config.BinaryEncodingBase64,
 		},
-		Terminator:                       util.AddressOf("\r\n"),
-		DateSeparator:                    util.AddressOf(config.DateSeparatorDay.String()),
-		EnablePartitionSeparator:         util.AddressOf(true),
-		EnableKafkaSinkV2:                util.AddressOf(false),
-		OnlyOutputUpdatedColumns:         util.AddressOf(false),
-		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
-		Protocol:                         util.AddressOf("open-protocol"),
-		AdvanceTimeoutInSec:              util.AddressOf(uint(150)),
+		Terminator:               "\r\n",
+		DateSeparator:            config.DateSeparatorDay.String(),
+		EnablePartitionSeparator: true,
+		Protocol:                 "open-protocol",
+		AdvanceTimeoutInSec:      util.AddressOf(uint(150)),
 	}, cfg.Sink)
 }
 
@@ -225,18 +222,16 @@ func TestAndWriteStorageSinkTOML(t *testing.T) {
 	sinkURL, err := url.Parse("s3://127.0.0.1:9092")
 	require.NoError(t, err)
 
-	cfg.Sink.Protocol = util.AddressOf(config.ProtocolCanalJSON.String())
+	cfg.Sink.Protocol = config.ProtocolCanalJSON.String()
 	err = cfg.ValidateAndAdjust(sinkURL)
 	require.NoError(t, err)
 	require.Equal(t, &config.SinkConfig{
-		Protocol:                 util.AddressOf(config.ProtocolCanalJSON.String()),
-		EncoderConcurrency:       util.AddressOf(config.DefaultEncoderGroupConcurrency),
-		Terminator:               util.AddressOf(config.CRLF),
-		TxnAtomicity:             util.AddressOf(config.AtomicityLevel("")),
-		DateSeparator:            util.AddressOf("day"),
-		EnablePartitionSeparator: util.AddressOf(true),
-		FileIndexWidth:           util.AddressOf(config.DefaultFileIndexWidth),
-		EnableKafkaSinkV2:        util.AddressOf(false),
+		Protocol:                 config.ProtocolCanalJSON.String(),
+		EncoderConcurrency:       16,
+		Terminator:               "\r\n",
+		DateSeparator:            "day",
+		EnablePartitionSeparator: true,
+		FileIndexWidth:           config.DefaultFileIndexWidth,
 		CSVConfig: &config.CSVConfig{
 			Delimiter:            ",",
 			Quote:                "\"",
@@ -244,9 +239,7 @@ func TestAndWriteStorageSinkTOML(t *testing.T) {
 			IncludeCommitTs:      false,
 			BinaryEncodingMethod: config.BinaryEncodingBase64,
 		},
-		OnlyOutputUpdatedColumns:         util.AddressOf(false),
-		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
-		AdvanceTimeoutInSec:              util.AddressOf(uint(150)),
+		AdvanceTimeoutInSec: util.AddressOf(uint(150)),
 	}, cfg.Sink)
 }
 

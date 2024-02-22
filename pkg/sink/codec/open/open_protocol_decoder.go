@@ -17,12 +17,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
-	"path/filepath"
 	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -30,7 +28,6 @@ import (
 	"github.com/pingcap/tiflow/pkg/sink/codec"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/codec/internal"
-	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -42,40 +39,23 @@ type BatchDecoder struct {
 	nextKey   *internal.MessageKey
 	nextEvent *model.RowChangedEvent
 
-	storage storage.ExternalStorage
-
-	config *common.Config
-
 	upstreamTiDB *sql.DB
 }
 
 // NewBatchDecoder creates a new BatchDecoder.
-func NewBatchDecoder(ctx context.Context, config *common.Config, db *sql.DB) (codec.RowEventDecoder, error) {
-	var (
-		externalStorage storage.ExternalStorage
-		err             error
-	)
-	if config.LargeMessageHandle.EnableClaimCheck() {
-		storageURI := config.LargeMessageHandle.ClaimCheckStorageURI
-		externalStorage, err = util.GetExternalStorageFromURI(ctx, storageURI)
-		if err != nil {
-			return nil, cerror.WrapError(cerror.ErrKafkaInvalidConfig, err)
-		}
-	}
-
+func NewBatchDecoder(
+	_ context.Context, config *common.Config, db *sql.DB) (codec.RowEventDecoder, error) {
 	if config.LargeMessageHandle.HandleKeyOnly() && db == nil {
 		return nil, cerror.ErrCodecDecode.
 			GenWithStack("handle-key-only is enabled, but upstream TiDB is not provided")
 	}
 
 	return &BatchDecoder{
-		config:       config,
-		storage:      externalStorage,
 		upstreamTiDB: db,
 	}, nil
 }
 
-// AddKeyValue implements the RowEventDecoder interface
+// AddKeyValue implements the EventBatchDecoder interface
 func (b *BatchDecoder) AddKeyValue(key, value []byte) error {
 	if len(b.keyBytes) != 0 || len(b.valueBytes) != 0 {
 		return cerror.ErrOpenProtocolCodecInvalidData.
@@ -119,7 +99,6 @@ func (b *BatchDecoder) decodeNextKey() error {
 		return errors.Trace(err)
 	}
 	b.nextKey = msgKey
-
 	b.keyBytes = b.keyBytes[keyLen+8:]
 	return nil
 }
@@ -139,13 +118,6 @@ func (b *BatchDecoder) HasNext() (model.MessageType, bool, error) {
 		b.valueBytes = b.valueBytes[valueLen+8:]
 
 		rowMsg := new(messageRow)
-
-		value, err := common.Decompress(b.config.LargeMessageHandle.LargeMessageHandleCompression, value)
-		if err != nil {
-			return model.MessageTypeUnknown, false, cerror.ErrOpenProtocolCodecInvalidData.
-				GenWithStack("decompress data failed")
-		}
-
 		if err := rowMsg.decode(value); err != nil {
 			return b.nextKey.Type, false, errors.Trace(err)
 		}
@@ -172,40 +144,26 @@ func (b *BatchDecoder) NextDDLEvent() (*model.DDLEvent, error) {
 	if b.nextKey.Type != model.MessageTypeDDL {
 		return nil, cerror.ErrOpenProtocolCodecInvalidData.GenWithStack("not found ddl event message")
 	}
-
 	valueLen := binary.BigEndian.Uint64(b.valueBytes[:8])
 	value := b.valueBytes[8 : valueLen+8]
-
-	value, err := common.Decompress(b.config.LargeMessageHandle.LargeMessageHandleCompression, value)
-	if err != nil {
-		return nil, cerror.ErrOpenProtocolCodecInvalidData.
-			GenWithStack("decompress DDL event failed")
-	}
-
 	ddlMsg := new(messageDDL)
 	if err := ddlMsg.decode(value); err != nil {
 		return nil, errors.Trace(err)
 	}
 	ddlEvent := msgToDDLEvent(b.nextKey, ddlMsg)
-
 	b.nextKey = nil
 	b.valueBytes = nil
 	return ddlEvent, nil
 }
 
-// NextRowChangedEvent implements the RowEventDecoder interface
+// NextRowChangedEvent implements the EventBatchDecoder interface
 func (b *BatchDecoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 	if b.nextKey.Type != model.MessageTypeRow {
 		return nil, cerror.ErrOpenProtocolCodecInvalidData.GenWithStack("not found row event message")
 	}
 
-	ctx := context.Background()
-	// claim-check message found
-	if b.nextKey.ClaimCheckLocation != "" {
-		return b.assembleEventFromClaimCheckStorage(ctx)
-	}
-
 	event := b.nextEvent
+	ctx := context.Background()
 	if b.nextKey.OnlyHandleKey {
 		var err error
 		event, err = b.assembleHandleKeyOnlyEvent(ctx, event)
@@ -306,47 +264,4 @@ func (b *BatchDecoder) assembleHandleKeyOnlyEvent(
 	}
 
 	return handleKeyOnlyEvent, nil
-}
-
-func (b *BatchDecoder) assembleEventFromClaimCheckStorage(ctx context.Context) (*model.RowChangedEvent, error) {
-	_, claimCheckFileName := filepath.Split(b.nextKey.ClaimCheckLocation)
-	b.nextKey = nil
-	data, err := b.storage.ReadFile(ctx, claimCheckFileName)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	claimCheckM, err := common.UnmarshalClaimCheckMessage(data)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	version := binary.BigEndian.Uint64(claimCheckM.Key[:8])
-	if version != codec.BatchVersion1 {
-		return nil, cerror.ErrOpenProtocolCodecInvalidData.
-			GenWithStack("unexpected key format version")
-	}
-
-	key := claimCheckM.Key[8:]
-	keyLen := binary.BigEndian.Uint64(key[:8])
-	key = key[8 : keyLen+8]
-	msgKey := new(internal.MessageKey)
-	if err := msgKey.Decode(key); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	valueLen := binary.BigEndian.Uint64(claimCheckM.Value[:8])
-	value := claimCheckM.Value[8 : valueLen+8]
-	value, err = common.Decompress(b.config.LargeMessageHandle.LargeMessageHandleCompression, value)
-	if err != nil {
-		return nil, cerror.WrapError(cerror.ErrOpenProtocolCodecInvalidData, err)
-	}
-
-	rowMsg := new(messageRow)
-	if err := rowMsg.decode(value); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	event := msgToRowChange(msgKey, rowMsg)
-
-	return event, nil
 }

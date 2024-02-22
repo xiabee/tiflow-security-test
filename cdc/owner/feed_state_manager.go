@@ -579,7 +579,7 @@ func (m *feedStateManager) handleWarning(errs ...*model.RunningError) {
 	lastError := errs[len(errs)-1]
 
 	if m.state.Status != nil {
-		currTime := m.upstream.PDClock.CurrentTime()
+		currTime, _ := m.upstream.PDClock.CurrentTime()
 		ckptTime := oracle.GetTimeFromTS(m.state.Status.CheckpointTs)
 		m.lastWarningReportCheckpointTs = m.state.Status.CheckpointTs
 
@@ -634,7 +634,7 @@ func (m *feedStateManager) checkAndChangeState() {
 		log.Info("changefeed is recovered from warning state,"+
 			"its checkpointTs is greater than lastRetryCheckpointTs,"+
 			"it will be changed to normal state",
-			zap.String("changefeed", m.state.ID.String()),
+			zap.String("changefeed", m.state.ID.ID),
 			zap.String("namespace", m.state.ID.Namespace),
 			zap.Uint64("checkpointTs", m.state.Status.CheckpointTs),
 			zap.Uint64("lastRetryCheckpointTs", m.lastErrorRetryCheckpointTs))

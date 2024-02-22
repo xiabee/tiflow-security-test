@@ -47,17 +47,15 @@ func NewManager4Test(
 	cfg := config.NewDefaultSchedulerConfig()
 	m := NewManager(captureInfo, upstream.NewManager4Test(nil), liveness, cfg).(*managerImpl)
 	m.newProcessor = func(
-		info *model.ChangeFeedInfo,
-		status *model.ChangeFeedStatus,
+		state *orchestrator.ChangefeedReactorState,
 		captureInfo *model.CaptureInfo,
 		changefeedID model.ChangeFeedID,
 		up *upstream.Upstream,
 		liveness *model.Liveness,
 		changefeedEpoch uint64,
 		cfg *config.SchedulerConfig,
-		client etcd.OwnerCaptureInfoClient,
 	) *processor {
-		return newProcessor4Test(t, info, status, captureInfo, m.liveness, cfg, false, client)
+		return newProcessor4Test(t, state, captureInfo, m.liveness, cfg, false)
 	}
 	return m
 }

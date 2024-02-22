@@ -24,19 +24,15 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	tidbkv "github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tiflow/cdc/controller"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/owner"
-	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher"
-	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/transformer/columnselector"
 	"github.com/pingcap/tiflow/cdc/sink/validator"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/security"
-	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
 	"github.com/pingcap/tiflow/pkg/version"
 	"github.com/r3labs/diff"
@@ -59,12 +55,12 @@ const RegisterImportTaskPrefix = "/tidb/brie/import"
 // Defining it as an interface to make APIs more testable.
 type APIV2Helpers interface {
 	// verifyCreateChangefeedConfig verifies the changefeedConfig,
-	// and yield a valid changefeedInfo or error
+	// and yield an valid changefeedInfo or error
 	verifyCreateChangefeedConfig(
 		ctx context.Context,
 		cfg *ChangefeedConfig,
 		pdClient pd.Client,
-		ctrl controller.Controller,
+		statusProvider owner.StatusProvider,
 		ensureGCServiceID string,
 		kvStorage tidbkv.Storage,
 	) (*model.ChangeFeedInfo, error)
@@ -115,11 +111,9 @@ type APIV2Helpers interface {
 		credential *security.Credential,
 	) (tidbkv.Storage, error)
 
-	// getVerifiedTables wraps entry.VerifyTables to increase testability
-	getVerifiedTables(replicaConfig *config.ReplicaConfig,
-		storage tidbkv.Storage, startTs uint64,
-		scheme string, topic string, protocol config.Protocol,
-	) (ineligibleTables,
+	// getVerfiedTables wraps entry.VerifyTables to increase testability
+	getVerfiedTables(replicaConfig *config.ReplicaConfig,
+		storage tidbkv.Storage, startTs uint64) (ineligibleTables,
 		eligibleTables []model.TableName, err error,
 	)
 }
@@ -133,7 +127,7 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 	ctx context.Context,
 	cfg *ChangefeedConfig,
 	pdClient pd.Client,
-	ctrl controller.Controller,
+	statusProvider owner.StatusProvider,
 	ensureGCServiceID string,
 	kvStorage tidbkv.Storage,
 ) (*model.ChangeFeedInfo, error) {
@@ -160,12 +154,12 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 			"invalid namespace: %s", cfg.Namespace)
 	}
 
-	exists, err := ctrl.IsChangefeedExists(ctx,
-		model.ChangeFeedID{Namespace: cfg.Namespace, ID: cfg.ID})
+	cfStatus, err := statusProvider.GetChangeFeedStatus(ctx,
+		model.DefaultChangeFeedID(cfg.ID))
 	if err != nil && cerror.ErrChangeFeedNotExists.NotEqual(err) {
 		return nil, err
 	}
-	if exists {
+	if cfStatus != nil {
 		return nil, cerror.ErrChangeFeedAlreadyExists.GenWithStackByArgs(cfg.ID)
 	}
 
@@ -185,7 +179,7 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 		ctx,
 		pdClient,
 		ensureGCServiceID,
-		model.ChangeFeedID{Namespace: cfg.Namespace, ID: cfg.ID},
+		model.DefaultChangeFeedID(cfg.ID),
 		ensureTTL, cfg.StartTs); err != nil {
 		if !cerror.ErrStartTsBeforeGC.Equal(err) {
 			return nil, cerror.ErrPDEtcdAPIError.Wrap(err)
@@ -201,6 +195,7 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 
 	// fill replicaConfig
 	replicaCfg := cfg.ReplicaConfig.ToInternalReplicaConfig()
+
 	// verify replicaConfig
 	sinkURIParsed, err := url.Parse(cfg.SinkURI)
 	if err != nil {
@@ -233,10 +228,7 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 	}
 
 	// verify sink
-	if err := validator.Validate(ctx,
-		model.ChangeFeedID{Namespace: cfg.Namespace, ID: cfg.ID},
-		cfg.SinkURI, replicaCfg, nil,
-	); err != nil {
+	if err := validator.Validate(ctx, cfg.SinkURI, replicaCfg); err != nil {
 		return nil, err
 	}
 
@@ -360,9 +352,7 @@ func (APIV2HelpersImpl) verifyUpdateChangefeedConfig(
 			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 
-		if err := validator.Validate(ctx,
-			model.ChangeFeedID{Namespace: cfg.Namespace, ID: cfg.ID},
-			newInfo.SinkURI, newInfo.Config, nil); err != nil {
+		if err := validator.Validate(ctx, newInfo.SinkURI, newInfo.Config); err != nil {
 			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 	}
@@ -387,6 +377,7 @@ func (APIV2HelpersImpl) verifyUpdateChangefeedConfig(
 	if cfg.CertAllowedCN != nil {
 		newUpInfo.CertAllowedCN = cfg.CertAllowedCN
 	}
+
 	changefeedInfoChanged := diff.Changed(oldInfo, newInfo)
 	upstreamInfoChanged := diff.Changed(oldUpInfo, newUpInfo)
 	if !changefeedInfoChanged && !upstreamInfoChanged {
@@ -412,7 +403,7 @@ func (APIV2HelpersImpl) verifyResumeChangefeedConfig(ctx context.Context,
 		ctx,
 		pdClient,
 		gcServiceID,
-		changefeedID,
+		model.DefaultChangeFeedID(changefeedID.ID),
 		gcTTL, checkpointTs)
 	if err != nil {
 		if !cerror.ErrStartTsBeforeGC.Equal(err) {
@@ -497,42 +488,15 @@ func (h APIV2HelpersImpl) createTiStore(pdAddrs []string,
 	return kv.CreateTiStore(strings.Join(pdAddrs, ","), credential)
 }
 
-func (h APIV2HelpersImpl) getVerifiedTables(
-	replicaConfig *config.ReplicaConfig,
-	storage tidbkv.Storage, startTs uint64,
-	scheme string, topic string, protocol config.Protocol,
-) ([]model.TableName, []model.TableName, error) {
+func (h APIV2HelpersImpl) getVerfiedTables(replicaConfig *config.ReplicaConfig,
+	storage tidbkv.Storage, startTs uint64) (ineligibleTables,
+	eligibleTables []model.TableName, err error,
+) {
 	f, err := filter.NewFilter(replicaConfig, "")
 	if err != nil {
-		return nil, nil, err
+		return
 	}
-	tableInfos, ineligibleTables, eligibleTables, err := entry.
+	_, ineligibleTables, eligibleTables, err = entry.
 		VerifyTables(f, storage, startTs)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if !sink.IsMQScheme(scheme) {
-		return ineligibleTables, eligibleTables, nil
-	}
-
-	eventRouter, err := dispatcher.NewEventRouter(replicaConfig, protocol, topic, scheme)
-	if err != nil {
-		return nil, nil, err
-	}
-	err = eventRouter.VerifyTables(tableInfos)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	selectors, err := columnselector.New(replicaConfig)
-	if err != nil {
-		return nil, nil, err
-	}
-	err = selectors.VerifyTables(tableInfos, eventRouter)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return ineligibleTables, eligibleTables, nil
+	return
 }

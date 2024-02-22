@@ -43,9 +43,8 @@ const (
 
 // TopicPartitionKey contains the topic and partition key of the message.
 type TopicPartitionKey struct {
-	Topic        string
-	Partition    int32
-	PartitionKey string
+	Topic     string
+	Partition int32
 }
 
 // mqEvent is the event of the mq worker.
@@ -86,8 +85,9 @@ type worker struct {
 func newWorker(
 	id model.ChangeFeedID,
 	protocol config.Protocol,
+	builder codec.RowEventEncoderBuilder,
+	encoderConcurrency int,
 	producer dmlproducer.DMLProducer,
-	encoderGroup codec.EncoderGroup,
 	statistics *metrics.Statistics,
 ) *worker {
 	w := &worker{
@@ -95,7 +95,7 @@ func newWorker(
 		protocol:                          protocol,
 		msgChan:                           chann.NewAutoDrainChann[mqEvent](),
 		ticker:                            time.NewTicker(flushInterval),
-		encoderGroup:                      encoderGroup,
+		encoderGroup:                      codec.NewEncoderGroup(builder, encoderConcurrency, id),
 		producer:                          producer,
 		metricMQWorkerSendMessageDuration: mq.WorkerSendMessageDuration.WithLabelValues(id.Namespace, id.ID),
 		metricMQWorkerBatchSize:           mq.WorkerBatchSize.WithLabelValues(id.Namespace, id.ID),
@@ -160,12 +160,7 @@ func (w *worker) nonBatchEncodeRun(ctx context.Context) error {
 					zap.Any("event", event))
 				continue
 			}
-			if err := w.encoderGroup.AddEvents(
-				ctx,
-				event.key.Topic,
-				event.key.Partition,
-				event.key.PartitionKey,
-				event.rowEvent); err != nil {
+			if err := w.encoderGroup.AddEvents(ctx, event.key.Topic, event.key.Partition, event.rowEvent); err != nil {
 				return errors.Trace(err)
 			}
 		}
@@ -196,8 +191,7 @@ func (w *worker) batchEncodeRun(ctx context.Context) (retErr error) {
 		msgs := eventsBuf[:endIndex]
 		partitionedRows := w.group(msgs)
 		for key, events := range partitionedRows {
-			if err := w.encoderGroup.
-				AddEvents(ctx, key.Topic, key.Partition, key.PartitionKey, events...); err != nil {
+			if err := w.encoderGroup.AddEvents(ctx, key.Topic, key.Partition, events...); err != nil {
 				return errors.Trace(err)
 			}
 		}
@@ -209,7 +203,7 @@ func (w *worker) batch(
 	ctx context.Context, events []mqEvent, flushInterval time.Duration,
 ) (int, error) {
 	index := 0
-	maxBatchSize := len(events)
+	max := len(events)
 	// We need to receive at least one message or be interrupted,
 	// otherwise it will lead to idling.
 	select {
@@ -245,7 +239,7 @@ func (w *worker) batch(
 				index++
 			}
 
-			if index >= maxBatchSize {
+			if index >= max {
 				return index, nil
 			}
 		case <-w.ticker.C:
@@ -275,6 +269,7 @@ func (w *worker) group(
 }
 
 func (w *worker) sendMessages(ctx context.Context) error {
+	inputCh := w.encoderGroup.Output()
 	ticker := time.NewTicker(15 * time.Second)
 	metric := codec.EncoderGroupOutputChanSizeGauge.
 		WithLabelValues(w.changeFeedID.Namespace, w.changeFeedID.ID)
@@ -283,9 +278,6 @@ func (w *worker) sendMessages(ctx context.Context) error {
 		codec.EncoderGroupOutputChanSizeGauge.
 			DeleteLabelValues(w.changeFeedID.Namespace, w.changeFeedID.ID)
 	}()
-
-	var err error
-	inputCh := w.encoderGroup.Output()
 	for {
 		select {
 		case <-ctx.Done():
@@ -299,18 +291,13 @@ func (w *worker) sendMessages(ctx context.Context) error {
 					zap.String("changefeed", w.changeFeedID.ID))
 				return nil
 			}
-			if err = future.Ready(ctx); err != nil {
+			if err := future.Ready(ctx); err != nil {
 				return errors.Trace(err)
 			}
 			for _, message := range future.Messages {
 				start := time.Now()
-				if err = w.statistics.RecordBatchExecution(func() (int, int64, error) {
-					message.SetPartitionKey(future.PartitionKey)
-					if err := w.producer.AsyncSendMessage(
-						ctx,
-						future.Topic,
-						future.Partition,
-						message); err != nil {
+				if err := w.statistics.RecordBatchExecution(func() (int, int64, error) {
+					if err := w.producer.AsyncSendMessage(ctx, future.Topic, future.Partition, message); err != nil {
 						return 0, 0, err
 					}
 					return message.GetRowsCount(), int64(message.Length()), nil
@@ -326,6 +313,7 @@ func (w *worker) sendMessages(ctx context.Context) error {
 func (w *worker) close() {
 	w.msgChan.CloseAndDrain()
 	w.producer.Close()
+
 	mq.WorkerSendMessageDuration.DeleteLabelValues(w.changeFeedID.Namespace, w.changeFeedID.ID)
 	mq.WorkerBatchSize.DeleteLabelValues(w.changeFeedID.Namespace, w.changeFeedID.ID)
 	mq.WorkerBatchDuration.DeleteLabelValues(w.changeFeedID.Namespace, w.changeFeedID.ID)

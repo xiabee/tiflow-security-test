@@ -42,7 +42,7 @@ func TestWriteDDLEvent(t *testing.T) {
 	replicaConfig := config.GetDefaultReplicaConfig()
 	err = replicaConfig.ValidateAndAdjust(sinkURI)
 	require.Nil(t, err)
-	sink, err := NewDDLSink(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
+	sink, err := NewDDLSink(ctx, sinkURI, replicaConfig)
 	require.Nil(t, err)
 
 	ddlEvent := &model.DDLEvent{
@@ -109,7 +109,7 @@ func TestWriteCheckpointTs(t *testing.T) {
 	replicaConfig := config.GetDefaultReplicaConfig()
 	err = replicaConfig.ValidateAndAdjust(sinkURI)
 	require.Nil(t, err)
-	sink, err := NewDDLSink(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
+	sink, err := NewDDLSink(ctx, sinkURI, replicaConfig)
 	require.Nil(t, err)
 	tables := []*model.TableInfo{
 		{

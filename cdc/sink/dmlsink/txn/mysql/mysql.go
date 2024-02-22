@@ -32,6 +32,7 @@ import (
 	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/metrics"
@@ -84,16 +85,16 @@ type mysqlBackend struct {
 // NewMySQLBackends creates a new MySQL sink using schema storage
 func NewMySQLBackends(
 	ctx context.Context,
-	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
 	dbConnFactory pmysql.Factory,
 	statistics *metrics.Statistics,
 ) ([]*mysqlBackend, error) {
+	changefeedID := contextutil.ChangefeedIDFromCtx(ctx)
 	changefeed := fmt.Sprintf("%s.%s", changefeedID.Namespace, changefeedID.ID)
 
 	cfg := pmysql.NewConfig()
-	err := cfg.Apply(config.GetGlobalServerConfig().TZ, changefeedID, sinkURI, replicaConfig)
+	err := cfg.Apply(ctx, changefeedID, sinkURI, replicaConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -170,9 +171,7 @@ func NewMySQLBackends(
 	var maxAllowedPacket int64
 	maxAllowedPacket, err = pmysql.QueryMaxAllowedPacket(ctx, db)
 	if err != nil {
-		log.Warn("failed to query max_allowed_packet, use default value",
-			zap.String("changefeed", changefeed),
-			zap.Error(err))
+		log.Warn("failed to query max_allowed_packet, use default value", zap.Error(err))
 		maxAllowedPacket = int64(variable.DefMaxAllowedPacket)
 	}
 
@@ -198,7 +197,8 @@ func NewMySQLBackends(
 	log.Info("MySQL backends is created",
 		zap.String("changefeed", changefeed),
 		zap.Int("workerCount", cfg.WorkerCount),
-		zap.Bool("forceReplicate", cfg.ForceReplicate))
+		zap.Bool("forceReplicate", cfg.ForceReplicate),
+		zap.Bool("enableOldValue", cfg.EnableOldValue))
 	return backends, nil
 }
 
@@ -228,13 +228,13 @@ func (s *mysqlBackend) Flush(ctx context.Context) (err error) {
 	}
 
 	dmls := s.prepareDMLs()
-	log.Debug("prepare DMLs", zap.String("changefeed", s.changefeed), zap.Any("rows", s.rows),
+	log.Debug("prepare DMLs", zap.Any("rows", s.rows),
 		zap.Strings("sqls", dmls.sqls), zap.Any("values", dmls.values))
 
 	start := time.Now()
 	if err := s.execDMLWithMaxRetries(ctx, dmls); err != nil {
 		if errors.Cause(err) != context.Canceled {
-			log.Error("execute DMLs failed", zap.String("changefeed", s.changefeed), zap.Error(err))
+			log.Error("execute DMLs failed", zap.Error(err))
 		}
 		return errors.Trace(err)
 	}
@@ -498,7 +498,7 @@ func (s *mysqlBackend) genUpdateSQL(rows ...*sqlmodel.RowChange) ([]string, [][]
 	}
 	if size < s.cfg.MaxMultiUpdateRowSize*count {
 		// use multi update in one SQL
-		sql, value := sqlmodel.GenUpdateSQL(rows...)
+		sql, value := sqlmodel.GenUpdateSQLFast(rows...)
 		return []string{sql}, [][]interface{}{value}
 	}
 	// each row has one independent update SQL.
@@ -532,8 +532,9 @@ func (s *mysqlBackend) prepareDMLs() *preparedDMLs {
 	values := make([][]interface{}, 0, s.rows)
 	callbacks := make([]dmlsink.CallbackFunc, 0, len(s.events))
 
-	// translateToInsert control the update and insert behavior.
-	translateToInsert := !s.cfg.SafeMode
+	// translateToInsert control the update and insert behavior
+	// we only translate into insert when old value is enabled and safe mode is disabled
+	translateToInsert := s.cfg.EnableOldValue && !s.cfg.SafeMode
 
 	rowCount := 0
 	approximateSize := int64(0)
@@ -553,10 +554,10 @@ func (s *mysqlBackend) prepareDMLs() *preparedDMLs {
 		// replicated before, and there is no such row in downstream MySQL.
 		translateToInsert = translateToInsert && firstRow.CommitTs > firstRow.ReplicatingTs
 		log.Debug("translate to insert",
-			zap.String("changefeed", s.changefeed),
 			zap.Bool("translateToInsert", translateToInsert),
 			zap.Uint64("firstRowCommitTs", firstRow.CommitTs),
 			zap.Uint64("firstRowReplicatingTs", firstRow.ReplicatingTs),
+			zap.Bool("enableOldValue", s.cfg.EnableOldValue),
 			zap.Bool("safeMode", s.cfg.SafeMode))
 
 		if event.Callback != nil {
@@ -661,7 +662,7 @@ func (s *mysqlBackend) multiStmtExecute(
 	}
 	multiStmtSQL := strings.Join(dmls.sqls, ";")
 
-	log.Debug("exec row", zap.String("changefeed", s.changefeed), zap.Int("workerID", s.workerID),
+	log.Debug("exec row", zap.Int("workerID", s.workerID),
 		zap.String("sql", multiStmtSQL), zap.Any("args", multiStmtArgs))
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
@@ -673,7 +674,7 @@ func (s *mysqlBackend) multiStmtExecute(
 			start, s.changefeed, multiStmtSQL, dmls.rowCount, dmls.startTs)
 		if rbErr := tx.Rollback(); rbErr != nil {
 			if errors.Cause(rbErr) != context.Canceled {
-				log.Warn("failed to rollback txn", zap.String("changefeed", s.changefeed), zap.Error(rbErr))
+				log.Warn("failed to rollback txn", zap.Error(rbErr))
 			}
 		}
 		return err
@@ -688,7 +689,7 @@ func (s *mysqlBackend) sequenceExecute(
 	start := time.Now()
 	for i, query := range dmls.sqls {
 		args := dmls.values[i]
-		log.Debug("exec row", zap.String("changefeed", s.changefeed), zap.Int("workerID", s.workerID),
+		log.Debug("exec row", zap.Int("workerID", s.workerID),
 			zap.String("sql", query), zap.Any("args", args))
 		ctx, cancelFunc := context.WithTimeout(ctx, writeTimeout)
 
@@ -720,7 +721,7 @@ func (s *mysqlBackend) sequenceExecute(
 				start, s.changefeed, query, dmls.rowCount, dmls.startTs)
 			if rbErr := tx.Rollback(); rbErr != nil {
 				if errors.Cause(rbErr) != context.Canceled {
-					log.Warn("failed to rollback txn", zap.String("changefeed", s.changefeed), zap.Error(rbErr))
+					log.Warn("failed to rollback txn", zap.Error(rbErr))
 				}
 			}
 			cancelFunc()
@@ -734,7 +735,6 @@ func (s *mysqlBackend) sequenceExecute(
 func (s *mysqlBackend) execDMLWithMaxRetries(pctx context.Context, dmls *preparedDMLs) error {
 	if len(dmls.sqls) != len(dmls.values) {
 		log.Panic("unexpected number of sqls and values",
-			zap.String("changefeed", s.changefeed),
 			zap.Strings("sqls", dmls.sqls),
 			zap.Any("values", dmls.values))
 	}
@@ -791,7 +791,7 @@ func (s *mysqlBackend) execDMLWithMaxRetries(pctx context.Context, dmls *prepare
 					dmls.rowCount, dmls.startTs)
 				if rbErr := tx.Rollback(); rbErr != nil {
 					if errors.Cause(rbErr) != context.Canceled {
-						log.Warn("failed to rollback txn", zap.String("changefeed", s.changefeed), zap.Error(rbErr))
+						log.Warn("failed to rollback txn", zap.Error(rbErr))
 					}
 				}
 				return 0, 0, err
@@ -808,8 +808,8 @@ func (s *mysqlBackend) execDMLWithMaxRetries(pctx context.Context, dmls *prepare
 			return errors.Trace(err)
 		}
 		log.Debug("Exec Rows succeeded",
-			zap.String("changefeed", s.changefeed),
 			zap.Int("workerID", s.workerID),
+			zap.String("changefeed", s.changefeed),
 			zap.Int("numOfRows", dmls.rowCount))
 		return nil
 	}, retry.WithBackoffBaseDelay(pmysql.BackoffBaseDelay.Milliseconds()),

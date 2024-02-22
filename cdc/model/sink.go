@@ -64,9 +64,9 @@ const (
 	// BinaryFlag means the column charset is binary
 	BinaryFlag ColumnFlagType = 1 << ColumnFlagType(iota)
 	// HandleKeyFlag means the column is selected as the handle key
-	// The handleKey is chosen by the following rules in the order:
-	// 1. if the table has primary key, it's the handle key.
-	// 2. If the table has not null unique key, it's the handle key.
+	// The handleKey is chosen by the following rules:
+	// 1. If the table has a primary key, the handleKey is the first column of the primary key.
+	// 2. If the table has not null unique key, the handleKey is the first column of the unique key.
 	// 3. If the table has no primary key and no not null unique key, it has no handleKey.
 	HandleKeyFlag
 	// GeneratedColumnFlag means the column is a generated column
@@ -291,17 +291,17 @@ type RedoDDLEvent struct {
 }
 
 // ToRedoLog converts row changed event to redo log
-func (r *RowChangedEvent) ToRedoLog() *RedoLog {
+func (row *RowChangedEvent) ToRedoLog() *RedoLog {
 	return &RedoLog{
-		RedoRow: RedoRowChangedEvent{Row: r},
+		RedoRow: RedoRowChangedEvent{Row: row},
 		Type:    RedoLogTypeRow,
 	}
 }
 
 // ToRedoLog converts ddl event to redo log
-func (d *DDLEvent) ToRedoLog() *RedoLog {
+func (ddl *DDLEvent) ToRedoLog() *RedoLog {
 	return &RedoLog{
-		RedoDDL: RedoDDLEvent{DDL: d},
+		RedoDDL: RedoDDLEvent{DDL: ddl},
 		Type:    RedoLogTypeDDL,
 	}
 }
@@ -414,26 +414,6 @@ func (r *RowChangedEvent) PrimaryKeyColumnNames() []string {
 	for _, col := range cols {
 		if col != nil && col.Flag.IsPrimaryKey() {
 			result = append(result, col.Name)
-		}
-	}
-	return result
-}
-
-// GetHandleKeyColumnValues returns all handle key's column values
-func (r *RowChangedEvent) GetHandleKeyColumnValues() []string {
-	var result []string
-
-	var cols []*Column
-	if r.IsDelete() {
-		cols = r.PreColumns
-	} else {
-		cols = r.Columns
-	}
-
-	result = make([]string, 0)
-	for _, col := range cols {
-		if col != nil && col.Flag.IsHandleKey() {
-			result = append(result, ColumnValueString(col.Value))
 		}
 	}
 	return result
@@ -604,20 +584,26 @@ func BuildTiDBTableInfo(columns []*Column, indexColumns [][]int) *model.TableInf
 			continue
 		}
 		if firstCol.Flag.IsPrimaryKey() {
-			indexInfo.Primary = true
 			indexInfo.Unique = true
 		}
 		if firstCol.Flag.IsUniqueKey() {
 			indexInfo.Unique = true
 		}
 
+		isPrimary := true
 		for _, offset := range colOffsets {
-			col := ret.Columns[offset]
+			col := columns[offset]
+			// When only all columns in the index are primary key, then the index is primary key.
+			if col == nil || !col.Flag.IsPrimaryKey() {
+				isPrimary = false
+			}
 
+			tiCol := ret.Columns[offset]
 			indexCol := &model.IndexColumn{}
-			indexCol.Name = col.Name
+			indexCol.Name = tiCol.Name
 			indexCol.Offset = offset
 			indexInfo.Columns = append(indexInfo.Columns, indexCol)
+			indexInfo.Primary = isPrimary
 		}
 
 		// TODO: revert the "all column set index related flag" to "only the
@@ -769,7 +755,7 @@ func (t *SingleTableTxn) GetCommitTs() uint64 {
 
 // TrySplitAndSortUpdateEvent split update events if unique key is updated
 func (t *SingleTableTxn) TrySplitAndSortUpdateEvent(scheme string) error {
-	if !t.shouldSplitUpdateEvent(scheme) {
+	if t.dontSplitUpdateEvent(scheme) {
 		return nil
 	}
 	newRows, err := trySplitAndSortUpdateEvent(t.Rows)
@@ -789,11 +775,11 @@ func (t *SingleTableTxn) TrySplitAndSortUpdateEvent(scheme string) error {
 // 1. Avro and CSV does not output the previous column values for the update event, so it would
 // cause consumer missing data if the unique key changed event is not split.
 // 2. Index-Value Dispatcher cannot work correctly if the unique key changed event isn't split.
-func (t *SingleTableTxn) shouldSplitUpdateEvent(sinkScheme string) bool {
-	if len(t.Rows) < 2 && sink.IsMySQLCompatibleScheme(sinkScheme) {
-		return false
+func (t *SingleTableTxn) dontSplitUpdateEvent(scheme string) bool {
+	if len(t.Rows) < 2 && sink.IsMySQLCompatibleScheme(scheme) {
+		return true
 	}
-	return true
+	return false
 }
 
 // trySplitAndSortUpdateEvent try to split update events if unique key is updated

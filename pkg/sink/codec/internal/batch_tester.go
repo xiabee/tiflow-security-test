@@ -10,7 +10,6 @@
 // distributed under the License is distributed on an "AS IS" BASIS,
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 package internal
 
 import (
@@ -240,7 +239,7 @@ func (s *BatchTester) TestBatchCodec(
 			}
 			require.Equal(t, model.MessageTypeRow, tp)
 			row, err := decoder.NextRowChangedEvent()
-			require.NoError(t, err)
+			require.Nil(t, err)
 			sortColumnArrays(row.Columns, row.PreColumns, cs[index].Columns, cs[index].PreColumns)
 			require.Equal(t, cs[index], row)
 			index++
@@ -289,10 +288,8 @@ func (s *BatchTester) TestBatchCodec(
 			res := encoder.Build()
 			require.Len(t, res, 1)
 			require.Equal(t, len(cs), res[0].GetRowsCount())
-
 			decoder, err := newDecoder(res[0].Key, res[0].Value)
-			require.NoError(t, err)
-
+			require.Nil(t, err)
 			checkRowDecoder(decoder, cs)
 		}
 	}
@@ -302,10 +299,8 @@ func (s *BatchTester) TestBatchCodec(
 			msg, err := encoder.EncodeDDLEvent(ddl)
 			require.Nil(t, err)
 			require.NotNil(t, msg)
-
 			decoder, err := newDecoder(msg.Key, msg.Value)
-			require.NoError(t, err)
-
+			require.Nil(t, err)
 			checkDDLDecoder(decoder, cs[i:i+1])
 
 		}
@@ -317,10 +312,8 @@ func (s *BatchTester) TestBatchCodec(
 			msg, err := encoder.EncodeCheckpointEvent(ts)
 			require.Nil(t, err)
 			require.NotNil(t, msg)
-
 			decoder, err := newDecoder(msg.Key, msg.Value)
-			require.NoError(t, err)
-
+			require.Nil(t, err)
 			checkTSDecoder(decoder, cs[i:i+1])
 		}
 	}

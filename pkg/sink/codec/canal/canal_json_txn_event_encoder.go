@@ -50,7 +50,7 @@ func (j *JSONTxnEventEncoder) AppendTxnEvent(
 	callback func(),
 ) error {
 	for _, row := range txn.Rows {
-		value, err := newJSONMessageForDML(j.builder, row, j.config, false, "")
+		value, err := newJSONMessageForDML(row, j.config, j.builder, false)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -97,7 +97,7 @@ func (j *JSONTxnEventEncoder) Build() []*common.Message {
 // newJSONTxnEventEncoder creates a new JSONTxnEventEncoder
 func newJSONTxnEventEncoder(config *common.Config) codec.TxnEventEncoder {
 	encoder := &JSONTxnEventEncoder{
-		builder:    newCanalEntryBuilder(),
+		builder:    newCanalEntryBuilder(config),
 		valueBuf:   &bytes.Buffer{},
 		terminator: []byte(config.Terminator),
 

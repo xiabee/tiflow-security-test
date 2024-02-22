@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/IBM/sarama"
+	"github.com/Shopify/sarama"
 	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"

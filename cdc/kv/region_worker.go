@@ -74,8 +74,6 @@ type regionWorkerMetrics struct {
 	metricSendEventResolvedCounter  prometheus.Counter
 	metricSendEventCommitCounter    prometheus.Counter
 	metricSendEventCommittedCounter prometheus.Counter
-
-	metricQueueDuration prometheus.Observer
 }
 
 /*
@@ -141,9 +139,6 @@ func newRegionWorkerMetrics(changefeedID model.ChangeFeedID) *regionWorkerMetric
 	metrics.metricSendEventCommittedCounter = sendEventCounter.
 		WithLabelValues("committed", changefeedID.Namespace, changefeedID.ID)
 
-	metrics.metricQueueDuration = regionWorkerQueueDuration.
-		WithLabelValues(changefeedID.Namespace, changefeedID.ID)
-
 	return metrics
 }
 
@@ -161,7 +156,7 @@ func newRegionWorker(
 		rtsManager:    newRegionTsManager(),
 		rtsUpdateCh:   make(chan *rtsUpdateEvent, 1024),
 		storeAddr:     addr,
-		concurrency:   int(s.client.config.KVClient.WorkerConcurrent),
+		concurrency:   s.client.config.KVClient.WorkerConcurrent,
 		metrics:       newRegionWorkerMetrics(changefeedID),
 		inputPending:  0,
 
@@ -225,7 +220,7 @@ func (w *regionWorker) handleSingleRegionError(err error, state *regionFeedState
 		return w.checkShouldExit()
 	}
 	// We need to ensure when the error is handled, `isStale` must be set. So set it before sending the error.
-	state.markStopped(nil)
+	state.markStopped()
 	w.delRegionState(regionID)
 	failpoint.Inject("kvClientSingleFeedProcessDelay", nil)
 
@@ -284,7 +279,14 @@ func (w *regionWorker) resolveLock(ctx context.Context) error {
 				w.rtsManager.Upsert(regionID, resolvedTs, eventTime)
 			}
 		case <-advanceCheckTicker.C:
-			currentTimeFromPD := w.session.client.pdClock.CurrentTime()
+			currentTimeFromPD, err := w.session.client.pdClock.CurrentTime()
+			if err != nil {
+				log.Warn("failed to get current time from PD",
+					zap.Error(err),
+					zap.String("namespace", w.session.client.changefeed.Namespace),
+					zap.String("changefeed", w.session.client.changefeed.ID))
+				continue
+			}
 			expired := make([]*regionTsInfo, 0)
 			for w.rtsManager.Len() > 0 {
 				item := w.rtsManager.Pop()
@@ -818,7 +820,7 @@ func (w *regionWorker) evictAllRegions() {
 			if regionState.isStale() {
 				return true
 			}
-			regionState.markStopped(nil)
+			regionState.markStopped()
 			deletes = append(deletes, struct {
 				regionID    uint64
 				regionState *regionFeedState

@@ -72,10 +72,9 @@ type metaManager struct {
 	startTs model.Ts
 
 	lastFlushTime          time.Time
+	flushIntervalInMs      int64
 	cfg                    *config.ConsistentConfig
 	metricFlushLogDuration prometheus.Observer
-
-	flushIntervalInMs int64
 }
 
 // NewDisabledMetaManager creates a disabled Meta Manager.
@@ -87,7 +86,8 @@ func NewDisabledMetaManager() *metaManager {
 
 // NewMetaManager creates a new meta Manager.
 func NewMetaManager(
-	changefeedID model.ChangeFeedID, cfg *config.ConsistentConfig, checkpoint model.Ts,
+	changefeedID model.ChangeFeedID,
+	cfg *config.ConsistentConfig, checkpoint model.Ts,
 ) *metaManager {
 	// return a disabled Manager if no consistent config or normal consistent level
 	if cfg == nil || !redo.IsConsistentEnabled(cfg.Level) {
@@ -106,11 +106,10 @@ func NewMetaManager(
 
 	if m.flushIntervalInMs < redo.MinFlushIntervalInMs {
 		log.Warn("redo flush interval is too small, use default value",
-			zap.String("namespace", m.changeFeedID.Namespace),
-			zap.String("changefeed", m.changeFeedID.ID),
 			zap.Int64("interval", m.flushIntervalInMs))
 		m.flushIntervalInMs = redo.DefaultMetaFlushIntervalInMs
 	}
+
 	return m
 }
 
@@ -136,7 +135,6 @@ func (m *metaManager) preStart(ctx context.Context) error {
 	if redo.IsBlackholeStorage(uri.Scheme) {
 		uri, _ = storage.ParseRawURL("noop://")
 	}
-
 	extStorage, err := redo.InitExternalStorage(ctx, *uri)
 	if err != nil {
 		return err
@@ -177,7 +175,6 @@ func (m *metaManager) Run(ctx context.Context, _ ...chan<- error) error {
 	eg.Go(func() error {
 		return m.bgGC(egCtx)
 	})
-
 	m.running.Store(true)
 	return eg.Wait()
 }
@@ -266,8 +263,6 @@ func (m *metaManager) initMeta(ctx context.Context) error {
 	common.ParseMeta(metas, &checkpointTs, &resolvedTs)
 	if checkpointTs == 0 || resolvedTs == 0 {
 		log.Panic("checkpointTs or resolvedTs is 0 when initializing redo meta in owner",
-			zap.String("namespace", m.changeFeedID.Namespace),
-			zap.String("changefeed", m.changeFeedID.ID),
 			zap.Uint64("checkpointTs", checkpointTs),
 			zap.Uint64("resolvedTs", resolvedTs))
 	}
@@ -329,17 +324,11 @@ func (m *metaManager) shouldRemoved(path string, checkPointTs uint64) bool {
 
 	commitTs, fileType, err := redo.ParseLogFileName(path)
 	if err != nil {
-		log.Error("parse file name failed",
-			zap.String("namespace", m.changeFeedID.Namespace),
-			zap.String("changefeed", m.changeFeedID.ID),
-			zap.String("path", path), zap.Error(err))
+		log.Error("parse file name failed", zap.String("path", path), zap.Error(err))
 		return false
 	}
 	if fileType != redo.RedoDDLLogFileType && fileType != redo.RedoRowLogFileType {
-		log.Panic("unknown file type",
-			zap.String("namespace", m.changeFeedID.Namespace),
-			zap.String("changefeed", m.changeFeedID.ID),
-			zap.String("path", path), zap.Any("fileType", fileType))
+		log.Panic("unknown file type", zap.String("path", path), zap.Any("fileType", fileType))
 	}
 
 	// if commitTs == checkPointTs, the DDL may be executed in the owner,
@@ -461,8 +450,6 @@ func (m *metaManager) flush(ctx context.Context, meta common.LogMeta) error {
 	m.preMetaFile = metaFile
 
 	log.Debug("flush meta to s3",
-		zap.String("namespace", m.changeFeedID.Namespace),
-		zap.String("changefeed", m.changeFeedID.ID),
 		zap.String("metaFile", metaFile),
 		zap.Any("cost", time.Since(start).Milliseconds()))
 	m.metricFlushLogDuration.Observe(time.Since(start).Seconds())

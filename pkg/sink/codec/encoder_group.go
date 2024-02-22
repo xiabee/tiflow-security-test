@@ -23,15 +23,15 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
-	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
 const (
-	defaultInputChanSize  = 128
-	defaultMetricInterval = 15 * time.Second
+	defaultEncoderGroupSize = 16
+	defaultInputChanSize    = 256
+	defaultMetricInterval   = 15 * time.Second
 )
 
 // EncoderGroup manages a group of encoders
@@ -41,7 +41,7 @@ type EncoderGroup interface {
 	// AddEvents add events into the group, handled by one of the encoders
 	// all input events should belong to the same topic and partition, this should be guaranteed by the caller
 	AddEvents(ctx context.Context, topic string, partition int32,
-		partitionKey string, events ...*dmlsink.RowChangeCallbackableEvent) error
+		events ...*dmlsink.RowChangeCallbackableEvent) error
 	// Output returns a channel produce futures
 	Output() <-chan *future
 }
@@ -62,7 +62,7 @@ func NewEncoderGroup(builder RowEventEncoderBuilder,
 	count int, changefeedID model.ChangeFeedID,
 ) *encoderGroup {
 	if count <= 0 {
-		count = config.DefaultEncoderGroupConcurrency
+		count = defaultEncoderGroupSize
 	}
 
 	inputCh := make([]chan *future, count)
@@ -83,7 +83,7 @@ func NewEncoderGroup(builder RowEventEncoderBuilder,
 
 func (g *encoderGroup) Run(ctx context.Context) error {
 	defer func() {
-		g.cleanMetrics()
+		encoderGroupInputChanSizeGauge.DeleteLabelValues(g.changefeedID.Namespace, g.changefeedID.ID)
 		log.Info("encoder group exited",
 			zap.String("namespace", g.changefeedID.Namespace),
 			zap.String("changefeed", g.changefeedID.ID))
@@ -128,10 +128,9 @@ func (g *encoderGroup) AddEvents(
 	ctx context.Context,
 	topic string,
 	partition int32,
-	partitionKey string,
 	events ...*dmlsink.RowChangeCallbackableEvent,
 ) error {
-	future := newFuture(topic, partition, partitionKey, events...)
+	future := newFuture(topic, partition, events...)
 	index := atomic.AddUint64(&g.index, 1) % uint64(g.count)
 	select {
 	case <-ctx.Done():
@@ -152,30 +151,22 @@ func (g *encoderGroup) Output() <-chan *future {
 	return g.outputCh
 }
 
-func (g *encoderGroup) cleanMetrics() {
-	encoderGroupInputChanSizeGauge.DeleteLabelValues(g.changefeedID.Namespace, g.changefeedID.ID)
-	g.builder.CleanMetrics()
-	common.CleanMetrics(g.changefeedID)
-}
-
 type future struct {
-	Topic        string
-	Partition    int32
-	PartitionKey string
-	events       []*dmlsink.RowChangeCallbackableEvent
-	Messages     []*common.Message
+	Topic     string
+	Partition int32
+	events    []*dmlsink.RowChangeCallbackableEvent
+	Messages  []*common.Message
 
 	done chan struct{}
 }
 
-func newFuture(topic string, partition int32, partitionKey string,
+func newFuture(topic string, partition int32,
 	events ...*dmlsink.RowChangeCallbackableEvent,
 ) *future {
 	return &future{
-		Topic:        topic,
-		Partition:    partition,
-		PartitionKey: partitionKey,
-		events:       events,
+		Topic:     topic,
+		Partition: partition,
+		events:    events,
 
 		done: make(chan struct{}),
 	}

@@ -184,7 +184,6 @@ func (mock *Cluster) Start() error {
 		return err
 	}
 	mock.Server = svr
-	mock.Server.SetDomain(mock.Domain)
 	go func() {
 		if err1 := svr.Run(); err1 != nil {
 			panic(err1)

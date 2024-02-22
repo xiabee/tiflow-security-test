@@ -109,10 +109,7 @@ func GetSlaveServerID(ctx *tcontext.Context, db *BaseDB) (map[uint32]struct{}, e
 	if err != nil {
 		return nil, terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
 	}
-	defer func() {
-		_ = rows.Close()
-		_ = rows.Err()
-	}()
+	defer rows.Close()
 
 	/*
 		in MySQL:

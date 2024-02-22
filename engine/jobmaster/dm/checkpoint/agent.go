@@ -120,12 +120,12 @@ func (c *AgentImpl) Create(ctx context.Context, cfg *config.JobCfg) error {
 		return errors.Trace(err)
 	}
 
-	if dmconfig.HasLoad(cfg.TaskMode) {
+	if cfg.TaskMode != dmconfig.ModeIncrement {
 		if err := createLoadCheckpointTable(ctx, c.jobID, cfg, db); err != nil {
 			return errors.Trace(err)
 		}
 	}
-	if dmconfig.HasSync(cfg.TaskMode) {
+	if cfg.TaskMode != dmconfig.ModeFull {
 		if err := createSyncCheckpointTable(ctx, c.jobID, cfg, db); err != nil {
 			return errors.Trace(err)
 		}

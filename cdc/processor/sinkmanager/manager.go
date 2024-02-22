@@ -203,7 +203,7 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 			zap.Error(err))
 	}()
 
-	splitTxn := util.GetOrZero(m.changefeedInfo.Config.Sink.TxnAtomicity).ShouldSplitTxn()
+	splitTxn := m.changefeedInfo.Config.Sink.TxnAtomicity.ShouldSplitTxn()
 
 	gcErrors := make(chan error, 16)
 	sinkErrors := make(chan error, 16)
@@ -308,7 +308,6 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 		if err != nil {
 			return errors.New(fmt.Sprintf("GetRetryBackoff: %s", err.Error()))
 		}
-
 		if err = util.Hang(m.managerCtx, backoff); err != nil {
 			return errors.Trace(err)
 		}
@@ -352,7 +351,7 @@ func (m *SinkManager) initSinkFactory() (chan error, uint64) {
 		return m.sinkFactory.errors, m.sinkFactory.version
 	}
 
-	m.sinkFactory.f, err = factory.New(m.managerCtx, m.changefeedID, uri, cfg, m.sinkFactory.errors, m.up.PDClock)
+	m.sinkFactory.f, err = factory.New(m.managerCtx, uri, cfg, m.sinkFactory.errors)
 	if err != nil {
 		emitError(err)
 		return m.sinkFactory.errors, m.sinkFactory.version
@@ -430,7 +429,7 @@ func (m *SinkManager) backgroundGC(errors chan<- error) {
 		for {
 			select {
 			case <-m.managerCtx.Done():
-				log.Info("Background GC is stopped because context is canceled",
+				log.Info("Background GC is stoped because context is canceled",
 					zap.String("namespace", m.changefeedID.Namespace),
 					zap.String("changefeed", m.changefeedID.ID))
 				return

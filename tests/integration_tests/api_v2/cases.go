@@ -21,8 +21,7 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/util"
+	"github.com/pingcap/tiflow/pkg/redo"
 	"go.uber.org/zap"
 )
 
@@ -30,13 +29,14 @@ import (
 var customReplicaConfig = &ReplicaConfig{
 	MemoryQuota:           1123450,
 	CaseSensitive:         false,
+	EnableOldValue:        false,
 	ForceReplicate:        false,
 	IgnoreIneligibleTable: false,
 	CheckGCSafePoint:      false,
-	BDRMode:               util.AddressOf(false),
-	EnableSyncPoint:       util.AddressOf(false),
-	SyncPointInterval:     util.AddressOf(JSONDuration{duration: 10 * time.Minute}),
-	SyncPointRetention:    util.AddressOf(JSONDuration{duration: 24 * time.Hour}),
+	EnableSyncPoint:       false,
+	BDRMode:               false,
+	SyncPointInterval:     &JSONDuration{11 * time.Minute},
+	SyncPointRetention:    &JSONDuration{25 * time.Hour},
 	Filter: &FilterConfig{
 		MySQLReplicationRules: &MySQLReplicationRules{
 			DoTables:     []*Table{{"a", "b"}, {"c", "d"}},
@@ -62,23 +62,42 @@ var customReplicaConfig = &ReplicaConfig{
 		WorkerNum: 17,
 	},
 	Sink: &SinkConfig{
-		Protocol: "arvo",
+		Protocol:       "arvo",
+		SchemaRegistry: "127.0.0.1:1234",
+		CSVConfig: &CSVConfig{
+			Delimiter:       "a",
+			Quote:           "c",
+			NullString:      "c",
+			IncludeCommitTs: true,
+		},
+		DispatchRules: []*DispatchRule{
+			{
+				[]string{"a.b"},
+				"1",
+				"test",
+			},
+		},
 		ColumnSelectors: []*ColumnSelector{
 			{
 				[]string{"a.b"},
 				[]string{"c"},
 			},
 		},
-		TxnAtomicity: "table",
-		Terminator:   "a",
-		CSVConfig: &CSVConfig{
-			Quote:      string(config.DoubleQuoteChar),
-			Delimiter:  config.Comma,
-			NullString: config.NULL,
-		},
-		DateSeparator:            "day",
-		EncoderConcurrency:       util.AddressOf(32),
-		EnablePartitionSeparator: util.AddressOf(true),
+		TxnAtomicity:             "table",
+		EncoderConcurrency:       20,
+		Terminator:               "a",
+		DateSeparator:            "month",
+		EnablePartitionSeparator: true,
+	},
+	Consistent: &ConsistentConfig{
+		Level:                 "",
+		MaxLogSize:            65,
+		MetaFlushIntervalInMs: 201,
+		FlushIntervalInMs:     500,
+		Storage:               "local://test",
+		UseFileBackend:        true,
+		EncoderWorkerNum:      14,
+		FlushWorkerNum:        23,
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
 		EnableTableAcrossNodes: false,
@@ -88,27 +107,17 @@ var customReplicaConfig = &ReplicaConfig{
 		IntegrityCheckLevel:   "none",
 		CorruptionHandleLevel: "warn",
 	},
-	Consistent: &ConsistentConfig{
-		Level:                 "none",
-		MaxLogSize:            64,
-		FlushIntervalInMs:     2000,
-		MetaFlushIntervalInMs: 200,
-		Storage:               "",
-		UseFileBackend:        false,
-		EncoderWorkerNum:      31,
-		FlushWorkerNum:        18,
-	},
 }
 
 // defaultReplicaConfig check if the default values is changed
 var defaultReplicaConfig = &ReplicaConfig{
 	MemoryQuota:        1024 * 1024 * 1024,
 	CaseSensitive:      false,
+	EnableOldValue:     true,
 	CheckGCSafePoint:   true,
-	EnableSyncPoint:    util.AddressOf(false),
-	SyncPointInterval:  util.AddressOf(JSONDuration{duration: 10 * time.Minute}),
-	SyncPointRetention: util.AddressOf(JSONDuration{duration: 24 * time.Hour}),
-	BDRMode:            util.AddressOf(false),
+	EnableSyncPoint:    false,
+	SyncPointInterval:  &JSONDuration{time.Minute * 10},
+	SyncPointRetention: &JSONDuration{time.Hour * 24},
 	Filter: &FilterConfig{
 		Rules: []string{"*.*"},
 	},
@@ -117,14 +126,24 @@ var defaultReplicaConfig = &ReplicaConfig{
 	},
 	Sink: &SinkConfig{
 		CSVConfig: &CSVConfig{
-			Quote:      string(config.DoubleQuoteChar),
-			Delimiter:  config.Comma,
-			NullString: config.NULL,
+			Quote:      string("\""),
+			Delimiter:  ",",
+			NullString: "\\N",
 		},
+		EncoderConcurrency:       16,
 		Terminator:               "\r\n",
 		DateSeparator:            "day",
-		EncoderConcurrency:       util.AddressOf(32),
-		EnablePartitionSeparator: util.AddressOf(true),
+		EnablePartitionSeparator: true,
+	},
+	Consistent: &ConsistentConfig{
+		Level:                 "none",
+		MaxLogSize:            redo.DefaultMaxLogSize,
+		MetaFlushIntervalInMs: redo.DefaultMetaFlushIntervalInMs,
+		FlushIntervalInMs:     redo.DefaultFlushIntervalInMs,
+		Storage:               "",
+		UseFileBackend:        false,
+		FlushWorkerNum:        redo.DefaultFlushWorkerNum,
+		EncoderWorkerNum:      redo.DefaultEncodingWorkerNum,
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
 		EnableTableAcrossNodes: false,
@@ -133,16 +152,6 @@ var defaultReplicaConfig = &ReplicaConfig{
 	Integrity: &IntegrityConfig{
 		IntegrityCheckLevel:   "none",
 		CorruptionHandleLevel: "warn",
-	},
-	Consistent: &ConsistentConfig{
-		Level:                 "none",
-		MaxLogSize:            64,
-		FlushIntervalInMs:     2000,
-		MetaFlushIntervalInMs: 200,
-		EncoderWorkerNum:      16,
-		FlushWorkerNum:        8,
-		Storage:               "",
-		UseFileBackend:        false,
 	},
 }
 
@@ -168,8 +177,7 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	// changefeed with default value
 	data := `{
 		"changefeed_id": "changefeed-test-v2-black-hole-1",
-		"sink_uri": "blackhole://",
-        "namespace": "test"
+		"sink_uri": "blackhole://"
 	}`
 	resp := client.Post().
 		WithBody(bytes.NewReader([]byte(data))).
@@ -180,9 +188,8 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	if err := json.Unmarshal(resp.body, changefeedInfo1); err != nil {
 		log.Panic("unmarshal failed", zap.String("body", string(resp.body)), zap.Error(err))
 	}
-
 	ensureChangefeed(ctx, client, changefeedInfo1.ID, "normal")
-	resp = client.Get().WithURI("/changefeeds/" + changefeedInfo1.ID + "?namespace=test").Do(ctx)
+	resp = client.Get().WithURI("/changefeeds/" + changefeedInfo1.ID).Do(ctx)
 	assertResponseIsOK(resp)
 	cfInfo := &ChangeFeedInfo{}
 	if err := json.Unmarshal(resp.body, cfInfo); err != nil {
@@ -195,7 +202,7 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	}
 
 	// pause changefeed
-	resp = client.Post().WithURI("changefeeds/changefeed-test-v2-black-hole-1/pause?namespace=test").Do(ctx)
+	resp = client.Post().WithURI("changefeeds/changefeed-test-v2-black-hole-1/pause").Do(ctx)
 	assertResponseIsOK(resp)
 	assertEmptyResponseBody(resp)
 
@@ -210,7 +217,7 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	}`
 	resp = client.Put().
 		WithBody(bytes.NewReader([]byte(data))).
-		WithURI("/changefeeds/changefeed-test-v2-black-hole-1?namespace=test").
+		WithURI("/changefeeds/changefeed-test-v2-black-hole-1").
 		Do(ctx)
 	assertResponseIsOK(resp)
 	changefeedInfo1 = &ChangeFeedInfo{}
@@ -228,11 +235,11 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	}
 	resp = client.Put().
 		WithBody(bytes.NewReader(cdata)).
-		WithURI("/changefeeds/changefeed-test-v2-black-hole-1?namespace=test").
+		WithURI("/changefeeds/changefeed-test-v2-black-hole-1").
 		Do(ctx)
 	assertResponseIsOK(resp)
 
-	resp = client.Get().WithURI("changefeeds/changefeed-test-v2-black-hole-1?namespace=test").Do(ctx)
+	resp = client.Get().WithURI("changefeeds/changefeed-test-v2-black-hole-1").Do(ctx)
 	assertResponseIsOK(resp)
 	cf := &ChangeFeedInfo{}
 	if err := json.Unmarshal(resp.body, cf); err != nil {
@@ -245,7 +252,7 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	}
 
 	// list changefeed
-	resp = client.Get().WithURI("changefeeds?state=stopped&namespace=test").Do(ctx)
+	resp = client.Get().WithURI("changefeeds?state=stopped").Do(ctx)
 	assertResponseIsOK(resp)
 	changefeedList := &ListResponse[ChangefeedCommonInfo]{}
 	if err := json.Unmarshal(resp.body, changefeedList); err != nil {
@@ -257,7 +264,7 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 
 	resp = client.Post().WithBody(bytes.NewReader(
 		[]byte(`{"overwrite_checkpoint_ts":0}`))).
-		WithURI("changefeeds/changefeed-test-v2-black-hole-1/resume?namespace=test").Do(ctx)
+		WithURI("changefeeds/changefeed-test-v2-black-hole-1/resume").Do(ctx)
 	assertResponseIsOK(resp)
 	assertEmptyResponseBody(resp)
 
@@ -265,12 +272,12 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	ensureChangefeed(ctx, client, changefeedInfo1.ID, "normal")
 
 	resp = client.Delete().
-		WithURI("changefeeds/changefeed-test-v2-black-hole-1?namespace=test").Do(ctx)
+		WithURI("changefeeds/changefeed-test-v2-black-hole-1").Do(ctx)
 	assertResponseIsOK(resp)
 	assertEmptyResponseBody(resp)
 
 	resp = client.Get().
-		WithURI("changefeeds/changefeed-test-v2-black-hole-1?namespace=test").Do(ctx)
+		WithURI("changefeeds/changefeed-test-v2-black-hole-1").Do(ctx)
 	if resp.statusCode == 200 {
 		log.Panic("delete changefeed failed", zap.Any("resp", resp))
 	}
@@ -282,7 +289,6 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 func testCreateChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	config := ChangefeedConfig{
 		ID:            "test-create-all",
-		Namespace:     "test",
 		SinkURI:       "blackhole://create=test",
 		ReplicaConfig: customReplicaConfig,
 	}
@@ -292,7 +298,7 @@ func testCreateChangefeed(ctx context.Context, client *CDCRESTClient) error {
 		Do(ctx)
 	assertResponseIsOK(resp)
 	ensureChangefeed(ctx, client, config.ID, "normal")
-	resp = client.Get().WithURI("/changefeeds/" + config.ID + "?namespace=test").Do(ctx)
+	resp = client.Get().WithURI("/changefeeds/" + config.ID).Do(ctx)
 	assertResponseIsOK(resp)
 	cfInfo := &ChangeFeedInfo{}
 	if err := json.Unmarshal(resp.body, cfInfo); err != nil {
@@ -301,7 +307,7 @@ func testCreateChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	if !reflect.DeepEqual(cfInfo.Config, config.ReplicaConfig) {
 		log.Panic("config is not equals", zap.Any("add", config.ReplicaConfig), zap.Any("get", cfInfo.Config))
 	}
-	resp = client.Delete().WithURI("/changefeeds/" + config.ID + "?namespace=test").Do(ctx)
+	resp = client.Delete().WithURI("/changefeeds/" + config.ID).Do(ctx)
 	assertResponseIsOK(resp)
 	return nil
 }
@@ -340,9 +346,7 @@ func testProcessor(ctx context.Context, client *CDCRESTClient) error {
 
 	processorDetail := &ProcessorDetail{}
 	resp = client.Get().
-		WithURI("processors/" + processors.Items[0].ChangeFeedID + "/" +
-			processors.Items[0].CaptureID +
-			"?namespace=" + processors.Items[0].Namespace).
+		WithURI("processors/" + processors.Items[0].ChangeFeedID + "/" + processors.Items[0].CaptureID).
 		Do(ctx)
 	assertResponseIsOK(resp)
 	if err := json.Unmarshal(resp.body, processorDetail); err != nil {
@@ -394,7 +398,7 @@ func ensureChangefeed(ctx context.Context, client *CDCRESTClient, id, state stri
 	var info *ChangeFeedInfo
 	for i := 0; i < 10; i++ {
 		resp := client.Get().
-			WithURI("/changefeeds/" + id + "?namespace=test").Do(ctx)
+			WithURI("/changefeeds/" + id).Do(ctx)
 		if resp.statusCode == 200 {
 			info = &ChangeFeedInfo{}
 			if err := json.Unmarshal(resp.body, info); err != nil {

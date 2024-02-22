@@ -16,7 +16,6 @@ package mq
 import (
 	"github.com/pingcap/tiflow/pkg/sink/codec"
 	"github.com/pingcap/tiflow/pkg/sink/kafka"
-	"github.com/pingcap/tiflow/pkg/sink/kafka/claimcheck"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -52,23 +51,9 @@ var (
 
 // InitMetrics registers all metrics in this file.
 func InitMetrics(registry *prometheus.Registry) {
-	serverRegistry = registry
-
 	registry.MustRegister(WorkerSendMessageDuration)
 	registry.MustRegister(WorkerBatchSize)
 	registry.MustRegister(WorkerBatchDuration)
-	claimcheck.InitMetrics(registry)
 	codec.InitMetrics(registry)
 	kafka.InitMetrics(registry)
-}
-
-var serverRegistry *prometheus.Registry
-
-// GetMetricRegistry for add pulsar default metrics
-func GetMetricRegistry() *prometheus.Registry {
-	// make sure registry is not nil
-	if serverRegistry == nil {
-		serverRegistry = prometheus.DefaultRegisterer.(*prometheus.Registry)
-	}
-	return serverRegistry
 }

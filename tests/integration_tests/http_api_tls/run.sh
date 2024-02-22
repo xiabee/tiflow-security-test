@@ -127,7 +127,6 @@ function run() {
 
 	for case in ${sequential_cases[@]}; do
 		python3 $CUR/util/test_case.py "$case" $TLS_DIR
-		sleep 1
 	done
 
 	cleanup_process $CDC_BINARY

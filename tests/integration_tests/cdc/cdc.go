@@ -56,7 +56,6 @@ func main() {
 		}
 	}()
 
-	// TODO(dongmen): remove the useless code
 	sourceDBs, err := util.CreateSourceDBs()
 	if err != nil {
 		log.S().Fatal(err)

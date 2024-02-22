@@ -51,8 +51,6 @@ const (
 	ModeAll       = "all"
 	ModeFull      = "full"
 	ModeIncrement = "incremental"
-	ModeDump      = "dump"
-	ModeLoadSync  = "load&sync"
 
 	DefaultShadowTableRules = "^_(.+)_(?:new|gho)$"
 	DefaultTrashTableRules  = "^_(.+)_(?:ghc|del|old)$"
@@ -329,8 +327,8 @@ func (c *SubTaskConfig) Adjust(verifyDecryptPassword bool) error {
 		c.MetaSchema = defaultMetaSchema
 	}
 
-	// adjust dir, no need to do for load&sync mode because it needs its own s3 repository
-	if HasLoad(c.Mode) && c.Mode != ModeLoadSync {
+	// adjust dir
+	if c.Mode == ModeAll || c.Mode == ModeFull {
 		// check
 		isS3 := storage.IsS3Path(c.LoaderConfig.Dir)
 		if isS3 && c.ImportMode == LoadModeLoader {
@@ -350,11 +348,7 @@ func (c *SubTaskConfig) Adjust(verifyDecryptPassword bool) error {
 			return terror.ErrConfigLoaderDirInvalid.Delegate(err, c.LoaderConfig.Dir)
 		}
 		c.LoaderConfig.Dir = newDir
-	}
 
-	// adjust sorting dir
-	if HasLoad(c.Mode) {
-		newDir := c.LoaderConfig.Dir
 		if c.LoaderConfig.SortingDirPhysical == "" {
 			if storage.IsLocalDiskPath(newDir) {
 				// lightning will not recursively create directories, so we use same level dir

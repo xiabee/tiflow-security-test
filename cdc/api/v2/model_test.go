@@ -32,9 +32,9 @@ import (
 var defaultAPIConfig = &ReplicaConfig{
 	MemoryQuota:        config.DefaultChangefeedMemoryQuota,
 	CaseSensitive:      false,
+	EnableOldValue:     true,
 	CheckGCSafePoint:   true,
-	BDRMode:            util.AddressOf(false),
-	EnableSyncPoint:    util.AddressOf(false),
+	EnableSyncPoint:    false,
 	SyncPointInterval:  &JSONDuration{10 * time.Minute},
 	SyncPointRetention: &JSONDuration{24 * time.Hour},
 	Filter: &FilterConfig{
@@ -50,14 +50,12 @@ var defaultAPIConfig = &ReplicaConfig{
 			NullString:           config.NULL,
 			BinaryEncodingMethod: config.BinaryEncodingBase64,
 		},
-		EncoderConcurrency:               util.AddressOf(config.DefaultEncoderGroupConcurrency),
-		Terminator:                       util.AddressOf(config.CRLF),
-		DateSeparator:                    util.AddressOf(config.DateSeparatorDay.String()),
-		EnablePartitionSeparator:         util.AddressOf(true),
-		EnableKafkaSinkV2:                util.AddressOf(false),
-		OnlyOutputUpdatedColumns:         util.AddressOf(false),
-		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
-		AdvanceTimeoutInSec:              util.AddressOf(uint(150)),
+		EncoderConcurrency:       16,
+		Terminator:               config.CRLF,
+		DateSeparator:            config.DateSeparatorDay.String(),
+		EnablePartitionSeparator: true,
+		EnableKafkaSinkV2:        false,
+		AdvanceTimeoutInSec:      util.AddressOf(uint(150)),
 	},
 	Consistent: &ConsistentConfig{
 		Level:                 "none",
@@ -105,6 +103,7 @@ func TestDefaultReplicaConfig(t *testing.T) {
 
 func TestToAPIReplicaConfig(t *testing.T) {
 	cfg := config.GetDefaultReplicaConfig()
+	cfg.EnableOldValue = false
 	cfg.CheckGCSafePoint = false
 	cfg.Sink = &config.SinkConfig{
 		DispatchRules: []*config.DispatchRule{
@@ -115,15 +114,15 @@ func TestToAPIReplicaConfig(t *testing.T) {
 				TopicRule:      "topic",
 			},
 		},
-		Protocol: util.AddressOf("aaa"),
+		Protocol: "aaa",
 		ColumnSelectors: []*config.ColumnSelector{
 			{
 				Matcher: []string{"a", "b", "c"},
 				Columns: []string{"a", "b"},
 			},
 		},
-		SchemaRegistry: util.AddressOf("bbb"),
-		TxnAtomicity:   util.AddressOf(config.AtomicityLevel("aa")),
+		SchemaRegistry: "bbb",
+		TxnAtomicity:   "aa",
 	}
 	cfg.Consistent = &config.ConsistentConfig{
 		Level:             "1",

@@ -31,14 +31,12 @@ import (
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
 	"github.com/pingcap/tiflow/engine/pkg/clock"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/pdutil"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
 func setClock(s *DMLSink, clock clock.Clock) {
 	for _, w := range s.workers {
-		w.filePathGenerator.SetClock(pdutil.NewMonotonicClock(clock))
+		w.filePathGenerator.SetClock(clock)
 	}
 }
 
@@ -124,14 +122,11 @@ func TestCloudStorageWriteEventsWithoutDateSeparator(t *testing.T) {
 	require.Nil(t, err)
 
 	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Sink.DateSeparator = util.AddressOf(config.DateSeparatorNone.String())
-	replicaConfig.Sink.Protocol = util.AddressOf(config.ProtocolCsv.String())
-	replicaConfig.Sink.FileIndexWidth = util.AddressOf(6)
+	replicaConfig.Sink.DateSeparator = config.DateSeparatorNone.String()
+	replicaConfig.Sink.Protocol = config.ProtocolCsv.String()
+	replicaConfig.Sink.FileIndexWidth = 6
 	errCh := make(chan error, 5)
-	s, err := NewDMLSink(ctx,
-		model.DefaultChangeFeedID("test"),
-		pdutil.NewMonotonicClock(clock.New()),
-		sinkURI, replicaConfig, errCh)
+	s, err := NewDMLSink(ctx, sinkURI, replicaConfig, errCh)
 	require.Nil(t, err)
 	var cnt uint64 = 0
 	batch := 100
@@ -194,17 +189,15 @@ func TestCloudStorageWriteEventsWithDateSeparator(t *testing.T) {
 	require.Nil(t, err)
 
 	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Sink.Protocol = util.AddressOf(config.ProtocolCsv.String())
-	replicaConfig.Sink.DateSeparator = util.AddressOf(config.DateSeparatorDay.String())
-	replicaConfig.Sink.FileIndexWidth = util.AddressOf(6)
+	replicaConfig.Sink.Protocol = config.ProtocolCsv.String()
+	replicaConfig.Sink.DateSeparator = config.DateSeparatorDay.String()
+	replicaConfig.Sink.FileIndexWidth = 6
 
 	errCh := make(chan error, 5)
-	mockClock := clock.NewMock()
-	s, err := NewDMLSink(ctx,
-		model.DefaultChangeFeedID("test"),
-		pdutil.NewMonotonicClock(mockClock),
-		sinkURI, replicaConfig, errCh)
+	s, err := NewDMLSink(ctx, sinkURI, replicaConfig, errCh)
 	require.Nil(t, err)
+	mockClock := clock.NewMock()
+	setClock(s, mockClock)
 
 	var cnt uint64 = 0
 	batch := 100
@@ -275,14 +268,11 @@ func TestCloudStorageWriteEventsWithDateSeparator(t *testing.T) {
 	// test table is scheduled from one node to another
 	cnt = 0
 	ctx, cancel = context.WithCancel(context.Background())
-
+	s, err = NewDMLSink(ctx, sinkURI, replicaConfig, errCh)
+	require.Nil(t, err)
 	mockClock = clock.NewMock()
 	mockClock.Set(time.Date(2023, 3, 9, 0, 1, 10, 0, time.UTC))
-	s, err = NewDMLSink(ctx,
-		model.DefaultChangeFeedID("test"),
-		pdutil.NewMonotonicClock(mockClock),
-		sinkURI, replicaConfig, errCh)
-	require.Nil(t, err)
+	setClock(s, mockClock)
 
 	err = s.WriteEvents(txns...)
 	require.Nil(t, err)

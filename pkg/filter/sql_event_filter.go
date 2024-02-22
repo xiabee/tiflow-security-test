@@ -120,6 +120,7 @@ func newSQLEventFilter(cfg *config.FilterConfig, sqlMode string) (*sqlEventFilte
 	res := &sqlEventFilter{
 		ddlParser: p,
 	}
+
 	for _, rule := range cfg.EventFilters {
 		if err := res.addRule(rule); err != nil {
 			return nil, errors.Trace(err)
@@ -163,6 +164,7 @@ func (f *sqlEventFilter) shouldSkipDDL(ddl *model.DDLEvent) (bool, error) {
 	f.pLock.Lock()
 	evenType, err := ddlToEventType(f.ddlParser, ddl.Query, ddl.Type)
 	f.pLock.Unlock()
+
 	if err != nil {
 		return false, err
 	}

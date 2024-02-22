@@ -30,24 +30,25 @@ import (
 
 // NewRowEventEncoderBuilder returns an RowEventEncoderBuilder
 func NewRowEventEncoderBuilder(
-	ctx context.Context, cfg *common.Config,
+	ctx context.Context,
+	c *common.Config,
 ) (codec.RowEventEncoderBuilder, error) {
-	switch cfg.Protocol {
+	switch c.Protocol {
 	case config.ProtocolDefault, config.ProtocolOpen:
-		return open.NewBatchEncoderBuilder(ctx, cfg)
+		return open.NewBatchEncoderBuilder(c), nil
 	case config.ProtocolCanal:
-		return canal.NewBatchEncoderBuilder(cfg), nil
+		return canal.NewBatchEncoderBuilder(c), nil
 	case config.ProtocolAvro:
-		return avro.NewBatchEncoderBuilder(ctx, cfg)
+		return avro.NewBatchEncoderBuilder(ctx, c)
 	case config.ProtocolMaxwell:
-		return maxwell.NewBatchEncoderBuilder(cfg), nil
+		return maxwell.NewBatchEncoderBuilder(c), nil
 	case config.ProtocolCanalJSON:
-		return canal.NewJSONRowEventEncoderBuilder(ctx, cfg)
+		return canal.NewJSONRowEventEncoderBuilder(c), nil
 	case config.ProtocolCraft:
-		return craft.NewBatchEncoderBuilder(cfg), nil
+		return craft.NewBatchEncoderBuilder(c), nil
 
 	default:
-		return nil, cerror.ErrSinkUnknownProtocol.GenWithStackByArgs(cfg.Protocol)
+		return nil, cerror.ErrSinkUnknownProtocol.GenWithStackByArgs(c.Protocol)
 	}
 }
 

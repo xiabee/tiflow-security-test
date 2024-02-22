@@ -48,9 +48,7 @@ import (
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/status"
 )
 
 func Test(t *testing.T) {
@@ -230,10 +228,6 @@ loop:
 	return nil
 }
 
-func (s *mockChangeDataService) EventFeedV2(server cdcpb.ChangeData_EventFeedV2Server) error {
-	return status.Error(codes.Unimplemented, "")
-}
-
 func newMockService(
 	ctx context.Context,
 	t *testing.T,
@@ -319,7 +313,7 @@ func TestConnectOfflineTiKV(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -421,7 +415,7 @@ func TestRecvLargeMessageSize(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -521,7 +515,7 @@ func TestHandleError(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -680,7 +674,7 @@ func TestCompatibilityWithSameConn(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -747,7 +741,7 @@ func TestClusterIDMismatch(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -816,7 +810,7 @@ func testHandleFeedEvent(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1277,7 +1271,7 @@ func TestStreamSendWithError(t *testing.T) {
 	cluster.SplitRaw(regionID3, regionID4, []byte("b"), []uint64{5}, 5)
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockerResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockerResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1389,7 +1383,7 @@ func testStreamRecvWithError(t *testing.T, failpointStr string) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1522,7 +1516,7 @@ func TestStreamRecvWithErrorAndResolvedGoBack(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1731,7 +1725,7 @@ func TestIncompatibleTiKV(t *testing.T) {
 	}()
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1808,7 +1802,7 @@ func TestNoPendingRegionError(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -1887,7 +1881,7 @@ func TestDropStaleRequest(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2001,7 +1995,7 @@ func TestResolveLock(t *testing.T) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2069,6 +2063,7 @@ func TestResolveLock(t *testing.T) {
 }
 
 func testEventCommitTsFallback(t *testing.T, events []*cdcpb.ChangeDataEvent) {
+	InitWorkerPool()
 	ctx, cancel := context.WithCancel(context.Background())
 	wg := &sync.WaitGroup{}
 
@@ -2106,7 +2101,7 @@ func testEventCommitTsFallback(t *testing.T, events []*cdcpb.ChangeDataEvent) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2234,7 +2229,7 @@ func testEventAfterFeedStop(t *testing.T) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2421,7 +2416,7 @@ func TestOutOfRegionRangeEvent(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2639,7 +2634,7 @@ func TestResolveLockNoCandidate(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2735,7 +2730,7 @@ func TestFailRegionReentrant(t *testing.T) {
 	}()
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2818,7 +2813,7 @@ func TestClientV1UnlockRangeReentrant(t *testing.T) {
 	}()
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2886,7 +2881,7 @@ func testClientErrNoPendingRegion(t *testing.T) {
 	}()
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -2964,7 +2959,7 @@ func testKVClientForceReconnect(t *testing.T) {
 	cluster.Bootstrap(regionID3, []uint64{1}, []uint64{4}, 4)
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -3115,7 +3110,7 @@ func TestConcurrentProcessRangeRequest(t *testing.T) {
 	}()
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -3232,7 +3227,7 @@ func TestEvTimeUpdate(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -3358,7 +3353,7 @@ func TestRegionWorkerExitWhenIsIdle(t *testing.T) {
 
 	baseAllocatedID := currentRequestID()
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -3450,7 +3445,7 @@ func TestPrewriteNotMatchError(t *testing.T) {
 	cluster.SplitRaw(regionID3, regionID4, []byte("b"), []uint64{5}, 5)
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)

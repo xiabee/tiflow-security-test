@@ -90,6 +90,11 @@ var (
 		"unknown kv optype: %s, entry: %v",
 		errors.RFCCodeText("CDC:ErrUnknownKVEventType"),
 	)
+	ErrNoPendingRegion = errors.Normalize(
+		"received event regionID %v, requestID %v from %v, "+
+			"but neither pending region nor running region was found",
+		errors.RFCCodeText("CDC:ErrNoPendingRegion"),
+	)
 	ErrPrewriteNotMatch = errors.Normalize(
 		"prewrite not match, key: %s, start-ts: %d, commit-ts: %d, type: %s, optype: %s",
 		errors.RFCCodeText("CDC:ErrPrewriteNotMatch"),
@@ -111,7 +116,7 @@ var (
 		errors.RFCCodeText("CDC:ErrRegionWorkerExit"),
 	)
 
-	// codec related errors
+	// rule related errors
 	ErrEncodeFailed = errors.Normalize(
 		"encode failed: %s",
 		errors.RFCCodeText("CDC:ErrEncodeFailed"),
@@ -123,16 +128,6 @@ var (
 	ErrFilterRuleInvalid = errors.Normalize(
 		"filter rule is invalid %v",
 		errors.RFCCodeText("CDC:ErrFilterRuleInvalid"),
-	)
-
-	ErrDispatcherFailed = errors.Normalize(
-		"dispatcher failed",
-		errors.RFCCodeText("CDC:ErrDispatcherFailed"),
-	)
-
-	ErrColumnSelectorFailed = errors.Normalize(
-		"column selector failed",
-		errors.RFCCodeText("CDC:ErrColumnSelectorFailed"),
 	)
 
 	// internal errors
@@ -208,63 +203,6 @@ var (
 		"kafka config item not found",
 		errors.RFCCodeText("CDC:ErrKafkaConfigNotFound"),
 	)
-	// for pulsar
-	ErrPulsarSendMessage = errors.Normalize(
-		"pulsar send message failed",
-		errors.RFCCodeText("CDC:ErrPulsarSendMessage"),
-	)
-	ErrPulsarProducerClosed = errors.Normalize(
-		"pulsar producer closed",
-		errors.RFCCodeText("CDC:ErrPulsarProducerClosed"),
-	)
-	ErrPulsarAsyncSendMessage = errors.Normalize(
-		"pulsar async send message failed",
-		errors.RFCCodeText("CDC:ErrPulsarAsyncSendMessage"),
-	)
-	ErrPulsarFlushUnfinished = errors.Normalize(
-		"flush not finished before producer close",
-		errors.RFCCodeText("CDC:ErrPulsarFlushUnfinished"),
-	)
-	ErrPulsarInvalidPartitionNum = errors.Normalize(
-		"invalid partition num %d",
-		errors.RFCCodeText("CDC:ErrPulsarInvalidPartitionNum"),
-	)
-	ErrPulsarNewClient = errors.Normalize(
-		"new pulsar client",
-		errors.RFCCodeText("CDC:ErrPulsarNewClient"),
-	)
-	ErrPulsarNewProducer = errors.Normalize(
-		"new pulsar producer",
-		errors.RFCCodeText("CDC:ErrPulsarNewProducer"),
-	)
-	ErrPulsarInvalidClientID = errors.Normalize(
-		"invalid pulsar client ID '%s'",
-		errors.RFCCodeText("CDC:ErrPulsarInvalidClientID"),
-	)
-	ErrPulsarInvalidVersion = errors.Normalize(
-		"invalid pulsar version",
-		errors.RFCCodeText("CDC:ErrPulsarInvalidVersion"),
-	)
-	ErrPulsarInvalidConfig = errors.Normalize(
-		"pulsar config invalid %s",
-		errors.RFCCodeText("CDC:ErrPulsarInvalidConfig"),
-	)
-	ErrPulsarCreateTopic = errors.Normalize(
-		"pulsar create topic failed",
-		errors.RFCCodeText("CDC:ErrPulsarCreateTopic"),
-	)
-	ErrPulsarInvalidTopicExpression = errors.Normalize(
-		"invalid topic expression",
-		errors.RFCCodeText("CDC:ErrPulsarTopicExprInvalid"),
-	)
-	ErrPulsarBrokerConfigNotFound = errors.Normalize(
-		"pulsar broker config item not found",
-		errors.RFCCodeText("CDC:ErrPulsarBrokerConfigNotFound"),
-	)
-	ErrPulsarTopicNotExists = errors.Normalize("pulsar topic not exists after creation",
-		errors.RFCCodeText("CDC:ErrPulsarTopicNotExists"),
-	)
-
 	ErrRedoConfigInvalid = errors.Normalize(
 		"redo log config invalid",
 		errors.RFCCodeText("CDC:ErrRedoConfigInvalid"),
@@ -305,12 +243,6 @@ var (
 		"Codec invalid config",
 		errors.RFCCodeText("CDC:ErrCodecInvalidConfig"),
 	)
-
-	ErrCompressionFailed = errors.Normalize(
-		"Compression failed",
-		errors.RFCCodeText("CDC:ErrCompressionFailed"),
-	)
-
 	ErrSinkURIInvalid = errors.Normalize(
 		"sink uri invalid '%s'",
 		errors.RFCCodeText("CDC:ErrSinkURIInvalid"),
@@ -361,12 +293,8 @@ var (
 		errors.RFCCodeText("CDC:ErrAvroEncodeToBinary"),
 	)
 	ErrAvroSchemaAPIError = errors.Normalize(
-		"schema manager API error, %s",
+		"schema manager API error",
 		errors.RFCCodeText("CDC:ErrAvroSchemaAPIError"),
-	)
-	ErrAvroInvalidMessage = errors.Normalize(
-		"avro invalid message format, %s",
-		errors.RFCCodeText("CDC:ErrAvroInvalidMessage"),
 	)
 	ErrMaxwellEncodeFailed = errors.Normalize(
 		"maxwell encode failed",
@@ -391,6 +319,10 @@ var (
 	ErrOldValueNotEnabled = errors.Normalize(
 		"old value is not enabled",
 		errors.RFCCodeText("CDC:ErrOldValueNotEnabled"),
+	)
+	ErrIncompatibleConfig = errors.Normalize(
+		"incompatible configuration",
+		errors.RFCCodeText("CDC:ErrIncompatibleConfig"),
 	)
 	ErrSinkInvalidConfig = errors.Normalize(
 		"sink config invalid",
@@ -743,6 +675,11 @@ var (
 		"consistent storage (%s) not support",
 		errors.RFCCodeText("CDC:ErrConsistentStorage"),
 	)
+	ErrInvalidS3URI = errors.Normalize(
+		"invalid s3 uri: %s",
+		errors.RFCCodeText("CDC:ErrInvalidS3URI"),
+	)
+
 	// sorter errors
 	ErrIllegalSorterParameter = errors.Normalize(
 		"illegal parameter for sorter: %s",
@@ -751,6 +688,12 @@ var (
 	ErrConflictingFileLocks = errors.Normalize(
 		"file lock conflict: %s",
 		errors.RFCCodeText("ErrConflictingFileLocks"),
+	)
+
+	// miscellaneous internal errors
+	ErrFlowControllerAborted = errors.Normalize(
+		"flow controller is aborted",
+		errors.RFCCodeText("CDC:ErrFlowControllerAborted"),
 	)
 
 	// retry error
@@ -929,10 +872,6 @@ var (
 		"invalid replica config, %s",
 		errors.RFCCodeText("CDC:ErrInvalidReplicaConfig"),
 	)
-	ErrInternalCheckFailed = errors.Normalize(
-		"internal check failed, %s",
-		errors.RFCCodeText("CDC:ErrInternalCheckFailed"),
-	)
 
 	ErrHandleDDLFailed = errors.Normalize(
 		"handle ddl failed, job: %s, query: %s, startTs: %d. "+
@@ -940,37 +879,5 @@ var (
 			"you can manually execute this DDL downstream. Afterwards, "+
 			"add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.",
 		errors.RFCCodeText("CDC:ErrHandleDDLFailed"),
-	)
-
-	ErrInvalidGlueSchemaRegistryConfig = errors.Normalize(
-		"invalid glue schema registry config, %s",
-		errors.RFCCodeText("CDC:ErrInvalidGlueSchemaRegistryConfig"),
-	)
-
-	// cdc v2
-	// TODO(CharlesCheung): refactor this errors
-	ErrElectorNotLeader = errors.Normalize(
-		"%s is not leader",
-		errors.RFCCodeText("CDC:ErrNotLeader"),
-	)
-	ErrNotController = errors.Normalize(
-		"not controller",
-		errors.RFCCodeText("CDC:ErrNotController"),
-	)
-	ErrMetaRowsAffectedNotMatch = errors.Normalize(
-		"rows affected by the operation %s is unexpected: expected %d, got %d",
-		errors.RFCCodeText("CDC:ErrMetaOpIgnored"),
-	)
-	ErrMetaOpFailed = errors.Normalize(
-		"unexpected meta operation failure: %s",
-		errors.RFCCodeText("DFLOW:ErrMetaOpFailed"),
-	)
-	ErrMetaInvalidState = errors.Normalize(
-		"meta state is invalid: %s",
-		errors.RFCCodeText("DFLOW:ErrMetaInvalidState"),
-	)
-	ErrInconsistentMetaCache = errors.Normalize(
-		"meta cache is inconsistent: %s",
-		errors.RFCCodeText("DFLOW:ErrInconsistentMetaCache"),
 	)
 )

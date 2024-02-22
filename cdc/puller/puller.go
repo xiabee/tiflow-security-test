@@ -22,6 +22,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	tidbkv "github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
@@ -94,6 +95,7 @@ func New(ctx context.Context,
 	tableID model.TableID,
 	tableName string,
 	filterLoop bool,
+	isDDLPuller bool,
 ) Puller {
 	tikvStorage, ok := kvStorage.(tikv.Storage)
 	if !ok {
@@ -132,7 +134,7 @@ func (p *pullerImpl) Run(ctx context.Context) error {
 	eventCh := make(chan model.RegionFeedEvent, defaultPullerEventChanSize)
 
 	lockResolver := txnutil.NewLockerResolver(p.kvStorage,
-		p.changefeed)
+		p.changefeed, contextutil.RoleFromCtx(ctx))
 	for _, span := range p.spans {
 		span := span
 

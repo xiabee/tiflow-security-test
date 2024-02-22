@@ -675,7 +675,7 @@ func (cp *RemoteCheckPoint) IsOlderThanTablePoint(table *filter.Table, location 
 	}
 	oldLocation := point.MySQLLocation()
 	// if we update enable-gtid = false to true, we need to compare binlog position instead of GTID before we save table point
-	cmpGTID := cp.cfg.EnableGTID && !(oldLocation.GTIDSetStr() == "" && binlog.ComparePosition(oldLocation.Position, binlog.MinPosition) > 0)
+	cmpGTID := cp.cfg.EnableGTID && !(binlog.CheckGTIDSetEmpty(oldLocation.GetGTID()) && binlog.ComparePosition(oldLocation.Position, binlog.MinPosition) > 0)
 	cp.logCtx.L().Debug("compare table location whether is newer", zap.Stringer("location", location), zap.Stringer("old location", oldLocation), zap.Bool("cmpGTID", cmpGTID))
 
 	return binlog.CompareLocation(location, oldLocation, cmpGTID) <= 0
@@ -1208,7 +1208,7 @@ func (cp *RemoteCheckPoint) LoadMeta(ctx context.Context) error {
 		err             error
 	)
 	switch cp.cfg.Mode {
-	case config.ModeAll, config.ModeLoadSync:
+	case config.ModeAll:
 		// NOTE: syncer must continue the syncing follow loader's tail, so we parse mydumper's output
 		// refine when master / slave switching added and checkpoint mechanism refactored
 		location, safeModeExitLoc, err = cp.parseMetaData(ctx)

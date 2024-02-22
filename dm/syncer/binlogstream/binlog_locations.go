@@ -27,10 +27,7 @@ import (
 
 func isDataEvent(e *replication.BinlogEvent) bool {
 	switch e.Event.(type) {
-	case *replication.TableMapEvent,
-		*replication.RowsEvent,
-		*replication.QueryEvent,
-		*replication.TransactionPayloadEvent:
+	case *replication.TableMapEvent, *replication.RowsEvent, *replication.QueryEvent:
 		return true
 	}
 	return false

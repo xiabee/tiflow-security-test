@@ -218,7 +218,7 @@ func (c *Checker) getTablePairInfo(ctx context.Context) (info *tablePairInfo, er
 
 	if _, ok := c.checkingItems[config.LightningFreeSpaceChecking]; ok &&
 		c.stCfgs[0].LoaderConfig.ImportMode == config.LoadModePhysical &&
-		config.HasLoad(c.stCfgs[0].Mode) {
+		c.stCfgs[0].Mode != config.ModeIncrement {
 		concurrency, err := checker.GetConcurrency(ctx, sourceIDs, dbs, c.stCfgs[0].MydumperConfig.Threads)
 		if err != nil {
 			return nil, err
@@ -286,15 +286,19 @@ func (c *Checker) Init(ctx context.Context) (err error) {
 			// only check the first subtask's config
 			// because the Mode is the same across all the subtasks
 			// as long as they are derived from the same task config.
-			// TODO: check the connections for syncer
-			// TODO: check for incremental mode
-			if config.HasDump(c.stCfgs[0].Mode) {
+			switch c.stCfgs[0].Mode {
+			case config.ModeAll:
+				// TODO: check the connections for syncer
+				// TODO: check for incremental mode
+				c.checkList = append(c.checkList, checker.NewLoaderConnNumberChecker(c.instances[0].targetDB, c.stCfgs))
 				for i, inst := range c.instances {
 					c.checkList = append(c.checkList, checker.NewDumperConnNumberChecker(inst.sourceDB, c.stCfgs[i].MydumperConfig.Threads))
 				}
-			}
-			if config.HasLoad(c.stCfgs[0].Mode) {
+			case config.ModeFull:
 				c.checkList = append(c.checkList, checker.NewLoaderConnNumberChecker(c.instances[0].targetDB, c.stCfgs))
+				for i, inst := range c.instances {
+					c.checkList = append(c.checkList, checker.NewDumperConnNumberChecker(inst.sourceDB, c.stCfgs[i].MydumperConfig.Threads))
+				}
 			}
 		}
 	}
@@ -322,7 +326,7 @@ func (c *Checker) Init(ctx context.Context) (err error) {
 		}
 
 		upstreamDBs[sourceID] = instance.sourceDB
-		if config.HasDump(instance.cfg.Mode) {
+		if instance.cfg.Mode != config.ModeIncrement {
 			// increment mode needn't check dump privilege
 			if _, ok := c.checkingItems[config.DumpPrivilegeChecking]; ok {
 				exportCfg := export.DefaultConfig()
@@ -338,17 +342,8 @@ func (c *Checker) Init(ctx context.Context) (err error) {
 					c.dumpWholeInstance,
 				))
 			}
-		} else if !instance.cfg.UseRelay && instance.cfg.Meta != nil {
-			checkMetaPos := len(instance.cfg.Meta.BinLogName) > 0 ||
-				(instance.cfg.EnableGTID && len(instance.cfg.Meta.BinLogGTID) > 0)
-			if _, ok := c.checkingItems[config.MetaPositionChecking]; checkMetaPos && ok {
-				c.checkList = append(c.checkList, checker.NewMetaPositionChecker(instance.sourceDB,
-					instance.cfg.From,
-					instance.cfg.EnableGTID,
-					instance.cfg.Meta))
-			}
 		}
-		if config.HasSync(instance.cfg.Mode) {
+		if instance.cfg.Mode != config.ModeFull {
 			// full mode needn't check follows
 			if _, ok := c.checkingItems[config.ServerIDChecking]; ok {
 				c.checkList = append(c.checkList, checker.NewMySQLServerIDChecker(instance.sourceDB.DB, instance.sourceDBinfo))
@@ -390,7 +385,7 @@ func (c *Checker) Init(ctx context.Context) (err error) {
 	// Because the table schema obtained from `show create table` is not the schema at the point of binlog.
 	_, checkingShardID := c.checkingItems[config.ShardAutoIncrementIDChecking]
 	_, checkingShard := c.checkingItems[config.ShardTableSchemaChecking]
-	if checkingShard && instance.cfg.ShardMode != "" && config.HasDump(instance.cfg.Mode) {
+	if checkingShard && instance.cfg.ShardMode != "" && instance.cfg.Mode != config.ModeIncrement {
 		isFresh, err := c.IsFreshTask()
 		if err != nil {
 			return err
@@ -428,7 +423,7 @@ func (c *Checker) Init(ctx context.Context) (err error) {
 		}
 	}
 
-	if config.HasLoad(instance.cfg.Mode) &&
+	if instance.cfg.Mode != config.ModeIncrement &&
 		instance.cfg.LoaderConfig.ImportMode == config.LoadModePhysical &&
 		hasLightningPrecheck {
 		lCfg, err := loader.GetLightningConfig(loader.MakeGlobalConfig(instance.cfg), instance.cfg)

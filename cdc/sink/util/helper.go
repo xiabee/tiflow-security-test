@@ -18,7 +18,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/manager"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
@@ -66,7 +65,6 @@ func GetFileExtension(protocol config.Protocol) string {
 
 // GetEncoderConfig returns the encoder config and validates the config.
 func GetEncoderConfig(
-	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	protocol config.Protocol,
 	replicaConfig *config.ReplicaConfig,
@@ -79,7 +77,7 @@ func GetEncoderConfig(
 	// Always set encoder's `MaxMessageBytes` equal to producer's `MaxMessageBytes`
 	// to prevent that the encoder generate batched message too large
 	// then cause producer meet `message too large`.
-	encoderConfig = encoderConfig.WithMaxMessageBytes(maxMsgBytes).WithChangefeedID(changefeedID)
+	encoderConfig = encoderConfig.WithMaxMessageBytes(maxMsgBytes)
 
 	if err := encoderConfig.Validate(); err != nil {
 		return nil, cerror.WrapError(cerror.ErrSinkInvalidConfig, err)
@@ -91,13 +89,12 @@ func GetEncoderConfig(
 // GetTopicManagerAndTryCreateTopic returns the topic manager and try to create the topic.
 func GetTopicManagerAndTryCreateTopic(
 	ctx context.Context,
-	changefeedID model.ChangeFeedID,
 	topic string,
 	topicCfg *kafka.AutoCreateTopicConfig,
 	adminClient kafka.ClusterAdminClient,
 ) (manager.TopicManager, error) {
 	topicManager := manager.NewKafkaTopicManager(
-		ctx, topic, changefeedID, adminClient, topicCfg,
+		ctx, topic, adminClient, topicCfg,
 	)
 
 	if _, err := topicManager.CreateTopicAndWaitUntilVisible(ctx, topic); err != nil {
@@ -105,9 +102,4 @@ func GetTopicManagerAndTryCreateTopic(
 	}
 
 	return topicManager, nil
-}
-
-// IsPulsarSupportedProtocols returns whether the protocol is supported by pulsar.
-func IsPulsarSupportedProtocols(p config.Protocol) bool {
-	return p == config.ProtocolCanalJSON
 }

@@ -30,7 +30,6 @@ import (
 	"github.com/pingcap/tiflow/engine/pkg/clock"
 	"github.com/pingcap/tiflow/pkg/chann"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/sink/cloudstorage"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
@@ -46,16 +45,14 @@ func testDMLWorker(ctx context.Context, t *testing.T, dir string) *dmlWorker {
 	require.Nil(t, err)
 	cfg := cloudstorage.NewConfig()
 	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Sink.DateSeparator = util.AddressOf(config.DateSeparatorNone.String())
+	replicaConfig.Sink.DateSeparator = config.DateSeparatorNone.String()
 	err = cfg.Apply(context.TODO(), sinkURI, replicaConfig)
 	cfg.FileIndexWidth = 6
 	require.Nil(t, err)
 
-	statistics := metrics.NewStatistics(ctx, model.DefaultChangeFeedID("dml-worker-test"),
-		sink.TxnSink)
-	pdlock := pdutil.NewMonotonicClock(clock.New())
+	statistics := metrics.NewStatistics(ctx, sink.TxnSink)
 	d := newDMLWorker(1, model.DefaultChangeFeedID("dml-worker-test"), storage,
-		cfg, ".json", chann.NewAutoDrainChann[eventFragment](), pdlock, statistics)
+		cfg, ".json", chann.NewAutoDrainChann[eventFragment](), clock.New(), statistics)
 	return d
 }
 

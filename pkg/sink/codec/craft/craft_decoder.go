@@ -117,6 +117,7 @@ func (b *batchDecoder) NextDDLEvent() (*model.DDLEvent, error) {
 	return event, nil
 }
 
+// newBatchDecoder creates a new batchDecoder.
 func newBatchDecoder(bits []byte) (codec.RowEventDecoder, error) {
 	decoder := NewBatchDecoderWithAllocator(NewSliceAllocator(64))
 	err := decoder.AddKeyValue(nil, bits)
@@ -132,7 +133,7 @@ func NewBatchDecoderWithAllocator(
 	}
 }
 
-// AddKeyValue implements the RowEventDecoder interface
+// AddKeyValue implements the EventBatchDecoder interface
 func (b *batchDecoder) AddKeyValue(_, value []byte) error {
 	decoder, err := NewMessageDecoder(value, b.allocator)
 	if err != nil {

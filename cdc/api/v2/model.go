@@ -68,7 +68,6 @@ type VerifyTableConfig struct {
 	PDConfig
 	ReplicaConfig *ReplicaConfig `json:"replica_config"`
 	StartTs       uint64         `json:"start_ts"`
-	SinkURI       string         `json:"sink_uri"`
 }
 
 func getDefaultVerifyTableConfig() *VerifyTableConfig {
@@ -187,14 +186,15 @@ func (d *JSONDuration) UnmarshalJSON(b []byte) error {
 type ReplicaConfig struct {
 	MemoryQuota           uint64 `json:"memory_quota"`
 	CaseSensitive         bool   `json:"case_sensitive"`
+	EnableOldValue        bool   `json:"enable_old_value"`
 	ForceReplicate        bool   `json:"force_replicate"`
 	IgnoreIneligibleTable bool   `json:"ignore_ineligible_table"`
 	CheckGCSafePoint      bool   `json:"check_gc_safe_point"`
-	EnableSyncPoint       *bool  `json:"enable_sync_point,omitempty"`
-	BDRMode               *bool  `json:"bdr_mode,omitempty"`
+	EnableSyncPoint       bool   `json:"enable_sync_point"`
+	BDRMode               bool   `json:"bdr_mode"`
 
-	SyncPointInterval  *JSONDuration `json:"sync_point_interval,omitempty" swaggertype:"string"`
-	SyncPointRetention *JSONDuration `json:"sync_point_retention,omitempty" swaggertype:"string"`
+	SyncPointInterval  *JSONDuration `json:"sync_point_interval" swaggertype:"string"`
+	SyncPointRetention *JSONDuration `json:"sync_point_retention" swaggertype:"string"`
 
 	Filter                       *FilterConfig              `json:"filter"`
 	Mounter                      *MounterConfig             `json:"mounter"`
@@ -218,16 +218,16 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 ) *config.ReplicaConfig {
 	res.MemoryQuota = c.MemoryQuota
 	res.CaseSensitive = c.CaseSensitive
+	res.EnableOldValue = c.EnableOldValue
 	res.ForceReplicate = c.ForceReplicate
 	res.CheckGCSafePoint = c.CheckGCSafePoint
 	res.EnableSyncPoint = c.EnableSyncPoint
-	res.IgnoreIneligibleTable = c.IgnoreIneligibleTable
 	res.SQLMode = c.SQLMode
 	if c.SyncPointInterval != nil {
-		res.SyncPointInterval = &c.SyncPointInterval.duration
+		res.SyncPointInterval = c.SyncPointInterval.duration
 	}
 	if c.SyncPointRetention != nil {
-		res.SyncPointRetention = &c.SyncPointRetention.duration
+		res.SyncPointRetention = c.SyncPointRetention.duration
 	}
 	res.BDRMode = c.BDRMode
 
@@ -297,8 +297,6 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 				Matcher:        rule.Matcher,
 				DispatcherRule: "",
 				PartitionRule:  rule.PartitionRule,
-				IndexName:      rule.IndexName,
-				Columns:        rule.Columns,
 				TopicRule:      rule.TopicRule,
 			})
 		}
@@ -319,38 +317,6 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 				BinaryEncodingMethod: c.Sink.CSVConfig.BinaryEncodingMethod,
 			}
 		}
-		var pulsarConfig *config.PulsarConfig
-		if c.Sink.PulsarConfig != nil {
-			pulsarConfig = &config.PulsarConfig{
-				TLSKeyFilePath:          c.Sink.PulsarConfig.TLSKeyFilePath,
-				TLSCertificateFile:      c.Sink.PulsarConfig.TLSCertificateFile,
-				TLSTrustCertsFilePath:   c.Sink.PulsarConfig.TLSTrustCertsFilePath,
-				PulsarProducerCacheSize: c.Sink.PulsarConfig.PulsarProducerCacheSize,
-				PulsarVersion:           c.Sink.PulsarConfig.PulsarVersion,
-				CompressionType:         (*config.PulsarCompressionType)(c.Sink.PulsarConfig.CompressionType),
-				AuthenticationToken:     c.Sink.PulsarConfig.AuthenticationToken,
-				ConnectionTimeout:       (*config.TimeSec)(c.Sink.PulsarConfig.ConnectionTimeout),
-				OperationTimeout:        (*config.TimeSec)(c.Sink.PulsarConfig.OperationTimeout),
-				BatchingMaxMessages:     c.Sink.PulsarConfig.BatchingMaxMessages,
-				BatchingMaxPublishDelay: (*config.TimeMill)(c.Sink.PulsarConfig.BatchingMaxPublishDelay),
-				SendTimeout:             (*config.TimeSec)(c.Sink.PulsarConfig.SendTimeout),
-				TokenFromFile:           c.Sink.PulsarConfig.TokenFromFile,
-				BasicUserName:           c.Sink.PulsarConfig.BasicUserName,
-				BasicPassword:           c.Sink.PulsarConfig.BasicPassword,
-				AuthTLSCertificatePath:  c.Sink.PulsarConfig.AuthTLSCertificatePath,
-				AuthTLSPrivateKeyPath:   c.Sink.PulsarConfig.AuthTLSPrivateKeyPath,
-			}
-			if c.Sink.PulsarConfig.OAuth2 != nil {
-				pulsarConfig.OAuth2 = &config.OAuth2{
-					OAuth2IssuerURL:  c.Sink.PulsarConfig.OAuth2.OAuth2IssuerURL,
-					OAuth2Audience:   c.Sink.PulsarConfig.OAuth2.OAuth2Audience,
-					OAuth2PrivateKey: c.Sink.PulsarConfig.OAuth2.OAuth2PrivateKey,
-					OAuth2ClientID:   c.Sink.PulsarConfig.OAuth2.OAuth2ClientID,
-					OAuth2Scope:      c.Sink.PulsarConfig.OAuth2.OAuth2Scope,
-				}
-			}
-		}
-
 		var kafkaConfig *config.KafkaConfig
 		if c.Sink.KafkaConfig != nil {
 			var codeConfig *config.CodecConfig
@@ -369,20 +335,7 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 			if c.Sink.KafkaConfig.LargeMessageHandle != nil {
 				oldConfig := c.Sink.KafkaConfig.LargeMessageHandle
 				largeMessageHandle = &config.LargeMessageHandleConfig{
-					LargeMessageHandleOption:      oldConfig.LargeMessageHandleOption,
-					LargeMessageHandleCompression: oldConfig.LargeMessageHandleCompression,
-					ClaimCheckStorageURI:          oldConfig.ClaimCheckStorageURI,
-				}
-			}
-
-			var glueSchemaRegistryConfig *config.GlueSchemaRegistryConfig
-			if c.Sink.KafkaConfig.GlueSchemaRegistryConfig != nil {
-				glueSchemaRegistryConfig = &config.GlueSchemaRegistryConfig{
-					RegistryName:    c.Sink.KafkaConfig.GlueSchemaRegistryConfig.RegistryName,
-					Region:          c.Sink.KafkaConfig.GlueSchemaRegistryConfig.Region,
-					AccessKey:       c.Sink.KafkaConfig.GlueSchemaRegistryConfig.AccessKey,
-					SecretAccessKey: c.Sink.KafkaConfig.GlueSchemaRegistryConfig.SecretAccessKey,
-					Token:           c.Sink.KafkaConfig.GlueSchemaRegistryConfig.Token,
+					LargeMessageHandleOption: oldConfig.LargeMessageHandleOption,
 				}
 			}
 
@@ -422,7 +375,6 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 				InsecureSkipVerify:           c.Sink.KafkaConfig.InsecureSkipVerify,
 				CodecConfig:                  codeConfig,
 				LargeMessageHandle:           largeMessageHandle,
-				GlueSchemaRegistryConfig:     glueSchemaRegistryConfig,
 			}
 		}
 		var mysqlConfig *config.MySQLConfig
@@ -459,33 +411,28 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 		}
 
 		res.Sink = &config.SinkConfig{
-			DispatchRules:                    dispatchRules,
-			Protocol:                         c.Sink.Protocol,
-			CSVConfig:                        csvConfig,
-			ColumnSelectors:                  columnSelectors,
-			SchemaRegistry:                   c.Sink.SchemaRegistry,
-			EncoderConcurrency:               c.Sink.EncoderConcurrency,
-			Terminator:                       c.Sink.Terminator,
-			DateSeparator:                    c.Sink.DateSeparator,
-			EnablePartitionSeparator:         c.Sink.EnablePartitionSeparator,
-			FileIndexWidth:                   c.Sink.FileIndexWidth,
-			EnableKafkaSinkV2:                c.Sink.EnableKafkaSinkV2,
-			OnlyOutputUpdatedColumns:         c.Sink.OnlyOutputUpdatedColumns,
-			DeleteOnlyOutputHandleKeyColumns: c.Sink.DeleteOnlyOutputHandleKeyColumns,
-			KafkaConfig:                      kafkaConfig,
-			MySQLConfig:                      mysqlConfig,
-			PulsarConfig:                     pulsarConfig,
-			CloudStorageConfig:               cloudStorageConfig,
-			SafeMode:                         c.Sink.SafeMode,
-		}
-
-		if c.Sink.TxnAtomicity != nil {
-			res.Sink.TxnAtomicity = util.AddressOf(config.AtomicityLevel(*c.Sink.TxnAtomicity))
+			DispatchRules:            dispatchRules,
+			Protocol:                 c.Sink.Protocol,
+			CSVConfig:                csvConfig,
+			TxnAtomicity:             config.AtomicityLevel(c.Sink.TxnAtomicity),
+			ColumnSelectors:          columnSelectors,
+			SchemaRegistry:           c.Sink.SchemaRegistry,
+			EncoderConcurrency:       c.Sink.EncoderConcurrency,
+			Terminator:               c.Sink.Terminator,
+			DateSeparator:            c.Sink.DateSeparator,
+			EnablePartitionSeparator: c.Sink.EnablePartitionSeparator,
+			FileIndexWidth:           c.Sink.FileIndexWidth,
+			EnableKafkaSinkV2:        c.Sink.EnableKafkaSinkV2,
+			OnlyOutputUpdatedColumns: c.Sink.OnlyOutputUpdatedColumns,
+			ContentCompatible:        c.Sink.ContentCompatible,
+			KafkaConfig:              kafkaConfig,
+			MySQLConfig:              mysqlConfig,
+			CloudStorageConfig:       cloudStorageConfig,
+			SafeMode:                 c.Sink.SafeMode,
 		}
 		if c.Sink.AdvanceTimeoutInSec != nil {
 			res.Sink.AdvanceTimeoutInSec = util.AddressOf(*c.Sink.AdvanceTimeoutInSec)
 		}
-
 	}
 	if c.Mounter != nil {
 		res.Mounter = &config.MounterConfig{
@@ -520,24 +467,18 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 // ToAPIReplicaConfig coverts *config.ReplicaConfig into *v2.ReplicaConfig
 func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 	cloned := c.Clone()
-
 	res := &ReplicaConfig{
 		MemoryQuota:           cloned.MemoryQuota,
 		CaseSensitive:         cloned.CaseSensitive,
+		EnableOldValue:        cloned.EnableOldValue,
 		ForceReplicate:        cloned.ForceReplicate,
-		IgnoreIneligibleTable: cloned.IgnoreIneligibleTable,
+		IgnoreIneligibleTable: false,
 		CheckGCSafePoint:      cloned.CheckGCSafePoint,
 		EnableSyncPoint:       cloned.EnableSyncPoint,
+		SyncPointInterval:     &JSONDuration{cloned.SyncPointInterval},
+		SyncPointRetention:    &JSONDuration{cloned.SyncPointRetention},
 		BDRMode:               cloned.BDRMode,
 		SQLMode:               cloned.SQLMode,
-	}
-
-	if cloned.SyncPointInterval != nil {
-		res.SyncPointInterval = &JSONDuration{*cloned.SyncPointInterval}
-	}
-
-	if cloned.SyncPointRetention != nil {
-		res.SyncPointRetention = &JSONDuration{*cloned.SyncPointRetention}
 	}
 
 	if cloned.Filter != nil {
@@ -587,8 +528,6 @@ func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 			dispatchRules = append(dispatchRules, &DispatchRule{
 				Matcher:       rule.Matcher,
 				PartitionRule: rule.PartitionRule,
-				IndexName:     rule.IndexName,
-				Columns:       rule.Columns,
 				TopicRule:     rule.TopicRule,
 			})
 		}
@@ -627,20 +566,7 @@ func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 			if cloned.Sink.KafkaConfig.LargeMessageHandle != nil {
 				oldConfig := cloned.Sink.KafkaConfig.LargeMessageHandle
 				largeMessageHandle = &LargeMessageHandleConfig{
-					LargeMessageHandleOption:      oldConfig.LargeMessageHandleOption,
-					LargeMessageHandleCompression: oldConfig.LargeMessageHandleCompression,
-					ClaimCheckStorageURI:          oldConfig.ClaimCheckStorageURI,
-				}
-			}
-
-			var glueSchemaRegistryConfig *GlueSchemaRegistryConfig
-			if cloned.Sink.KafkaConfig.GlueSchemaRegistryConfig != nil {
-				glueSchemaRegistryConfig = &GlueSchemaRegistryConfig{
-					RegistryName:    cloned.Sink.KafkaConfig.GlueSchemaRegistryConfig.RegistryName,
-					Region:          cloned.Sink.KafkaConfig.GlueSchemaRegistryConfig.Region,
-					AccessKey:       cloned.Sink.KafkaConfig.GlueSchemaRegistryConfig.AccessKey,
-					SecretAccessKey: cloned.Sink.KafkaConfig.GlueSchemaRegistryConfig.SecretAccessKey,
-					Token:           cloned.Sink.KafkaConfig.GlueSchemaRegistryConfig.Token,
+					LargeMessageHandleOption: oldConfig.LargeMessageHandleOption,
 				}
 			}
 
@@ -680,7 +606,6 @@ func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 				InsecureSkipVerify:           cloned.Sink.KafkaConfig.InsecureSkipVerify,
 				CodecConfig:                  codeConfig,
 				LargeMessageHandle:           largeMessageHandle,
-				GlueSchemaRegistryConfig:     glueSchemaRegistryConfig,
 			}
 		}
 		var mysqlConfig *MySQLConfig
@@ -703,37 +628,6 @@ func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 				EnableCachePreparedStatement: cloned.Sink.MySQLConfig.EnableCachePreparedStatement,
 			}
 		}
-		var pulsarConfig *PulsarConfig
-		if cloned.Sink.PulsarConfig != nil {
-			pulsarConfig = &PulsarConfig{
-				TLSKeyFilePath:          cloned.Sink.PulsarConfig.TLSKeyFilePath,
-				TLSCertificateFile:      cloned.Sink.PulsarConfig.TLSCertificateFile,
-				TLSTrustCertsFilePath:   cloned.Sink.PulsarConfig.TLSTrustCertsFilePath,
-				PulsarProducerCacheSize: cloned.Sink.PulsarConfig.PulsarProducerCacheSize,
-				PulsarVersion:           cloned.Sink.PulsarConfig.PulsarVersion,
-				CompressionType:         (*string)(cloned.Sink.PulsarConfig.CompressionType),
-				AuthenticationToken:     cloned.Sink.PulsarConfig.AuthenticationToken,
-				ConnectionTimeout:       (*int)(cloned.Sink.PulsarConfig.ConnectionTimeout),
-				OperationTimeout:        (*int)(cloned.Sink.PulsarConfig.OperationTimeout),
-				BatchingMaxMessages:     cloned.Sink.PulsarConfig.BatchingMaxMessages,
-				BatchingMaxPublishDelay: (*int)(cloned.Sink.PulsarConfig.BatchingMaxPublishDelay),
-				SendTimeout:             (*int)(cloned.Sink.PulsarConfig.SendTimeout),
-				TokenFromFile:           cloned.Sink.PulsarConfig.TokenFromFile,
-				BasicUserName:           cloned.Sink.PulsarConfig.BasicUserName,
-				BasicPassword:           cloned.Sink.PulsarConfig.BasicPassword,
-				AuthTLSCertificatePath:  cloned.Sink.PulsarConfig.AuthTLSCertificatePath,
-				AuthTLSPrivateKeyPath:   cloned.Sink.PulsarConfig.AuthTLSPrivateKeyPath,
-			}
-			if cloned.Sink.PulsarConfig.OAuth2 != nil {
-				pulsarConfig.OAuth2 = &PulsarOAuth2{
-					OAuth2IssuerURL:  cloned.Sink.PulsarConfig.OAuth2.OAuth2IssuerURL,
-					OAuth2Audience:   cloned.Sink.PulsarConfig.OAuth2.OAuth2Audience,
-					OAuth2PrivateKey: cloned.Sink.PulsarConfig.OAuth2.OAuth2PrivateKey,
-					OAuth2ClientID:   cloned.Sink.PulsarConfig.OAuth2.OAuth2ClientID,
-					OAuth2Scope:      cloned.Sink.PulsarConfig.OAuth2.OAuth2Scope,
-				}
-			}
-		}
 		var cloudStorageConfig *CloudStorageConfig
 		if cloned.Sink.CloudStorageConfig != nil {
 			cloudStorageConfig = &CloudStorageConfig{
@@ -748,28 +642,24 @@ func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 		}
 
 		res.Sink = &SinkConfig{
-			Protocol:                         cloned.Sink.Protocol,
-			SchemaRegistry:                   cloned.Sink.SchemaRegistry,
-			DispatchRules:                    dispatchRules,
-			CSVConfig:                        csvConfig,
-			ColumnSelectors:                  columnSelectors,
-			EncoderConcurrency:               cloned.Sink.EncoderConcurrency,
-			Terminator:                       cloned.Sink.Terminator,
-			DateSeparator:                    cloned.Sink.DateSeparator,
-			EnablePartitionSeparator:         cloned.Sink.EnablePartitionSeparator,
-			FileIndexWidth:                   cloned.Sink.FileIndexWidth,
-			EnableKafkaSinkV2:                cloned.Sink.EnableKafkaSinkV2,
-			OnlyOutputUpdatedColumns:         cloned.Sink.OnlyOutputUpdatedColumns,
-			DeleteOnlyOutputHandleKeyColumns: cloned.Sink.DeleteOnlyOutputHandleKeyColumns,
-			KafkaConfig:                      kafkaConfig,
-			MySQLConfig:                      mysqlConfig,
-			PulsarConfig:                     pulsarConfig,
-			CloudStorageConfig:               cloudStorageConfig,
-			SafeMode:                         cloned.Sink.SafeMode,
-		}
-
-		if cloned.Sink.TxnAtomicity != nil {
-			res.Sink.TxnAtomicity = util.AddressOf(string(*cloned.Sink.TxnAtomicity))
+			Protocol:                 cloned.Sink.Protocol,
+			SchemaRegistry:           cloned.Sink.SchemaRegistry,
+			DispatchRules:            dispatchRules,
+			CSVConfig:                csvConfig,
+			ColumnSelectors:          columnSelectors,
+			TxnAtomicity:             string(cloned.Sink.TxnAtomicity),
+			EncoderConcurrency:       cloned.Sink.EncoderConcurrency,
+			Terminator:               cloned.Sink.Terminator,
+			DateSeparator:            cloned.Sink.DateSeparator,
+			EnablePartitionSeparator: cloned.Sink.EnablePartitionSeparator,
+			FileIndexWidth:           cloned.Sink.FileIndexWidth,
+			EnableKafkaSinkV2:        cloned.Sink.EnableKafkaSinkV2,
+			OnlyOutputUpdatedColumns: cloned.Sink.OnlyOutputUpdatedColumns,
+			ContentCompatible:        cloned.Sink.ContentCompatible,
+			KafkaConfig:              kafkaConfig,
+			MySQLConfig:              mysqlConfig,
+			CloudStorageConfig:       cloudStorageConfig,
+			SafeMode:                 cloned.Sink.SafeMode,
 		}
 		if cloned.Sink.AdvanceTimeoutInSec != nil {
 			res.Sink.AdvanceTimeoutInSec = util.AddressOf(*cloned.Sink.AdvanceTimeoutInSec)
@@ -838,7 +728,7 @@ type FilterConfig struct {
 	*MySQLReplicationRules
 	Rules            []string          `json:"rules,omitempty"`
 	IgnoreTxnStartTs []uint64          `json:"ignore_txn_start_ts,omitempty"`
-	EventFilters     []EventFilterRule `json:"event_filters,omitempty"`
+	EventFilters     []EventFilterRule `json:"event_filters"`
 }
 
 // MounterConfig represents mounter config for a changefeed
@@ -927,26 +817,25 @@ type Table struct {
 // SinkConfig represents sink config for a changefeed
 // This is a duplicate of config.SinkConfig
 type SinkConfig struct {
-	Protocol                         *string             `json:"protocol,omitempty"`
-	SchemaRegistry                   *string             `json:"schema_registry,omitempty"`
-	CSVConfig                        *CSVConfig          `json:"csv,omitempty"`
-	DispatchRules                    []*DispatchRule     `json:"dispatchers,omitempty"`
-	ColumnSelectors                  []*ColumnSelector   `json:"column_selectors,omitempty"`
-	TxnAtomicity                     *string             `json:"transaction_atomicity,omitempty"`
-	EncoderConcurrency               *int                `json:"encoder_concurrency,omitempty"`
-	Terminator                       *string             `json:"terminator,omitempty"`
-	DateSeparator                    *string             `json:"date_separator,omitempty"`
-	EnablePartitionSeparator         *bool               `json:"enable_partition_separator,omitempty"`
-	FileIndexWidth                   *int                `json:"file_index_width,omitempty"`
-	EnableKafkaSinkV2                *bool               `json:"enable_kafka_sink_v2,omitempty"`
-	OnlyOutputUpdatedColumns         *bool               `json:"only_output_updated_columns,omitempty"`
-	DeleteOnlyOutputHandleKeyColumns *bool               `json:"delete_only_output_handle_key_columns"`
-	SafeMode                         *bool               `json:"safe_mode,omitempty"`
-	KafkaConfig                      *KafkaConfig        `json:"kafka_config,omitempty"`
-	PulsarConfig                     *PulsarConfig       `json:"pulsar_config,omitempty"`
-	MySQLConfig                      *MySQLConfig        `json:"mysql_config,omitempty"`
-	CloudStorageConfig               *CloudStorageConfig `json:"cloud_storage_config,omitempty"`
-	AdvanceTimeoutInSec              *uint               `json:"advance_timeout,omitempty"`
+	Protocol                 string              `json:"protocol"`
+	SchemaRegistry           string              `json:"schema_registry"`
+	CSVConfig                *CSVConfig          `json:"csv"`
+	DispatchRules            []*DispatchRule     `json:"dispatchers,omitempty"`
+	ColumnSelectors          []*ColumnSelector   `json:"column_selectors"`
+	TxnAtomicity             string              `json:"transaction_atomicity"`
+	EncoderConcurrency       int                 `json:"encoder_concurrency"`
+	Terminator               string              `json:"terminator"`
+	DateSeparator            string              `json:"date_separator"`
+	EnablePartitionSeparator bool                `json:"enable_partition_separator"`
+	FileIndexWidth           int                 `json:"file_index_digit"`
+	EnableKafkaSinkV2        bool                `json:"enable_kafka_sink_v2"`
+	OnlyOutputUpdatedColumns *bool               `json:"only_output_updated_columns"`
+	SafeMode                 *bool               `json:"safe_mode,omitempty"`
+	ContentCompatible        *bool               `json:"content_compatible"`
+	KafkaConfig              *KafkaConfig        `json:"kafka_config,omitempty"`
+	MySQLConfig              *MySQLConfig        `json:"mysql_config,omitempty"`
+	CloudStorageConfig       *CloudStorageConfig `json:"cloud_storage_config,omitempty"`
+	AdvanceTimeoutInSec      *uint               `json:"advance_timeout,omitempty"`
 }
 
 // CSVConfig denotes the csv config
@@ -959,22 +848,12 @@ type CSVConfig struct {
 	BinaryEncodingMethod string `json:"binary_encoding_method"`
 }
 
-// LargeMessageHandleConfig denotes the large message handling config
-// This is the same as config.LargeMessageHandleConfig
-type LargeMessageHandleConfig struct {
-	LargeMessageHandleOption      string `json:"large_message_handle_option"`
-	LargeMessageHandleCompression string `json:"large_message_handle_compression"`
-	ClaimCheckStorageURI          string `json:"claim_check_storage_uri"`
-}
-
 // DispatchRule represents partition rule for a table
 // This is a duplicate of config.DispatchRule
 type DispatchRule struct {
 	Matcher       []string `json:"matcher,omitempty"`
-	PartitionRule string   `json:"partition,omitempty"`
-	IndexName     string   `json:"index,omitempty"`
-	Columns       []string `json:"columns,omitempty"`
-	TopicRule     string   `json:"topic,omitempty"`
+	PartitionRule string   `json:"partition"`
+	TopicRule     string   `json:"topic"`
 }
 
 // ColumnSelector represents a column selector for a table.
@@ -1165,75 +1044,44 @@ type CodecConfig struct {
 	AvroBigintUnsignedHandlingMode *string `json:"avro_bigint_unsigned_handling_mode,omitempty"`
 }
 
-// PulsarConfig represents a pulsar sink configuration
-type PulsarConfig struct {
-	TLSKeyFilePath          *string       `json:"tls-certificate-path,omitempty"`
-	TLSCertificateFile      *string       `json:"tls-private-key-path,omitempty"`
-	TLSTrustCertsFilePath   *string       `json:"tls-trust-certs-file-path,omitempty"`
-	PulsarProducerCacheSize *int32        `json:"pulsar-producer-cache-size,omitempty"`
-	PulsarVersion           *string       `json:"pulsar-version,omitempty"`
-	CompressionType         *string       `json:"compression-type,omitempty"`
-	AuthenticationToken     *string       `json:"authentication-token,omitempty"`
-	ConnectionTimeout       *int          `json:"connection-timeout,omitempty"`
-	OperationTimeout        *int          `json:"operation-timeout,omitempty"`
-	BatchingMaxMessages     *uint         `json:"batching-max-messages,omitempty"`
-	BatchingMaxPublishDelay *int          `json:"batching-max-publish-delay,omitempty"`
-	SendTimeout             *int          `json:"send-timeout,omitempty"`
-	TokenFromFile           *string       `json:"token-from-file,omitempty"`
-	BasicUserName           *string       `json:"basic-user-name,omitempty"`
-	BasicPassword           *string       `json:"basic-password,omitempty"`
-	AuthTLSCertificatePath  *string       `json:"auth-tls-certificate-path,omitempty"`
-	AuthTLSPrivateKeyPath   *string       `json:"auth-tls-private-key-path,omitempty"`
-	OAuth2                  *PulsarOAuth2 `json:"oauth2,omitempty"`
-}
-
-// PulsarOAuth2 is the configuration for OAuth2
-type PulsarOAuth2 struct {
-	OAuth2IssuerURL  string `json:"oauth2-issuer-url,omitempty"`
-	OAuth2Audience   string `json:"oauth2-audience,omitempty"`
-	OAuth2PrivateKey string `json:"oauth2-private-key,omitempty"`
-	OAuth2ClientID   string `json:"oauth2-client-id,omitempty"`
-	OAuth2Scope      string `json:"oauth2-scope,omitempty"`
-}
-
 // KafkaConfig represents a kafka sink configuration
 type KafkaConfig struct {
-	PartitionNum                 *int32                    `json:"partition_num,omitempty"`
-	ReplicationFactor            *int16                    `json:"replication_factor,omitempty"`
-	KafkaVersion                 *string                   `json:"kafka_version,omitempty"`
-	MaxMessageBytes              *int                      `json:"max_message_bytes,omitempty"`
-	Compression                  *string                   `json:"compression,omitempty"`
-	KafkaClientID                *string                   `json:"kafka_client_id,omitempty"`
-	AutoCreateTopic              *bool                     `json:"auto_create_topic,omitempty"`
-	DialTimeout                  *string                   `json:"dial_timeout,omitempty"`
-	WriteTimeout                 *string                   `json:"write_timeout,omitempty"`
-	ReadTimeout                  *string                   `json:"read_timeout,omitempty"`
-	RequiredAcks                 *int                      `json:"required_acks,omitempty"`
-	SASLUser                     *string                   `json:"sasl_user,omitempty"`
-	SASLPassword                 *string                   `json:"sasl_password,omitempty"`
-	SASLMechanism                *string                   `json:"sasl_mechanism,omitempty"`
-	SASLGssAPIAuthType           *string                   `json:"sasl_gssapi_auth_type,omitempty"`
-	SASLGssAPIKeytabPath         *string                   `json:"sasl_gssapi_keytab_path,omitempty"`
-	SASLGssAPIKerberosConfigPath *string                   `json:"sasl_gssapi_kerberos_config_path,omitempty"`
-	SASLGssAPIServiceName        *string                   `json:"sasl_gssapi_service_name,omitempty"`
-	SASLGssAPIUser               *string                   `json:"sasl_gssapi_user,omitempty"`
-	SASLGssAPIPassword           *string                   `json:"sasl_gssapi_password,omitempty"`
-	SASLGssAPIRealm              *string                   `json:"sasl_gssapi_realm,omitempty"`
-	SASLGssAPIDisablePafxfast    *bool                     `json:"sasl_gssapi_disable_pafxfast,omitempty"`
-	SASLOAuthClientID            *string                   `json:"sasl_oauth_client_id,omitempty"`
-	SASLOAuthClientSecret        *string                   `json:"sasl_oauth_client_secret,omitempty"`
-	SASLOAuthTokenURL            *string                   `json:"sasl_oauth_token_url,omitempty"`
-	SASLOAuthScopes              []string                  `json:"sasl_oauth_scopes,omitempty"`
-	SASLOAuthGrantType           *string                   `json:"sasl_oauth_grant_type,omitempty"`
-	SASLOAuthAudience            *string                   `json:"sasl_oauth_audience,omitempty"`
-	EnableTLS                    *bool                     `json:"enable_tls,omitempty"`
-	CA                           *string                   `json:"ca,omitempty"`
-	Cert                         *string                   `json:"cert,omitempty"`
-	Key                          *string                   `json:"key,omitempty"`
-	InsecureSkipVerify           *bool                     `json:"insecure_skip_verify,omitempty"`
-	CodecConfig                  *CodecConfig              `json:"codec_config,omitempty"`
-	LargeMessageHandle           *LargeMessageHandleConfig `json:"large_message_handle,omitempty"`
-	GlueSchemaRegistryConfig     *GlueSchemaRegistryConfig `json:"glue_schema_registry_config,omitempty"`
+	PartitionNum                 *int32       `json:"partition_num,omitempty"`
+	ReplicationFactor            *int16       `json:"replication_factor,omitempty"`
+	KafkaVersion                 *string      `json:"kafka_version,omitempty"`
+	MaxMessageBytes              *int         `json:"max_message_bytes,omitempty"`
+	Compression                  *string      `json:"compression,omitempty"`
+	KafkaClientID                *string      `json:"kafka_client_id,omitempty"`
+	AutoCreateTopic              *bool        `json:"auto_create_topic,omitempty"`
+	DialTimeout                  *string      `json:"dial_timeout,omitempty"`
+	WriteTimeout                 *string      `json:"write_timeout,omitempty"`
+	ReadTimeout                  *string      `json:"read_timeout,omitempty"`
+	RequiredAcks                 *int         `json:"required_acks,omitempty"`
+	SASLUser                     *string      `json:"sasl_user,omitempty"`
+	SASLPassword                 *string      `json:"sasl_password,omitempty"`
+	SASLMechanism                *string      `json:"sasl_mechanism,omitempty"`
+	SASLGssAPIAuthType           *string      `json:"sasl_gssapi_auth_type,omitempty"`
+	SASLGssAPIKeytabPath         *string      `json:"sasl_gssapi_keytab_path,omitempty"`
+	SASLGssAPIKerberosConfigPath *string      `json:"sasl_gssapi_kerberos_config_path,omitempty"`
+	SASLGssAPIServiceName        *string      `json:"sasl_gssapi_service_name,omitempty"`
+	SASLGssAPIUser               *string      `json:"sasl_gssapi_user,omitempty"`
+	SASLGssAPIPassword           *string      `json:"sasl_gssapi_password,omitempty"`
+	SASLGssAPIRealm              *string      `json:"sasl_gssapi_realm,omitempty"`
+	SASLGssAPIDisablePafxfast    *bool        `json:"sasl_gssapi_disable_pafxfast,omitempty"`
+	SASLOAuthClientID            *string      `json:"sasl_oauth_client_id,omitempty"`
+	SASLOAuthClientSecret        *string      `json:"sasl_oauth_client_secret,omitempty"`
+	SASLOAuthTokenURL            *string      `json:"sasl_oauth_token_url,omitempty"`
+	SASLOAuthScopes              []string     `json:"sasl_oauth_scopes,omitempty"`
+	SASLOAuthGrantType           *string      `json:"sasl_oauth_grant_type,omitempty"`
+	SASLOAuthAudience            *string      `json:"sasl_oauth_audience,omitempty"`
+	EnableTLS                    *bool        `json:"enable_tls,omitempty"`
+	CA                           *string      `json:"ca,omitempty"`
+	Cert                         *string      `json:"cert,omitempty"`
+	Key                          *string      `json:"key,omitempty"`
+	InsecureSkipVerify           *bool        `json:"insecure_skip_verify,omitempty"`
+	CodecConfig                  *CodecConfig `json:"codec_config,omitempty"`
+
+	LargeMessageHandle *LargeMessageHandleConfig `json:"large_message_handle,omitempty"`
 }
 
 // MySQLConfig represents a MySQL sink configuration
@@ -1275,15 +1123,8 @@ type ChangefeedStatus struct {
 	LastWarning  *RunningError `json:"last_warning,omitempty"`
 }
 
-// GlueSchemaRegistryConfig represents a glue schema registry configuration
-type GlueSchemaRegistryConfig struct {
-	// Name of the schema registry
-	RegistryName string `json:"registry_name"`
-	// Region of the schema registry
-	Region string `json:"region"`
-	// AccessKey of the schema registry
-	AccessKey string `json:"access_key,omitempty"`
-	// SecretAccessKey of the schema registry
-	SecretAccessKey string `json:"secret_access_key,omitempty"`
-	Token           string `json:"token,omitempty"`
+// LargeMessageHandleConfig denotes the large message handling config
+// This is the same as config.LargeMessageHandleConfig
+type LargeMessageHandleConfig struct {
+	LargeMessageHandleOption string `json:"large_message_handle_option"`
 }

@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pingcap/log"
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tidb/parser"
 	timodel "github.com/pingcap/tidb/parser/model"
@@ -42,7 +41,6 @@ func TestIsSchema(t *testing.T) {
 		{tifilter.InspectionSchemaName, true},
 		{tifilter.PerformanceSchemaName, true},
 		{tifilter.MetricSchemaName, true},
-		{TiCDCSystemSchema, true},
 	}
 	for _, c := range cases {
 		require.Equal(t, c.result, isSysSchema(c.schema))
@@ -163,7 +161,6 @@ func TestDDLToTypeSpecialDDL(t *testing.T) {
 	}
 	p := parser.New()
 	for _, c := range cases {
-		log.Info(c.ddl)
 		et, err := ddlToEventType(p, c.ddl, c.jobType)
 		if c.err != nil {
 			errRFC, ok := cerror.RFCCode(err)

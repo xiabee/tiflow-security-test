@@ -19,8 +19,7 @@ import (
 
 // Dispatcher is an abstraction for dispatching rows into different partitions
 type Dispatcher interface {
-	// DispatchRowChangedEvent returns an index of partitions or a partition key
-	//  according to RowChangedEvent.
+	// DispatchRowChangedEvent returns an index of partitions according to RowChangedEvent.
 	// Concurrency Note: This method is thread-safe.
-	DispatchRowChangedEvent(row *model.RowChangedEvent, partitionNum int32) (int32, string, error)
+	DispatchRowChangedEvent(row *model.RowChangedEvent, partitionNum int32) int32
 }

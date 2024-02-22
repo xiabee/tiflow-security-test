@@ -34,6 +34,7 @@ import (
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/metrics"
@@ -46,39 +47,29 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-func init() {
-	serverConfig := config.GetGlobalServerConfig().Clone()
-	serverConfig.TZ = "UTC"
-	config.StoreGlobalServerConfig(serverConfig)
-}
-
 func newMySQLBackendWithoutDB(ctx context.Context) *mysqlBackend {
 	cfg := pmysql.NewConfig()
 	cfg.BatchDMLEnable = false
 	return &mysqlBackend{
-		statistics: metrics.NewStatistics(ctx,
-			model.DefaultChangeFeedID("test"),
-			sink.TxnSink),
-		cfg: cfg,
+		statistics: metrics.NewStatistics(ctx, sink.TxnSink),
+		cfg:        cfg,
 	}
 }
 
 func newMySQLBackend(
 	ctx context.Context,
-	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
 	dbConnFactory pmysql.Factory,
 ) (*mysqlBackend, error) {
 	ctx1, cancel := context.WithCancel(ctx)
-	statistics := metrics.NewStatistics(ctx1, changefeedID, sink.TxnSink)
+	statistics := metrics.NewStatistics(ctx1, sink.TxnSink)
 	cancel() // Cancel background goroutines in returned metrics.Statistics.
 	raw := sinkURI.Query()
 	raw.Set("batch-dml-enable", "true")
 	sinkURI.RawQuery = raw.Encode()
 
-	backends, err := NewMySQLBackends(ctx, changefeedID,
-		sinkURI, replicaConfig, dbConnFactory, statistics)
+	backends, err := NewMySQLBackends(ctx, sinkURI, replicaConfig, dbConnFactory, statistics)
 	if err != nil {
 		return nil, err
 	}
@@ -112,29 +103,23 @@ func TestPrepareDML(t *testing.T) {
 				sqls:    []string{},
 				values:  [][]interface{}{},
 			},
-		},
-		// delete event
-		{
+		}, {
 			input: []*model.RowChangedEvent{
 				{
 					StartTs:  418658114257813514,
 					CommitTs: 418658114257813515,
 					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk"},
-					PreColumns: []*model.Column{
-						nil,
-						{
-							Name:  "a1",
-							Type:  mysql.TypeLong,
-							Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
-							Value: 1,
-						},
-						{
-							Name:  "a3",
-							Type:  mysql.TypeLong,
-							Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
-							Value: 1,
-						},
-					},
+					PreColumns: []*model.Column{nil, {
+						Name:  "a1",
+						Type:  mysql.TypeLong,
+						Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
+						Value: 1,
+					}, {
+						Name:  "a3",
+						Type:  mysql.TypeLong,
+						Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
+						Value: 1,
+					}},
 					IndexColumns: [][]int{{1, 2}},
 				},
 			},
@@ -145,42 +130,35 @@ func TestPrepareDML(t *testing.T) {
 				rowCount:        1,
 				approximateSize: 74,
 			},
-		},
-		// insert event.
-		{
+		}, {
 			input: []*model.RowChangedEvent{
 				{
 					StartTs:  418658114257813516,
 					CommitTs: 418658114257813517,
 					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk"},
-					Columns: []*model.Column{
-						nil,
-						{
-							Name:  "a1",
-							Type:  mysql.TypeLong,
-							Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
-							Value: 2,
-						},
-						{
-							Name:  "a3",
-							Type:  mysql.TypeLong,
-							Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
-							Value: 2,
-						},
-					},
+					Columns: []*model.Column{nil, {
+						Name:  "a1",
+						Type:  mysql.TypeLong,
+						Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
+						Value: 2,
+					}, {
+						Name:  "a3",
+						Type:  mysql.TypeLong,
+						Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
+						Value: 2,
+					}},
 					IndexColumns: [][]int{{1, 2}},
 				},
 			},
 			expected: &preparedDMLs{
 				startTs:         []model.Ts{418658114257813516},
-				sqls:            []string{"INSERT INTO `common_1`.`uk_without_pk` (`a1`,`a3`) VALUES (?,?)"},
+				sqls:            []string{"REPLACE INTO `common_1`.`uk_without_pk` (`a1`,`a3`) VALUES (?,?)"},
 				values:          [][]interface{}{{2, 2}},
 				rowCount:        1,
-				approximateSize: 63,
+				approximateSize: 64,
 			},
 		},
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ms := newMySQLBackendWithoutDB(ctx)
@@ -217,11 +195,11 @@ func TestAdjustSQLMode(t *testing.T) {
 	}
 
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	sinkURI, err := url.Parse("mysql://127.0.0.1:4000/?time-zone=UTC&worker-count=1" +
 		"&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed),
-		sinkURI, config.GetDefaultReplicaConfig(), mockGetDBConn)
+	sink, err := newMySQLBackend(ctx, sinkURI, config.GetDefaultReplicaConfig(), mockGetDBConn)
 	require.Nil(t, err)
 	require.Nil(t, sink.Close())
 }
@@ -281,9 +259,10 @@ func TestNewMySQLTimeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	sinkURI, err := url.Parse(fmt.Sprintf("mysql://%s/?read-timeout=1s&timeout=1s", addr))
 	require.Nil(t, err)
-	_, err = newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	_, err = newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), pmysql.CreateMySQLDBConn)
 	require.Equal(t, driver.ErrBadConn, errors.Cause(err))
 }
@@ -315,6 +294,7 @@ func TestNewMySQLBackendExecDML(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	// TODO: Need to test txn sink behavior when cache-prep-stmts is true
 	// I did some attempts to write tests when cache-prep-stmts is true, but failed.
 	// The reason is that I can't find a way to prepare a statement in sqlmock connection,
@@ -322,7 +302,7 @@ func TestNewMySQLBackendExecDML(t *testing.T) {
 	sinkURI, err := url.Parse(
 		"mysql://127.0.0.1:4000/?time-zone=UTC&worker-count=1&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	sink, err := newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), mockGetDBConn)
 	require.Nil(t, err)
 
@@ -441,10 +421,11 @@ func TestExecDMLRollbackErrDatabaseNotExists(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	sinkURI, err := url.Parse(
 		"mysql://127.0.0.1:4000/?time-zone=UTC&worker-count=1&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	sink, err := newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), mockGetDBConnErrDatabaseNotExists)
 	require.Nil(t, err)
 
@@ -512,10 +493,11 @@ func TestExecDMLRollbackErrTableNotExists(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	sinkURI, err := url.Parse(
 		"mysql://127.0.0.1:4000/?time-zone=UTC&worker-count=1&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	sink, err := newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), mockGetDBConnErrDatabaseNotExists)
 	require.Nil(t, err)
 
@@ -585,10 +567,11 @@ func TestExecDMLRollbackErrRetryable(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	sinkURI, err := url.Parse(
 		"mysql://127.0.0.1:4000/?time-zone=UTC&worker-count=1&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	sink, err := newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), mockGetDBConnErrDatabaseNotExists)
 	require.Nil(t, err)
 	sink.setDMLMaxRetry(2)
@@ -647,11 +630,12 @@ func TestMysqlSinkNotRetryErrDupEntry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	sinkURI, err := url.Parse(
 		"mysql://127.0.0.1:4000/?time-zone=UTC&worker-count=1&safe-mode=false" +
 			"&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	sink, err := newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), mockDBInsertDupEntry)
 	require.Nil(t, err)
 	sink.setDMLMaxRetry(1)
@@ -694,10 +678,11 @@ func TestNewMySQLBackend(t *testing.T) {
 	defer cancel()
 
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	sinkURI, err := url.Parse("mysql://127.0.0.1:4000/?time-zone=UTC&worker-count=1" +
 		"&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	sink, err := newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), mockGetDBConn)
 
 	require.Nil(t, err)
@@ -728,11 +713,12 @@ func TestNewMySQLBackendWithIPv6Address(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	// See https://www.ietf.org/rfc/rfc2732.txt, we have to use brackets to wrap IPv6 address.
 	sinkURI, err := url.Parse("mysql://[::1]:3306/?time-zone=UTC&worker-count=1" +
 		"&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	sink, err := newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), mockGetDBConn)
 	require.Nil(t, err)
 	require.Nil(t, sink.Close())
@@ -765,10 +751,11 @@ func TestGBKSupported(t *testing.T) {
 
 	ctx := context.Background()
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	sinkURI, err := url.Parse("mysql://127.0.0.1:4000/?time-zone=UTC&worker-count=1" +
 		"&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	sink, err := newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), mockGetDBConn)
 	require.Nil(t, err)
 
@@ -822,10 +809,11 @@ func TestMySQLSinkExecDMLError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changefeed := "test-changefeed"
+	contextutil.PutChangefeedIDInCtx(ctx, model.DefaultChangeFeedID(changefeed))
 	sinkURI, err := url.Parse(
 		"mysql://127.0.0.1:4000/?time-zone=UTC&worker-count=1&cache-prep-stmts=false")
 	require.Nil(t, err)
-	sink, err := newMySQLBackend(ctx, model.DefaultChangeFeedID(changefeed), sinkURI,
+	sink, err := newMySQLBackend(ctx, sinkURI,
 		config.GetDefaultReplicaConfig(), mockGetDBConn)
 	require.Nil(t, err)
 
@@ -1166,6 +1154,7 @@ func TestMysqlSinkSafeModeOff(t *testing.T) {
 	defer cancel()
 	ms := newMySQLBackendWithoutDB(ctx)
 	ms.cfg.SafeMode = false
+	ms.cfg.EnableOldValue = true
 	for _, tc := range testCases {
 		ms.events = make([]*dmlsink.TxnCallbackableEvent, 1)
 		ms.events[0] = &dmlsink.TxnCallbackableEvent{
@@ -1240,10 +1229,10 @@ func TestPrepareBatchDMLs(t *testing.T) {
 			},
 			expected: &preparedDMLs{
 				startTs:         []model.Ts{418658114257813514},
-				sqls:            []string{"DELETE FROM `common_1`.`uk_without_pk` WHERE (`a1` = ? AND `a3` = ?) OR (`a1` = ? AND `a3` = ?)"},
+				sqls:            []string{"DELETE FROM `common_1`.`uk_without_pk` WHERE (`a1`,`a3`) IN ((?,?),(?,?))"},
 				values:          [][]interface{}{{1, "你好", 2, "世界"}},
 				rowCount:        2,
-				approximateSize: 115,
+				approximateSize: 93,
 			},
 		},
 		{ // insert event
@@ -1370,16 +1359,17 @@ func TestPrepareBatchDMLs(t *testing.T) {
 			},
 			expected: &preparedDMLs{
 				startTs: []model.Ts{418658114257813516},
-				sqls: []string{"UPDATE `common_1`.`uk_without_pk` " +
-					"SET `a1`=CASE WHEN `a1` = ? AND `a3` = ? THEN ? WHEN `a1` = ? AND `a3` = ? THEN ? END, " +
-					"`a3`=CASE WHEN `a1` = ? AND `a3` = ? THEN ? WHEN `a1` = ? AND `a3` = ? THEN ? END " +
-					"WHERE (`a1` = ? AND `a3` = ?) OR (`a1` = ? AND `a3` = ?)"},
+				sqls: []string{"UPDATE `common_1`.`uk_without_pk` SET `a1`=CASE " +
+					"WHEN ROW(`a1`,`a3`)=ROW(?,?) THEN ? WHEN ROW(`a1`,`a3`)=ROW(?,?) " +
+					"THEN ? END, `a3`=CASE WHEN ROW(`a1`,`a3`)=ROW(?,?) " +
+					"THEN ? WHEN ROW(`a1`,`a3`)=ROW(?,?) THEN ? END WHERE " +
+					"ROW(`a1`,`a3`) IN (ROW(?,?),ROW(?,?))"},
 				values: [][]interface{}{{
 					1, "开发", 2, 3, "纽约", 4, 1, "开发", "测试", 3,
 					"纽约", "北京", 1, "开发", 3, "纽约",
 				}},
 				rowCount:        2,
-				approximateSize: 283,
+				approximateSize: 278,
 			},
 		},
 		// mixed event, and test delete， update, insert are ordered
@@ -1516,11 +1506,12 @@ func TestPrepareBatchDMLs(t *testing.T) {
 			expected: &preparedDMLs{
 				startTs: []model.Ts{418658114257813514},
 				sqls: []string{
-					"DELETE FROM `common_1`.`uk_without_pk` WHERE (`a1` = ? AND `a3` = ?) OR (`a1` = ? AND `a3` = ?)",
-					"UPDATE `common_1`.`uk_without_pk` " +
-						"SET `a1`=CASE WHEN `a1` = ? AND `a3` = ? THEN ? WHEN `a1` = ? AND `a3` = ? THEN ? END, " +
-						"`a3`=CASE WHEN `a1` = ? AND `a3` = ? THEN ? WHEN `a1` = ? AND `a3` = ? THEN ? END " +
-						"WHERE (`a1` = ? AND `a3` = ?) OR (`a1` = ? AND `a3` = ?)",
+					"DELETE FROM `common_1`.`uk_without_pk` WHERE (`a1`,`a3`) IN ((?,?),(?,?))",
+					"UPDATE `common_1`.`uk_without_pk` SET `a1`=CASE " +
+						"WHEN ROW(`a1`,`a3`)=ROW(?,?) THEN ? WHEN ROW(`a1`,`a3`)=ROW(?,?) " +
+						"THEN ? END, `a3`=CASE WHEN ROW(`a1`,`a3`)=ROW(?,?) " +
+						"THEN ? WHEN ROW(`a1`,`a3`)=ROW(?,?) THEN ? END WHERE " +
+						"ROW(`a1`,`a3`) IN (ROW(?,?),ROW(?,?))",
 					"INSERT INTO `common_1`.`uk_without_pk` (`a1`,`a3`) VALUES (?,?)",
 				},
 				values: [][]interface{}{
@@ -1532,7 +1523,7 @@ func TestPrepareBatchDMLs(t *testing.T) {
 					{2, "你好"},
 				},
 				rowCount:        5,
-				approximateSize: 467,
+				approximateSize: 440,
 			},
 		},
 		// update event and downstream is mysql and without pk
@@ -1637,6 +1628,7 @@ func TestPrepareBatchDMLs(t *testing.T) {
 	ms := newMySQLBackendWithoutDB(ctx)
 	ms.cfg.BatchDMLEnable = true
 	ms.cfg.SafeMode = false
+	ms.cfg.EnableOldValue = true
 	for _, tc := range testCases {
 		ms.cfg.IsTiDB = tc.isTiDB
 		ms.events = make([]*dmlsink.TxnCallbackableEvent, 1)
@@ -1912,9 +1904,9 @@ func TestBackendGenUpdateSQL(t *testing.T) {
 			ms.cfg.MaxMultiUpdateRowCount,
 			[]string{
 				"UPDATE `db`.`tb1` SET " +
-					"`id`=CASE WHEN `id` = ? THEN ? WHEN `id` = ? THEN ? END, " +
-					"`name`=CASE WHEN `id` = ? THEN ? WHEN `id` = ? THEN ? END " +
-					"WHERE (`id` = ?) OR (`id` = ?)",
+					"`id`=CASE WHEN `id`=? THEN ? WHEN `id`=? THEN ? END, " +
+					"`name`=CASE WHEN `id`=? THEN ? WHEN `id`=? THEN ? END " +
+					"WHERE `id` IN (?,?)",
 			},
 			[][]interface{}{
 				{1, 1, 2, 2, 1, "aa", 2, "bb", 1, 2},

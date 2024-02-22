@@ -78,8 +78,6 @@ var nonGlobalDDLs = map[timodel.ActionType]struct{}{
 	timodel.ActionReorganizePartition:          {},
 	timodel.ActionAlterTTLInfo:                 {},
 	timodel.ActionAlterTTLRemove:               {},
-	timodel.ActionAlterTablePartitioning:       {},
-	timodel.ActionRemovePartitioning:           {},
 }
 
 var redoBarrierDDLs = map[timodel.ActionType]struct{}{
@@ -89,8 +87,6 @@ var redoBarrierDDLs = map[timodel.ActionType]struct{}{
 	timodel.ActionTruncateTablePartition: {},
 	timodel.ActionRecoverTable:           {},
 	timodel.ActionReorganizePartition:    {},
-	timodel.ActionAlterTablePartitioning: {},
-	timodel.ActionRemovePartitioning:     {},
 }
 
 // ddlManager holds the pending DDL events of all tables and responsible for
@@ -458,6 +454,7 @@ func (m *ddlManager) getAllTableNextDDL() []*model.DDLEvent {
 // barrier returns ddlResolvedTs and tableBarrier
 func (m *ddlManager) barrier() *schedulepb.BarrierWithMinTs {
 	barrier := schedulepb.NewBarrierWithMinTs(m.ddlResolvedTs)
+
 	tableBarrierMap := make(map[model.TableID]model.Ts)
 	ddls := m.getAllTableNextDDL()
 	if m.justSentDDL != nil {

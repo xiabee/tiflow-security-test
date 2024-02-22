@@ -56,6 +56,7 @@ func TestChangefeedStateUpdate(t *testing.T) {
     "sort-dir": "",
     "config": {
         "case-sensitive": true,
+        "enable-old-value": false,
         "force-replicate": false,
         "check-gc-safe-point": true,
         "filter": {
@@ -66,6 +67,11 @@ func TestChangefeedStateUpdate(t *testing.T) {
         },
         "mounter": {
             "worker-num": 16
+        },
+        "sink": {
+            "dispatchers": null,
+            "protocol": "open-protocol",
+            "advance-timeout-in-sec": 150
         }
     },
     "state": "normal",
@@ -117,15 +123,8 @@ func TestChangefeedStateUpdate(t *testing.T) {
 						Mounter:          &config.MounterConfig{WorkerNum: 16},
 						Scheduler:        config.GetDefaultReplicaConfig().Scheduler,
 						Sink: &config.SinkConfig{
-							Terminator:                       putil.AddressOf(config.CRLF),
-							AdvanceTimeoutInSec:              putil.AddressOf(uint(150)),
-							CSVConfig:                        config.GetDefaultReplicaConfig().Sink.CSVConfig,
-							EncoderConcurrency:               config.GetDefaultReplicaConfig().Sink.EncoderConcurrency,
-							DateSeparator:                    config.GetDefaultReplicaConfig().Sink.DateSeparator,
-							EnablePartitionSeparator:         config.GetDefaultReplicaConfig().Sink.EnablePartitionSeparator,
-							EnableKafkaSinkV2:                config.GetDefaultReplicaConfig().Sink.EnableKafkaSinkV2,
-							OnlyOutputUpdatedColumns:         config.GetDefaultReplicaConfig().Sink.OnlyOutputUpdatedColumns,
-							DeleteOnlyOutputHandleKeyColumns: config.GetDefaultReplicaConfig().Sink.DeleteOnlyOutputHandleKeyColumns,
+							Protocol:            "open-protocol",
+							AdvanceTimeoutInSec: putil.AddressOf(uint(150)),
 						},
 						Consistent: config.GetDefaultReplicaConfig().Consistent,
 						Integrity:  config.GetDefaultReplicaConfig().Integrity,
@@ -180,19 +179,12 @@ func TestChangefeedStateUpdate(t *testing.T) {
 						Filter:           &config.FilterConfig{Rules: []string{"*.*"}},
 						Mounter:          &config.MounterConfig{WorkerNum: 16},
 						Sink: &config.SinkConfig{
-							Terminator:                       putil.AddressOf(config.CRLF),
-							AdvanceTimeoutInSec:              putil.AddressOf(uint(150)),
-							CSVConfig:                        config.GetDefaultReplicaConfig().Sink.CSVConfig,
-							EncoderConcurrency:               config.GetDefaultReplicaConfig().Sink.EncoderConcurrency,
-							DateSeparator:                    config.GetDefaultReplicaConfig().Sink.DateSeparator,
-							EnablePartitionSeparator:         config.GetDefaultReplicaConfig().Sink.EnablePartitionSeparator,
-							EnableKafkaSinkV2:                config.GetDefaultReplicaConfig().Sink.EnableKafkaSinkV2,
-							OnlyOutputUpdatedColumns:         config.GetDefaultReplicaConfig().Sink.OnlyOutputUpdatedColumns,
-							DeleteOnlyOutputHandleKeyColumns: config.GetDefaultReplicaConfig().Sink.DeleteOnlyOutputHandleKeyColumns,
+							Protocol:            "open-protocol",
+							AdvanceTimeoutInSec: putil.AddressOf(uint(150)),
 						},
+						Consistent: config.GetDefaultReplicaConfig().Consistent,
 						Scheduler:  config.GetDefaultReplicaConfig().Scheduler,
 						Integrity:  config.GetDefaultReplicaConfig().Integrity,
-						Consistent: config.GetDefaultReplicaConfig().Consistent,
 						ChangefeedErrorStuckDuration: config.
 							GetDefaultReplicaConfig().ChangefeedErrorStuckDuration,
 						SQLMode:      config.GetDefaultReplicaConfig().SQLMode,
@@ -249,15 +241,8 @@ func TestChangefeedStateUpdate(t *testing.T) {
 						Filter:           &config.FilterConfig{Rules: []string{"*.*"}},
 						Mounter:          &config.MounterConfig{WorkerNum: 16},
 						Sink: &config.SinkConfig{
-							Terminator:                       putil.AddressOf(config.CRLF),
-							AdvanceTimeoutInSec:              putil.AddressOf(uint(150)),
-							EncoderConcurrency:               config.GetDefaultReplicaConfig().Sink.EncoderConcurrency,
-							CSVConfig:                        config.GetDefaultReplicaConfig().Sink.CSVConfig,
-							DateSeparator:                    config.GetDefaultReplicaConfig().Sink.DateSeparator,
-							EnablePartitionSeparator:         config.GetDefaultReplicaConfig().Sink.EnablePartitionSeparator,
-							EnableKafkaSinkV2:                config.GetDefaultReplicaConfig().Sink.EnableKafkaSinkV2,
-							OnlyOutputUpdatedColumns:         config.GetDefaultReplicaConfig().Sink.OnlyOutputUpdatedColumns,
-							DeleteOnlyOutputHandleKeyColumns: config.GetDefaultReplicaConfig().Sink.DeleteOnlyOutputHandleKeyColumns,
+							Protocol:            "open-protocol",
+							AdvanceTimeoutInSec: putil.AddressOf(uint(150)),
 						},
 						Consistent: config.GetDefaultReplicaConfig().Consistent,
 						Scheduler:  config.GetDefaultReplicaConfig().Scheduler,
@@ -331,10 +316,7 @@ func TestChangefeedStateUpdate(t *testing.T) {
 			err = state.Update(util.NewEtcdKey(k), value, false)
 			require.Nil(t, err)
 		}
-		require.True(t, cmp.Equal(
-			state, &tc.expected,
-			cmpopts.IgnoreUnexported(ChangefeedReactorState{}),
-		),
+		require.True(t, cmp.Equal(state, &tc.expected, cmpopts.IgnoreUnexported(ChangefeedReactorState{})),
 			fmt.Sprintf("%d,%s", i, cmp.Diff(state, &tc.expected, cmpopts.IgnoreUnexported(ChangefeedReactorState{}))))
 	}
 }
@@ -349,7 +331,7 @@ func TestPatchInfo(t *testing.T) {
 	})
 	stateTester.MustApplyPatches()
 	defaultConfig := config.GetDefaultReplicaConfig()
-	cfInfo := &model.ChangeFeedInfo{
+	require.Equal(t, state.Info, &model.ChangeFeedInfo{
 		SinkURI: "123",
 		Engine:  model.SortUnified,
 		Config: &config.ReplicaConfig{
@@ -363,16 +345,13 @@ func TestPatchInfo(t *testing.T) {
 			SQLMode:                      defaultConfig.SQLMode,
 			SyncedStatus:                 defaultConfig.SyncedStatus,
 		},
-	}
-	cfInfo.RmUnusedFields()
-	require.Equal(t, state.Info, cfInfo)
-
+	})
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
 		info.StartTs = 6
 		return info, true, nil
 	})
 	stateTester.MustApplyPatches()
-	cfInfo = &model.ChangeFeedInfo{
+	require.Equal(t, state.Info, &model.ChangeFeedInfo{
 		SinkURI: "123",
 		StartTs: 6,
 		Engine:  model.SortUnified,
@@ -387,10 +366,7 @@ func TestPatchInfo(t *testing.T) {
 			SQLMode:                      defaultConfig.SQLMode,
 			SyncedStatus:                 defaultConfig.SyncedStatus,
 		},
-	}
-	cfInfo.RmUnusedFields()
-	require.Equal(t, state.Info, cfInfo)
-
+	})
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
 		return nil, true, nil
 	})

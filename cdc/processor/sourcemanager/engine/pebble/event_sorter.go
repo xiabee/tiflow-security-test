@@ -14,6 +14,8 @@
 package pebble
 
 import (
+	"encoding/binary"
+	"hash/fnv"
 	"math"
 	"strconv"
 	"sync"
@@ -25,9 +27,8 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine/pebble/encoding"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	metrics "github.com/pingcap/tiflow/cdc/sorter/db"
 	"github.com/pingcap/tiflow/pkg/chann"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
@@ -41,6 +42,7 @@ var (
 type EventSorter struct {
 	// Read-only fields.
 	changefeedID model.ChangeFeedID
+	uniqueID     uint32
 	dbs          []*pebble.DB
 	channs       []*chann.DrainableChann[eventWithTableID]
 	serde        encoding.MsgPackGenSerde
@@ -52,8 +54,8 @@ type EventSorter struct {
 	// Following fields are protected by mu.
 	mu         sync.RWMutex
 	isClosed   bool
-	onResolves []func(tablepb.Span, model.Ts)
-	tables     *spanz.HashMap[*tableState]
+	onResolves []func(model.TableID, model.Ts)
+	tables     map[model.TableID]*tableState
 }
 
 // EventIter implements sorter.EventIterator.
@@ -70,15 +72,16 @@ type EventIter struct {
 func New(ID model.ChangeFeedID, dbs []*pebble.DB) *EventSorter {
 	channs := make([]*chann.DrainableChann[eventWithTableID], 0, len(dbs))
 	for i := 0; i < len(dbs); i++ {
-		channs = append(channs, chann.NewAutoDrainChann[eventWithTableID](chann.Cap(128)))
+		channs = append(channs, chann.NewDrainableChann[eventWithTableID](chann.Cap(128)))
 	}
 
 	eventSorter := &EventSorter{
 		changefeedID: ID,
+		uniqueID:     genUniqueID(),
 		dbs:          dbs,
 		channs:       channs,
 		closed:       make(chan struct{}),
-		tables:       spanz.NewHashMap[*tableState](),
+		tables:       make(map[model.TableID]*tableState),
 	}
 
 	for i := range eventSorter.dbs {
@@ -110,53 +113,48 @@ func (s *EventSorter) IsTableBased() bool {
 }
 
 // AddTable implements engine.SortEngine.
-func (s *EventSorter) AddTable(span tablepb.Span, startTs model.Ts) {
+func (s *EventSorter) AddTable(tableID model.TableID) {
 	s.mu.Lock()
-	if _, exists := s.tables.Get(span); exists {
+	if _, exists := s.tables[tableID]; exists {
 		s.mu.Unlock()
 		log.Warn("add an exist table",
 			zap.String("namespace", s.changefeedID.Namespace),
 			zap.String("changefeed", s.changefeedID.ID),
-			zap.Stringer("span", &span))
+			zap.Int64("tableID", tableID))
 		return
 	}
-	state := &tableState{
-		uniqueID: genUniqueID(),
-		ch:       s.channs[getDB(span, len(s.dbs))],
-	}
-	state.maxReceivedResolvedTs.Store(startTs)
-	s.tables.ReplaceOrInsert(span, state)
+	s.tables[tableID] = &tableState{ch: s.channs[getDB(tableID, len(s.dbs))]}
 	s.mu.Unlock()
 }
 
 // RemoveTable implements engine.SortEngine.
-func (s *EventSorter) RemoveTable(span tablepb.Span) {
+func (s *EventSorter) RemoveTable(tableID model.TableID) {
 	s.mu.Lock()
-	if _, exists := s.tables.Get(span); !exists {
+	if _, exists := s.tables[tableID]; !exists {
 		s.mu.Unlock()
 		log.Warn("remove an unexist table",
 			zap.String("namespace", s.changefeedID.Namespace),
 			zap.String("changefeed", s.changefeedID.ID),
-			zap.Stringer("span", &span))
+			zap.Int64("tableID", tableID))
 		return
 	}
-	s.tables.Delete(span)
+	delete(s.tables, tableID)
 	s.mu.Unlock()
 }
 
 // Add implements engine.SortEngine.
 //
 // Panics if the table doesn't exist.
-func (s *EventSorter) Add(span tablepb.Span, events ...*model.PolymorphicEvent) {
+func (s *EventSorter) Add(tableID model.TableID, events ...*model.PolymorphicEvent) {
 	s.mu.RLock()
-	state, exists := s.tables.Get(span)
+	state, exists := s.tables[tableID]
 	s.mu.RUnlock()
 
 	if !exists {
 		log.Panic("add events into an non-existent table",
 			zap.String("namespace", s.changefeedID.Namespace),
 			zap.String("changefeed", s.changefeedID.ID),
-			zap.Stringer("span", &span))
+			zap.Int64("tableID", tableID))
 	}
 
 	maxCommitTs := state.maxReceivedCommitTs.Load()
@@ -173,28 +171,31 @@ func (s *EventSorter) Add(span tablepb.Span, events ...*model.PolymorphicEvent) 
 				state.maxReceivedCommitTs.Store(maxCommitTs)
 			}
 		}
-		state.ch.In() <- eventWithTableID{uniqueID: state.uniqueID, span: span, event: event}
+		state.ch.In() <- eventWithTableID{tableID, event}
 	}
 }
 
 // OnResolve implements engine.SortEngine.
-func (s *EventSorter) OnResolve(action func(tablepb.Span, model.Ts)) {
+func (s *EventSorter) OnResolve(action func(model.TableID, model.Ts)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onResolves = append(s.onResolves, action)
 }
 
 // FetchByTable implements engine.SortEngine.
-func (s *EventSorter) FetchByTable(span tablepb.Span, lowerBound, upperBound engine.Position) engine.EventIterator {
-	iterReadDur := engine.SorterIterReadDuration()
+func (s *EventSorter) FetchByTable(
+	tableID model.TableID,
+	lowerBound, upperBound engine.Position,
+) engine.EventIterator {
+	iterReadDur := metrics.SorterIterReadDuration()
 	eventIter := &EventIter{
-		tableID:      span.TableID,
+		tableID:      tableID,
 		serde:        s.serde,
 		nextDuration: iterReadDur.WithLabelValues(s.changefeedID.Namespace, s.changefeedID.ID, "next"),
 	}
 
 	s.mu.RLock()
-	state, exists := s.tables.Get(span)
+	state, exists := s.tables[tableID]
 	s.mu.RUnlock()
 	if !exists {
 		return eventIter
@@ -205,16 +206,16 @@ func (s *EventSorter) FetchByTable(span tablepb.Span, lowerBound, upperBound eng
 		log.Panic("fetch unresolved events",
 			zap.String("namespace", s.changefeedID.Namespace),
 			zap.String("changefeed", s.changefeedID.ID),
-			zap.Stringer("span", &span),
+			zap.Int64("tableID", tableID),
 			zap.Uint64("upperBound", upperBound.CommitTs),
 			zap.Uint64("lowerBound", lowerBound.CommitTs),
 			zap.Uint64("resolved", sortedResolved))
 	}
 
-	db := s.dbs[getDB(span, len(s.dbs))]
+	db := s.dbs[getDB(tableID, len(s.dbs))]
 
 	seekStart := time.Now()
-	iter := iterTable(db, state.uniqueID, span.TableID, lowerBound, upperBound)
+	iter := iterTable(db, s.uniqueID, tableID, lowerBound, upperBound)
 	iterReadDur.WithLabelValues(s.changefeedID.Namespace, s.changefeedID.ID, "first").
 		Observe(time.Since(seekStart).Seconds())
 
@@ -231,16 +232,16 @@ func (s *EventSorter) FetchAllTables(lowerBound engine.Position) engine.EventIte
 }
 
 // CleanByTable implements engine.SortEngine.
-func (s *EventSorter) CleanByTable(span tablepb.Span, upperBound engine.Position) error {
+func (s *EventSorter) CleanByTable(tableID model.TableID, upperBound engine.Position) error {
 	s.mu.RLock()
-	state, exists := s.tables.Get(span)
+	state, exists := s.tables[tableID]
 	s.mu.RUnlock()
 
 	if !exists {
 		return nil
 	}
 
-	return s.cleanTable(state, span, upperBound)
+	return s.cleanTable(state, tableID, upperBound)
 }
 
 // CleanAllTables implements engine.EventSortEngine.
@@ -254,16 +255,16 @@ func (s *EventSorter) CleanAllTables(upperBound engine.Position) error {
 // GetStatsByTable implements engine.SortEngine.
 //
 // Panics if the table doesn't exist.
-func (s *EventSorter) GetStatsByTable(span tablepb.Span) engine.TableStats {
+func (s *EventSorter) GetStatsByTable(tableID model.TableID) engine.TableStats {
 	s.mu.RLock()
-	state, exists := s.tables.Get(span)
+	state, exists := s.tables[tableID]
 	s.mu.RUnlock()
 
 	if !exists {
 		log.Panic("Get stats from an non-existent table",
 			zap.String("namespace", s.changefeedID.Namespace),
 			zap.String("changefeed", s.changefeedID.ID),
-			zap.Stringer("span", &span))
+			zap.Int64("tableID", tableID))
 	}
 
 	maxCommitTs := state.maxReceivedCommitTs.Load()
@@ -297,23 +298,12 @@ func (s *EventSorter) Close() error {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	var err error
-	s.tables.Range(func(span tablepb.Span, state *tableState) bool {
-		// TODO: maybe we can use a unified prefix for a changefeed,
-		//       so that we can speed up it when closing a changefeed.
-		if err1 := s.cleanTable(state, span); err1 != nil {
-			err = err1
-			return false
+	for tableID, state := range s.tables {
+		if err := s.cleanTable(state, tableID); err != nil {
+			return err
 		}
-		return true
-	})
-	return err
-}
-
-// SlotsAndHasher implements engine.SortEngine.
-func (s *EventSorter) SlotsAndHasher() (slotCount int, hasher func(tablepb.Span, int) int) {
-	return len(s.dbs), spanz.HashTableSpan
+	}
+	return nil
 }
 
 // Next implements sorter.EventIterator.
@@ -353,13 +343,11 @@ func (s *EventIter) Close() error {
 }
 
 type eventWithTableID struct {
-	uniqueID uint32
-	span     tablepb.Span
-	event    *model.PolymorphicEvent
+	tableID model.TableID
+	event   *model.PolymorphicEvent
 }
 
 type tableState struct {
-	uniqueID       uint32
 	ch             *chann.DrainableChann[eventWithTableID]
 	sortedResolved atomic.Uint64 // indicates events are ready for fetching.
 	// For statistics.
@@ -376,19 +364,19 @@ func (s *EventSorter) handleEvents(
 	fetchTokens, ioTokens chan struct{},
 ) {
 	idstr := strconv.Itoa(id + 1)
-	writeDuration := engine.SorterWriteDuration().WithLabelValues(idstr)
-	writeBytes := engine.SorterWriteBytes().WithLabelValues(idstr)
+	writeDuration := metrics.SorterWriteDuration().WithLabelValues(idstr)
+	writeBytes := metrics.SorterWriteBytes().WithLabelValues(idstr)
 
 	batch := db.NewBatch()
 	writeOpts := &pebble.WriteOptions{Sync: false}
-	newResolved := spanz.NewHashMap[model.Ts]()
+	newResolved := make(map[model.TableID]model.Ts)
 
 	handleItem := func(item eventWithTableID) {
 		if item.event.IsResolved() {
-			newResolved.ReplaceOrInsert(item.span, item.event.CRTs)
+			newResolved[item.tableID] = item.event.CRTs
 			return
 		}
-		key := encoding.EncodeKey(item.uniqueID, uint64(item.span.TableID), item.event)
+		key := encoding.EncodeKey(s.uniqueID, uint64(item.tableID), item.event)
 		value, err := s.serde.Marshal(item.event, []byte{})
 		if err != nil {
 			log.Panic("failed to marshal event", zap.Error(err),
@@ -469,34 +457,31 @@ func (s *EventSorter) handleEvents(
 			batch = db.NewBatch()
 		}
 
-		newResolved.Range(func(span tablepb.Span, resolved uint64) bool {
+		for table, resolved := range newResolved {
 			s.mu.RLock()
-			ts, ok := s.tables.Get(span)
+			ts, ok := s.tables[table]
 			if !ok {
 				log.Debug("Table is removed, skip updating resolved",
 					zap.String("namespace", s.changefeedID.Namespace),
 					zap.String("changefeed", s.changefeedID.ID),
-					zap.Stringer("span", &span),
+					zap.Int64("table", table),
 					zap.Uint64("resolved", resolved))
 				s.mu.RUnlock()
-				return false
+				continue
 			}
 			ts.sortedResolved.Store(resolved)
 			for _, onResolve := range s.onResolves {
-				onResolve(span, resolved)
+				onResolve(table, resolved)
 			}
 			s.mu.RUnlock()
-			return true
-		})
-		newResolved = spanz.NewHashMap[model.Ts]()
+		}
+		newResolved = make(map[model.TableID]model.Ts)
 		ioTokens <- struct{}{}
 	}
 }
 
 // cleanTable uses DeleteRange to clean data of the given table.
-func (s *EventSorter) cleanTable(
-	state *tableState, span tablepb.Span, upperBound ...engine.Position,
-) error {
+func (s *EventSorter) cleanTable(state *tableState, tableID model.TableID, upperBound ...engine.Position) error {
 	var toClean engine.Position
 	var start, end []byte
 
@@ -513,12 +498,11 @@ func (s *EventSorter) cleanTable(
 		return nil
 	}
 
-	start = encoding.EncodeTsKey(state.uniqueID, uint64(span.TableID), 0)
+	start = encoding.EncodeTsKey(s.uniqueID, uint64(tableID), 0)
 	toCleanNext := toClean.Next()
-	end = encoding.EncodeTsKey(
-		state.uniqueID, uint64(span.TableID), toCleanNext.CommitTs, toCleanNext.StartTs)
+	end = encoding.EncodeTsKey(s.uniqueID, uint64(tableID), toCleanNext.CommitTs, toCleanNext.StartTs)
 
-	db := s.dbs[getDB(span, len(s.dbs))]
+	db := s.dbs[getDB(tableID, len(s.dbs))]
 	err := db.DeleteRange(start, end, &pebble.WriteOptions{Sync: false})
 	if err != nil {
 		return err
@@ -540,6 +524,11 @@ func genUniqueID() uint32 {
 	return atomic.AddUint32(&uniqueIDGen, 1)
 }
 
-func getDB(span tablepb.Span, dbCount int) int {
-	return spanz.HashTableSpan(span, dbCount)
+// TODO: add test for this function.
+func getDB(tableID model.TableID, dbCount int) int {
+	h := fnv.New64()
+	b := [8]byte{}
+	binary.LittleEndian.PutUint64(b[:], uint64(tableID))
+	h.Write(b[:])
+	return int(h.Sum64() % uint64(dbCount))
 }

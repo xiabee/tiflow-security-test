@@ -96,7 +96,7 @@ func newMockNode(t *testing.T, id NodeID) *MockNode {
 	ret.wg.Add(1)
 	go func() {
 		defer ret.wg.Done()
-		err := ret.Server.Run(ctx, nil)
+		err := ret.Server.Run(ctx)
 		require.Error(t, err)
 		require.Regexp(t, ".*context canceled.*", err.Error())
 	}()
@@ -114,6 +114,7 @@ func newMockNode(t *testing.T, id NodeID) *MockNode {
 // Close closes the mock node.
 func (n *MockNode) Close() {
 	n.Router.Close()
+	n.Router.Wait()
 	n.cancel()
 	n.wg.Wait()
 }

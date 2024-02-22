@@ -20,7 +20,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	pclock "github.com/pingcap/tiflow/engine/pkg/clock"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
@@ -136,25 +135,4 @@ func (c *clock4Test) Run(ctx context.Context) {
 }
 
 func (c *clock4Test) Stop() {
-}
-
-type monotonicClock struct {
-	clock pclock.Clock
-}
-
-// NewMonotonicClock return a new monotonic clock.
-func NewMonotonicClock(pClock pclock.Clock) Clock {
-	return &monotonicClock{
-		clock: pClock,
-	}
-}
-
-func (c *monotonicClock) CurrentTime() time.Time {
-	return c.clock.Now()
-}
-
-func (c *monotonicClock) Run(ctx context.Context) {
-}
-
-func (c *monotonicClock) Stop() {
 }

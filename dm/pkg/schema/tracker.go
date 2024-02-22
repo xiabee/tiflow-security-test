@@ -32,11 +32,11 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/filter"
 	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/sqlexec"
-	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	fr "github.com/pingcap/tiflow/dm/pkg/func-rollback"
 	"github.com/pingcap/tiflow/dm/pkg/log"
@@ -161,7 +161,7 @@ func NewTestTracker(
 	logger log.Logger,
 ) (*Tracker, error) {
 	tr := NewTracker()
-	err := tr.Init(ctx, task, int(conn.LCTableNamesSensitive), downstreamConn, logger)
+	err := tr.Init(ctx, task, int(utils.LCTableNamesSensitive), downstreamConn, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +229,7 @@ func (tr *Tracker) GetCreateTable(ctx context.Context, table *filter.Table) (str
 	if err != nil {
 		return "", err
 	}
-	return conn.CreateTableSQLToOneRow(result.String()), nil
+	return utils.CreateTableSQLToOneRow(result.String()), nil
 }
 
 // AllSchemas returns all schemas visible to the tracker (excluding system tables).
@@ -465,6 +465,17 @@ func (dt *downstreamTracker) getTableInfoByCreateStmt(tctx *tcontext.Context, ta
 		return nil, dmterror.ErrSchemaTrackerInvalidCreateTableStmt.Delegate(err, createStr)
 	}
 
+	// suppress ErrTooLongKey
+	strictSQLModeBackup := dt.se.GetSessionVars().StrictSQLMode
+	dt.se.GetSessionVars().StrictSQLMode = false
+	// support drop PK
+	enableClusteredIndexBackup := dt.se.GetSessionVars().EnableClusteredIndex
+	dt.se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOff
+	defer func() {
+		dt.se.GetSessionVars().StrictSQLMode = strictSQLModeBackup
+		dt.se.GetSessionVars().EnableClusteredIndex = enableClusteredIndexBackup
+	}()
+
 	ti, err := ddl.BuildTableInfoWithStmt(dt.se, stmtNode.(*ast.CreateTableStmt), mysql.DefaultCharset, "", nil)
 	if err != nil {
 		return nil, dmterror.ErrSchemaTrackerCannotMockDownstreamTable.Delegate(err, createStr)
@@ -480,7 +491,7 @@ func (dt *downstreamTracker) initDownStreamSQLModeAndParser(tctx *tcontext.Conte
 	if err != nil {
 		return dmterror.ErrSchemaTrackerCannotSetDownstreamSQLMode.Delegate(err, mysql.DefaultSQLMode)
 	}
-	stmtParser, err := conn.GetParserFromSQLModeStr(mysql.DefaultSQLMode)
+	stmtParser, err := utils.GetParserFromSQLModeStr(mysql.DefaultSQLMode)
 	if err != nil {
 		return dmterror.ErrSchemaTrackerCannotInitDownstreamParser.Delegate(err, mysql.DefaultSQLMode)
 	}

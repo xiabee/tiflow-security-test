@@ -9,7 +9,6 @@ import (
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
-	openapi "github.com/pingcap/tiflow/engine/pkg/openapi"
 )
 
 // MockJobHTTPClient is a mock of JobHTTPClient interface.
@@ -48,11 +47,11 @@ func (mr *MockJobHTTPClientMockRecorder) Close() *gomock.Call {
 }
 
 // GetJobDetail mocks base method.
-func (m *MockJobHTTPClient) GetJobDetail(arg0 context.Context, arg1, arg2 string) ([]byte, *openapi.HTTPError) {
+func (m *MockJobHTTPClient) GetJobDetail(arg0 context.Context, arg1, arg2 string) ([]byte, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetJobDetail", arg0, arg1, arg2)
 	ret0, _ := ret[0].([]byte)
-	ret1, _ := ret[1].(*openapi.HTTPError)
+	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 

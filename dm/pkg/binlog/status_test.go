@@ -31,7 +31,7 @@ func TestGetBinaryLogs(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := tcontext.Background()
-	baseDB := conn.NewBaseDBForTest(db)
+	baseDB := conn.NewBaseDB(db)
 
 	cases := []struct {
 		rows  *sqlmock.Rows

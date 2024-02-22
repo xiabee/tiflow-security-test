@@ -17,7 +17,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/errors"
+	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/proto/p2p"
 	"go.uber.org/atomic"
 )
@@ -62,7 +63,7 @@ func (s *streamHandle) Send(ctx context.Context, response p2p.SendMessageRespons
 	// isClosed to be false. If this happens, we will try to send
 	// to a closed channel, which will panic.
 	if s.isClosed.Load() {
-		return errors.ErrPeerMessageInternalSenderClosed.GenWithStackByArgs()
+		return cerror.ErrPeerMessageInternalSenderClosed.GenWithStackByArgs()
 	}
 
 	select {
@@ -70,7 +71,7 @@ func (s *streamHandle) Send(ctx context.Context, response p2p.SendMessageRespons
 		return errors.Trace(ctx.Err())
 	case s.sendCh <- response:
 	case <-s.closeCh:
-		return errors.ErrPeerMessageInternalSenderClosed.GenWithStackByArgs()
+		return cerror.ErrPeerMessageInternalSenderClosed.GenWithStackByArgs()
 	}
 
 	return nil

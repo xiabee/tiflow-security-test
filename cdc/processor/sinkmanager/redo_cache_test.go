@@ -18,7 +18,6 @@ import (
 
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,8 +27,7 @@ func TestRedoEventCache(t *testing.T) {
 	var broken uint64
 	var popRes popResult
 
-	span := spanz.TableIDToComparableSpan(3)
-	appender := cache.maybeCreateAppender(span, engine.Position{StartTs: 3, CommitTs: 4})
+	appender := cache.maybeCreateAppender(3, engine.Position{StartTs: 3, CommitTs: 4})
 
 	appender.push(&model.RowChangedEvent{StartTs: 3, CommitTs: 4}, 100, engine.Position{})
 	appender.push(&model.RowChangedEvent{StartTs: 3, CommitTs: 4}, 200, engine.Position{})
@@ -82,7 +80,7 @@ func TestRedoEventCache(t *testing.T) {
 	require.Equal(t, 0, len(appender.events))
 	require.True(t, appender.broken)
 
-	appender = cache.maybeCreateAppender(span, engine.Position{StartTs: 11, CommitTs: 12})
+	appender = cache.maybeCreateAppender(3, engine.Position{StartTs: 11, CommitTs: 12})
 	require.False(t, appender.broken)
 	require.Equal(t, uint64(0), appender.upperBound.StartTs)
 	require.Equal(t, uint64(0), appender.upperBound.CommitTs)
@@ -90,8 +88,7 @@ func TestRedoEventCache(t *testing.T) {
 
 func TestRedoEventCacheAllPopBranches(t *testing.T) {
 	cache := newRedoEventCache(model.ChangeFeedID{}, 1000)
-	span := spanz.TableIDToComparableSpan(3)
-	appender := cache.maybeCreateAppender(span, engine.Position{StartTs: 101, CommitTs: 111})
+	appender := cache.maybeCreateAppender(1, engine.Position{StartTs: 101, CommitTs: 111})
 	var batch []*model.RowChangedEvent
 	var ok bool
 	var popRes popResult

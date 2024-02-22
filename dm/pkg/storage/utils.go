@@ -26,7 +26,7 @@ import (
 	bstorage "github.com/pingcap/tidb/br/pkg/storage"
 )
 
-// AdjustPath adjust rawURL, add uniqueId as path suffix, returns a new path.
+// AdjustPath adjust rawURL, add uniqueId as path suffix, returns a new path and will not change rawURL.
 // This function supports both local dir or s3 path. It can be used like the following:
 // 1. adjust subtask's `LoaderConfig.Dir`, uniqueID like `.test-mysql01`.
 // 2. add Lightning checkpoint's fileName to rawURL, uniqueID like `/tidb_lightning_checkpoint.pb`.
@@ -76,7 +76,7 @@ func TrimPath(rawURL string, uniqueID string) (string, error) {
 	return u.String(), err
 }
 
-// IsS3Path judges if rawURL is s3 path.
+// isS3Path judges if rawURL is s3 path.
 func IsS3Path(rawURL string) bool {
 	if rawURL == "" {
 		return false
@@ -86,18 +86,6 @@ func IsS3Path(rawURL string) bool {
 		return false
 	}
 	return u.Scheme == "s3"
-}
-
-// IsLocalDiskPath judges if path is local disk path.
-func IsLocalDiskPath(rawURL string) bool {
-	if rawURL == "" {
-		return false
-	}
-	u, err := bstorage.ParseRawURL(rawURL)
-	if err != nil {
-		return false
-	}
-	return u.Scheme == "" || u.Scheme == "file"
 }
 
 // CreateStorage creates ExternalStore.
@@ -167,18 +155,17 @@ func OpenFile(ctx context.Context, dir, fileName string, storage bstorage.Extern
 			return nil, err
 		}
 	}
-	return storage.Open(ctx, fileName, nil)
+	return storage.Open(ctx, fileName)
 }
 
 func IsNotExistError(err error) bool {
 	if err == nil {
 		return false
 	}
-	err = errors.Cause(err)
 	if os.IsNotExist(err) {
 		return true
 	}
-	if aerr, ok := err.(awserr.Error); ok {
+	if aerr, ok := errors.Cause(err).(awserr.Error); ok {
 		switch aerr.Code() {
 		case s3.ErrCodeNoSuchBucket, s3.ErrCodeNoSuchKey, "NotFound":
 			return true

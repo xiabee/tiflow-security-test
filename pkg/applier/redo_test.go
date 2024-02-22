@@ -25,8 +25,8 @@ import (
 	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/redo/reader"
-	mysqlDDL "github.com/pingcap/tiflow/cdc/sink/ddlsink/mysql"
-	"github.com/pingcap/tiflow/cdc/sink/dmlsink/txn"
+	mysqlDDL "github.com/pingcap/tiflow/cdc/sinkv2/ddlsink/mysql"
+	"github.com/pingcap/tiflow/cdc/sinkv2/eventsink/txn"
 	pmysql "github.com/pingcap/tiflow/pkg/sink/mysql"
 	"github.com/stretchr/testify/require"
 )
@@ -203,8 +203,7 @@ func TestApply(t *testing.T) {
 
 	cfg := &RedoApplierConfig{
 		SinkURI: "mysql://127.0.0.1:4000/?worker-count=1&max-txn-row=1" +
-			"&tidb_placement_mode=ignore&safe-mode=true&cache-prep-stmts=false" +
-			"&multi-stmt-enable=false",
+			"&tidb_placement_mode=ignore&safe-mode=true&multi-stmt-enable=false",
 	}
 	ap := NewRedoApplier(cfg)
 	err := ap.Apply(ctx)
@@ -245,7 +244,6 @@ func getMockDB(t *testing.T) *sql.DB {
 		Number:  1305,
 		Message: "FUNCTION test.tidb_version does not exist",
 	})
-
 	mock.ExpectBegin()
 	mock.ExpectExec("USE `test`;").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("create table checkpoint(id int)").WillReturnResult(sqlmock.NewResult(1, 1))
@@ -259,7 +257,7 @@ func getMockDB(t *testing.T) *sql.DB {
 
 	// First, apply row which commitTs equal to resolvedTs
 	mock.ExpectBegin()
-	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a` = ? AND `b` = ?)").
+	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a`,`b`) IN ((?,?))").
 		WithArgs(1, "2").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("REPLACE INTO `test`.`t1` (`a`,`b`) VALUES (?,?)").

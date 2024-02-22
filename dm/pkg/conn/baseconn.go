@@ -72,33 +72,17 @@ import (
 // each connection should have ability to retry on some common errors (e.g. tmysql.ErrTiKVServerTimeout) or maybe some specify errors in the future
 // and each connection also should have ability to reset itself during some specify connection error (e.g. driver.ErrBadConn).
 type BaseConn struct {
-	DBConn        *sql.Conn
-	Scope         terror.ErrScope
+	DBConn *sql.Conn
+
 	RetryStrategy retry.Strategy
 }
 
 // NewBaseConn builds BaseConn to connect real DB.
-func NewBaseConn(conn *sql.Conn, scope terror.ErrScope, strategy retry.Strategy) *BaseConn {
+func NewBaseConn(conn *sql.Conn, strategy retry.Strategy) *BaseConn {
 	if strategy == nil {
 		strategy = &retry.FiniteRetryStrategy{}
 	}
-	return &BaseConn{
-		DBConn:        conn,
-		Scope:         scope,
-		RetryStrategy: strategy,
-	}
-}
-
-// NewBaseConnForTest builds BaseConn to connect real DB for test.
-func NewBaseConnForTest(conn *sql.Conn, strategy retry.Strategy) *BaseConn {
-	if strategy == nil {
-		strategy = &retry.FiniteRetryStrategy{}
-	}
-	return &BaseConn{
-		DBConn:        conn,
-		Scope:         terror.ScopeNotSet,
-		RetryStrategy: strategy,
-	}
+	return &BaseConn{conn, strategy}
 }
 
 // SetRetryStrategy set retry strategy for baseConn.
@@ -275,17 +259,8 @@ func (conn *BaseConn) ApplyRetryStrategy(tctx *tcontext.Context, params retry.Pa
 	return conn.RetryStrategy.Apply(tctx, params, operateFn)
 }
 
-// close returns the connection to the connection pool, has the same meaning of sql.Conn.Close.
+// close should not be used by functions other than BaseDB.CloseBaseConn.
 func (conn *BaseConn) close() error {
-	if conn == nil || conn.DBConn == nil {
-		return nil
-	}
-	return conn.DBConn.Close()
-}
-
-// forceClose will close the underlying connection completely,
-// should not be used by functions other than BaseDB.ForceCloseConn.
-func (conn *BaseConn) forceClose() error {
 	if conn == nil || conn.DBConn == nil {
 		return nil
 	}

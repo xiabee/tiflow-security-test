@@ -108,17 +108,16 @@ func NewRowChange(
 		sourceTableInfo: sourceTableInfo,
 	}
 
-	colCount := ret.ColumnCount()
-	if preValues != nil && len(preValues) != colCount {
+	if preValues != nil && len(preValues) != len(sourceTableInfo.Columns) {
 		log.L().DPanic("preValues length not equal to sourceTableInfo columns",
 			zap.Int("preValues", len(preValues)),
-			zap.Int("sourceTableInfo", colCount),
+			zap.Int("sourceTableInfo", len(sourceTableInfo.Columns)),
 			zap.Stringer("sourceTable", sourceTable))
 	}
-	if postValues != nil && len(postValues) != colCount {
+	if postValues != nil && len(postValues) != len(sourceTableInfo.Columns) {
 		log.L().DPanic("postValues length not equal to sourceTableInfo columns",
 			zap.Int("postValues", len(postValues)),
-			zap.Int("sourceTableInfo", colCount),
+			zap.Int("sourceTableInfo", len(sourceTableInfo.Columns)),
 			zap.Stringer("sourceTable", sourceTable))
 	}
 
@@ -177,16 +176,8 @@ func (r *RowChange) TargetTableID() string {
 }
 
 // ColumnCount returns the number of columns of this RowChange.
-// TiDB TableInfo contains some internal columns like expression index, they
-// are not included in this count.
 func (r *RowChange) ColumnCount() int {
-	c := 0
-	for _, col := range r.sourceTableInfo.Columns {
-		if !col.Hidden {
-			c++
-		}
-	}
-	return c
+	return len(r.sourceTableInfo.Columns)
 }
 
 // SourceTableInfo returns the TableInfo of source table.

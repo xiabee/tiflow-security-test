@@ -10,8 +10,8 @@ SINK_TYPE=$1
 MAX_RETRIES=50
 
 function run() {
-	# storage and kafka are the same as mysql
-	if [ "$SINK_TYPE" != "mysql" ]; then
+	# mysql and kafka are the same
+	if [ "$SINK_TYPE" == "kafka" ]; then
 		return
 	fi
 

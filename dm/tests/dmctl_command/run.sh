@@ -8,20 +8,13 @@ WORK_DIR=$TEST_DIR/$TEST_NAME
 
 db_name=$TEST_NAME
 
-# 44 normal help message + 1 "PASS" line
-help_cnt=45
-
-function get_uuid() {
-	uuid=$(echo "show variables like '%server_uuid%';" | MYSQL_PWD=123456 mysql -uroot -h$1 -P$2 | awk 'FNR == 2 {print $2}')
-	echo $uuid
-}
+help_cnt=46
 
 function run() {
 	# check dmctl output with help flag
 	# it should usage for root command
 	$PWD/bin/dmctl.test DEVEL --help >$WORK_DIR/help.log
-	# since golang 1.20 there's one coverage line for each package, so we filter them
-	help_msg=$(cat $WORK_DIR/help.log | grep -v 'coverage:')
+	help_msg=$(cat $WORK_DIR/help.log)
 	help_msg_cnt=$(echo "${help_msg}" | wc -l | xargs)
 	if [ "$help_msg_cnt" != $help_cnt ]; then
 		echo "dmctl case 1 help failed: $help_msg"
@@ -161,7 +154,20 @@ function run() {
 	fi
 }
 
-function check_privilege() {
+function checktask_full_mode_conn() {
+	# full mode
+	# dumpers: (2 + 2) for each
+	# loaders: 5 + 1 = 6
+	run_sql_source1 "set @@GLOBAL.max_connections=3;"
+	check_task_not_pass $cur/conf/dm-task3.yaml # dumper threads too few
+	run_sql_source1 "set @@GLOBAL.max_connections=4;"
+	check_task_pass $cur/conf/dm-task3.yaml
+
+	run_sql_tidb "set @@GLOBAL.max_connections=5;" # loader threads too few
+	check_task_not_pass $cur/conf/dm-task3.yaml
+	run_sql_tidb "set @@GLOBAL.max_connections=6;"
+	check_task_pass $cur/conf/dm-task3.yaml
+
 	# test no enough privilege
 	cp $cur/conf/dm-task3.yaml $WORK_DIR/temp.yaml
 	sed -i "s/  user: \"root\"/  user: \"test1\"/g" $WORK_DIR/temp.yaml
@@ -191,6 +197,38 @@ function check_task_lightning() {
 	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
 		"check-task $cur/conf/dm-task2.yaml" \
 		"task precheck cannot accurately check the number of connection needed for Lightning" 1
+}
+
+function check_full_mode_conn() {
+	# TODO: currently, pool-size are not efficacious for Lightning
+	# which simply determines the concurrency by hardware conditions.
+	# This should be solved in the future.
+	run_sql_tidb "set @@GLOBAL.max_connections=151;"
+	run_sql_source1 "set @@GLOBAL.max_connections=151;"
+	run_sql_source2 "set @@GLOBAL.max_connections=151;"
+	run_sql_tidb "drop database if exists dmctl_conn"
+	run_sql_both_source "drop database if exists dmctl_conn"
+	run_sql_both_source "create database dmctl_conn"
+	# ref: many_tables/run.sh
+	for ((i = 0; i <= 1000; ++i)); do
+		run_sql_source1 "create table dmctl_conn.test_$i(id int primary key)"
+		run_sql_source1 "insert into dmctl_conn.test_$i values (1),(2),(3),(4),(5)"
+	done
+	dmctl_start_task_standalone "$cur/conf/dm-task3.yaml" --remove-meta
+	run_sql_source1 'SHOW PROCESSLIST;'
+	check_rows_equal 5 # 4 + 1 for SHOWPROCESSLIST
+
+	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"query-status test" \
+		"Load" 1
+	run_sql_tidb 'SHOW PROCESSLIST;'
+	check_rows_equal 7 # (5 + 1) + 1 for SHOW PROCESSLIST= 7
+
+	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
+		"stop-task test" \
+		"\"result\": true" 2
+	run_sql_tidb "drop database if exists dm_meta" # cleanup checkpoint
+	run_sql_tidb "drop database if exists dmctl_conn"
 }
 
 function run_validation_start_stop_cmd {
@@ -432,77 +470,25 @@ function run_validation_start_stop_cmd {
 	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
 		"query-status test2" \
 		"\"unit\": \"Sync\"" 1
-	uuid=($(get_uuid $MYSQL_HOST2 $MYSQL_PORT2))
-	echo "--> (fail) validation update: on non-existed validator"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update test -s $SOURCE_ID2 --cutover-binlog-gtid $uuid:1-999" \
-		"\"result\": false" 1 \
-		"validator not found for task" 1
 
 	echo "--> (success) validation start: start all tasks"
 	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
 		"validation start --all-task --mode fast" \
 		"\"result\": true" 1
-
-	echo "--> (fail) validation update: missing task-name"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update" \
-		"\`task-name\` should be set" 1
-	echo "--> (fail) validation update: multi tasks"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update test test2" \
-		"should specify only one" 1
-	echo "--> (fail) validation update: non-existed subtask"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update xxxxx" \
-		"\"result\": false" 1 \
-		"cannot get subtask by task name \`xxxxx\`" 1
-	echo "--> (fail) validation update: non-exist source"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update -s xxxxx test" \
-		"\"result\": false" 1 \
-		"cannot get subtask by task name \`test\` and sources" 1
-	echo "--> (fail) validation update: not specify cutover-binlog-gtid"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update test -s $SOURCE_ID2" \
-		"\"result\": false" 1 \
-		"didn't specify cutover-binlog-gtid" 1
-	echo "--> (fail) validation update: not specify cutover-binlog-pos"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update test2 -s $SOURCE_ID1" \
-		"\"result\": false" 1 \
-		"didn't specify cutover-binlog-pos" 1
-	echo "--> (fail) validation update: invalid cutover-binlog-pos"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update test -s $SOURCE_ID1 --cutover-binlog-pos xxx" \
-		"invalid binlog pos" 1
-	echo "--> (fail) validation update: specify both cutover-binlog-pos and cutover-binlog-gtid"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update test -s $SOURCE_ID1 --cutover-binlog-pos '(mysql-bin.000001, 2345)' --cutover-binlog-gtid $uuid:1-999" \
-		"you must specify either one of" 1
-	echo "--> (success) validation update: on exist source"
-	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
-		"validation update test -s $SOURCE_ID2 --cutover-binlog-gtid $uuid:1-999" \
-		"\"result\": true" 2
-
 	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
 		"validation status test" \
 		"\"result\": true" 1 \
 		"\"mode\": \"full\"" 0 \
 		"\"mode\": \"fast\"" 2 \
 		"\"stage\": \"Running\"" 2 \
-		"\"stage\": \"Stopped\"" 0 \
-		"\"cutoverBinlogPos\"" 2 \
-		"\"cutoverBinlogGtid\": \"$uuid:1-999\"" 1
+		"\"stage\": \"Stopped\"" 0
 	run_dm_ctl_with_retry $WORK_DIR "127.0.0.1:$MASTER_PORT" \
 		"validation status test2" \
 		"\"result\": true" 1 \
 		"\"mode\": \"full\"" 0 \
 		"\"mode\": \"fast\"" 1 \
 		"\"stage\": \"Running\"" 1 \
-		"\"stage\": \"Stopped\"" 0 \
-		"\"cutoverBinlogPos\"" 1 \
-		"\"cutoverBinlogGtid\": \"$uuid:1-999\"" 0
+		"\"stage\": \"Stopped\"" 0
 
 	echo "--> (success) validation stop: stop all tasks"
 	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
@@ -777,7 +763,8 @@ function run_check_task() {
 	run_sql_source1 "set @@GLOBAL.max_connections=151;"
 	run_sql_source2 "set @@GLOBAL.max_connections=151;"
 	check_task_lightning
-	check_privilege
+	check_full_mode_conn
+	checktask_full_mode_conn
 	run_sql_source1 "set @@GLOBAL.max_connections=151;"
 	run_sql_source2 "set @@GLOBAL.max_connections=151;"
 	run_sql_tidb "set @@GLOBAL.max_connections=0;" # set default (unlimited), or other tests will fail

@@ -165,21 +165,20 @@ func (d *JSONDuration) UnmarshalJSON(b []byte) error {
 type ReplicaConfig struct {
 	MemoryQuota           uint64 `json:"memory_quota"`
 	CaseSensitive         bool   `json:"case_sensitive"`
+	EnableOldValue        bool   `json:"enable_old_value"`
 	ForceReplicate        bool   `json:"force_replicate"`
 	IgnoreIneligibleTable bool   `json:"ignore_ineligible_table"`
 	CheckGCSafePoint      bool   `json:"check_gc_safe_point"`
-	EnableSyncPoint       *bool  `json:"enable_sync_point,omitempty"`
-	BDRMode               *bool  `json:"bdr_mode,omitempty"`
+	EnableSyncPoint       bool   `json:"enable_sync_point"`
+	BDRMode               bool   `json:"bdr_mode"`
 
-	SyncPointInterval  *JSONDuration `json:"sync_point_interval,omitempty" swaggertype:"string"`
-	SyncPointRetention *JSONDuration `json:"sync_point_retention,omitempty" swaggertype:"string"`
+	SyncPointInterval  *JSONDuration `json:"sync_point_interval" swaggertype:"string"`
+	SyncPointRetention *JSONDuration `json:"sync_point_retention" swaggertype:"string"`
 
-	Filter     *FilterConfig              `json:"filter"`
-	Mounter    *MounterConfig             `json:"mounter"`
-	Sink       *SinkConfig                `json:"sink"`
-	Consistent *ConsistentConfig          `json:"consistent,omitempty"`
-	Scheduler  *ChangefeedSchedulerConfig `json:"scheduler"`
-	Integrity  *IntegrityConfig           `json:"integrity"`
+	Filter     *FilterConfig     `json:"filter"`
+	Mounter    *MounterConfig    `json:"mounter"`
+	Sink       *SinkConfig       `json:"sink"`
+	Consistent *ConsistentConfig `json:"consistent"`
 }
 
 // FilterConfig represents filter config for a changefeed
@@ -188,7 +187,7 @@ type FilterConfig struct {
 	*MySQLReplicationRules
 	Rules            []string          `json:"rules,omitempty"`
 	IgnoreTxnStartTs []uint64          `json:"ignore_txn_start_ts,omitempty"`
-	EventFilters     []EventFilterRule `json:"event_filters,omitempty"`
+	EventFilters     []EventFilterRule `json:"event_filters"`
 }
 
 // MounterConfig represents mounter config for a changefeed
@@ -233,16 +232,16 @@ type Table struct {
 // SinkConfig represents sink config for a changefeed
 // This is a duplicate of config.SinkConfig
 type SinkConfig struct {
-	Protocol                 string            `json:"protocol,omitempty"`
-	SchemaRegistry           string            `json:"schema_registry,omitempty"`
-	CSVConfig                *CSVConfig        `json:"csv,omitempty"`
+	Protocol                 string            `json:"protocol"`
+	SchemaRegistry           string            `json:"schema_registry"`
+	CSVConfig                *CSVConfig        `json:"csv"`
 	DispatchRules            []*DispatchRule   `json:"dispatchers,omitempty"`
-	ColumnSelectors          []*ColumnSelector `json:"column_selectors,omitempty"`
+	ColumnSelectors          []*ColumnSelector `json:"column_selectors"`
 	TxnAtomicity             string            `json:"transaction_atomicity"`
-	EncoderConcurrency       *int              `json:"encoder_concurrency,omitempty"`
+	EncoderConcurrency       int               `json:"encoder_concurrency"`
 	Terminator               string            `json:"terminator"`
-	DateSeparator            string            `json:"date_separator,omitempty"`
-	EnablePartitionSeparator *bool             `json:"enable_partition_separator,omitempty"`
+	DateSeparator            string            `json:"date_separator"`
+	EnablePartitionSeparator bool              `json:"enable_partition_separator"`
 }
 
 // CSVConfig denotes the csv config
@@ -276,7 +275,7 @@ type ConsistentConfig struct {
 	MaxLogSize            int64  `json:"max_log_size"`
 	FlushIntervalInMs     int64  `json:"flush_interval"`
 	MetaFlushIntervalInMs int64  `json:"meta_flush_interval"`
-	EncoderWorkerNum      int    `json:"encoding_worker_num"`
+	EncodingWorkerNum     int    `json:"encoding_worker_num"`
 	FlushWorkerNum        int    `json:"flush_worker_num"`
 	Storage               string `json:"storage"`
 	UseFileBackend        bool   `json:"use_file_backend"`
@@ -292,13 +291,6 @@ type ChangefeedSchedulerConfig struct {
 	RegionThreshold int `toml:"region_threshold" json:"region_threshold"`
 	// WriteKeyThreshold is the written keys threshold of splitting a table.
 	WriteKeyThreshold int `toml:"write_key_threshold" json:"write_key_threshold"`
-}
-
-// IntegrityConfig is the config for integrity check
-// This is a duplicate of config.IntegrityConfig
-type IntegrityConfig struct {
-	IntegrityCheckLevel   string `json:"integrity_check_level"`
-	CorruptionHandleLevel string `json:"corruption_handle_level"`
 }
 
 // ChangeFeedInfo describes the detail of a ChangeFeed

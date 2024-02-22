@@ -15,16 +15,14 @@ package owner
 
 import (
 	"context"
-	"fmt"
 	"math"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/puller"
@@ -34,32 +32,35 @@ import (
 	"github.com/pingcap/tiflow/pkg/config"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/filter"
 	pfilter "github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
 	"github.com/pingcap/tiflow/pkg/pdutil"
 	redoCfg "github.com/pingcap/tiflow/pkg/redo"
-	"github.com/pingcap/tiflow/pkg/sink/observer"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
 	"github.com/pingcap/tiflow/pkg/upstream"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/client-go/v2/oracle"
-	"go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
 // newScheduler creates a new scheduler from context.
 // This function is factored out to facilitate unit testing.
 func newScheduler(
-	ctx cdcContext.Context, up *upstream.Upstream, epoch uint64, cfg *config.SchedulerConfig, redoMetaManager redo.MetaManager,
-) (scheduler.Scheduler, error) {
+	ctx cdcContext.Context, pdClock pdutil.Clock,
+	epoch uint64, redoMetaManager redo.MetaManager,
+) (ret scheduler.Scheduler, err error) {
 	changeFeedID := ctx.ChangefeedVars().ID
 	messageServer := ctx.GlobalVars().MessageServer
 	messageRouter := ctx.GlobalVars().MessageRouter
 	ownerRev := ctx.GlobalVars().OwnerRevision
 	captureID := ctx.GlobalVars().CaptureInfo.ID
-	ret, err := scheduler.NewScheduler(
-		ctx, captureID, changeFeedID, messageServer, messageRouter, ownerRev, epoch, up, cfg, redoMetaManager)
+	cfg := config.GetGlobalServerConfig().Debug
+	ret, err = scheduler.NewScheduler(
+		ctx, captureID, changeFeedID,
+		messageServer, messageRouter,
+		ownerRev, epoch, cfg.Scheduler,
+		pdClock, redoMetaManager)
 	return ret, errors.Trace(err)
 }
 
@@ -69,7 +70,6 @@ type changefeed struct {
 	state *orchestrator.ChangefeedReactorState
 
 	upstream  *upstream.Upstream
-	cfg       *config.SchedulerConfig
 	scheduler scheduler.Scheduler
 	// barriers will be created when a changefeed is initialized
 	// and will be destroyed when a changefeed is closed.
@@ -122,12 +122,6 @@ type changefeed struct {
 	metricsChangefeedBarrierTsGauge prometheus.Gauge
 	metricsChangefeedTickDuration   prometheus.Observer
 
-	metricsChangefeedCreateTimeGuage  prometheus.Gauge
-	metricsChangefeedRestartTimeGauge prometheus.Gauge
-
-	downstreamObserver observer.Observer
-	observerLastTick   *atomic.Time
-
 	newDDLPuller func(ctx context.Context,
 		replicaConfig *config.ReplicaConfig,
 		up *upstream.Upstream,
@@ -143,15 +137,8 @@ type changefeed struct {
 	) DDLSink
 
 	newScheduler func(
-		ctx cdcContext.Context, up *upstream.Upstream, epoch uint64, cfg *config.SchedulerConfig, redoMetaManager redo.MetaManager,
+		ctx cdcContext.Context, pdClock pdutil.Clock, epoch uint64, redoMetaManager redo.MetaManager,
 	) (scheduler.Scheduler, error)
-
-	newDownstreamObserver func(
-		ctx context.Context,
-		changefeedID model.ChangeFeedID,
-		sinkURIStr string, replCfg *config.ReplicaConfig,
-		opts ...observer.NewObserverOption,
-	) (observer.Observer, error)
 
 	lastDDLTs uint64 // Timestamp of the last executed DDL. Only used for tests.
 }
@@ -160,7 +147,6 @@ func newChangefeed(
 	id model.ChangeFeedID,
 	state *orchestrator.ChangefeedReactorState,
 	up *upstream.Upstream,
-	cfg *config.SchedulerConfig,
 ) *changefeed {
 	c := &changefeed{
 		id:    id,
@@ -175,12 +161,10 @@ func newChangefeed(
 		warningCh: make(chan error, defaultErrChSize),
 		cancel:    func() {},
 
-		newDDLPuller:          puller.NewDDLPuller,
-		newSink:               newDDLSink,
-		newDownstreamObserver: observer.NewObserver,
+		newDDLPuller: puller.NewDDLPuller,
+		newSink:      newDDLSink,
 	}
 	c.newScheduler = newScheduler
-	c.cfg = cfg
 	return c
 }
 
@@ -199,21 +183,13 @@ func newChangefeed4Test(
 		reportError func(err error), reportWarning func(err error),
 	) DDLSink,
 	newScheduler func(
-		ctx cdcContext.Context, up *upstream.Upstream, epoch uint64, cfg *config.SchedulerConfig, redoMetaManager redo.MetaManager,
+		ctx cdcContext.Context, pdClock pdutil.Clock, epoch uint64, redoMetaManager redo.MetaManager,
 	) (scheduler.Scheduler, error),
-	newDownstreamObserver func(
-		ctx context.Context,
-		changefeedID model.ChangeFeedID,
-		sinkURIStr string, replCfg *config.ReplicaConfig,
-		opts ...observer.NewObserverOption,
-	) (observer.Observer, error),
 ) *changefeed {
-	cfg := config.NewDefaultSchedulerConfig()
-	c := newChangefeed(id, state, up, cfg)
+	c := newChangefeed(id, state, up)
 	c.newDDLPuller = newDDLPuller
 	c.newSink = newSink
 	c.newScheduler = newScheduler
-	c.newDownstreamObserver = newDownstreamObserver
 	return c
 }
 
@@ -225,7 +201,7 @@ func (c *changefeed) Tick(ctx cdcContext.Context, captures map[model.CaptureID]*
 	for !noMoreWarnings {
 		select {
 		case err := <-c.warningCh:
-			c.handleWarning(err)
+			c.handleWarning(ctx, err)
 		default:
 			noMoreWarnings = true
 		}
@@ -278,14 +254,14 @@ func (c *changefeed) handleErr(ctx cdcContext.Context, err error) {
 	}
 	c.feedStateManager.handleError(&model.RunningError{
 		Time:    time.Now(),
-		Addr:    config.GetGlobalServerConfig().AdvertiseAddr,
+		Addr:    contextutil.CaptureAddrFromCtx(ctx),
 		Code:    code,
 		Message: err.Error(),
 	})
 	c.releaseResources(ctx)
 }
 
-func (c *changefeed) handleWarning(err error) {
+func (c *changefeed) handleWarning(ctx cdcContext.Context, err error) {
 	log.Warn("an warning occurred in Owner",
 		zap.String("namespace", c.id.Namespace),
 		zap.String("changefeed", c.id.ID), zap.Error(err))
@@ -298,7 +274,7 @@ func (c *changefeed) handleWarning(err error) {
 
 	c.feedStateManager.handleWarning(&model.RunningError{
 		Time:    time.Now(),
-		Addr:    config.GetGlobalServerConfig().AdvertiseAddr,
+		Addr:    contextutil.CaptureAddrFromCtx(ctx),
 		Code:    code,
 		Message: err.Error(),
 	})
@@ -420,7 +396,6 @@ func (c *changefeed) tick(ctx cdcContext.Context, captures map[model.CaptureID]*
 		}
 		return nil
 	}
-
 	log.Debug("owner prepares to update status",
 		zap.Uint64("prevResolvedTs", c.resolvedTs),
 		zap.Uint64("newResolvedTs", watermark.ResolvedTs),
@@ -454,7 +429,6 @@ func (c *changefeed) tick(ctx cdcContext.Context, captures map[model.CaptureID]*
 
 	c.updateStatus(watermark.CheckpointTs, barrier.MinTableBarrierTs)
 	c.updateMetrics(currentTs, watermark.CheckpointTs, c.resolvedTs)
-	c.tickDownstreamObserver(ctx)
 
 	return nil
 }
@@ -557,12 +531,12 @@ LOOP2:
 	}
 
 	c.barriers = newBarriers()
-	if util.GetOrZero(c.state.Info.Config.EnableSyncPoint) {
+	if c.state.Info.Config.EnableSyncPoint { // preResolvedTs model.Ts
 		c.barriers.Update(syncPointBarrier, c.resolvedTs)
 	}
 	c.barriers.Update(finishBarrier, c.state.Info.GetTargetTs())
 
-	filter, err := pfilter.NewFilter(c.state.Info.Config, "")
+	filter, err := filter.NewFilter(c.state.Info.Config, "")
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -614,12 +588,6 @@ LOOP2:
 		ctx.Throw(c.ddlPuller.Run(cancelCtx))
 	}()
 
-	c.downstreamObserver, err = c.newDownstreamObserver(ctx, c.id, c.state.Info.SinkURI, c.state.Info.Config)
-	if err != nil {
-		return err
-	}
-	c.observerLastTick = atomic.NewTime(time.Time{})
-
 	c.redoDDLMgr = redo.NewDDLManager(c.id, c.state.Info.Config.Consistent, ddlStartTs)
 	if c.redoDDLMgr.Enabled() {
 		c.wg.Add(1)
@@ -645,7 +613,6 @@ LOOP2:
 	if err != nil {
 		return errors.Trace(err)
 	}
-
 	c.ddlManager = newDDLManager(
 		c.id,
 		ddlStartTs,
@@ -657,14 +624,11 @@ LOOP2:
 		c.redoDDLMgr,
 		c.redoMetaMgr,
 		downstreamType,
-		util.GetOrZero(c.state.Info.Config.BDRMode),
-	)
+		c.state.Info.Config.BDRMode)
 
 	// create scheduler
-	cfg := *c.cfg
-	cfg.ChangefeedSettings = c.state.Info.Config.Scheduler
 	epoch := c.state.Info.Epoch
-	c.scheduler, err = c.newScheduler(ctx, c.upstream, epoch, &cfg, c.redoMetaMgr)
+	c.scheduler, err = c.newScheduler(ctx, c.upstream.PDClock, epoch, c.redoMetaMgr)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -672,8 +636,6 @@ LOOP2:
 	c.initMetrics()
 
 	c.initialized = true
-	c.metricsChangefeedCreateTimeGuage.Set(float64(oracle.GetPhysical(c.state.Info.CreateTime)))
-	c.metricsChangefeedRestartTimeGauge.Set(float64(oracle.GetPhysical(time.Now())))
 	log.Info("changefeed initialized",
 		zap.String("namespace", c.state.ID.Namespace),
 		zap.String("changefeed", c.state.ID.ID),
@@ -705,11 +667,6 @@ func (c *changefeed) initMetrics() {
 		WithLabelValues(c.id.Namespace, c.id.ID)
 	c.metricsChangefeedTickDuration = changefeedTickDuration.
 		WithLabelValues(c.id.Namespace, c.id.ID)
-
-	c.metricsChangefeedCreateTimeGuage = changefeedStartTimeGauge.
-		WithLabelValues(c.id.Namespace, c.id.ID, "create")
-	c.metricsChangefeedRestartTimeGauge = changefeedStartTimeGauge.
-		WithLabelValues(c.id.Namespace, c.id.ID, "restart")
 }
 
 // releaseResources is idempotent.
@@ -747,9 +704,6 @@ func (c *changefeed) releaseResources(ctx cdcContext.Context) {
 	if c.scheduler != nil {
 		c.scheduler.Close(ctx)
 		c.scheduler = nil
-	}
-	if c.downstreamObserver != nil {
-		_ = c.downstreamObserver.Close()
 	}
 
 	c.schema = nil
@@ -790,8 +744,6 @@ func (c *changefeed) cleanupMetrics() {
 
 	if c.isRemoved {
 		changefeedStatusGauge.DeleteLabelValues(c.id.Namespace, c.id.ID)
-		changefeedCheckpointTsGauge.DeleteLabelValues(c.id.Namespace, c.id.ID, "create")
-		changefeedCheckpointTsLagGauge.DeleteLabelValues(c.id.Namespace, c.id.ID, "restart")
 	}
 }
 
@@ -904,6 +856,7 @@ func (c *changefeed) preflightCheck(captures map[model.CaptureID]*model.CaptureI
 // barrierTs is used to control the data that can be flush to downstream.
 func (c *changefeed) handleBarrier(ctx cdcContext.Context, barrier *schedulepb.BarrierWithMinTs) error {
 	barrierTp, barrierTs := c.barriers.Min()
+
 	c.metricsChangefeedBarrierTsGauge.Set(float64(oracle.ExtractPhysical(barrierTs)))
 
 	// It means:
@@ -913,10 +866,9 @@ func (c *changefeed) handleBarrier(ctx cdcContext.Context, barrier *schedulepb.B
 	if checkpointReachBarrier {
 		switch barrierTp {
 		case syncPointBarrier:
-			nextSyncPointTs := oracle.GoTimeToTS(
-				oracle.GetTimeFromTS(barrierTs).
-					Add(util.GetOrZero(c.state.Info.Config.SyncPointInterval)),
-			)
+			nextSyncPointTs := oracle.
+				GoTimeToTS(oracle.GetTimeFromTS(barrierTs).
+					Add(c.state.Info.Config.SyncPointInterval))
 			if err := c.ddlSink.emitSyncPoint(ctx, barrierTs); err != nil {
 				return errors.Trace(err)
 			}
@@ -927,7 +879,6 @@ func (c *changefeed) handleBarrier(ctx cdcContext.Context, barrier *schedulepb.B
 			log.Panic("Unknown barrier type", zap.Int("barrierType", int(barrierTp)))
 		}
 	}
-
 	// If there are other barriers less than ddl barrier,
 	// we should wait for them.
 	// Note: There may be some tableBarrierTs larger than otherBarrierTs,
@@ -945,7 +896,6 @@ func (c *changefeed) handleBarrier(ctx cdcContext.Context, barrier *schedulepb.B
 			zap.Uint64("minTableBarrierTs", barrier.GlobalBarrierTs))
 		barrier.MinTableBarrierTs = barrierTs
 	}
-
 	return nil
 }
 
@@ -1028,29 +978,4 @@ func (c *changefeed) checkUpstream() (skip bool, err error) {
 		return true, nil
 	}
 	return
-}
-
-// tickDownstreamObserver checks whether needs to trigger tick of downstream
-// observer, if needed run it in an independent goroutine with 5s timeout.
-func (c *changefeed) tickDownstreamObserver(ctx context.Context) {
-	if time.Since(c.observerLastTick.Load()) > downstreamObserverTickDuration {
-		c.observerLastTick.Store(time.Now())
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		go func() {
-			cctx, cancel := context.WithTimeout(ctx, time.Second*5)
-			defer cancel()
-			if err := c.downstreamObserver.Tick(cctx); err != nil {
-				// Prometheus is not deployed, it happens in non production env.
-				noPrometheusMsg := fmt.Sprintf(":%d", errno.ErrPrometheusAddrIsNotSet)
-				if strings.Contains(err.Error(), noPrometheusMsg) {
-					return
-				}
-				log.Warn("backend observer tick error", zap.Error(err))
-			}
-		}()
-	}
 }

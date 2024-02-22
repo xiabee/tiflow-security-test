@@ -239,8 +239,8 @@ type TiCDCClusterVersion struct {
 	*semver.Version
 }
 
-// LessThan500RC returns true if th cluster version is less than 5.0.0-rc
-func (v *TiCDCClusterVersion) LessThan500RC() bool {
+// ShouldEnableOldValueByDefault returns whether old value should be enabled by default
+func (v *TiCDCClusterVersion) ShouldEnableOldValueByDefault() bool {
 	// we assume the unknown version to be the latest version
 	return v.Version == nil || !v.LessThan(*semver.New("5.0.0-rc"))
 }

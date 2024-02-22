@@ -17,13 +17,13 @@ import (
 	"container/heap"
 	"sync"
 
+	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 )
 
 // progress is the fetch progress of a table.
 type progress struct {
-	span              tablepb.Span
+	tableID           model.TableID
 	nextLowerBoundPos engine.Position
 	version           uint64
 }

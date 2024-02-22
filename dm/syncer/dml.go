@@ -43,29 +43,14 @@ type genDMLParam struct {
 	extendData      [][]interface{}  // all data include extend data
 }
 
-// latin1Decider is not usually ISO8859_1 in MySQL.
-// ref https://dev.mysql.com/doc/refman/8.0/en/charset-we-sets.html
-var latin1Decoder = charmap.Windows1252.NewDecoder()
+var latin1Decoder = charmap.ISO8859_1.NewDecoder()
 
-// adjustValueFromBinlogData adjust the values obtained from go-mysql so that
+// extractValueFromData adjust the values obtained from go-mysql so that
 // - the values can be correctly converted to TiDB datum
 // - the values are in the correct type that go-sql-driver/mysql uses.
-func adjustValueFromBinlogData(
-	data []interface{},
-	sourceTI *model.TableInfo,
-) ([]interface{}, error) {
+func extractValueFromData(data []interface{}, columns []*model.ColumnInfo, sourceTI *model.TableInfo) []interface{} {
 	value := make([]interface{}, 0, len(data))
 	var err error
-
-	columns := make([]*model.ColumnInfo, 0, len(sourceTI.Columns))
-	for _, col := range sourceTI.Columns {
-		if !col.Hidden {
-			columns = append(columns, col)
-		}
-	}
-	if len(data) != len(columns) {
-		return nil, terror.ErrSyncerUnitDMLColumnNotMatch.Generate(len(columns), len(data))
-	}
 
 	for i, d := range data {
 		d = castUnsigned(d, &columns[i].FieldType)
@@ -91,7 +76,6 @@ func adjustValueFromBinlogData(
 		case []byte:
 			if isLatin1 {
 				d, err = latin1Decoder.Bytes(v)
-				// replicate wrong data and don't break task
 				if err != nil {
 					log.L().DPanic("can't convert latin1 to utf8", zap.ByteString("value", v), zap.Error(err))
 				}
@@ -106,7 +90,6 @@ func adjustValueFromBinlogData(
 				// TiDB has bug in latin1 so we must convert it to utf8 at DM's scope
 				// https://github.com/pingcap/tidb/issues/18955
 				d, err = latin1Decoder.String(v)
-				// replicate wrong data and don't break task
 				if err != nil {
 					log.L().DPanic("can't convert latin1 to utf8", zap.String("value", v), zap.Error(err))
 				}
@@ -114,10 +97,9 @@ func adjustValueFromBinlogData(
 		}
 		value = append(value, d)
 	}
-	return value, nil
+	return value
 }
 
-// nolint:dupl
 func (s *Syncer) genAndFilterInsertDMLs(tctx *tcontext.Context, param *genDMLParam, filterExprs []expression.Expression) ([]*sqlmodel.RowChange, error) {
 	var (
 		tableID         = utils.GenTableID(param.targetTable)
@@ -138,11 +120,12 @@ func (s *Syncer) genAndFilterInsertDMLs(tctx *tcontext.Context, param *genDMLPar
 	}
 
 RowLoop:
-	for _, data := range originalDataSeq {
-		originalValue, err := adjustValueFromBinlogData(data, ti)
-		if err != nil {
-			return nil, err
+	for dataIdx, data := range originalDataSeq {
+		if len(data) != len(ti.Columns) {
+			return nil, terror.ErrSyncerUnitDMLColumnNotMatch.Generate(len(ti.Columns), len(data))
 		}
+
+		originalValue := extractValueFromData(originalDataSeq[dataIdx], ti.Columns, ti)
 
 		for _, expr := range filterExprs {
 			skip, err := SkipDMLByExpression(s.sessCtx, originalValue, expr, ti.Columns)
@@ -171,7 +154,6 @@ RowLoop:
 	return dmls, nil
 }
 
-// nolint:dupl
 func (s *Syncer) genAndFilterUpdateDMLs(
 	tctx *tcontext.Context,
 	param *genDMLParam,
@@ -205,14 +187,12 @@ RowLoop:
 			return nil, terror.ErrSyncerUnitDMLOldNewValueMismatch.Generate(len(oriOldData), len(oriChangedData))
 		}
 
-		oriOldValues, err := adjustValueFromBinlogData(oriOldData, ti)
-		if err != nil {
-			return nil, err
+		if len(oriOldData) != len(ti.Columns) {
+			return nil, terror.ErrSyncerUnitDMLColumnNotMatch.Generate(len(ti.Columns), len(oriOldData))
 		}
-		oriChangedValues, err := adjustValueFromBinlogData(oriChangedData, ti)
-		if err != nil {
-			return nil, err
-		}
+
+		oriOldValues := extractValueFromData(oriOldData, ti.Columns, ti)
+		oriChangedValues := extractValueFromData(oriChangedData, ti.Columns, ti)
 
 		for j := range oldValueFilters {
 			// AND logic
@@ -248,7 +228,6 @@ RowLoop:
 	return dmls, nil
 }
 
-// nolint:dupl
 func (s *Syncer) genAndFilterDeleteDMLs(tctx *tcontext.Context, param *genDMLParam, filterExprs []expression.Expression) ([]*sqlmodel.RowChange, error) {
 	var (
 		tableID    = utils.GenTableID(param.targetTable)
@@ -270,10 +249,11 @@ func (s *Syncer) genAndFilterDeleteDMLs(tctx *tcontext.Context, param *genDMLPar
 
 RowLoop:
 	for _, data := range dataSeq {
-		value, err := adjustValueFromBinlogData(data, ti)
-		if err != nil {
-			return nil, err
+		if len(data) != len(ti.Columns) {
+			return nil, terror.ErrSyncerUnitDMLColumnNotMatch.Generate(len(ti.Columns), len(data))
 		}
+
+		value := extractValueFromData(data, ti.Columns, ti)
 
 		for _, expr := range filterExprs {
 			skip, err := SkipDMLByExpression(s.sessCtx, value, expr, ti.Columns)
@@ -329,6 +309,29 @@ func castUnsigned(data interface{}, ft *types.FieldType) interface{} {
 	}
 
 	return data
+}
+
+func (s *Syncer) mappingDML(table *filter.Table, ti *model.TableInfo, data [][]interface{}) ([][]interface{}, error) {
+	if s.columnMapping == nil {
+		return data, nil
+	}
+
+	columns := make([]string, 0, len(ti.Columns))
+	for _, col := range ti.Columns {
+		columns = append(columns, col.Name.O)
+	}
+
+	var (
+		err  error
+		rows = make([][]interface{}, len(data))
+	)
+	for i := range data {
+		rows[i], _, err = s.columnMapping.HandleRowValue(table.Schema, table.Name, columns, data[i])
+		if err != nil {
+			return nil, terror.ErrSyncerUnitDoColumnMapping.Delegate(err, data[i], table)
+		}
+	}
+	return rows, nil
 }
 
 // checkLogColumns returns error when not all rows in skipped is empty, which means the binlog doesn't contain all

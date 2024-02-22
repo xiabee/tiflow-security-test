@@ -294,12 +294,12 @@ func TestShouldSkipDML(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
+		tCase := tc
+		t.Run(tCase.name, func(t *testing.T) {
 			t.Parallel()
-			f, err := newSQLEventFilter(tc.cfg, config.GetDefaultReplicaConfig().SQLMode)
+			f, err := newSQLEventFilter(tCase.cfg, config.GetDefaultReplicaConfig().SQLMode)
 			require.NoError(t, err)
-			for _, c := range tc.cases {
+			for _, c := range tCase.cases {
 				event := &model.RowChangedEvent{
 					Table: &model.TableName{
 						Schema: c.schema,

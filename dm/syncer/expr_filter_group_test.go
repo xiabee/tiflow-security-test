@@ -25,7 +25,6 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/schema"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -121,8 +120,8 @@ create table t (
 		require.Len(t, exprs, 1)
 		expr := exprs[0]
 
-		ca.skippedRow = util.Must(adjustValueFromBinlogData(ca.skippedRow, ti))
-		ca.passedRow = util.Must(adjustValueFromBinlogData(ca.passedRow, ti))
+		ca.skippedRow = extractValueFromData(ca.skippedRow, ti.Columns, ti)
+		ca.passedRow = extractValueFromData(ca.passedRow, ti.Columns, ti)
 
 		skip, err := SkipDMLByExpression(sessCtx, ca.skippedRow, expr, ti.Columns)
 		require.NoError(t, err)
@@ -385,8 +384,8 @@ create table t (
 		require.Len(t, exprs, 1)
 		expr := exprs[0]
 
-		ca.skippedRow = util.Must(adjustValueFromBinlogData(ca.skippedRow, ti))
-		ca.passedRow = util.Must(adjustValueFromBinlogData(ca.passedRow, ti))
+		ca.skippedRow = extractValueFromData(ca.skippedRow, ti.Columns, ti)
+		ca.passedRow = extractValueFromData(ca.passedRow, ti.Columns, ti)
 
 		skip, err := SkipDMLByExpression(sessCtx, ca.skippedRow, expr, ti.Columns)
 		require.NoError(t, err)

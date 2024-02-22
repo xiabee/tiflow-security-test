@@ -55,7 +55,8 @@ func (c *connNumberChecker) check(ctx context.Context, checkerName string, neede
 		markCheckError(result, err)
 		return result
 	}
-	defer c.toCheckDB.ForceCloseConnWithoutErr(baseConn)
+	//nolint:errcheck
+	defer c.toCheckDB.CloseBaseConn(baseConn)
 	if err != nil {
 		markCheckError(result, err)
 		return result
@@ -66,10 +67,7 @@ func (c *connNumberChecker) check(ctx context.Context, checkerName string, neede
 		markCheckError(result, err)
 		return result
 	}
-	defer func() {
-		_ = rows.Close()
-		_ = rows.Err()
-	}()
+	defer rows.Close()
 	var (
 		maxConn  int
 		variable string
@@ -106,10 +104,7 @@ func (c *connNumberChecker) check(ctx context.Context, checkerName string, neede
 			markCheckError(result, err)
 			return result
 		}
-		defer func() {
-			_ = processRows.Close()
-			_ = processRows.Err()
-		}()
+		defer processRows.Close()
 		for processRows.Next() {
 			usedConn++
 		}
@@ -179,14 +174,21 @@ func (l *LoaderConnNumberChecker) Check(ctx context.Context) *Result {
 		mysql.SuperPriv: {needGlobal: true},
 	})
 	if !l.unlimitedConn && result.State == StateFailure {
-		// if we're using lightning, this error should be omitted
-		// because lightning doesn't need to keep connections while restoring.
-		result.Errors = append(
-			result.Errors,
-			NewWarn("task precheck cannot accurately check the number of connection needed for Lightning."),
-		)
-		result.State = StateWarning
-		result.Instruction = "You need to set a larger connection for TiDB."
+		// if the max_connections is set as a specific number
+		// and we failed because of the number connecions needed is smaller than max_connections
+		for _, stCfg := range l.stCfgs {
+			if stCfg.NeedUseLightning() {
+				// if we're using lightning, this error should be omitted
+				// because lightning doesn't need to keep connections while restoring.
+				result.Errors = append(
+					result.Errors,
+					NewWarn("task precheck cannot accurately check the number of connection needed for Lightning."),
+				)
+				result.State = StateWarning
+				result.Instruction = "You need to set a larger connection for TiDB."
+				break
+			}
+		}
 	}
 	return result
 }

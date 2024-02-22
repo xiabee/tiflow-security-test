@@ -26,7 +26,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tikv/pd/pkg/utils/tempurl"
+	"github.com/tikv/pd/pkg/tempurl"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -97,22 +97,17 @@ func MigrateBackupKey(version int, backupKey string) string {
 	return fmt.Sprintf("%s/%d/%s", migrateBackupPrefix, version, backupKey)
 }
 
-// OwnerCaptureInfoClient is the sub interface of CDCEtcdClient that used for get owner capture information
-type OwnerCaptureInfoClient interface {
+// CDCEtcdClient extracts CDCEtcdClients's method used for apiv2.
+type CDCEtcdClient interface {
+	GetClusterID() string
+
+	GetEtcdClient() *Client
+
 	GetOwnerID(context.Context) (model.CaptureID, error)
 
 	GetOwnerRevision(context.Context, model.CaptureID) (int64, error)
 
 	GetCaptures(context.Context) (int64, []*model.CaptureInfo, error)
-}
-
-// CDCEtcdClient extracts CDCEtcdClients's method used for apiv2.
-type CDCEtcdClient interface {
-	OwnerCaptureInfoClient
-
-	GetClusterID() string
-
-	GetEtcdClient() *Client
 
 	GetAllCDCInfo(ctx context.Context) ([]*mvccpb.KeyValue, error)
 

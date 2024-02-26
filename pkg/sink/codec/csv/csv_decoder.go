@@ -74,7 +74,7 @@ func NewBatchDecoder(ctx context.Context,
 	}, nil
 }
 
-// AddKeyValue implements the EventBatchDecoder interface.
+// AddKeyValue implements the RowEventDecoder interface.
 func (b *batchDecoder) AddKeyValue(_, _ []byte) error {
 	return nil
 }
@@ -109,7 +109,7 @@ func (b *batchDecoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 		return nil, cerror.WrapError(cerror.ErrCSVDecodeFailed, errors.New("no csv row can be found"))
 	}
 
-	e, err := csvMsg2RowChangedEvent(b.codecConfig, b.msg, b.tableInfo.Columns)
+	e, err := csvMsg2RowChangedEvent(b.codecConfig, b.msg, b.tableInfo)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

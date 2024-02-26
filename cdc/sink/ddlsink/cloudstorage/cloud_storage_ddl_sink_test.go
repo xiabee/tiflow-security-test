@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/types"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/util"
@@ -42,7 +42,7 @@ func TestWriteDDLEvent(t *testing.T) {
 	replicaConfig := config.GetDefaultReplicaConfig()
 	err = replicaConfig.ValidateAndAdjust(sinkURI)
 	require.Nil(t, err)
-	sink, err := NewDDLSink(ctx, sinkURI, replicaConfig)
+	sink, err := NewDDLSink(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
 	require.Nil(t, err)
 
 	ddlEvent := &model.DDLEvent{
@@ -109,7 +109,7 @@ func TestWriteCheckpointTs(t *testing.T) {
 	replicaConfig := config.GetDefaultReplicaConfig()
 	err = replicaConfig.ValidateAndAdjust(sinkURI)
 	require.Nil(t, err)
-	sink, err := NewDDLSink(ctx, sinkURI, replicaConfig)
+	sink, err := NewDDLSink(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
 	require.Nil(t, err)
 	tables := []*model.TableInfo{
 		{

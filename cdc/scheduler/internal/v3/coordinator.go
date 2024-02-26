@@ -98,7 +98,7 @@ func NewCoordinator(
 		return nil, errors.Trace(err)
 	}
 	revision := schedulepb.OwnerRevision{Revision: ownerRevision}
-	coord := &coordinator{
+	return &coordinator{
 		version:         version.ReleaseSemver(),
 		revision:        revision,
 		changefeedEpoch: changefeedEpoch,
@@ -113,8 +113,7 @@ func NewCoordinator(
 		compat:          compat.New(cfg, map[model.CaptureID]*model.CaptureInfo{}),
 		pdClock:         up.PDClock,
 		redoMetaManager: redoMetaManager,
-	}
-	return coord, nil
+	}, nil
 }
 
 // Tick implement the scheduler interface
@@ -313,10 +312,7 @@ func (c *coordinator) poll(
 	pdTime := time.Now()
 	// only nil in unit test
 	if c.pdClock != nil {
-		pdTime, err = c.pdClock.CurrentTime()
-		if err != nil {
-			log.Warn("schedulerv3: failed to get pd time", zap.Error(err))
-		}
+		pdTime = c.pdClock.CurrentTime()
 	}
 
 	c.tableRanges.UpdateTables(currentTables)

@@ -43,8 +43,8 @@ type kafkaDMLProducer struct {
 	// closed is used to indicate whether the producer is closed.
 	// We also use it to guard against double closes.
 	closed bool
-	// failpointCh is used to inject failpoints to the run loop.
-	// Only used in test.
+
+	// failpointCh is used to inject failpoints to the run loop. Only used in test.
 	failpointCh chan error
 
 	cancel context.CancelFunc
@@ -136,12 +136,12 @@ func (k *kafkaDMLProducer) Close() {
 			zap.String("changefeed", k.id.ID))
 		return
 	}
-
 	if k.cancel != nil {
 		k.cancel()
 	}
 
 	close(k.failpointCh)
+
 	k.asyncProducer.Close()
 	k.closed = true
 }

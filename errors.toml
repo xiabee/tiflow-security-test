@@ -31,6 +31,11 @@ error = '''
 encode to binray from native
 '''
 
+["CDC:ErrAvroInvalidMessage"]
+error = '''
+avro invalid message format, %s
+'''
+
 ["CDC:ErrAvroMarshalFailed"]
 error = '''
 json marshal failed
@@ -38,7 +43,7 @@ json marshal failed
 
 ["CDC:ErrAvroSchemaAPIError"]
 error = '''
-schema manager API error
+schema manager API error, %s
 '''
 
 ["CDC:ErrAvroToEnvelopeError"]
@@ -176,6 +181,16 @@ error = '''
 Codec invalid config
 '''
 
+["CDC:ErrColumnSelectorFailed"]
+error = '''
+column selector failed
+'''
+
+["CDC:ErrCompressionFailed"]
+error = '''
+Compression failed
+'''
+
 ["CDC:ErrConsistentStorage"]
 error = '''
 consistent storage (%s) not support
@@ -196,6 +211,11 @@ error = '''
 craft codec invalid data
 '''
 
+["CDC:ErrCredentialNotFound"]
+error = '''
+credential not found: %s
+'''
+
 ["CDC:ErrDDLSchemaNotFound"]
 error = '''
 cannot find mysql.tidb_ddl_job schema
@@ -204,6 +224,11 @@ cannot find mysql.tidb_ddl_job schema
 ["CDC:ErrDatumUnflatten"]
 error = '''
 unflatten datume data
+'''
+
+["CDC:ErrDebeziumEncodeFailed"]
+error = '''
+debezium encode failed
 '''
 
 ["CDC:ErrDecodeFailed"]
@@ -221,9 +246,14 @@ error = '''
 failed to preallocate file because disk is full
 '''
 
+["CDC:ErrDispatcherFailed"]
+error = '''
+dispatcher failed
+'''
+
 ["CDC:ErrEncodeFailed"]
 error = '''
-encode failed: %s
+encode failed
 '''
 
 ["CDC:ErrEtcdIgnore"]
@@ -296,11 +326,6 @@ error = '''
 filter rule is invalid %v
 '''
 
-["CDC:ErrFlowControllerAborted"]
-error = '''
-flow controller is aborted
-'''
-
 ["CDC:ErrGCTTLExceeded"]
 error = '''
 the checkpoint-ts(%d) lag of the changefeed(%s) has exceeded the GC TTL and the changefeed is blocking global GC progression
@@ -328,7 +353,7 @@ get tikv grpc context failed
 
 ["CDC:ErrHandleDDLFailed"]
 error = '''
-handle ddl failed, job: %s, query: %s, startTs: %d. If you want to skip this DDL and continue with replication, you can manually execute this DDL downstream. Afterwards, add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.
+handle ddl failed, query: %s, startTs: %d. If you want to skip this DDL and continue with replication, you can manually execute this DDL downstream. Afterwards, add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.
 '''
 
 ["CDC:ErrIllegalSorterParameter"]
@@ -336,14 +361,14 @@ error = '''
 illegal parameter for sorter: %s
 '''
 
-["CDC:ErrIncompatibleConfig"]
-error = '''
-incompatible configuration
-'''
-
 ["CDC:ErrIncompatibleSinkConfig"]
 error = '''
 incompatible configuration in sink uri(%s) and config file(%s), please try to update the configuration only through sink uri
+'''
+
+["CDC:ErrInternalCheckFailed"]
+error = '''
+internal check failed, %s
 '''
 
 ["CDC:ErrInternalServerError"]
@@ -381,6 +406,11 @@ error = '''
 invalid filter expressions. There is a syntax error in: '%s'
 '''
 
+["CDC:ErrInvalidGlueSchemaRegistryConfig"]
+error = '''
+invalid glue schema registry config, %s
+'''
+
 ["CDC:ErrInvalidHost"]
 error = '''
 host must be a URL or a host:port pair: %q
@@ -404,11 +434,6 @@ invalid record key - %q
 ["CDC:ErrInvalidReplicaConfig"]
 error = '''
 invalid replica config, %s
-'''
-
-["CDC:ErrInvalidS3URI"]
-error = '''
-invalid s3 uri: %s
 '''
 
 ["CDC:ErrInvalidServerOption"]
@@ -516,6 +541,11 @@ error = '''
 meta not exists in region
 '''
 
+["CDC:ErrMetaOpIgnored"]
+error = '''
+rows affected by the operation %s is unexpected: expected %d, got %d
+'''
+
 ["CDC:ErrMultipleCDCClustersExist"]
 error = '''
 multiple TiCDC clusters exist while using --pd
@@ -556,9 +586,14 @@ error = '''
 new store failed
 '''
 
-["CDC:ErrNoPendingRegion"]
+["CDC:ErrNotController"]
 error = '''
-received event regionID %v, requestID %v from %v, but neither pending region nor running region was found
+not controller
+'''
+
+["CDC:ErrNotLeader"]
+error = '''
+%s is not leader
 '''
 
 ["CDC:ErrNotOwner"]
@@ -699,6 +734,76 @@ table not found in processor cache
 ["CDC:ErrProcessorUnknown"]
 error = '''
 processor running unknown error
+'''
+
+["CDC:ErrPulsarAsyncSendMessage"]
+error = '''
+pulsar async send message failed
+'''
+
+["CDC:ErrPulsarBrokerConfigNotFound"]
+error = '''
+pulsar broker config item not found
+'''
+
+["CDC:ErrPulsarCreateTopic"]
+error = '''
+pulsar create topic failed
+'''
+
+["CDC:ErrPulsarFlushUnfinished"]
+error = '''
+flush not finished before producer close
+'''
+
+["CDC:ErrPulsarInvalidClientID"]
+error = '''
+invalid pulsar client ID '%s'
+'''
+
+["CDC:ErrPulsarInvalidConfig"]
+error = '''
+pulsar config invalid %s
+'''
+
+["CDC:ErrPulsarInvalidPartitionNum"]
+error = '''
+invalid partition num %d
+'''
+
+["CDC:ErrPulsarInvalidVersion"]
+error = '''
+invalid pulsar version
+'''
+
+["CDC:ErrPulsarNewClient"]
+error = '''
+new pulsar client
+'''
+
+["CDC:ErrPulsarNewProducer"]
+error = '''
+new pulsar producer
+'''
+
+["CDC:ErrPulsarProducerClosed"]
+error = '''
+pulsar producer closed
+'''
+
+["CDC:ErrPulsarSendMessage"]
+error = '''
+pulsar send message failed
+'''
+
+["CDC:ErrPulsarTopicExprInvalid"]
+error = '''
+invalid topic expression
+'''
+
+["CDC:ErrPulsarTopicNotExists"]
+error = '''
+pulsar topic not exists after creation
 '''
 
 ["CDC:ErrReachMaxTry"]
@@ -906,6 +1011,16 @@ error = '''
 url format is invalid
 '''
 
+["CDC:ErrUnauthorized"]
+error = '''
+user %s unauthorized, error: %s
+'''
+
+["CDC:ErrUnexpected"]
+error = '''
+cdc met unexpected error: %s
+'''
+
 ["CDC:ErrUnknownKVEventType"]
 error = '''
 unknown kv optype: %s, entry: %v
@@ -1086,6 +1201,11 @@ error = '''
 incompatible scheduler request: %s
 '''
 
+["DFLOW:ErrInconsistentMetaCache"]
+error = '''
+meta cache is inconsistent: %s
+'''
+
 ["DFLOW:ErrInvalidArgument"]
 error = '''
 invalid argument: %s
@@ -1226,6 +1346,11 @@ error = '''
 meta entry not found
 '''
 
+["DFLOW:ErrMetaInvalidState"]
+error = '''
+meta state is invalid: %s
+'''
+
 ["DFLOW:ErrMetaNestedTxn"]
 error = '''
 meta unsupported nested txn
@@ -1239,6 +1364,11 @@ create meta client fail
 ["DFLOW:ErrMetaOpFail"]
 error = '''
 meta operation fail
+'''
+
+["DFLOW:ErrMetaOpFailed"]
+error = '''
+unexpected meta operation failure: %s
 '''
 
 ["DFLOW:ErrMetaOptionConflict"]

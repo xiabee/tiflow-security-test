@@ -23,7 +23,7 @@ import (
 	gmysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/dumpling/export"
-	tmysql "github.com/pingcap/tidb/parser/mysql"
+	tmysql "github.com/pingcap/tidb/pkg/parser/mysql"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -69,7 +69,10 @@ func getVariable(ctx *tcontext.Context, conn *BaseConn, variable string, isGloba
 	if err != nil {
 		return "", err
 	}
-	defer row.Close()
+	defer func() {
+		_ = row.Close()
+		_ = row.Err()
+	}()
 
 	// Show an example.
 	/*

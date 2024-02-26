@@ -36,7 +36,8 @@ type singleRegionInfo struct {
 	span   tablepb.Span
 	rpcCtx *tikv.RPCContext
 
-	lockedRange *regionlock.LockedRange
+	requestedTable *requestedTable
+	lockedRange    *regionlock.LockedRange
 }
 
 func newSingleRegionInfo(
@@ -52,7 +53,7 @@ func newSingleRegionInfo(
 }
 
 func (s singleRegionInfo) resolvedTs() uint64 {
-	return s.lockedRange.CheckpointTs.Load()
+	return s.lockedRange.ResolvedTs.Load()
 }
 
 type regionFeedState struct {
@@ -68,6 +69,9 @@ type regionFeedState struct {
 	state struct {
 		sync.RWMutex
 		v uint32
+		// All region errors should be handled in region workers.
+		// `err` is used to retrieve errors generated outside.
+		err error
 	}
 }
 
@@ -83,18 +87,38 @@ func (s *regionFeedState) start() {
 }
 
 // mark regionFeedState as stopped with the given error if possible.
-func (s *regionFeedState) markStopped() {
+func (s *regionFeedState) markStopped(err error) {
 	s.state.Lock()
 	defer s.state.Unlock()
 	if s.state.v == stateNormal {
 		s.state.v = stateStopped
+		s.state.err = err
 	}
+}
+
+// mark regionFeedState as removed if possible.
+func (s *regionFeedState) markRemoved() (changed bool) {
+	s.state.Lock()
+	defer s.state.Unlock()
+	if s.state.v == stateStopped {
+		s.state.v = stateRemoved
+		changed = true
+	}
+	return
 }
 
 func (s *regionFeedState) isStale() bool {
 	s.state.RLock()
 	defer s.state.RUnlock()
 	return s.state.v == stateStopped || s.state.v == stateRemoved
+}
+
+func (s *regionFeedState) takeError() (err error) {
+	s.state.Lock()
+	defer s.state.Unlock()
+	err = s.state.err
+	s.state.err = nil
+	return
 }
 
 func (s *regionFeedState) isInitialized() bool {
@@ -110,20 +134,28 @@ func (s *regionFeedState) getRegionID() uint64 {
 }
 
 func (s *regionFeedState) getLastResolvedTs() uint64 {
-	return s.sri.lockedRange.CheckpointTs.Load()
+	return s.sri.lockedRange.ResolvedTs.Load()
 }
 
 // updateResolvedTs update the resolved ts of the current region feed
 func (s *regionFeedState) updateResolvedTs(resolvedTs uint64) {
 	state := s.sri.lockedRange
 	for {
-		last := state.CheckpointTs.Load()
+		last := state.ResolvedTs.Load()
 		if last > resolvedTs {
 			return
 		}
-		if state.CheckpointTs.CompareAndSwap(last, resolvedTs) {
+		if state.ResolvedTs.CompareAndSwap(last, resolvedTs) {
 			break
 		}
+	}
+	if s.sri.requestedTable != nil {
+		s.sri.requestedTable.postUpdateRegionResolvedTs(
+			s.sri.verID.GetID(),
+			s.sri.verID.GetVer(),
+			state,
+			s.sri.span,
+		)
 	}
 }
 

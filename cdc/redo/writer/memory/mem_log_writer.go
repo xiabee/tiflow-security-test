@@ -43,6 +43,7 @@ func NewLogWriter(
 		return nil, errors.WrapError(errors.ErrRedoConfigInvalid,
 			errors.New("invalid LogWriterConfig"))
 	}
+
 	// "nfs" and "local" scheme are converted to "file" scheme
 	if !cfg.UseExternalStorage {
 		redo.FixLocalScheme(cfg.URI)
@@ -57,16 +58,16 @@ func NewLogWriter(
 	eg, ctx := errgroup.WithContext(ctx)
 	lwCtx, lwCancel := context.WithCancel(ctx)
 	lw := &memoryLogWriter{
-		cfg:    cfg,
-		eg:     eg,
-		cancel: lwCancel,
+		cfg:           cfg,
+		encodeWorkers: newEncodingWorkerGroup(cfg),
+		fileWorkers:   newFileWorkerGroup(cfg, cfg.FlushWorkerNum, extStorage, opts...),
+		eg:            eg,
+		cancel:        lwCancel,
 	}
 
-	lw.encodeWorkers = newEncodingWorkerGroup(cfg.EncodingWorkerNum)
 	eg.Go(func() error {
 		return lw.encodeWorkers.Run(lwCtx)
 	})
-	lw.fileWorkers = newFileWorkerGroup(cfg, cfg.FlushWorkerNum, extStorage, opts...)
 	eg.Go(func() error {
 		return lw.fileWorkers.Run(lwCtx, lw.encodeWorkers.outputCh)
 	})
@@ -78,6 +79,8 @@ func (l *memoryLogWriter) WriteEvents(ctx context.Context, events ...writer.Redo
 	for _, event := range events {
 		if event == nil {
 			log.Warn("writing nil event to redo log, ignore this",
+				zap.String("namespace", l.cfg.ChangeFeedID.Namespace),
+				zap.String("changefeed", l.cfg.ChangeFeedID.ID),
 				zap.String("capture", l.cfg.CaptureID))
 			continue
 		}

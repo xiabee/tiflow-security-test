@@ -22,8 +22,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/storage"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tiflow/cdc/contextutil"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/ddlsink"
 	"github.com/pingcap/tiflow/cdc/sink/metrics"
@@ -55,10 +54,10 @@ type DDLSink struct {
 
 // NewDDLSink creates a ddl sink for cloud storage.
 func NewDDLSink(ctx context.Context,
+	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
 ) (*DDLSink, error) {
-	changefeedID := contextutil.ChangefeedIDFromCtx(ctx)
 	return newDDLSink(ctx, changefeedID, sinkURI, replicaConfig, nil)
 }
 
@@ -83,7 +82,7 @@ func newDDLSink(ctx context.Context,
 	d := &DDLSink{
 		id:                       changefeedID,
 		storage:                  storage,
-		statistics:               metrics.NewStatistics(ctx, sink.TxnSink),
+		statistics:               metrics.NewStatistics(ctx, changefeedID, sink.TxnSink),
 		cfg:                      cfg,
 		lastSendCheckpointTsTime: time.Now(),
 	}
@@ -123,7 +122,7 @@ func (d *DDLSink) WriteDDLEvent(ctx context.Context, ddl *model.DDLEvent) error 
 	}
 
 	var def cloudstorage.TableDefinition
-	def.FromDDLEvent(ddl)
+	def.FromDDLEvent(ddl, d.cfg.OutputColumnID)
 	if err := writeFile(def); err != nil {
 		return errors.Trace(err)
 	}
@@ -131,7 +130,7 @@ func (d *DDLSink) WriteDDLEvent(ctx context.Context, ddl *model.DDLEvent) error 
 	if ddl.Type == timodel.ActionExchangeTablePartition {
 		// For exchange partition, we need to write the schema of the source table.
 		var sourceTableDef cloudstorage.TableDefinition
-		sourceTableDef.FromTableInfo(ddl.PreTableInfo, ddl.TableInfo.Version)
+		sourceTableDef.FromTableInfo(ddl.PreTableInfo, ddl.TableInfo.Version, d.cfg.OutputColumnID)
 		return writeFile(sourceTableDef)
 	}
 	return nil

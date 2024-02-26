@@ -72,14 +72,17 @@ func TestJsonVsCraftVsPB(t *testing.T) {
 		if len(cs) == 0 {
 			continue
 		}
-		config := &common.Config{
-			MaxMessageBytes: 8192,
-			MaxBatchSize:    64,
-		}
-		craftEncoder := craft.NewBatchEncoder(config)
+
+		codecConfig := common.NewConfig(config.ProtocolCraft)
+		codecConfig.MaxMessageBytes = 8192
+		codecConfig.MaxBatchSize = 64
+
+		craftEncoder := craft.NewBatchEncoder(codecConfig)
 		craftMessages := encodeRowCase(t, craftEncoder, cs)
 
-		jsonEncoder := open.NewBatchEncoder(config)
+		builder, err := open.NewBatchEncoderBuilder(context.Background(), codecConfig)
+		require.NoError(t, err)
+		jsonEncoder := builder.Build()
 		jsonMessages := encodeRowCase(t, jsonEncoder, cs)
 
 		protobuf1Messages := codecEncodeRowChangedPB1ToMessage(cs)
@@ -101,8 +104,8 @@ func TestJsonVsCraftVsPB(t *testing.T) {
 func codecEncodeKeyPB(event *model.RowChangedEvent) []byte {
 	key := &benchmark.Key{
 		Ts:        event.CommitTs,
-		Schema:    event.Table.Schema,
-		Table:     event.Table.Table,
+		Schema:    event.TableInfo.GetSchemaName(),
+		Table:     event.TableInfo.GetTableName(),
 		RowId:     event.RowID,
 		Partition: 0,
 	}
@@ -133,8 +136,8 @@ func codecEncodeColumnsPB(columns []*model.Column) []*benchmark.Column {
 
 func codecEncodeRowChangedPB(event *model.RowChangedEvent) []byte {
 	rowChanged := &benchmark.RowChanged{
-		OldValue: codecEncodeColumnsPB(event.PreColumns),
-		NewValue: codecEncodeColumnsPB(event.Columns),
+		OldValue: codecEncodeColumnsPB(event.GetPreColumns()),
+		NewValue: codecEncodeColumnsPB(event.GetColumns()),
 	}
 	if b, err := rowChanged.Marshal(); err != nil {
 		panic(err)
@@ -166,8 +169,8 @@ func codecEncodeKeysPB2(events []*model.RowChangedEvent) []byte {
 
 	for _, event := range events {
 		converted.Ts = append(converted.Ts, event.CommitTs)
-		converted.Schema = append(converted.Schema, event.Table.Schema)
-		converted.Table = append(converted.Table, event.Table.Table)
+		converted.Schema = append(converted.Schema, event.TableInfo.GetSchemaName())
+		converted.Table = append(converted.Table, event.TableInfo.GetTableName())
 		converted.RowId = append(converted.RowId, event.RowID)
 		converted.Partition = append(converted.Partition, 0)
 	}
@@ -199,8 +202,8 @@ func codecEncodeColumnsPB2(columns []*model.Column) *benchmark.ColumnsColumnar {
 func codecEncodeRowChangedPB2(events []*model.RowChangedEvent) []byte {
 	rowChanged := &benchmark.RowChangedColumnar{}
 	for _, event := range events {
-		rowChanged.OldValue = append(rowChanged.OldValue, codecEncodeColumnsPB2(event.PreColumns))
-		rowChanged.NewValue = append(rowChanged.NewValue, codecEncodeColumnsPB2(event.Columns))
+		rowChanged.OldValue = append(rowChanged.OldValue, codecEncodeColumnsPB2(event.GetPreColumns()))
+		rowChanged.NewValue = append(rowChanged.NewValue, codecEncodeColumnsPB2(event.GetColumns()))
 	}
 	if b, err := rowChanged.Marshal(); err != nil {
 		panic(err)
@@ -226,18 +229,22 @@ func codecEncodeRowCase(encoder codec.RowEventEncoder,
 }
 
 func init() {
-	var err error
+	codecConfig := common.NewConfig(config.ProtocolOpen)
+	codecConfig.MaxMessageBytes = 8192
+	codecConfig.MaxBatchSize = 64
 
-	config := &common.Config{
-		MaxMessageBytes: 8192,
-		MaxBatchSize:    64,
-	}
-	encoder := craft.NewBatchEncoder(config)
+	var err error
+	encoder := craft.NewBatchEncoder(codecConfig)
 	if codecCraftEncodedRowChanges, err = codecEncodeRowCase(encoder, codecBenchmarkRowChanges); err != nil {
 		panic(err)
 	}
 
-	encoder = open.NewBatchEncoder(config)
+	builder, err := open.NewBatchEncoderBuilder(context.Background(), codecConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	encoder = builder.Build()
 	if codecJSONEncodedRowChanges, err = codecEncodeRowCase(encoder, codecBenchmarkRowChanges); err != nil {
 		panic(err)
 	}
@@ -246,23 +253,24 @@ func init() {
 }
 
 func BenchmarkCraftEncoding(b *testing.B) {
-	config := &common.Config{
-		MaxMessageBytes: 8192,
-		MaxBatchSize:    64,
-	}
+	codecConfig := common.NewConfig(config.ProtocolCraft)
+	codecConfig.MaxMessageBytes = 8192
+	codecConfig.MaxBatchSize = 64
 	allocator := craft.NewSliceAllocator(128)
-	encoder := craft.NewBatchEncoderWithAllocator(allocator, config)
+	encoder := craft.NewBatchEncoderWithAllocator(allocator, codecConfig)
 	for i := 0; i < b.N; i++ {
 		_, _ = codecEncodeRowCase(encoder, codecBenchmarkRowChanges)
 	}
 }
 
 func BenchmarkJsonEncoding(b *testing.B) {
-	config := &common.Config{
-		MaxMessageBytes: 8192,
-		MaxBatchSize:    64,
-	}
-	encoder := open.NewBatchEncoder(config)
+	codecConfig := common.NewConfig(config.ProtocolCraft)
+	codecConfig.MaxMessageBytes = 8192
+	codecConfig.MaxBatchSize = 64
+
+	builder, err := open.NewBatchEncoderBuilder(context.Background(), codecConfig)
+	require.NoError(b, err)
+	encoder := builder.Build()
 	for i := 0; i < b.N; i++ {
 		_, _ = codecEncodeRowCase(encoder, codecBenchmarkRowChanges)
 	}
@@ -287,14 +295,15 @@ func BenchmarkCraftDecoding(b *testing.B) {
 		for _, message := range codecCraftEncodedRowChanges {
 			if err := decoder.AddKeyValue(message.Key, message.Value); err != nil {
 				panic(err)
-			}
-			for {
-				if _, hasNext, err := decoder.HasNext(); err != nil {
-					panic(err)
-				} else if hasNext {
-					_, _ = decoder.NextRowChangedEvent()
-				} else {
-					break
+			} else {
+				for {
+					if _, hasNext, err := decoder.HasNext(); err != nil {
+						panic(err)
+					} else if hasNext {
+						_, _ = decoder.NextRowChangedEvent()
+					} else {
+						break
+					}
 				}
 			}
 		}
@@ -309,14 +318,15 @@ func BenchmarkJsonDecoding(b *testing.B) {
 			require.NoError(b, err)
 			if err := decoder.AddKeyValue(message.Key, message.Value); err != nil {
 				panic(err)
-			}
-			for {
-				if _, hasNext, err := decoder.HasNext(); err != nil {
-					panic(err)
-				} else if hasNext {
-					_, _ = decoder.NextRowChangedEvent()
-				} else {
-					break
+			} else {
+				for {
+					if _, hasNext, err := decoder.HasNext(); err != nil {
+						panic(err)
+					} else if hasNext {
+						_, _ = decoder.NextRowChangedEvent()
+					} else {
+						break
+					}
 				}
 			}
 		}
@@ -355,16 +365,13 @@ func benchmarkProtobuf1Decoding() []*model.RowChangedEvent {
 			panic(err)
 		}
 		ev := &model.RowChangedEvent{}
-		ev.PreColumns = codecDecodeRowChangedPB1(value.OldValue)
-		ev.Columns = codecDecodeRowChangedPB1(value.NewValue)
+		ev.TableInfo = model.BuildTableInfo(key.Schema, key.Table, codecDecodeRowChangedPB1(value.OldValue), nil)
+		ev.PreColumns = model.Columns2ColumnDatas(codecDecodeRowChangedPB1(value.OldValue), ev.TableInfo)
+		ev.Columns = model.Columns2ColumnDatas(codecDecodeRowChangedPB1(value.NewValue), ev.TableInfo)
 		ev.CommitTs = key.Ts
-		ev.Table = &model.TableName{
-			Schema: key.Schema,
-			Table:  key.Table,
-		}
 		if key.Partition >= 0 {
-			ev.Table.TableID = key.Partition
-			ev.Table.IsPartition = true
+			ev.PhysicalTableID = key.Partition
+			ev.TableInfo.TableName.IsPartition = true
 		}
 		result = append(result, ev)
 	}
@@ -409,19 +416,17 @@ func benchmarkProtobuf2Decoding() []*model.RowChangedEvent {
 		for i, ts := range keys.Ts {
 			ev := &model.RowChangedEvent{}
 			if len(values.OldValue) > i {
-				ev.PreColumns = codecDecodeRowChangedPB2(values.OldValue[i])
+				ev.TableInfo = model.BuildTableInfo(keys.Schema[i], keys.Table[i], codecDecodeRowChangedPB2(values.OldValue[i]), nil)
+				ev.PreColumns = model.Columns2ColumnDatas(codecDecodeRowChangedPB2(values.OldValue[i]), ev.TableInfo)
 			}
 			if len(values.NewValue) > i {
-				ev.Columns = codecDecodeRowChangedPB2(values.NewValue[i])
+				ev.TableInfo = model.BuildTableInfo(keys.Schema[i], keys.Table[i], codecDecodeRowChangedPB2(values.NewValue[i]), nil)
+				ev.Columns = model.Columns2ColumnDatas(codecDecodeRowChangedPB2(values.NewValue[i]), ev.TableInfo)
 			}
 			ev.CommitTs = ts
-			ev.Table = &model.TableName{
-				Schema: keys.Schema[i],
-				Table:  keys.Table[i],
-			}
 			if keys.Partition[i] >= 0 {
-				ev.Table.TableID = keys.Partition[i]
-				ev.Table.IsPartition = true
+				ev.PhysicalTableID = keys.Partition[i]
+				ev.TableInfo.TableName.IsPartition = true
 			}
 			result = append(result, ev)
 		}

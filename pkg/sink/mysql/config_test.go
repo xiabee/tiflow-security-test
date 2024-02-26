@@ -24,7 +24,6 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/aws/aws-sdk-go/aws"
 	dmysql "github.com/go-sql-driver/mysql"
-	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/util"
@@ -82,7 +81,7 @@ func TestGenerateDSNByConfig(t *testing.T) {
 		uri, err := url.Parse("mysql://127.0.0.1:3306/?read-timeout=4m&write-timeout=5m&timeout=3m")
 		require.Nil(t, err)
 		cfg := NewConfig()
-		err = cfg.Apply(context.TODO(),
+		err = cfg.Apply("UTC",
 			model.DefaultChangeFeedID("123"), uri, config.GetDefaultReplicaConfig())
 		require.Nil(t, err)
 		dsnStr, err := generateDSNByConfig(context.TODO(), dsn, cfg, db)
@@ -190,7 +189,6 @@ func TestApplySinkURIParamsToConfig(t *testing.T) {
 	expected.SafeMode = false
 	expected.Timezone = `"UTC"`
 	expected.tidbTxnMode = "pessimistic"
-	expected.EnableOldValue = true
 	expected.CachePrepStmts = true
 	uriStr := "mysql://127.0.0.1:3306/?worker-count=64&max-txn-row=20" +
 		"&max-multi-update-row=80&max-multi-update-row-size=512" +
@@ -201,7 +199,7 @@ func TestApplySinkURIParamsToConfig(t *testing.T) {
 	uri, err := url.Parse(uriStr)
 	require.Nil(t, err)
 	cfg := NewConfig()
-	err = cfg.Apply(context.TODO(), model.ChangeFeedID{}, uri, config.GetDefaultReplicaConfig())
+	err = cfg.Apply("UTC", model.ChangeFeedID{}, uri, config.GetDefaultReplicaConfig())
 	require.Nil(t, err)
 	require.Equal(t, expected, cfg)
 }
@@ -243,7 +241,6 @@ func TestParseSinkURIOverride(t *testing.T) {
 			require.EqualValues(t, sp.CachePrepStmts, false)
 		},
 	}}
-	ctx := context.TODO()
 	var uri *url.URL
 	var err error
 	for _, cs := range cases {
@@ -254,7 +251,7 @@ func TestParseSinkURIOverride(t *testing.T) {
 			uri = nil
 		}
 		cfg := NewConfig()
-		err = cfg.Apply(ctx,
+		err = cfg.Apply("UTC",
 			model.DefaultChangeFeedID("changefeed-01"),
 			uri, config.GetDefaultReplicaConfig())
 		require.Nil(t, err)
@@ -281,7 +278,6 @@ func TestParseSinkURIBadQueryString(t *testing.T) {
 		"mysql://127.0.0.1:3306/?read-timeout=badduration",
 		"mysql://127.0.0.1:3306/?timeout=badduration",
 	}
-	ctx := context.TODO()
 	var uri *url.URL
 	var err error
 	for _, uriStr := range uris {
@@ -292,7 +288,7 @@ func TestParseSinkURIBadQueryString(t *testing.T) {
 			uri = nil
 		}
 		cfg := NewConfig()
-		err = cfg.Apply(ctx,
+		err = cfg.Apply("UTC",
 			model.DefaultChangeFeedID("changefeed-01"), uri, config.GetDefaultReplicaConfig())
 		require.Error(t, err)
 	}
@@ -392,14 +388,13 @@ func TestApplyTimezone(t *testing.T) {
 			t.Parallel()
 
 			cfg := NewConfig()
-			ctx := contextutil.PutTimezoneInCtx(context.Background(), tc.serverTimezone)
 			sinkURI := "mysql://127.0.0.1:3306"
 			if !tc.noChangefeedTimezone {
 				sinkURI = sinkURI + "?time-zone=" + tc.changefeedTimezone
 			}
 			uri, err := url.Parse(sinkURI)
 			require.Nil(t, err)
-			err = cfg.Apply(ctx,
+			err = cfg.Apply(tc.serverTimezone.String(),
 				model.DefaultChangeFeedID("changefeed-01"), uri, config.GetDefaultReplicaConfig())
 			if tc.expectedHasErr {
 				require.NotNil(t, err)
@@ -432,9 +427,7 @@ func TestMergeConfig(t *testing.T) {
 		EnableCachePreparedStatement: aws.Bool(true),
 	}
 	c := NewConfig()
-	tz, _ := time.LoadLocation("Asia/Shanghai")
-	ctx := contextutil.PutTimezoneInCtx(context.Background(), tz)
-	err = c.Apply(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
+	err = c.Apply("Asia/Shanghai", model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
 	require.NoError(t, err)
 	require.Equal(t, 13, c.WorkerCount)
 	require.Equal(t, 100, c.MaxTxnRow)
@@ -480,8 +473,7 @@ func TestMergeConfig(t *testing.T) {
 		EnableCachePreparedStatement: aws.Bool(false),
 	}
 	c = NewConfig()
-	ctx = contextutil.PutTimezoneInCtx(context.Background(), tz)
-	err = c.Apply(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
+	err = c.Apply("Asia/Shanghai", model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
 	require.NoError(t, err)
 	require.Equal(t, 13, c.WorkerCount)
 	require.Equal(t, 100, c.MaxTxnRow)

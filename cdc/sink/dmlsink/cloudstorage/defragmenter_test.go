@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/rowcodec"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/util"
@@ -51,7 +51,9 @@ func TestDeframenter(t *testing.T) {
 	txnCnt := 50
 	sinkURI, err := url.Parse(uri)
 	require.Nil(t, err)
-	encoderConfig, err := util.GetEncoderConfig(sinkURI, config.ProtocolCsv,
+
+	changefeedID := model.DefaultChangeFeedID("changefeed-test")
+	encoderConfig, err := util.GetEncoderConfig(changefeedID, sinkURI, config.ProtocolCsv,
 		config.GetDefaultReplicaConfig(), config.DefaultMaxMessageBytes)
 	require.Nil(t, err)
 	encoderBuilder, err := builder.NewTxnEventEncoderBuilder(encoderConfig)
@@ -66,6 +68,15 @@ func TestDeframenter(t *testing.T) {
 		seqNumbers[i], seqNumbers[j] = seqNumbers[j], seqNumbers[i]
 	})
 
+	tidbTableInfo := &timodel.TableInfo{
+		ID:   100,
+		Name: timodel.NewCIStr("table1"),
+		Columns: []*timodel.ColumnInfo{
+			{ID: 1, Name: timodel.NewCIStr("c1"), FieldType: *types.NewFieldType(mysql.TypeLong)},
+			{ID: 2, Name: timodel.NewCIStr("c2"), FieldType: *types.NewFieldType(mysql.TypeString)},
+		},
+	}
+	tableInfo := model.WrapTableInfo(100, "test", 99, tidbTableInfo)
 	for i := 0; i < txnCnt; i++ {
 		go func(seq uint64) {
 			encoder := encoderBuilder.Build()
@@ -87,28 +98,11 @@ func TestDeframenter(t *testing.T) {
 			n := 1 + rand.Intn(1000)
 			for j := 0; j < n; j++ {
 				row := &model.RowChangedEvent{
-					Table: &model.TableName{
-						Schema:  "test",
-						Table:   "table1",
-						TableID: 100,
-					},
-					Columns: []*model.Column{
-						{Name: "c1", Value: j + 1},
-						{Name: "c2", Value: "hello world"},
-					},
-					ColInfos: []rowcodec.ColInfo{
-						{
-							ID:            1,
-							IsPKHandle:    false,
-							VirtualGenCol: false,
-							Ft:            types.NewFieldType(mysql.TypeLong),
-						},
-						{
-							ID:            2,
-							IsPKHandle:    false,
-							VirtualGenCol: false,
-							Ft:            types.NewFieldType(mysql.TypeString),
-						},
+					PhysicalTableID: 100,
+					TableInfo:       tableInfo,
+					Columns: []*model.ColumnData{
+						{ColumnID: 1, Value: j + 1},
+						{ColumnID: 2, Value: "hello world"},
 					},
 				}
 				frag.event.Event.Rows = append(frag.event.Event.Rows, row)

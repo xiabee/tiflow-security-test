@@ -16,7 +16,9 @@ package dmlproducer
 import (
 	"context"
 
+	"github.com/apache/pulsar-client-go/pulsar"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/kafka"
 )
@@ -38,10 +40,14 @@ type DMLProducer interface {
 // there is no way to safely close errCh by the sender.
 // So we let the GC close errCh.
 // It's usually a buffered channel.
-type Factory func(ctx context.Context,
-	changefeedID model.ChangeFeedID,
+type Factory func(ctx context.Context, changefeedID model.ChangeFeedID,
 	asyncProducer kafka.AsyncProducer,
 	metricsCollector kafka.MetricsCollector,
 	errCh chan error,
 	failpointCh chan error,
 ) DMLProducer
+
+// PulsarFactory is a function to create a pulsar producer.
+type PulsarFactory func(ctx context.Context, changefeedID model.ChangeFeedID,
+	client pulsar.Client, sinkConfig *config.SinkConfig, errCh chan error,
+	failpointCh chan error) (DMLProducer, error)

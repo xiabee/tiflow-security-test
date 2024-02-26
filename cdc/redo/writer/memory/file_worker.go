@@ -156,7 +156,10 @@ func (f *fileWorkerGroup) Run(
 	defer func() {
 		f.close()
 		if err != nil && errors.Cause(err) != context.Canceled {
-			log.Warn("redo file workers closed with error", zap.Error(err))
+			log.Warn("redo file workers closed with error",
+				zap.String("namespace", f.cfg.ChangeFeedID.Namespace),
+				zap.String("changefeed", f.cfg.ChangeFeedID.ID),
+				zap.Error(err))
 		}
 	}()
 
@@ -169,7 +172,10 @@ func (f *fileWorkerGroup) Run(
 			return f.bgFlushFileCache(egCtx)
 		})
 	}
-	log.Info("redo file workers started", zap.Int("workerNum", f.workerNum))
+	log.Info("redo file workers started",
+		zap.String("namespace", f.cfg.ChangeFeedID.Namespace),
+		zap.String("changefeed", f.cfg.ChangeFeedID.ID),
+		zap.Int("workerNum", f.workerNum))
 	return eg.Wait()
 }
 
@@ -231,7 +237,8 @@ func (f *fileWorkerGroup) bgWriteLogs(
 			return errors.Trace(egCtx.Err())
 		case event := <-inputCh:
 			if event == nil {
-				log.Panic("inputCh of redo file worker is closed unexpectedly")
+				log.Error("inputCh of redo file worker is closed unexpectedly")
+				return errors.ErrUnexpected.FastGenByArgs("inputCh of redo file worker is closed unexpectedly")
 			}
 
 			if event.data != nil {

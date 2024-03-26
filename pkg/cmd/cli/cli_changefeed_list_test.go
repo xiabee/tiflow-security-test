@@ -21,9 +21,8 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/pingcap/errors"
-	v2 "github.com/pingcap/tiflow/cdc/api/v2"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/pkg/api/v2/mock"
+	"github.com/pingcap/tiflow/pkg/api/v1/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,7 +35,7 @@ func TestChangefeedListCli(t *testing.T) {
 	b := bytes.NewBufferString("")
 	cmd.SetOut(b)
 
-	cf.EXPECT().List(gomock.Any(), gomock.Any(), gomock.Any()).Return([]v2.ChangefeedCommonInfo{
+	cf.EXPECT().List(gomock.Any(), gomock.Any()).Return(&[]model.ChangefeedCommonInfo{
 		{
 			UpstreamID:     1,
 			Namespace:      "default",
@@ -91,11 +90,11 @@ func TestChangefeedListCli(t *testing.T) {
 			ID:             "warning-7",
 			CheckpointTime: model.JSONTime{},
 			RunningError:   nil,
-			FeedState:      model.StateStopped,
+			FeedState:      model.StateWarning,
 		},
 	}, nil).Times(2)
-	// when --all=false, should contains StateNormal, StateWarning, StateFailed, StateStopped changefeed
-	os.Args = []string{"list", "--all=false", "--namespace=default"}
+	// when --all=false, should contains StateNormal, StateError, StateFailed, StateStopped changefeed
+	os.Args = []string{"list", "--all=false"}
 	require.Nil(t, cmd.Execute())
 	out, err := io.ReadAll(b)
 	require.Nil(t, err)
@@ -106,7 +105,7 @@ func TestChangefeedListCli(t *testing.T) {
 	require.Contains(t, string(out), "warning-7")
 
 	// when --all=true, should contains all changefeed
-	os.Args = []string{"list", "--all=true", "--namespace=default"}
+	os.Args = []string{"list", "--all=true"}
 	require.Nil(t, cmd.Execute())
 	out, err = io.ReadAll(b)
 	require.Nil(t, err)
@@ -118,8 +117,7 @@ func TestChangefeedListCli(t *testing.T) {
 	require.Contains(t, string(out), "stopped-6")
 	require.Contains(t, string(out), "warning-7")
 
-	cf.EXPECT().List(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(nil, errors.New("changefeed list test error"))
+	cf.EXPECT().List(gomock.Any(), gomock.Any()).Return(nil, errors.New("changefeed list test error"))
 	o := newListChangefeedOptions()
 	require.NoError(t, o.complete(f))
 	require.Contains(t, o.run(cmd).Error(), "changefeed list test error")

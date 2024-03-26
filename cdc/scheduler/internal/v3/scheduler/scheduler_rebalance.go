@@ -22,10 +22,8 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/member"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/replication"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	"go.uber.org/zap"
 )
 
@@ -52,9 +50,9 @@ func (r *rebalanceScheduler) Name() string {
 
 func (r *rebalanceScheduler) Schedule(
 	_ model.Ts,
-	currentSpans []tablepb.Span,
+	currentTables []model.TableID,
 	captures map[model.CaptureID]*member.CaptureStatus,
-	replications *spanz.BtreeMap[*replication.ReplicationSet],
+	replications map[model.TableID]*replication.ReplicationSet,
 ) []*replication.ScheduleTask {
 	// rebalance is not triggered, or there is still some pending task,
 	// do not generate new tasks.
@@ -77,8 +75,8 @@ func (r *rebalanceScheduler) Schedule(
 	}
 
 	// only rebalance when all tables are replicating
-	for _, span := range currentSpans {
-		rep, ok := replications.Get(span)
+	for _, tableID := range currentTables {
+		rep, ok := replications[tableID]
 		if !ok {
 			return nil
 		}
@@ -110,28 +108,28 @@ func (r *rebalanceScheduler) Schedule(
 func newBalanceMoveTables(
 	random *rand.Rand,
 	captures map[model.CaptureID]*member.CaptureStatus,
-	replications *spanz.BtreeMap[*replication.ReplicationSet],
+	replications map[model.TableID]*replication.ReplicationSet,
 	maxTaskLimit int,
 	changefeedID model.ChangeFeedID,
 ) []replication.MoveTable {
-	tablesPerCapture := make(map[model.CaptureID]*spanz.Set)
+	tablesPerCapture := make(map[model.CaptureID]*model.TableSet)
 	for captureID := range captures {
-		tablesPerCapture[captureID] = spanz.NewSet()
+		tablesPerCapture[captureID] = model.NewTableSet()
 	}
 
-	replications.Ascend(func(span tablepb.Span, rep *replication.ReplicationSet) bool {
-		if rep.State == replication.ReplicationSetStateReplicating {
-			tablesPerCapture[rep.Primary].Add(span)
+	for tableID, rep := range replications {
+		if rep.State != replication.ReplicationSetStateReplicating {
+			continue
 		}
-		return true
-	})
+		tablesPerCapture[rep.Primary].Add(tableID)
+	}
 
 	// findVictim return tables which need to be moved
-	upperLimitPerCapture := int(math.Ceil(float64(replications.Len()) / float64(len(captures))))
+	upperLimitPerCapture := int(math.Ceil(float64(len(replications)) / float64(len(captures))))
 
-	victims := make([]tablepb.Span, 0)
+	victims := make([]model.TableID, 0)
 	for _, ts := range tablesPerCapture {
-		spans := ts.Keys()
+		tables := ts.Keys()
 		if random != nil {
 			// Complexity note: Shuffle has O(n), where `n` is the number of tables.
 			// Also, during a single call of `Schedule`, Shuffle can be called at most
@@ -139,28 +137,28 @@ func newBalanceMoveTables(
 			// Only called when a rebalance is triggered, which happens rarely,
 			// we do not expect a performance degradation as a result of adding
 			// the randomness.
-			random.Shuffle(len(spans), func(i, j int) {
-				spans[i], spans[j] = spans[j], spans[i]
+			random.Shuffle(len(tables), func(i, j int) {
+				tables[i], tables[j] = tables[j], tables[i]
 			})
 		} else {
-			// sort the spans here so that the result is deterministic,
+			// sort the tableIDs here so that the result is deterministic,
 			// which would aid testing and debugging.
-			sort.Slice(spans, func(i, j int) bool {
-				return spans[i].Less(&spans[j])
+			sort.Slice(tables, func(i, j int) bool {
+				return tables[i] < tables[j]
 			})
 		}
 
-		tableNum2Remove := len(spans) - upperLimitPerCapture
+		tableNum2Remove := len(tables) - upperLimitPerCapture
 		if tableNum2Remove <= 0 {
 			continue
 		}
 
-		for _, span := range spans {
+		for _, table := range tables {
 			if tableNum2Remove <= 0 {
 				break
 			}
-			victims = append(victims, span)
-			ts.Remove(span)
+			victims = append(victims, table)
+			ts.Remove(table)
 			tableNum2Remove--
 		}
 	}
@@ -174,7 +172,7 @@ func newBalanceMoveTables(
 	}
 	// for each victim table, find the target for it
 	moveTables := make([]replication.MoveTable, 0, len(victims))
-	for idx, span := range victims {
+	for idx, tableID := range victims {
 		target := ""
 		minWorkload := math.MaxInt64
 
@@ -197,10 +195,10 @@ func newBalanceMoveTables(
 		}
 
 		moveTables = append(moveTables, replication.MoveTable{
-			Span:        span,
+			TableID:     tableID,
 			DestCapture: target,
 		})
-		tablesPerCapture[target].Add(span)
+		tablesPerCapture[target].Add(tableID)
 		captureWorkload[target] = randomizeWorkload(random, tablesPerCapture[target].Size())
 	}
 

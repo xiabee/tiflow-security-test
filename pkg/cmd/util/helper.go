@@ -42,11 +42,7 @@ const (
 // InitCmd initializes the logger, the default context and returns its cancel function.
 func InitCmd(cmd *cobra.Command, logCfg *logutil.Config) context.CancelFunc {
 	// Init log.
-	err := logutil.InitLogger(
-		logCfg,
-		logutil.WithInitGRPCLogger(),
-		logutil.WithInitSaramaLogger(),
-		logutil.WithInitMySQLLogger())
+	err := logutil.InitLogger(logCfg, logutil.WithInitGRPCLogger(), logutil.WithInitSaramaLogger())
 	if err != nil {
 		cmd.Printf("init logger error %v\n", errors.ErrorStack(err))
 		os.Exit(1)
@@ -192,15 +188,6 @@ func JSONPrint(cmd *cobra.Command, v interface{}) error {
 func CheckErr(err error) {
 	if cerror.IsCliUnprintableError(err) {
 		err = nil
-	}
-	if err != nil {
-		if strings.Contains(err.Error(), string(cerror.ErrCredentialNotFound.RFCCode())) {
-			msg := ", please use the following command to create a new one:\n" +
-				"1. specify the credential in the command line with `cdc cli --user <user> --password <password>`.\n" +
-				"2. specify the credential in the environment variables with `export TICDC_USER=<user> TICDC_PASSWORD=<password>`.\n" +
-				"3. `cdc cli configure-credentials` to initialize the default credential config.\n"
-			err = errors.New(err.Error() + msg)
-		}
 	}
 	cobra.CheckErr(err)
 }

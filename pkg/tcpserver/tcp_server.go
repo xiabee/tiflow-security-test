@@ -57,10 +57,8 @@ type TCPServer interface {
 type tcpServerImpl struct {
 	mux cmux.CMux
 
-	rootListener net.Listener
-	// grpc lisener, service as p2p gRPC server.
-	grpcListener net.Listener
-	// used for HTTP server, service for restful open API.
+	rootListener  net.Listener
+	grpcListener  net.Listener
 	http1Listener net.Listener
 
 	isClosed atomic.Bool

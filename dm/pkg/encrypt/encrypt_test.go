@@ -18,8 +18,34 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
+
+var _ = Suite(&testEncryptSuite{})
+
+func TestSuite(t *testing.T) {
+	TestingT(t)
+}
+
+type testEncryptSuite struct{}
+
+func (t *testEncryptSuite) TestSetSecretKey(c *C) {
+	// 16 bit
+	b16 := make([]byte, 16)
+	_, err := rand.Read(b16)
+	c.Assert(err, IsNil)
+
+	err = SetSecretKey(b16)
+	c.Assert(err, IsNil)
+
+	// 20 bit
+	b20 := make([]byte, 20)
+	_, err = rand.Read(b20)
+	c.Assert(err, IsNil)
+
+	err = SetSecretKey(b20)
+	c.Assert(err, NotNil)
+}
 
 func removeChar(input []byte, c byte) []byte {
 	i := 0
@@ -32,47 +58,34 @@ func removeChar(input []byte, c byte) []byte {
 	return input[:i]
 }
 
-func TestCipher(t *testing.T) {
-	key := make([]byte, 32)
-	_, err := rand.Read(key)
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		InitCipher(nil)
-	})
-	InitCipher(nil)
-	require.IsType(t, &notInitializedCipher{}, defaultCipher)
-
-	InitCipher(key)
-	require.IsType(t, &aesCipher{}, defaultCipher)
-
+func (t *testEncryptSuite) TestEncrypt(c *C) {
 	plaintext := []byte("a plain text")
 
 	// encrypt
 	ciphertext, err := Encrypt(plaintext)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	// decrypt
 	plaintext2, err := Decrypt(ciphertext)
-	require.NoError(t, err)
-	require.Equal(t, plaintext, plaintext2)
+	c.Assert(err, IsNil)
+	c.Assert(plaintext2, DeepEquals, plaintext)
 
 	// invalid length
 	_, err = Decrypt(ciphertext[:len(ciphertext)-len(plaintext)-1])
-	require.Error(t, err)
+	c.Assert(err, NotNil)
 
 	// invalid content
 	_, err = Decrypt(removeChar(ciphertext, ivSep[0]))
-	require.Error(t, err)
+	c.Assert(err, NotNil)
 
 	// a special case, we construct a ciphertext that can be decrypted but the
 	// plaintext is not what we want. This is because currently encrypt mechanism
 	// doesn't keep enough information to decide whether the new ciphertext is valid
-	block, err := aes.NewCipher(key)
-	require.NoError(t, err)
+	block, err := aes.NewCipher(secretKey)
+	c.Assert(err, IsNil)
 	blockSize := block.BlockSize()
-	require.Greater(t, len(ciphertext), blockSize+2)
+	c.Assert(len(ciphertext), Greater, blockSize+2)
 	plaintext3, err := Decrypt(append(ciphertext[1:blockSize+1], append([]byte{ivSep[0]}, ciphertext[blockSize+2:]...)...))
-	require.NoError(t, err)
-	require.NotEqual(t, plaintext, plaintext3)
+	c.Assert(err, IsNil)
+	c.Assert(plaintext3, Not(DeepEquals), plaintext)
 }

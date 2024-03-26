@@ -30,7 +30,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/spanz"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/workerpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/client-go/v2/oracle"
@@ -75,8 +75,6 @@ type regionWorkerMetrics struct {
 	metricSendEventResolvedCounter  prometheus.Counter
 	metricSendEventCommitCounter    prometheus.Counter
 	metricSendEventCommittedCounter prometheus.Counter
-
-	metricQueueDuration prometheus.Observer
 
 	metricWorkerBusyRatio   prometheus.Gauge
 	metricWorkerChannelSize prometheus.Gauge
@@ -142,9 +140,6 @@ func newRegionWorkerMetrics(changefeedID model.ChangeFeedID, tableID string, sto
 	metrics.metricSendEventCommittedCounter = sendEventCounter.
 		WithLabelValues("committed", changefeedID.Namespace, changefeedID.ID)
 
-	metrics.metricQueueDuration = regionWorkerQueueDuration.
-		WithLabelValues(changefeedID.Namespace, changefeedID.ID)
-
 	metrics.metricWorkerBusyRatio = workerBusyRatio.WithLabelValues(
 		changefeedID.Namespace, changefeedID.ID, tableID, storeAddr, "event-handler")
 	metrics.metricWorkerChannelSize = workerChannelSize.WithLabelValues(
@@ -168,7 +163,7 @@ func newRegionWorker(
 		statesManager:      newRegionStateManager(-1),
 		rtsManager:         newRegionTsManager(),
 		rtsUpdateCh:        make(chan *rtsUpdateEvent, 1024),
-		concurrency:        int(s.client.config.KVClient.WorkerConcurrent),
+		concurrency:        s.client.config.KVClient.WorkerConcurrent,
 		metrics:            newRegionWorkerMetrics(s.changefeed, strconv.FormatInt(s.tableID, 10), stream.addr),
 		inputPendingEvents: 0,
 	}
@@ -208,7 +203,7 @@ func (w *regionWorker) checkShouldExit() error {
 	// cancel the gRPC stream.
 	if empty && w.stream.regions.len() == 0 {
 		log.Info("A single region error happens before, "+
-			"and there is no region maintained by the stream, "+
+			"and there is no region maintained by this region worker, "+
 			"exit it and cancel the gRPC stream",
 			zap.String("namespace", w.session.client.changefeed.Namespace),
 			zap.String("changefeed", w.session.client.changefeed.ID),
@@ -225,14 +220,12 @@ func (w *regionWorker) checkShouldExit() error {
 func (w *regionWorker) handleSingleRegionError(err error, state *regionFeedState) error {
 	regionID := state.getRegionID()
 	isStale := state.isStale()
-	w.session.client.logRegionDetails("single region event feed disconnected",
+	log.Info("single region event feed disconnected",
 		zap.String("namespace", w.session.client.changefeed.Namespace),
 		zap.String("changefeed", w.session.client.changefeed.ID),
-		zap.Int64("tableID", w.session.tableID),
-		zap.String("tableName", w.session.tableName),
 		zap.Uint64("regionID", regionID),
 		zap.Uint64("requestID", state.requestID),
-		zap.Stringer("span", &state.sri.span),
+		zap.Stringer("span", state.sri.span),
 		zap.Uint64("resolvedTs", state.sri.resolvedTs()),
 		zap.Bool("isStale", isStale),
 		zap.Error(err))
@@ -241,7 +234,7 @@ func (w *regionWorker) handleSingleRegionError(err error, state *regionFeedState
 		return w.checkShouldExit()
 	}
 	// We need to ensure when the error is handled, `isStale` must be set. So set it before sending the error.
-	state.markStopped(nil)
+	state.markStopped()
 	w.delRegionState(regionID)
 	failpoint.Inject("kvClientSingleFeedProcessDelay", nil)
 
@@ -371,7 +364,7 @@ func (w *regionWorker) resolveLock(ctx context.Context) error {
 							zap.Int64("tableID", w.session.tableID),
 							zap.String("tableName", w.session.tableName),
 							zap.Uint64("regionID", rts.regionID),
-							zap.Stringer("span", &state.sri.span),
+							zap.Stringer("span", state.sri.span),
 							zap.Duration("duration", sinceLastResolvedTs),
 							zap.Duration("lastEvent", sinceLastEvent),
 							zap.Uint64("resolvedTs", lastResolvedTs),
@@ -416,11 +409,9 @@ func (w *regionWorker) processEvent(ctx context.Context, event *regionStatefulEv
 				err = w.handleSingleRegionError(err, event.state)
 			}
 		case *cdcpb.Event_Admin_:
-			w.session.client.logRegionDetails("receive admin event",
+			log.Info("receive admin event",
 				zap.String("namespace", w.session.client.changefeed.Namespace),
 				zap.String("changefeed", w.session.client.changefeed.ID),
-				zap.Int64("tableID", w.session.tableID),
-				zap.String("tableName", w.session.tableName),
 				zap.Stringer("event", event.changeEvent))
 		case *cdcpb.Event_Error:
 			err = w.handleSingleRegionError(
@@ -469,7 +460,7 @@ func (w *regionWorker) onHandleExit(err error) {
 
 func (w *regionWorker) eventHandler(ctx context.Context, enableTableMonitor bool) error {
 	exitFn := func() error {
-		w.session.client.logRegionDetails("region worker closed by error",
+		log.Info("region worker closed by error",
 			zap.String("namespace", w.session.client.changefeed.Namespace),
 			zap.String("changefeed", w.session.client.changefeed.ID),
 			zap.Int64("tableID", w.session.tableID),
@@ -685,7 +676,7 @@ func (w *regionWorker) handleEventEntry(
 			return false
 		}
 	}
-	return handleEventEntry(x, w.session.startTs, state, w.metrics, emit, w.session.changefeed, w.session.tableID, w.session.client.logRegionDetails)
+	return handleEventEntry(x, w.session.startTs, state, w.metrics, emit)
 }
 
 func handleEventEntry(
@@ -694,17 +685,15 @@ func handleEventEntry(
 	state *regionFeedState,
 	metrics *regionWorkerMetrics,
 	emit func(assembled model.RegionFeedEvent) bool,
-	changefeed model.ChangeFeedID,
-	tableID model.TableID,
-	logRegionDetails func(msg string, fields ...zap.Field),
 ) error {
 	regionID, regionSpan, _ := state.getRegionMeta()
 	for _, entry := range x.Entries.GetEntries() {
-		// NOTE: from TiKV 7.0.0, entries are already filtered out in TiKV side.
-		// We can remove the check in future.
-		comparableKey := spanz.ToComparableKey(entry.GetKey())
+		// if a region with kv range [a, z), and we only want the get [b, c) from this region,
+		// tikv will return all key events in the region, although specified [b, c) int the request.
+		// we can make tikv only return the events about the keys in the specified range.
+		comparableKey := regionspan.ToComparableKey(entry.GetKey())
 		if entry.Type != cdcpb.Event_INITIALIZED &&
-			!spanz.KeyInSpan(comparableKey, regionSpan) {
+			!regionspan.KeyInSpan(comparableKey, regionSpan) {
 			metrics.metricDroppedEventSize.Observe(float64(entry.Size()))
 			continue
 		}
@@ -712,14 +701,6 @@ func handleEventEntry(
 		case cdcpb.Event_INITIALIZED:
 			metrics.metricPullEventInitializedCounter.Inc()
 			state.setInitialized()
-			logRegionDetails("region is initialized",
-				zap.String("namespace", changefeed.Namespace),
-				zap.String("changefeed", changefeed.ID),
-				zap.Int64("tableID", tableID),
-				zap.Uint64("regionID", regionID),
-				zap.Uint64("requestID", state.requestID),
-				zap.Stringer("span", &state.sri.span))
-
 			for _, cachedEvent := range state.matcher.matchCachedRow(true) {
 				revent, err := assembleRowEvent(regionID, cachedEvent)
 				if err != nil {
@@ -878,7 +859,7 @@ func (w *regionWorker) evictAllRegions() {
 			if regionState.isStale() {
 				return true
 			}
-			regionState.markStopped(nil)
+			regionState.markStopped()
 			deletes = append(deletes, struct {
 				regionID    uint64
 				regionState *regionFeedState

@@ -781,7 +781,7 @@ tags = ["internal", "high"]
 [error.DM-functional-11125]
 message = "upstream returns an empty result for SHOW MASTER STATUS"
 description = ""
-workaround = "Please make sure binlog is enabled, and check the upstream settings like privileges, RDS settings to read data from SHOW MASTER STATUS."
+workaround = "Please check the upstream settings like privileges, RDS settings to read data from SHOW MASTER STATUS."
 tags = ["upstream", "medium"]
 
 [error.DM-binlog-op-11126]
@@ -1187,34 +1187,10 @@ workaround = "Please choose a valid value in ['none', 'manual'] or leave it empt
 tags = ["internal", "medium"]
 
 [error.DM-config-20063]
-message = "invalid load checksum-physical option '%s'"
-description = ""
-workaround = "Please choose a valid value in ['required', 'optional', 'off'] or leave it empty."
-tags = ["internal", "medium"]
-
-[error.DM-config-20064]
-message = "column-mapping is not supported since v6.6.0"
-description = ""
-workaround = "Please use extract-table/extract-schema/extract-source to handle data conflict when merge tables. See https://docs.pingcap.com/tidb/v6.4/task-configuration-file-full#task-configuration-file-template-advanced"
-tags = ["internal", "high"]
-
-[error.DM-config-20065]
-message = "invalid load analyze option '%s'"
-description = ""
-workaround = "Please choose a valid value in ['required', 'optional', 'off'] or leave it empty."
-tags = ["internal", "medium"]
-
-[error.DM-config-20066]
 message = "cannot enable `strict-optimistic-shard-mode` while `shard-mode` is not `optimistic`"
 description = ""
 workaround = "Please set `shard-mode` to `optimistic` if you want to enable `strict-optimistic-shard-mode`."
 tags = ["internal", "medium"]
-
-[error.DM-config-20067]
-message = "invalid secret key path or content: %v"
-description = ""
-workaround = "Please check whether the path is valid, and has required permission to read the file, and the key is correct."
-tags = ["internal", "high"]
 
 [error.DM-binlog-op-22001]
 message = ""
@@ -1742,19 +1718,7 @@ tags = ["internal", "high"]
 message = ""
 description = ""
 workaround = ""
-tags = ["internal", "high"]
-
-[error.DM-load-unit-34020]
-message = "physical import finished but the data has duplication, please check `%s`.`%s` to see the duplication"
-description = ""
-workaround = "You can refer to https://docs.pingcap.com/tidb/stable/tidb-lightning-physical-import-mode-usage#conflict-detection to manually insert data and resume the task."
-tags = ["internal", "medium"]
-
-[error.DM-load-unit-34021]
-message = "checksum mismatched, KV number in source files: %s, KV number in TiDB cluster: %s"
-description = ""
-workaround = "If TiDB cluster has more KV, please check if the migrated tables are empty before the task. If source files have more KV, please set `on-duplicate-physical` and restart the task to see data duplication. You can resume the task to ignore the error if you want."
-tags = ["internal", "medium"]
+tags = ["not-set", "high"]
 
 [error.DM-sync-unit-36001]
 message = "panic error: %v"

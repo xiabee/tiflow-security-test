@@ -23,13 +23,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/engine/pkg/clock"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
@@ -43,14 +42,14 @@ func testFilePathGenerator(ctx context.Context, t *testing.T, dir string) *FileP
 	sinkURI, err := url.Parse(uri)
 	require.NoError(t, err)
 	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Sink.DateSeparator = util.AddressOf(config.DateSeparatorNone.String())
-	replicaConfig.Sink.Protocol = util.AddressOf(config.ProtocolOpen.String())
-	replicaConfig.Sink.FileIndexWidth = util.AddressOf(6)
+	replicaConfig.Sink.DateSeparator = config.DateSeparatorNone.String()
+	replicaConfig.Sink.Protocol = config.ProtocolOpen.String()
+	replicaConfig.Sink.FileIndexWidth = 6
 	cfg := NewConfig()
 	err = cfg.Apply(ctx, sinkURI, replicaConfig)
 	require.NoError(t, err)
 
-	f := NewFilePathGenerator(model.ChangeFeedID{}, cfg, storage, ".json", pdutil.NewMonotonicClock(clock.New()))
+	f := NewFilePathGenerator(cfg, storage, ".json", clock.New())
 	return f
 }
 
@@ -85,7 +84,7 @@ func TestGenerateDataFilePath(t *testing.T) {
 	f = testFilePathGenerator(ctx, t, dir)
 	f.versionMap[table] = table.TableInfoVersion
 	f.config.DateSeparator = config.DateSeparatorYear.String()
-	f.SetClock(pdutil.NewMonotonicClock(mockClock))
+	f.clock = mockClock
 	mockClock.Set(time.Date(2022, 12, 31, 23, 59, 59, 0, time.UTC))
 	date = f.GenerateDateStr()
 	path, err = f.GenerateDataFilePath(ctx, table, date)
@@ -109,8 +108,7 @@ func TestGenerateDataFilePath(t *testing.T) {
 	f = testFilePathGenerator(ctx, t, dir)
 	f.versionMap[table] = table.TableInfoVersion
 	f.config.DateSeparator = config.DateSeparatorMonth.String()
-	f.SetClock(pdutil.NewMonotonicClock(mockClock))
-
+	f.clock = mockClock
 	mockClock.Set(time.Date(2022, 12, 31, 23, 59, 59, 0, time.UTC))
 	date = f.GenerateDateStr()
 	path, err = f.GenerateDataFilePath(ctx, table, date)
@@ -134,8 +132,7 @@ func TestGenerateDataFilePath(t *testing.T) {
 	f = testFilePathGenerator(ctx, t, dir)
 	f.versionMap[table] = table.TableInfoVersion
 	f.config.DateSeparator = config.DateSeparatorDay.String()
-	f.SetClock(pdutil.NewMonotonicClock(mockClock))
-
+	f.clock = mockClock
 	mockClock.Set(time.Date(2022, 12, 31, 23, 59, 59, 0, time.UTC))
 	date = f.GenerateDateStr()
 	path, err = f.GenerateDataFilePath(ctx, table, date)
@@ -213,8 +210,7 @@ func TestGenerateDataFilePathWithIndexFile(t *testing.T) {
 	f := testFilePathGenerator(ctx, t, dir)
 	mockClock := clock.NewMock()
 	f.config.DateSeparator = config.DateSeparatorDay.String()
-	f.SetClock(pdutil.NewMonotonicClock(mockClock))
-
+	f.clock = mockClock
 	mockClock.Set(time.Date(2023, 3, 9, 23, 59, 59, 0, time.UTC))
 	table := VersionedTableName{
 		TableNameWithPhysicTableID: model.TableName{
@@ -363,9 +359,9 @@ func TestRemoveExpiredFilesWithoutPartition(t *testing.T) {
 	sinkURI, err := url.Parse(uri)
 	require.NoError(t, err)
 	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Sink.DateSeparator = util.AddressOf(config.DateSeparatorDay.String())
-	replicaConfig.Sink.Protocol = util.AddressOf(config.ProtocolCsv.String())
-	replicaConfig.Sink.FileIndexWidth = util.AddressOf(6)
+	replicaConfig.Sink.DateSeparator = config.DateSeparatorDay.String()
+	replicaConfig.Sink.Protocol = config.ProtocolCsv.String()
+	replicaConfig.Sink.FileIndexWidth = 6
 	replicaConfig.Sink.CloudStorageConfig = &config.CloudStorageConfig{
 		FileExpirationDays:  util.AddressOf(1),
 		FileCleanupCronSpec: util.AddressOf("* * * * * *"),

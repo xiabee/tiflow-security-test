@@ -10,6 +10,7 @@ fi
 
 ${PKILL} cdc.test || true
 ${PKILL} cdc || true
+${PKILL} cdc_state_checker || true
 ${PKILL} cdc_kafka_consumer || true
 ${PKILL} cdc_storage_consumer || true
 ${PKILL} tidb-server || true
@@ -45,5 +46,3 @@ kill -9 $(lsof -i tcp:${DOWN_TIKV_PORT} -t 2>/dev/null) &>/dev/null || true
 kill -9 $(lsof -i tcp:${DOWN_TIKV_STATUS_PORT} -t 2>/dev/null) &>/dev/null || true
 kill -9 $(lsof -i tcp:9500 -t 2>/dev/null) &>/dev/null || true
 kill -9 $(lsof -i tcp:17000 -t 2>/dev/null) &>/dev/null || true
-kill -9 $(lsof -i tcp:6650 -t 2>/dev/null) &>/dev/null || true
-kill -9 $(lsof -i tcp:6651 -t 2>/dev/null) &>/dev/null || true

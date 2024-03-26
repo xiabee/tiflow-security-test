@@ -22,12 +22,11 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 	"github.com/phayes/freeport"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	mysqlParser "github.com/pingcap/tidb/pkg/parser/mysql"
+	timodel "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/redo/reader"
-	mysqlDDL "github.com/pingcap/tiflow/cdc/sink/ddlsink/mysql"
-	"github.com/pingcap/tiflow/cdc/sink/dmlsink/txn"
+	mysqlDDL "github.com/pingcap/tiflow/cdc/sinkv2/ddlsink/mysql"
+	"github.com/pingcap/tiflow/cdc/sinkv2/eventsink/txn"
 	pmysql "github.com/pingcap/tiflow/pkg/sink/mysql"
 	"github.com/stretchr/testify/require"
 )
@@ -107,7 +106,7 @@ func TestApply(t *testing.T) {
 			dbIndex++
 		}()
 		if dbIndex%2 == 0 {
-			testDB, err := pmysql.MockTestDB()
+			testDB, err := pmysql.MockTestDB(true)
 			require.Nil(t, err)
 			return testDB, nil
 		}
@@ -126,54 +125,49 @@ func TestApply(t *testing.T) {
 		mysqlDDL.GetDBConnImpl = getDDLDBConnBak
 	}()
 
-	tableInfo := model.BuildTableInfo("test", "t1", []*model.Column{
-		{
-			Name: "a",
-			Type: mysqlParser.TypeLong,
-			Flag: model.HandleKeyFlag | model.PrimaryKeyFlag,
-		}, {
-			Name: "b",
-			Type: mysqlParser.TypeString,
-			Flag: 0,
-		},
-	}, [][]int{{0}})
 	dmls := []*model.RowChangedEvent{
 		{
-			StartTs:   1100,
-			CommitTs:  1200,
-			TableInfo: tableInfo,
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			StartTs:  1100,
+			CommitTs: 1200,
+			Table:    &model.TableName{Schema: "test", Table: "t1"},
+			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 1,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "2",
+					Flag:  0,
 				},
-			}, tableInfo),
+			},
 		},
 		{
-			StartTs:   1200,
-			CommitTs:  resolvedTs,
-			TableInfo: tableInfo,
-			PreColumns: model.Columns2ColumnDatas([]*model.Column{
+			StartTs:  1200,
+			CommitTs: resolvedTs,
+			Table:    &model.TableName{Schema: "test", Table: "t1"},
+			PreColumns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 1,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "2",
+					Flag:  0,
 				},
-			}, tableInfo),
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			},
+			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: 2,
+					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "3",
+					Flag:  0,
 				},
-			}, tableInfo),
+			},
 		},
 	}
 	for _, dml := range dmls {
@@ -197,7 +191,7 @@ func TestApply(t *testing.T) {
 					Schema: "test", Table: "resolved",
 				},
 			},
-			Query: "create table resolved(id int not null unique key)",
+			Query: "create table resolved(id int)",
 			Type:  timodel.ActionCreateTable,
 		},
 	}
@@ -209,8 +203,7 @@ func TestApply(t *testing.T) {
 
 	cfg := &RedoApplierConfig{
 		SinkURI: "mysql://127.0.0.1:4000/?worker-count=1&max-txn-row=1" +
-			"&tidb_placement_mode=ignore&safe-mode=true&cache-prep-stmts=false" +
-			"&multi-stmt-enable=false",
+			"&tidb_placement_mode=ignore&safe-mode=true&multi-stmt-enable=false",
 	}
 	ap := NewRedoApplier(cfg)
 	err := ap.Apply(ctx)
@@ -251,11 +244,6 @@ func getMockDB(t *testing.T) *sql.DB {
 		Number:  1305,
 		Message: "FUNCTION test.tidb_version does not exist",
 	})
-	mock.ExpectQuery("select tidb_version()").WillReturnError(&mysql.MySQLError{
-		Number:  1305,
-		Message: "FUNCTION test.tidb_version does not exist",
-	})
-
 	mock.ExpectBegin()
 	mock.ExpectExec("USE `test`;").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("create table checkpoint(id int)").WillReturnResult(sqlmock.NewResult(1, 1))
@@ -269,8 +257,8 @@ func getMockDB(t *testing.T) *sql.DB {
 
 	// First, apply row which commitTs equal to resolvedTs
 	mock.ExpectBegin()
-	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a` = ?)").
-		WithArgs(1).
+	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a`,`b`) IN ((?,?))").
+		WithArgs(1, "2").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("REPLACE INTO `test`.`t1` (`a`,`b`) VALUES (?,?)").
 		WithArgs(2, "3").
@@ -280,7 +268,7 @@ func getMockDB(t *testing.T) *sql.DB {
 	// Then, apply ddl which commitTs equal to resolvedTs
 	mock.ExpectBegin()
 	mock.ExpectExec("USE `test`;").WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("create table resolved(id int not null unique key)").WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("create table resolved(id int)").WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
 	mock.ExpectClose()

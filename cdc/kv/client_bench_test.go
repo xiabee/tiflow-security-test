@@ -24,14 +24,15 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/cdcpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/store/mockstore/mockcopr"
+	"github.com/pingcap/tidb/store/mockstore/mockcopr"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/pdutil"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/pkg/txnutil"
+	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/testutils"
 	"github.com/tikv/client-go/v2/tikv"
@@ -71,10 +72,6 @@ func (s *mockChangeDataService2) EventFeed(server cdcpb.ChangeData_EventFeedServ
 		}
 	}
 	return nil
-}
-
-func (s *mockChangeDataService2) EventFeedV2(server cdcpb.ChangeData_EventFeedV2Server) error {
-	return s.EventFeed(server)
 }
 
 func newMockService2(
@@ -192,7 +189,7 @@ func prepareBenchMultiStore(b *testing.B, storeNum, regionNum int) (
 	}
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -204,7 +201,7 @@ func prepareBenchMultiStore(b *testing.B, storeNum, regionNum int) (
 	wg.Add(1)
 	go func() {
 		err := cdcClient.EventFeed(ctx,
-			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("b")},
+			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("b")},
 			100, lockResolver, eventCh, false)
 		if errors.Cause(err) != context.Canceled {
 			b.Error(err)
@@ -286,7 +283,7 @@ func prepareBench(b *testing.B, regionNum int) (
 	}
 
 	changefeed := model.DefaultChangeFeedID("changefeed-test")
-	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed)
+	lockResolver := txnutil.NewLockerResolver(kvStorage, changefeed, util.RoleTester)
 	grpcPool := NewGrpcPoolImpl(ctx, &security.Credential{})
 	defer grpcPool.Close()
 	regionCache := tikv.NewRegionCache(pdClient)
@@ -298,7 +295,7 @@ func prepareBench(b *testing.B, regionNum int) (
 	wg.Add(1)
 	go func() {
 		err := cdcClient.EventFeed(ctx,
-			tablepb.Span{StartKey: []byte("a"), EndKey: []byte("z")},
+			regionspan.ComparableSpan{Start: []byte("a"), End: []byte("z")},
 			100, lockResolver, eventCh, false)
 		if errors.Cause(err) != context.Canceled {
 			b.Error(err)

@@ -18,16 +18,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/util/rowcodec"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/integrity"
 	"github.com/pingcap/tiflow/pkg/quotes"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/util"
@@ -64,10 +63,6 @@ const (
 	// BinaryFlag means the column charset is binary
 	BinaryFlag ColumnFlagType = 1 << ColumnFlagType(iota)
 	// HandleKeyFlag means the column is selected as the handle key
-	// The handleKey is chosen by the following rules in the order:
-	// 1. if the table has primary key, it's the handle key.
-	// 2. If the table has not null unique key, it's the handle key.
-	// 3. If the table has no primary key and no not null unique key, it has no handleKey.
 	HandleKeyFlag
 	// GeneratedColumnFlag means the column is a generated column
 	GeneratedColumnFlag
@@ -81,7 +76,19 @@ const (
 	NullableFlag
 	// UnsignedFlag means the column stores an unsigned integer
 	UnsignedFlag
+	// ZerofillFlag means the column is zerofill
+	ZerofillFlag
 )
+
+// SetZeroFill sets ZerofillFlag
+func (b *ColumnFlagType) SetZeroFill() {
+	(*util.Flag)(b).Add(util.Flag(ZerofillFlag))
+}
+
+// IsZerofill shows whether ZerofillFlag is set
+func (b *ColumnFlagType) IsZerofill() bool {
+	return (*util.Flag)(b).HasAll(util.Flag(ZerofillFlag))
+}
 
 // SetIsBinary sets BinaryFlag
 func (b *ColumnFlagType) SetIsBinary() {
@@ -205,10 +212,10 @@ func (b *ColumnFlagType) UnsetIsUnsigned() {
 
 // TableName represents name of a table, includes table name and schema name.
 type TableName struct {
-	Schema      string `toml:"db-name" msg:"db-name"`
-	Table       string `toml:"tbl-name" msg:"tbl-name"`
-	TableID     int64  `toml:"tbl-id" msg:"tbl-id"`
-	IsPartition bool   `toml:"is-partition" msg:"is-partition"`
+	Schema      string `toml:"db-name" json:"db-name" msg:"db-name"`
+	Table       string `toml:"tbl-name" json:"tbl-name" msg:"tbl-name"`
+	TableID     int64  `toml:"tbl-id" json:"tbl-id" msg:"tbl-id"`
+	IsPartition bool   `toml:"is-partition" json:"is-partition" msg:"is-partition"`
 }
 
 // String implements fmt.Stringer interface.
@@ -253,9 +260,9 @@ const (
 // more info https://github.com/tinylib/msgp/issues/158, https://github.com/tinylib/msgp/issues/149
 // so define a RedoColumn, RedoDDLEvent instead of using the Column, DDLEvent
 type RedoLog struct {
-	RedoRow RedoRowChangedEvent `msg:"row"`
-	RedoDDL RedoDDLEvent        `msg:"ddl"`
-	Type    RedoLogType         `msg:"type"`
+	RedoRow *RedoRowChangedEvent `msg:"row"`
+	RedoDDL *RedoDDLEvent        `msg:"ddl"`
+	Type    RedoLogType          `msg:"type"`
 }
 
 // GetCommitTs returns the commit ts of the redo log.
@@ -272,15 +279,15 @@ func (r *RedoLog) GetCommitTs() Ts {
 }
 
 // TrySplitAndSortUpdateEvent redo log do nothing
-func (r *RedoLog) TrySplitAndSortUpdateEvent(_ string) error {
+func (r *RedoLog) TrySplitAndSortUpdateEvent(sinkScheme string) error {
 	return nil
 }
 
 // RedoRowChangedEvent represents the DML event used in RedoLog
 type RedoRowChangedEvent struct {
-	Row        *RowChangedEventInRedoLog `msg:"row"`
-	Columns    []RedoColumn              `msg:"columns"`
-	PreColumns []RedoColumn              `msg:"pre-columns"`
+	Row        *RowChangedEvent `msg:"row"`
+	PreColumns []*RedoColumn    `msg:"pre-columns"`
+	Columns    []*RedoColumn    `msg:"columns"`
 }
 
 // RedoDDLEvent represents DDL event used in redo log persistent
@@ -291,45 +298,26 @@ type RedoDDLEvent struct {
 }
 
 // ToRedoLog converts row changed event to redo log
-func (r *RowChangedEvent) ToRedoLog() *RedoLog {
-	rowInRedoLog := &RowChangedEventInRedoLog{
-		StartTs:  r.StartTs,
-		CommitTs: r.CommitTs,
-		Table: &TableName{
-			Schema:      r.TableInfo.GetSchemaName(),
-			Table:       r.TableInfo.GetTableName(),
-			TableID:     r.PhysicalTableID,
-			IsPartition: r.TableInfo.IsPartitionTable(),
-		},
-		Columns:      r.GetColumns(),
-		PreColumns:   r.GetPreColumns(),
-		IndexColumns: r.TableInfo.IndexColumnsOffset,
-	}
-	return &RedoLog{
-		RedoRow: RedoRowChangedEvent{Row: rowInRedoLog},
-		Type:    RedoLogTypeRow,
-	}
+func (row *RowChangedEvent) ToRedoLog() *RedoLog {
+	return &RedoLog{RedoRow: RowToRedo(row), Type: RedoLogTypeRow}
 }
 
 // ToRedoLog converts ddl event to redo log
-func (d *DDLEvent) ToRedoLog() *RedoLog {
-	return &RedoLog{
-		RedoDDL: RedoDDLEvent{DDL: d},
-		Type:    RedoLogTypeDDL,
-	}
+func (ddl *DDLEvent) ToRedoLog() *RedoLog {
+	return &RedoLog{RedoDDL: DDLToRedo(ddl), Type: RedoLogTypeDDL}
 }
 
 // RowChangedEvent represents a row changed event
-//
-//msgp:ignore RowChangedEvent
 type RowChangedEvent struct {
-	StartTs  uint64
-	CommitTs uint64
+	StartTs  uint64 `json:"start-ts" msg:"start-ts"`
+	CommitTs uint64 `json:"commit-ts" msg:"commit-ts"`
 
-	RowID int64 // Deprecated. It is empty when the RowID comes from clustered index table.
+	RowID int64 `json:"row-id" msg:"-"` // Deprecated. It is empty when the RowID comes from clustered index table.
 
-	PhysicalTableID int64
-
+	// Table contains the table name and table ID.
+	// NOTICE: We store the physical table ID here, not the logical table ID.
+	Table    *TableName         `json:"table" msg:"table"`
+	ColInfos []rowcodec.ColInfo `json:"column-infos" msg:"-"`
 	// NOTICE: We probably store the logical ID inside TableInfo's TableName,
 	// not the physical ID.
 	// For normal table, there is only one ID, which is the physical ID.
@@ -340,46 +328,20 @@ type RowChangedEvent struct {
 	// In general, we always use the physical ID to represent a table, but we
 	// record the logical ID from the DDL event(job.BinlogInfo.TableInfo).
 	// So be careful when using the TableInfo.
-	TableInfo *TableInfo
+	TableInfo *TableInfo `json:"-" msg:"-"`
 
-	Columns    []*ColumnData
-	PreColumns []*ColumnData
-
-	// Checksum for the event, only not nil if the upstream TiDB enable the row level checksum
-	// and TiCDC set the integrity check level to the correctness.
-	Checksum *integrity.Checksum
+	Columns      []*Column `json:"columns" msg:"-"`
+	PreColumns   []*Column `json:"pre-columns" msg:"-"`
+	IndexColumns [][]int   `json:"-" msg:"index-columns"`
 
 	// ApproximateDataSize is the approximate size of protobuf binary
 	// representation of this event.
-	ApproximateDataSize int64
+	ApproximateDataSize int64 `json:"-" msg:"-"`
 
 	// SplitTxn marks this RowChangedEvent as the first line of a new txn.
-	SplitTxn bool
+	SplitTxn bool `json:"-" msg:"-"`
 	// ReplicatingTs is ts when a table starts replicating events to downstream.
-	ReplicatingTs Ts
-	// HandleKey is the key of the row changed event.
-	// It can be used to identify the row changed event.
-	// It can be one of three : common_handle, int_handle or _tidb_rowid based on the table definitions
-	// 1. primary key is the clustered index, and key is not int type, then we use `CommonHandle`
-	// 2. primary key is int type(including different types of int, such as bigint, TINYINT), then we use IntHandle
-	// 3. when the table doesn't have the primary key and clustered index,
-	//    tidb will make a hidden column called "_tidb_rowid" as the handle.
-	//    due to the type of "_tidb_rowid" is int, so we also use IntHandle to represent.
-	HandleKey kv.Handle
-}
-
-// RowChangedEventInRedoLog is used to store RowChangedEvent in redo log v2 format
-type RowChangedEventInRedoLog struct {
-	StartTs  uint64 `msg:"start-ts"`
-	CommitTs uint64 `msg:"commit-ts"`
-
-	// Table contains the table name and table ID.
-	// NOTICE: We store the physical table ID here, not the logical table ID.
-	Table *TableName `msg:"table"`
-
-	Columns      []*Column `msg:"columns"`
-	PreColumns   []*Column `msg:"pre-columns"`
-	IndexColumns [][]int   `msg:"index-columns"`
+	ReplicatingTs Ts `json:"-" msg:"-"`
 }
 
 // txnRows represents a set of events that belong to the same transaction.
@@ -415,7 +377,7 @@ func (r *RowChangedEvent) GetCommitTs() uint64 {
 }
 
 // TrySplitAndSortUpdateEvent do nothing
-func (r *RowChangedEvent) TrySplitAndSortUpdateEvent(_ string) error {
+func (r *RowChangedEvent) TrySplitAndSortUpdateEvent(sinkScheme string) error {
 	return nil
 }
 
@@ -434,58 +396,11 @@ func (r *RowChangedEvent) IsUpdate() bool {
 	return len(r.PreColumns) != 0 && len(r.Columns) != 0
 }
 
-func columnData2Column(col *ColumnData, tableInfo *TableInfo) *Column {
-	colID := col.ColumnID
-	offset, ok := tableInfo.columnsOffset[colID]
-	if !ok {
-		log.Panic("invalid column id",
-			zap.Int64("columnID", colID),
-			zap.Any("tableInfo", tableInfo))
-	}
-	colInfo := tableInfo.Columns[offset]
-	return &Column{
-		Name:      colInfo.Name.O,
-		Type:      colInfo.GetType(),
-		Charset:   colInfo.GetCharset(),
-		Collation: colInfo.GetCollate(),
-		Flag:      tableInfo.ColumnsFlag[colID],
-		Value:     col.Value,
-		Default:   GetColumnDefaultValue(colInfo),
-	}
-}
-
-func columnDatas2Columns(cols []*ColumnData, tableInfo *TableInfo) []*Column {
-	if cols == nil {
-		return nil
-	}
-	columns := make([]*Column, len(cols))
-	for i, colData := range cols {
-		if colData == nil {
-			log.Warn("meet nil column data, should not happened in production env",
-				zap.Any("cols", cols),
-				zap.Any("tableInfo", tableInfo))
-			continue
-		}
-		columns[i] = columnData2Column(colData, tableInfo)
-	}
-	return columns
-}
-
-// GetColumns returns the columns of the event
-func (r *RowChangedEvent) GetColumns() []*Column {
-	return columnDatas2Columns(r.Columns, r.TableInfo)
-}
-
-// GetPreColumns returns the pre columns of the event
-func (r *RowChangedEvent) GetPreColumns() []*Column {
-	return columnDatas2Columns(r.PreColumns, r.TableInfo)
-}
-
 // PrimaryKeyColumnNames return all primary key's name
 func (r *RowChangedEvent) PrimaryKeyColumnNames() []string {
 	var result []string
 
-	var cols []*ColumnData
+	var cols []*Column
 	if r.IsDelete() {
 		cols = r.PreColumns
 	} else {
@@ -493,34 +408,54 @@ func (r *RowChangedEvent) PrimaryKeyColumnNames() []string {
 	}
 
 	result = make([]string, 0)
-	tableInfo := r.TableInfo
 	for _, col := range cols {
-		if col != nil && tableInfo.ForceGetColumnFlagType(col.ColumnID).IsPrimaryKey() {
-			result = append(result, tableInfo.ForceGetColumnName(col.ColumnID))
+		if col != nil && col.Flag.IsPrimaryKey() {
+			result = append(result, col.Name)
 		}
 	}
 	return result
 }
 
-// GetHandleKeyColumnValues returns all handle key's column values
-func (r *RowChangedEvent) GetHandleKeyColumnValues() []string {
-	var result []string
+// PrimaryKeyColumns returns the column(s) corresponding to the handle key(s)
+func (r *RowChangedEvent) PrimaryKeyColumns() []*Column {
+	pkeyCols := make([]*Column, 0)
 
-	var cols []*ColumnData
+	var cols []*Column
 	if r.IsDelete() {
 		cols = r.PreColumns
 	} else {
 		cols = r.Columns
 	}
 
-	result = make([]string, 0)
-	tableInfo := r.TableInfo
 	for _, col := range cols {
-		if col != nil && tableInfo.ForceGetColumnFlagType(col.ColumnID).IsHandleKey() {
-			result = append(result, ColumnValueString(col.Value))
+		if col != nil && (col.Flag.IsPrimaryKey()) {
+			pkeyCols = append(pkeyCols, col)
 		}
 	}
-	return result
+
+	// It is okay not to have primary keys, so the empty array is an acceptable result
+	return pkeyCols
+}
+
+// HandleKeyColumns returns the column(s) corresponding to the handle key(s)
+func (r *RowChangedEvent) HandleKeyColumns() []*Column {
+	pkeyCols := make([]*Column, 0)
+
+	var cols []*Column
+	if r.IsDelete() {
+		cols = r.PreColumns
+	} else {
+		cols = r.Columns
+	}
+
+	for _, col := range cols {
+		if col != nil && col.Flag.IsHandleKey() {
+			pkeyCols = append(pkeyCols, col)
+		}
+	}
+
+	// It is okay not to have handle keys, so the empty array is an acceptable result
+	return pkeyCols
 }
 
 // HandleKeyColInfos returns the column(s) and colInfo(s) corresponding to the handle key(s)
@@ -528,19 +463,17 @@ func (r *RowChangedEvent) HandleKeyColInfos() ([]*Column, []rowcodec.ColInfo) {
 	pkeyCols := make([]*Column, 0)
 	pkeyColInfos := make([]rowcodec.ColInfo, 0)
 
-	var cols []*ColumnData
+	var cols []*Column
 	if r.IsDelete() {
 		cols = r.PreColumns
 	} else {
 		cols = r.Columns
 	}
 
-	tableInfo := r.TableInfo
-	colInfos := tableInfo.GetColInfosForRowChangedEvent()
 	for i, col := range cols {
-		if col != nil && tableInfo.ForceGetColumnFlagType(col.ColumnID).IsHandleKey() {
-			pkeyCols = append(pkeyCols, columnData2Column(col, tableInfo))
-			pkeyColInfos = append(pkeyColInfos, colInfos[i])
+		if col != nil && col.Flag.IsHandleKey() {
+			pkeyCols = append(pkeyCols, col)
+			pkeyColInfos = append(pkeyColInfos, r.ColInfos[i])
 		}
 	}
 
@@ -548,11 +481,31 @@ func (r *RowChangedEvent) HandleKeyColInfos() ([]*Column, []rowcodec.ColInfo) {
 	return pkeyCols, pkeyColInfos
 }
 
+// WithHandlePrimaryFlag set `HandleKeyFlag` and `PrimaryKeyFlag`
+func (r *RowChangedEvent) WithHandlePrimaryFlag(colNames map[string]struct{}) {
+	for _, col := range r.Columns {
+		if _, ok := colNames[col.Name]; ok {
+			col.Flag.SetIsHandleKey()
+			col.Flag.SetIsPrimaryKey()
+		}
+	}
+	for _, col := range r.PreColumns {
+		if _, ok := colNames[col.Name]; ok {
+			col.Flag.SetIsHandleKey()
+			col.Flag.SetIsPrimaryKey()
+		}
+	}
+}
+
 // ApproximateBytes returns approximate bytes in memory consumed by the event.
 func (r *RowChangedEvent) ApproximateBytes() int {
 	const sizeOfRowEvent = int(unsafe.Sizeof(*r))
+	const sizeOfTable = int(unsafe.Sizeof(*r.Table))
+	const sizeOfIndexes = int(unsafe.Sizeof(r.IndexColumns[0]))
+	const sizeOfInt = int(unsafe.Sizeof(int(0)))
 
-	size := 0
+	// Size of table name
+	size := len(r.Table.Schema) + len(r.Table.Table) + sizeOfTable
 	// Size of cols
 	for i := range r.Columns {
 		size += r.Columns[i].ApproximateBytes
@@ -563,51 +516,25 @@ func (r *RowChangedEvent) ApproximateBytes() int {
 			size += r.PreColumns[i].ApproximateBytes
 		}
 	}
+	// Size of index columns
+	for i := range r.IndexColumns {
+		size += len(r.IndexColumns[i]) * sizeOfInt
+		size += sizeOfIndexes
+	}
 	// Size of an empty row event
 	size += sizeOfRowEvent
 	return size
 }
 
-// Columns2ColumnDatas convert `Column`s to `ColumnData`s
-func Columns2ColumnDatas(cols []*Column, tableInfo *TableInfo) []*ColumnData {
-	if cols == nil {
-		return nil
-	}
-	columns := make([]*ColumnData, len(cols))
-	for i, col := range cols {
-		if col == nil {
-			continue
-		}
-		colID := tableInfo.ForceGetColumnIDByName(col.Name)
-		columns[i] = &ColumnData{
-			ColumnID: colID,
-			Value:    col.Value,
-		}
-	}
-	return columns
-}
-
-// Column represents a column value and its schema info
+// Column represents a column value in row changed event
 type Column struct {
-	Name      string         `msg:"name"`
-	Type      byte           `msg:"type"`
-	Charset   string         `msg:"charset"`
-	Collation string         `msg:"collation"`
-	Flag      ColumnFlagType `msg:"-"`
-	Value     interface{}    `msg:"-"`
-	Default   interface{}    `msg:"-"`
-
-	// ApproximateBytes is approximate bytes consumed by the column.
-	ApproximateBytes int `msg:"-"`
-}
-
-// ColumnData represents a column value in row changed event
-type ColumnData struct {
-	// ColumnID may be just a mock id, because we don't store it in redo log.
-	// So after restore from redo log, we need to give every a column a mock id.
-	// The only guarantee is that the column id is unique in a RowChangedEvent
-	ColumnID int64       `json:"column_id" msg:"column_id"`
-	Value    interface{} `json:"value" msg:"-"`
+	Name      string         `json:"name" msg:"name"`
+	Type      byte           `json:"type" msg:"type"`
+	Charset   string         `json:"charset" msg:"charset"`
+	Collation string         `json:"collation" msg:"collation"`
+	Flag      ColumnFlagType `json:"flag" msg:"-"`
+	Value     interface{}    `json:"value" msg:"value"`
+	Default   interface{}    `json:"default" msg:"-"`
 
 	// ApproximateBytes is approximate bytes consumed by the column.
 	ApproximateBytes int `json:"-" msg:"-"`
@@ -615,240 +542,58 @@ type ColumnData struct {
 
 // RedoColumn stores Column change
 type RedoColumn struct {
-	// Fields from Column and can't be marshaled directly in Column.
-	Value interface{} `msg:"column"`
-	// msgp transforms empty byte slice into nil, PTAL msgp#247.
-	ValueIsEmptyBytes bool   `msg:"value-is-empty-bytes"`
-	Flag              uint64 `msg:"flag"`
+	Column *Column `msg:"column"`
+	Flag   uint64  `msg:"flag"`
 }
 
-// ColumnIDAllocator represents the interface to allocate column id for tableInfo
-type ColumnIDAllocator interface {
-	// GetColumnID return the column id according to the column name
-	GetColumnID(name string) int64
-}
-
-// IncrementalColumnIDAllocator allocates column id in an incremental way.
-// At most of the time, it is the default implementation when you don't care the column id's concrete value.
-//
-//msgp:ignore IncrementalColumnIDAllocator
-type IncrementalColumnIDAllocator struct {
-	nextColID int64
-}
-
-// NewIncrementalColumnIDAllocator creates a new IncrementalColumnIDAllocator
-func NewIncrementalColumnIDAllocator() *IncrementalColumnIDAllocator {
-	return &IncrementalColumnIDAllocator{
-		nextColID: 100, // 100 is an arbitrary number
-	}
-}
-
-// GetColumnID return the next mock column id
-func (d *IncrementalColumnIDAllocator) GetColumnID(name string) int64 {
-	result := d.nextColID
-	d.nextColID += 1
-	return result
-}
-
-// NameBasedColumnIDAllocator allocates column id using an prefined map from column name to id
-//
-//msgp:ignore NameBasedColumnIDAllocator
-type NameBasedColumnIDAllocator struct {
-	nameToIDMap map[string]int64
-}
-
-// NewNameBasedColumnIDAllocator creates a new NameBasedColumnIDAllocator
-func NewNameBasedColumnIDAllocator(nameToIDMap map[string]int64) *NameBasedColumnIDAllocator {
-	return &NameBasedColumnIDAllocator{
-		nameToIDMap: nameToIDMap,
-	}
-}
-
-// GetColumnID return the column id of the name
-func (n *NameBasedColumnIDAllocator) GetColumnID(name string) int64 {
-	colID, ok := n.nameToIDMap[name]
-	if !ok {
-		log.Panic("column not found",
-			zap.String("name", name),
-			zap.Any("nameToIDMap", n.nameToIDMap))
-	}
-	return colID
-}
-
-// BuildTableInfo builds a table info from given information.
-// Note that some fields of the result TableInfo may just be mocked.
-// The only guarantee is that we can use the result to reconstrut the information in `Column`.
-// The main use cases of this function it to build TableInfo from redo log and in tests.
-func BuildTableInfo(schemaName, tableName string, columns []*Column, indexColumns [][]int) *TableInfo {
-	tidbTableInfo := BuildTiDBTableInfo(tableName, columns, indexColumns)
-	return WrapTableInfo(100 /* not used */, schemaName, 1000 /* not used */, tidbTableInfo)
-}
-
-// BuildTableInfoWithPKNames4Test builds a table info from given information.
-func BuildTableInfoWithPKNames4Test(schemaName, tableName string, columns []*Column, pkNames map[string]struct{}) *TableInfo {
-	if len(pkNames) == 0 {
-		return BuildTableInfo(schemaName, tableName, columns, nil)
-	}
-	indexColumns := make([][]int, 1)
-	indexColumns[0] = make([]int, 0)
-	for i, col := range columns {
-		if _, ok := pkNames[col.Name]; ok {
-			indexColumns[0] = append(indexColumns[0], i)
-			col.Flag.SetIsHandleKey()
-			col.Flag.SetIsPrimaryKey()
-		}
-	}
-	if len(indexColumns[0]) != len(pkNames) {
-		log.Panic("cannot find all pks",
-			zap.Any("indexColumns", indexColumns),
-			zap.Any("pkNames", pkNames))
-	}
-	return BuildTableInfo(schemaName, tableName, columns, indexColumns)
-}
-
-// AddExtraColumnInfo is used to add some extra column info to the table info.
-// Just use it in test.
-func AddExtraColumnInfo(tableInfo *model.TableInfo, extraColInfos []rowcodec.ColInfo) {
-	for i, colInfo := range extraColInfos {
-		tableInfo.Columns[i].SetElems(colInfo.Ft.GetElems())
-		tableInfo.Columns[i].SetFlen(colInfo.Ft.GetFlen())
-	}
-}
-
-// GetHandleAndUniqueIndexOffsets4Test is used to get the offsets of handle columns and other unique index columns in test
-func GetHandleAndUniqueIndexOffsets4Test(cols []*Column) [][]int {
-	result := make([][]int, 0)
-	handleColumns := make([]int, 0)
-	for i, col := range cols {
-		if col.Flag.IsHandleKey() {
-			handleColumns = append(handleColumns, i)
-		} else if col.Flag.IsUniqueKey() {
-			// When there is a unique key which is not handle key,
-			// we cannot get the accurate index info for this key.
-			// So just be aggressive to make each unique column a unique index
-			// to make sure there is no write conflict when syncing data in tests.
-			result = append(result, []int{i})
-		}
-	}
-	if len(handleColumns) != 0 {
-		result = append(result, handleColumns)
-	}
-	return result
-}
-
-// BuildTiDBTableInfoWithoutVirtualColumns build a TableInfo without virual columns from the source table info
-func BuildTiDBTableInfoWithoutVirtualColumns(source *model.TableInfo) *model.TableInfo {
-	ret := source.Clone()
-	ret.Columns = make([]*model.ColumnInfo, 0, len(source.Columns))
-	rowColumnsCurrentOffset := 0
-	columnsOffset := make(map[string]int, len(source.Columns))
-	for _, srcCol := range source.Columns {
-		if !IsColCDCVisible(srcCol) {
-			continue
-		}
-		colInfo := srcCol.Clone()
-		colInfo.Offset = rowColumnsCurrentOffset
-		ret.Columns = append(ret.Columns, colInfo)
-		columnsOffset[colInfo.Name.O] = rowColumnsCurrentOffset
-		rowColumnsCurrentOffset += 1
-	}
-	// Keep all the index info even if it contains virtual columns for simplicity
-	for _, indexInfo := range ret.Indices {
-		for _, col := range indexInfo.Columns {
-			col.Offset = columnsOffset[col.Name.O]
-		}
-	}
-
-	return ret
-}
-
-// BuildTiDBTableInfo is a simple wrapper over BuildTiDBTableInfoImpl which create a default ColumnIDAllocator.
-func BuildTiDBTableInfo(tableName string, columns []*Column, indexColumns [][]int) *model.TableInfo {
-	return BuildTiDBTableInfoImpl(tableName, columns, indexColumns, NewIncrementalColumnIDAllocator())
-}
-
-// BuildTiDBTableInfoImpl builds a TiDB TableInfo from given information.
-// Note the result TableInfo may not be same as the original TableInfo in tidb.
-// The only guarantee is that you can restore the `Name`, `Type`, `Charset`, `Collation`
-// and `Flag` field of `Column` using the result TableInfo.
-// The precondition required for calling this function:
-//  1. There must be at least one handle key in `columns`;
-//  2. The handle key must either be a primary key or a non null unique key;
-//  3. The index that is selected as the handle must be provided in `indexColumns`;
-func BuildTiDBTableInfoImpl(
-	tableName string,
-	columns []*Column,
-	indexColumns [][]int,
-	columnIDAllocator ColumnIDAllocator,
-) *model.TableInfo {
+// BuildTiDBTableInfo builds a TiDB TableInfo from given information.
+func BuildTiDBTableInfo(columns []*Column, indexColumns [][]int) *model.TableInfo {
 	ret := &model.TableInfo{}
-	ret.Name = model.NewCIStr(tableName)
+	// nowhere will use this field, so we set a debug message
+	ret.Name = model.NewCIStr("BuildTiDBTableInfo")
 
-	hasPrimaryKeyColumn := false
 	for i, col := range columns {
 		columnInfo := &model.ColumnInfo{
 			Offset: i,
 			State:  model.StatePublic,
 		}
 		if col == nil {
-			// actually, col should never be nil according to `datum2Column` and `WrapTableInfo` in prod env
-			// we mock it as generated column just for test
+			// by referring to datum2Column, nil is happened when
+			// - !IsColCDCVisible, which means the column is a virtual generated
+			//   column
+			// - !exist && !fillWithDefaultValue, which means upstream does not
+			//   send the column value
+			// just mock for the first case
 			columnInfo.Name = model.NewCIStr("omitted")
 			columnInfo.GeneratedExprString = "pass_generated_check"
 			columnInfo.GeneratedStored = false
 			ret.Columns = append(ret.Columns, columnInfo)
 			continue
 		}
-		// add a mock id to identify columns inside cdc
-		columnInfo.ID = columnIDAllocator.GetColumnID(col.Name)
 		columnInfo.Name = model.NewCIStr(col.Name)
 		columnInfo.SetType(col.Type)
-
-		if col.Collation != "" {
-			columnInfo.SetCollate(col.Collation)
-		} else {
-			// collation is not stored, give it a default value
-			columnInfo.SetCollate(mysql.UTF8MB4DefaultCollation)
-		}
+		// TiKV always use utf8mb4 to store, and collation is not recorded by CDC
+		columnInfo.SetCharset(mysql.UTF8MB4Charset)
+		columnInfo.SetCollate(mysql.UTF8MB4DefaultCollation)
 
 		// inverse initColumnsFlag
 		flag := col.Flag
-		if col.Charset != "" {
-			columnInfo.SetCharset(col.Charset)
-		} else if flag.IsBinary() {
+		if flag.IsBinary() {
 			columnInfo.SetCharset("binary")
-		} else {
-			// charset is not stored, give it a default value
-			columnInfo.SetCharset(mysql.UTF8MB4Charset)
 		}
 		if flag.IsGeneratedColumn() {
 			// we do not use this field, so we set it to any non-empty string
 			columnInfo.GeneratedExprString = "pass_generated_check"
 			columnInfo.GeneratedStored = true
 		}
-		if flag.IsPrimaryKey() {
+		if flag.IsHandleKey() {
 			columnInfo.AddFlag(mysql.PriKeyFlag)
-			hasPrimaryKeyColumn = true
-			if !flag.IsHandleKey() {
-				log.Panic("Primary key must be handle key",
-					zap.String("table", tableName),
-					zap.Any("columns", columns),
-					zap.Any("indexColumns", indexColumns))
-			}
-			// just set it for test compatibility,
-			// actually we cannot deduce the value of IsCommonHandle from the provided args.
 			ret.IsCommonHandle = true
+		} else if flag.IsPrimaryKey() {
+			columnInfo.AddFlag(mysql.PriKeyFlag)
 		}
 		if flag.IsUniqueKey() {
 			columnInfo.AddFlag(mysql.UniqueKeyFlag)
-		}
-		if flag.IsHandleKey() {
-			if !flag.IsPrimaryKey() && !flag.IsUniqueKey() {
-				log.Panic("Handle key must either be primary key or unique key",
-					zap.String("table", tableName),
-					zap.Any("columns", columns),
-					zap.Any("indexColumns", indexColumns))
-			}
 		}
 		if !flag.IsNullable() {
 			columnInfo.AddFlag(mysql.NotNullFlag)
@@ -862,14 +607,6 @@ func BuildTiDBTableInfoImpl(
 		ret.Columns = append(ret.Columns, columnInfo)
 	}
 
-	hasPrimaryKeyIndex := false
-	hasHandleIndex := false
-	// TiCDC handles columns according to the following rules:
-	// 1. If a primary key (PK) exists, it is chosen.
-	// 2. If there is no PK, TiCDC looks for a not null unique key (UK) with the least number of columns and the smallest index ID.
-	// So we assign the smallest index id to the index which is selected as handle to mock this behavior.
-	minIndexID := int64(1)
-	nextMockIndexID := minIndexID + 1
 	for i, colOffsets := range indexColumns {
 		indexInfo := &model.IndexInfo{
 			Name:  model.NewCIStr(fmt.Sprintf("idx_%d", i)),
@@ -890,15 +627,11 @@ func BuildTiDBTableInfoImpl(
 		}
 
 		isPrimary := true
-		isAllColumnsHandle := true
 		for _, offset := range colOffsets {
 			col := columns[offset]
 			// When only all columns in the index are primary key, then the index is primary key.
 			if col == nil || !col.Flag.IsPrimaryKey() {
 				isPrimary = false
-			}
-			if col == nil || !col.Flag.IsHandleKey() {
-				isAllColumnsHandle = false
 			}
 
 			tiCol := ret.Columns[offset]
@@ -908,42 +641,11 @@ func BuildTiDBTableInfoImpl(
 			indexInfo.Columns = append(indexInfo.Columns, indexCol)
 			indexInfo.Primary = isPrimary
 		}
-		hasPrimaryKeyIndex = hasPrimaryKeyIndex || isPrimary
-		if isAllColumnsHandle {
-			// If there is no primary index, only one index will contain columns which are all handles.
-			// If there is a primary index, the primary index must be the handle.
-			// And there may be another index which is a subset of the primary index. So we skip this check.
-			if hasHandleIndex && !hasPrimaryKeyColumn {
-				log.Panic("Multiple handle index found",
-					zap.String("table", tableName),
-					zap.Any("colOffsets", colOffsets),
-					zap.String("indexName", indexInfo.Name.O),
-					zap.Any("columns", columns),
-					zap.Any("indexColumns", indexColumns))
-			}
-			hasHandleIndex = true
-		}
-		// If there is no primary column, we need allocate the min index id to the one selected as handle.
-		// In other cases, we don't care the concrete value of index id.
-		if isAllColumnsHandle && !hasPrimaryKeyColumn {
-			indexInfo.ID = minIndexID
-		} else {
-			indexInfo.ID = nextMockIndexID
-			nextMockIndexID += 1
-		}
 
 		// TODO: revert the "all column set index related flag" to "only the
 		// first column set index related flag" if needed
 
 		ret.Indices = append(ret.Indices, indexInfo)
-	}
-	if hasPrimaryKeyColumn != hasPrimaryKeyIndex {
-		log.Panic("Primary key column and primary key index is not consistent",
-			zap.String("table", tableName),
-			zap.Any("columns", columns),
-			zap.Any("indexColumns", indexColumns),
-			zap.Bool("hasPrimaryKeyColumn", hasPrimaryKeyColumn),
-			zap.Bool("hasPrimaryKeyIndex", hasPrimaryKeyIndex))
 	}
 	return ret
 }
@@ -1003,11 +705,6 @@ type DDLEvent struct {
 	Done         atomic.Bool      `msg:"-"`
 	Charset      string           `msg:"-"`
 	Collate      string           `msg:"-"`
-	IsBootstrap  bool             `msg:"-"`
-	// BDRRole is the role of the TiDB cluster, it is used to determine whether
-	// the DDL is executed by the primary cluster.
-	BDRRole string        `msg:"-"`
-	SQLMode mysql.SQLMode `msg:"-"`
 }
 
 // FromJob fills the values with DDLEvent from DDL job
@@ -1028,8 +725,7 @@ func (d *DDLEvent) FromJobWithArgs(
 	d.TableInfo = tableInfo
 	d.Charset = job.Charset
 	d.Collate = job.Collate
-	d.BDRRole = job.BDRRole
-	d.SQLMode = job.SQLMode
+
 	switch d.Type {
 	// The query for "DROP TABLE" and "DROP VIEW" statements need
 	// to be rebuilt. The reason is elaborated as follows:
@@ -1066,25 +762,12 @@ func (d *DDLEvent) FromJobWithArgs(
 	}
 }
 
-// NewBootstrapDDLEvent returns a bootstrap DDL event.
-// We set Bootstrap DDL event's startTs and commitTs to 0.
-// Because it is generated by the TiCDC, not from the upstream TiDB.
-// And they ere useless for a bootstrap DDL event.
-func NewBootstrapDDLEvent(tableInfo *TableInfo) *DDLEvent {
-	return &DDLEvent{
-		StartTs:     0,
-		CommitTs:    0,
-		TableInfo:   tableInfo,
-		IsBootstrap: true,
-	}
-}
-
 // SingleTableTxn represents a transaction which includes many row events in a single table
 //
 //msgp:ignore SingleTableTxn
 type SingleTableTxn struct {
-	PhysicalTableID int64
-	TableInfo       *TableInfo
+	Table     *TableName
+	TableInfo *TableInfo
 	// TableInfoVersion is the version of the table info, it is used to generate data path
 	// in storage sink. Generally, TableInfoVersion equals to `SingleTableTxn.TableInfo.Version`.
 	// Besides, if one table is just scheduled to a new processor, the TableInfoVersion should be
@@ -1094,6 +777,11 @@ type SingleTableTxn struct {
 	StartTs  uint64
 	CommitTs uint64
 	Rows     []*RowChangedEvent
+
+	// control fields of SingleTableTxn
+	// FinishWg is a barrier txn, after this txn is received, the worker must
+	// flush cached txns and call FinishWg.Done() to mark txns have been flushed.
+	FinishWg *sync.WaitGroup
 }
 
 // GetCommitTs returns the commit timestamp of the transaction.
@@ -1101,16 +789,12 @@ func (t *SingleTableTxn) GetCommitTs() uint64 {
 	return t.CommitTs
 }
 
-// GetPhysicalTableID returns the physical table id of the table in the transaction
-func (t *SingleTableTxn) GetPhysicalTableID() int64 {
-	return t.PhysicalTableID
-}
-
 // TrySplitAndSortUpdateEvent split update events if unique key is updated
-func (t *SingleTableTxn) TrySplitAndSortUpdateEvent(scheme string) error {
-	if !t.shouldSplitUpdateEvent(scheme) {
+func (t *SingleTableTxn) TrySplitAndSortUpdateEvent(sinkScheme string) error {
+	if !t.shouldSplitUpdateEvent(sinkScheme) {
 		return nil
 	}
+
 	newRows, err := trySplitAndSortUpdateEvent(t.Rows)
 	if err != nil {
 		return errors.Trace(err)
@@ -1180,14 +864,6 @@ func trySplitAndSortUpdateEvent(
 	return rowChangedEvents, nil
 }
 
-func isNonEmptyUniqueOrHandleCol(col *ColumnData, tableInfo *TableInfo) bool {
-	if col != nil {
-		colFlag := tableInfo.ForceGetColumnFlagType(col.ColumnID)
-		return colFlag.IsUniqueKey() || colFlag.IsHandleKey()
-	}
-	return false
-}
-
 // shouldSplitUpdateEvent determines if the split event is needed to align the old format based on
 // whether the handle key column or unique key has been modified.
 // If  is modified, we need to use splitUpdateEvent to split the update event into a delete and an insert event.
@@ -1197,11 +873,11 @@ func shouldSplitUpdateEvent(updateEvent *RowChangedEvent) bool {
 		return false
 	}
 
-	tableInfo := updateEvent.TableInfo
 	for i := range updateEvent.Columns {
 		col := updateEvent.Columns[i]
 		preCol := updateEvent.PreColumns[i]
-		if isNonEmptyUniqueOrHandleCol(col, tableInfo) && isNonEmptyUniqueOrHandleCol(preCol, tableInfo) {
+		if col != nil && (col.Flag.IsUniqueKey() || col.Flag.IsHandleKey()) &&
+			preCol != nil && (preCol.Flag.IsUniqueKey() || preCol.Flag.IsHandleKey()) {
 			colValueString := ColumnValueString(col.Value)
 			preColValueString := ColumnValueString(preCol.Value)
 			// If one unique key columns is updated, we need to split the event row.
@@ -1238,20 +914,17 @@ func splitUpdateEvent(
 
 // Append adds a row changed event into SingleTableTxn
 func (t *SingleTableTxn) Append(row *RowChangedEvent) {
-	if row.StartTs != t.StartTs || row.CommitTs != t.CommitTs || row.PhysicalTableID != t.GetPhysicalTableID() {
+	if row.StartTs != t.StartTs || row.CommitTs != t.CommitTs || row.Table.TableID != t.Table.TableID {
 		log.Panic("unexpected row change event",
 			zap.Uint64("startTs", t.StartTs),
 			zap.Uint64("commitTs", t.CommitTs),
-			zap.Any("table", t.GetPhysicalTableID()),
+			zap.Any("table", t.Table),
 			zap.Any("row", row))
 	}
 	t.Rows = append(t.Rows, row)
 }
 
-// TopicPartitionKey contains the topic and partition key of the message.
-type TopicPartitionKey struct {
-	Topic          string
-	Partition      int32
-	PartitionKey   string
-	TotalPartition int32
+// ToWaitFlush indicates whether to wait flushing after the txn is processed or not.
+func (t *SingleTableTxn) ToWaitFlush() bool {
+	return t.FinishWg != nil
 }

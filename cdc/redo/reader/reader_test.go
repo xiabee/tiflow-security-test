@@ -24,7 +24,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/redo/common"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
 	"github.com/pingcap/tiflow/cdc/redo/writer/file"
@@ -51,17 +50,9 @@ func genLogFile(
 	if logType == redo.RedoRowLogFileType {
 		// generate unsorted logs
 		for ts := maxCommitTs; ts >= minCommitTs; ts-- {
-			event := &model.RowChangedEvent{
-				CommitTs: ts,
-				TableInfo: &model.TableInfo{
-					TableName: model.TableName{
-						Schema: "test",
-						Table:  "t",
-					},
-				},
-			}
+			event := &model.RowChangedEvent{CommitTs: ts}
 			log := event.ToRedoLog()
-			rawData, err := codec.MarshalRedoLog(log, nil)
+			rawData, err := log.MarshalMsg(nil)
 			require.Nil(t, err)
 			_, err = w.Write(rawData)
 			require.Nil(t, err)
@@ -72,7 +63,7 @@ func genLogFile(
 			TableInfo: &model.TableInfo{},
 		}
 		log := event.ToRedoLog()
-		rawData, err := codec.MarshalRedoLog(log, nil)
+		rawData, err := log.MarshalMsg(nil)
 		require.Nil(t, err)
 		_, err = w.Write(rawData)
 		require.Nil(t, err)
@@ -109,7 +100,7 @@ func TestReadLogs(t *testing.T) {
 			UseExternalStorage: true,
 		},
 		meta:  meta,
-		rowCh: make(chan *model.RowChangedEventInRedoLog, defaultReaderChanSize),
+		rowCh: make(chan *model.RowChangedEvent, defaultReaderChanSize),
 		ddlCh: make(chan *model.DDLEvent, defaultReaderChanSize),
 	}
 	eg, egCtx := errgroup.WithContext(ctx)
@@ -158,7 +149,7 @@ func TestLogReaderClose(t *testing.T) {
 			UseExternalStorage: true,
 		},
 		meta:  meta,
-		rowCh: make(chan *model.RowChangedEventInRedoLog, 1),
+		rowCh: make(chan *model.RowChangedEvent, 1),
 		ddlCh: make(chan *model.DDLEvent, 1),
 	}
 	eg, egCtx := errgroup.WithContext(ctx)

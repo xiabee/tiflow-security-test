@@ -25,7 +25,6 @@ import (
 	v2 "github.com/pingcap/tiflow/cdc/api/v2"
 	"github.com/pingcap/tiflow/cdc/capture"
 	_ "github.com/pingcap/tiflow/docs/swagger" // use for OpenAPI online docs
-	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -55,9 +54,6 @@ func RegisterRoutes(
 
 	// Log API
 	router.POST("/admin/log", gin.WrapF(owner.HandleAdminLogLevel))
-	router.GET("/config", func(c *gin.Context) {
-		c.JSON(http.StatusOK, config.GetDefaultServerConfig())
-	})
 
 	// pprof debug API
 	pprofGroup := router.Group("/debug/pprof/")

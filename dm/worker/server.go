@@ -925,10 +925,10 @@ func getMinLocInAllSubTasks(ctx context.Context, subTaskCfgs map[string]config.S
 }
 
 func getMinLocForSubTask(ctx context.Context, subTaskCfg config.SubTaskConfig) (minLoc *binlog.Location, err error) {
-	if !config.HasSync(subTaskCfg.Mode) {
+	if subTaskCfg.Mode == config.ModeFull {
 		return nil, nil
 	}
-	subTaskCfg2, err := subTaskCfg.DecryptedClone()
+	subTaskCfg2, err := subTaskCfg.DecryptPassword()
 	if err != nil {
 		return nil, errors.Annotate(err, "get min position from checkpoint")
 	}
@@ -1077,31 +1077,6 @@ func (s *Server) OperateValidatorError(ctx context.Context, req *pb.OperateValid
 		//nolint:nilerr
 		return resp, nil
 	}
-	//nolint:nilerr
-	return resp, nil
-}
-
-func (s *Server) UpdateValidator(ctx context.Context, req *pb.UpdateValidationWorkerRequest) (*pb.CommonWorkerResponse, error) {
-	log.L().Info("update validation", zap.Stringer("payload", req))
-	w := s.getSourceWorker(true)
-	resp := &pb.CommonWorkerResponse{
-		Result: true,
-	}
-	if w == nil {
-		log.L().Warn("fail to update validator, because no mysql source is being handled in the worker")
-		resp.Result = false
-		resp.Msg = terror.ErrWorkerNoStart.Error()
-		return resp, nil
-	}
-	err := w.UpdateWorkerValidator(req)
-	if err != nil {
-		resp.Result = false
-		resp.Msg = err.Error()
-		//nolint:nilerr
-		return resp, nil
-	}
-	resp.Source = w.cfg.SourceID
-	resp.Worker = s.cfg.Name
 	//nolint:nilerr
 	return resp, nil
 }

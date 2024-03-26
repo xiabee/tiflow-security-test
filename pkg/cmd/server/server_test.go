@@ -21,9 +21,8 @@ import (
 	"testing"
 	"time"
 
-	ticonfig "github.com/pingcap/tidb/pkg/config"
+	ticonfig "github.com/pingcap/tidb/config"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -152,33 +151,47 @@ func TestParseCfg(t *testing.T) {
 		OwnerFlushInterval:     config.TomlDuration(150 * time.Millisecond),
 		ProcessorFlushInterval: config.TomlDuration(150 * time.Millisecond),
 		Sorter: &config.SorterConfig{
-			SortDir:       config.DefaultSortDir,
-			CacheSizeInMB: 128,
+			SortDir:             config.DefaultSortDir,
+			CacheSizeInMB:       128,
+			MaxMemoryPercentage: 10,
+
+			NumConcurrentWorker:    4,
+			ChunkSizeLimit:         128 * 1024 * 1024,
+			MaxMemoryConsumption:   16 * 1024 * 1024 * 1024,
+			NumWorkerPoolGoroutine: 16,
 		},
-		Security: &security.Credential{
+		Security: &config.SecurityConfig{
 			CertPath:      "bb",
 			KeyPath:       "cc",
 			CertAllowedCN: []string{"dd", "ee"},
 		},
+		PerTableMemoryQuota: config.DefaultTableMemoryQuota,
 		KVClient: &config.KVClientConfig{
-			EnableMultiplexing:   true,
-			WorkerConcurrent:     8,
-			GrpcStreamConcurrent: 1,
-			AdvanceIntervalInMs:  300,
-			FrontierConcurrent:   8,
-			WorkerPoolSize:       0,
-			RegionScanLimit:      40,
-			RegionRetryDuration:  config.TomlDuration(time.Minute),
+			WorkerConcurrent:    8,
+			WorkerPoolSize:      0,
+			RegionScanLimit:     40,
+			RegionRetryDuration: config.TomlDuration(time.Minute),
 		},
 		Debug: &config.DebugConfig{
+			TableActor: &config.TableActorConfig{
+				EventBatchSize: 32,
+			},
+			EnableDBSorter:      true,
+			EnableNewScheduler:  true,
+			EnablePullBasedSink: true,
 			DB: &config.DBConfig{
-				Count:               8,
-				MaxOpenFiles:        10000,
-				BlockSize:           65536,
-				WriterBufferSize:    8388608,
-				Compression:         "snappy",
-				WriteL0PauseTrigger: math.MaxInt32,
-				CompactionL0Trigger: 160,
+				Count:                       8,
+				Concurrency:                 128,
+				MaxOpenFiles:                10000,
+				BlockSize:                   65536,
+				WriterBufferSize:            8388608,
+				Compression:                 "snappy",
+				WriteL0PauseTrigger:         math.MaxInt32,
+				CompactionL0Trigger:         160,
+				CompactionDeletionThreshold: 10485760,
+				CompactionPeriod:            1800,
+				IteratorMaxAliveDuration:    10000,
+				IteratorSlowReadDuration:    256,
 			},
 			// We expect the default configuration here.
 			Messages: &config.MessagesConfig{
@@ -200,16 +213,14 @@ func TestParseCfg(t *testing.T) {
 				CheckBalanceInterval: 60000000000,
 				AddTableBatchSize:    50,
 			},
-			CDCV2: &config.CDCV2{
-				Enable:          false,
-				MetaStoreConfig: config.MetaStoreConfiguration{},
-			},
+			EnableNewSink: true,
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
 			},
 		},
-		ClusterID: "default",
+		ClusterID:           "default",
+		MaxMemoryPercentage: config.DisableMemoryLimit,
 	}, o.serverConfig)
 }
 
@@ -239,14 +250,16 @@ max-backups = 1
 
 [sorter]
 sort-dir = "/tmp/just_a_test"
-cache-size-in-mb = 8
 
 [kv-client]
 region-retry-duration = "3s"
 
 [debug]
+enable-db-sorter = true
+enable-pull-based-sink = true
 [debug.db]
 count = 5
+concurrency = 6
 max-open-files = 7
 block-size = 32768 # 32 KB
 block-cache-size = 8
@@ -254,6 +267,9 @@ writer-buffer-size = 9
 compression = "none"
 target-file-size-base = 10
 compaction-l0-trigger = 11
+compaction-deletion-threshold = 15
+compaction-period = 16
+write-l0-slowdown-trigger = 12
 write-l0-pause-trigger = 13
 
 [debug.messages]
@@ -304,29 +320,43 @@ check-balance-interval = "10s"
 		OwnerFlushInterval:     config.TomlDuration(600 * time.Millisecond),
 		ProcessorFlushInterval: config.TomlDuration(600 * time.Millisecond),
 		Sorter: &config.SorterConfig{
-			SortDir:       config.DefaultSortDir,
-			CacheSizeInMB: 8,
+			SortDir:             config.DefaultSortDir,
+			CacheSizeInMB:       128,
+			MaxMemoryPercentage: 10,
+
+			NumConcurrentWorker:    4,
+			ChunkSizeLimit:         128 * 1024 * 1024,
+			MaxMemoryConsumption:   16 * 1024 * 1024 * 1024,
+			NumWorkerPoolGoroutine: 16,
 		},
-		Security: &security.Credential{},
+		Security:            &config.SecurityConfig{},
+		PerTableMemoryQuota: config.DefaultTableMemoryQuota,
 		KVClient: &config.KVClientConfig{
-			EnableMultiplexing:   true,
-			WorkerConcurrent:     8,
-			GrpcStreamConcurrent: 1,
-			AdvanceIntervalInMs:  300,
-			FrontierConcurrent:   8,
-			WorkerPoolSize:       0,
-			RegionScanLimit:      40,
-			RegionRetryDuration:  config.TomlDuration(3 * time.Second),
+			WorkerConcurrent:    8,
+			WorkerPoolSize:      0,
+			RegionScanLimit:     40,
+			RegionRetryDuration: config.TomlDuration(3 * time.Second),
 		},
 		Debug: &config.DebugConfig{
+			TableActor: &config.TableActorConfig{
+				EventBatchSize: 32,
+			},
+			EnableDBSorter:      true,
+			EnablePullBasedSink: true,
+			EnableNewScheduler:  true,
 			DB: &config.DBConfig{
-				Count:               5,
-				MaxOpenFiles:        7,
-				BlockSize:           32768,
-				WriterBufferSize:    9,
-				Compression:         "none",
-				CompactionL0Trigger: 11,
-				WriteL0PauseTrigger: 13,
+				Count:                       5,
+				Concurrency:                 6,
+				MaxOpenFiles:                7,
+				BlockSize:                   32768,
+				WriterBufferSize:            9,
+				Compression:                 "none",
+				CompactionL0Trigger:         11,
+				WriteL0PauseTrigger:         13,
+				IteratorMaxAliveDuration:    10000,
+				IteratorSlowReadDuration:    256,
+				CompactionDeletionThreshold: 15,
+				CompactionPeriod:            16,
 			},
 			Messages: &config.MessagesConfig{
 				ClientMaxBatchInterval:       config.TomlDuration(500 * time.Millisecond),
@@ -347,16 +377,14 @@ check-balance-interval = "10s"
 				CheckBalanceInterval: config.TomlDuration(10 * time.Second),
 				AddTableBatchSize:    50,
 			},
-			CDCV2: &config.CDCV2{
-				Enable:          false,
-				MetaStoreConfig: config.MetaStoreConfiguration{},
-			},
+			EnableNewSink: true,
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
 			},
 		},
-		ClusterID: "default",
+		ClusterID:           "default",
+		MaxMemoryPercentage: config.DisableMemoryLimit,
 	}, o.serverConfig)
 }
 
@@ -386,7 +414,6 @@ max-backups = 1
 
 [sorter]
 sort-dir = "/tmp/just_a_test"
-cache-size-in-mb = 8
 
 [security]
 ca-path = "aa"
@@ -438,33 +465,47 @@ cert-allowed-cn = ["dd","ee"]
 		OwnerFlushInterval:     config.TomlDuration(150 * time.Millisecond),
 		ProcessorFlushInterval: config.TomlDuration(150 * time.Millisecond),
 		Sorter: &config.SorterConfig{
-			SortDir:       config.DefaultSortDir,
-			CacheSizeInMB: 8,
+			SortDir:             config.DefaultSortDir,
+			CacheSizeInMB:       128,
+			MaxMemoryPercentage: 10,
+
+			NumConcurrentWorker:    4,
+			ChunkSizeLimit:         128 * 1024 * 1024,
+			MaxMemoryConsumption:   16 * 1024 * 1024 * 1024,
+			NumWorkerPoolGoroutine: 16,
 		},
-		Security: &security.Credential{
+		Security: &config.SecurityConfig{
 			CertPath:      "bb",
 			KeyPath:       "cc",
 			CertAllowedCN: []string{"dd", "ee"},
 		},
+		PerTableMemoryQuota: config.DefaultTableMemoryQuota,
 		KVClient: &config.KVClientConfig{
-			EnableMultiplexing:   true,
-			WorkerConcurrent:     8,
-			GrpcStreamConcurrent: 1,
-			AdvanceIntervalInMs:  300,
-			FrontierConcurrent:   8,
-			WorkerPoolSize:       0,
-			RegionScanLimit:      40,
-			RegionRetryDuration:  config.TomlDuration(time.Minute),
+			WorkerConcurrent:    8,
+			WorkerPoolSize:      0,
+			RegionScanLimit:     40,
+			RegionRetryDuration: config.TomlDuration(time.Minute),
 		},
 		Debug: &config.DebugConfig{
+			TableActor: &config.TableActorConfig{
+				EventBatchSize: 32,
+			},
+			EnableDBSorter:      true,
+			EnableNewScheduler:  true,
+			EnablePullBasedSink: true,
 			DB: &config.DBConfig{
-				Count:               8,
-				MaxOpenFiles:        10000,
-				BlockSize:           65536,
-				WriterBufferSize:    8388608,
-				Compression:         "snappy",
-				WriteL0PauseTrigger: math.MaxInt32,
-				CompactionL0Trigger: 160,
+				Count:                       8,
+				Concurrency:                 128,
+				MaxOpenFiles:                10000,
+				BlockSize:                   65536,
+				WriterBufferSize:            8388608,
+				Compression:                 "snappy",
+				WriteL0PauseTrigger:         math.MaxInt32,
+				CompactionL0Trigger:         160,
+				CompactionDeletionThreshold: 10485760,
+				CompactionPeriod:            1800,
+				IteratorMaxAliveDuration:    10000,
+				IteratorSlowReadDuration:    256,
 			},
 			// We expect the default configuration here.
 			Messages: &config.MessagesConfig{
@@ -486,20 +527,18 @@ cert-allowed-cn = ["dd","ee"]
 				CheckBalanceInterval: 60000000000,
 				AddTableBatchSize:    50,
 			},
-			CDCV2: &config.CDCV2{
-				Enable:          false,
-				MetaStoreConfig: config.MetaStoreConfiguration{},
-			},
+			EnableNewSink: true,
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
 			},
 		},
-		ClusterID: "default",
+		ClusterID:           "default",
+		MaxMemoryPercentage: config.DisableMemoryLimit,
 	}, o.serverConfig)
 }
 
-func TestDecodeUnknownDebugCfg(t *testing.T) {
+func TestDecodeUnkownDebugCfg(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "ticdc.toml")
 	configContent := `
@@ -522,14 +561,25 @@ unknown3 = 3
 	err = o.validate()
 	require.Nil(t, err)
 	require.Equal(t, &config.DebugConfig{
+		TableActor: &config.TableActorConfig{
+			EventBatchSize: 32,
+		},
+		EnableDBSorter:      true,
+		EnableNewScheduler:  true,
+		EnablePullBasedSink: true,
 		DB: &config.DBConfig{
-			Count:               8,
-			MaxOpenFiles:        10000,
-			BlockSize:           65536,
-			WriterBufferSize:    8388608,
-			Compression:         "snappy",
-			WriteL0PauseTrigger: math.MaxInt32,
-			CompactionL0Trigger: 160,
+			Count:                       8,
+			Concurrency:                 128,
+			MaxOpenFiles:                10000,
+			BlockSize:                   65536,
+			WriterBufferSize:            8388608,
+			Compression:                 "snappy",
+			WriteL0PauseTrigger:         math.MaxInt32,
+			CompactionL0Trigger:         160,
+			CompactionDeletionThreshold: 10485760,
+			CompactionPeriod:            1800,
+			IteratorMaxAliveDuration:    10000,
+			IteratorSlowReadDuration:    256,
 		},
 		// We expect the default configuration here.
 		Messages: &config.MessagesConfig{
@@ -551,10 +601,7 @@ unknown3 = 3
 			CheckBalanceInterval: 60000000000,
 			AddTableBatchSize:    50,
 		},
-		CDCV2: &config.CDCV2{
-			Enable:          false,
-			MetaStoreConfig: config.MetaStoreConfiguration{},
-		},
+		EnableNewSink: true,
 		Puller: &config.PullerConfig{
 			EnableResolvedTsStuckDetection: false,
 			ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),

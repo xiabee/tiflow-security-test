@@ -162,12 +162,8 @@ type MessageServer struct {
 }
 
 type taskOnMessageBatch struct {
-	// for grpc msgs
 	streamMeta     *p2p.StreamMeta
 	messageEntries []*p2p.MessageEntry
-
-	// for internal msgs
-	rawMessageEntries []RawMessageEntry
 }
 
 type taskOnRegisterPeer struct {
@@ -213,7 +209,7 @@ func NewMessageServer(serverID NodeID, config *MessageServerConfig) *MessageServ
 
 // Run starts the MessageServer's worker goroutines.
 // It must be running to provide the gRPC service.
-func (m *MessageServer) Run(ctx context.Context, localCh <-chan RawMessageEntry) error {
+func (m *MessageServer) Run(ctx context.Context) error {
 	atomic.StoreInt32(&m.isRunning, 1)
 	defer func() {
 		atomic.StoreInt32(&m.isRunning, 0)
@@ -228,12 +224,6 @@ func (m *MessageServer) Run(ctx context.Context, localCh <-chan RawMessageEntry)
 	errg.Go(func() error {
 		return errors.Trace(m.pool.Run(ctx))
 	})
-
-	if localCh != nil {
-		errg.Go(func() error {
-			return errors.Trace(m.receiveLocalMessage(ctx, localCh))
-		})
-	}
 
 	return errg.Wait()
 }
@@ -254,9 +244,6 @@ func (m *MessageServer) run(ctx context.Context) error {
 		case task := <-m.taskQueue:
 			switch task := task.(type) {
 			case taskOnMessageBatch:
-				for _, entry := range task.rawMessageEntries {
-					m.handleRawMessage(ctx, entry)
-				}
 				for _, entry := range task.messageEntries {
 					m.handleMessage(ctx, task.streamMeta, entry)
 				}
@@ -444,14 +431,7 @@ func (m *MessageServer) AddHandler(
 	})
 
 	poolHandle := m.pool.RegisterEvent(func(ctx context.Context, argsI interface{}) error {
-		args, ok := argsI.(poolEventArgs)
-		if !ok {
-			// Handle message from local.
-			if err := fn(m.serverID, argsI); err != nil {
-				return errors.Trace(err)
-			}
-			return nil
-		}
+		args := argsI.(poolEventArgs)
 		sm := args.streamMeta
 		entry := args.entry
 		e := reflect.New(tp.Elem()).Interface()
@@ -572,11 +552,7 @@ func (m *MessageServer) handlePendingMessages(ctx context.Context, topic string)
 		}
 
 		for _, entry := range entries {
-			if entry.StreamMeta != nil {
-				m.handleMessage(ctx, entry.StreamMeta, entry.Entry)
-			} else {
-				m.handleRawMessage(ctx, entry.RawEntry)
-			}
+			m.handleMessage(ctx, entry.StreamMeta, entry.Entry)
 		}
 
 		delete(m.pendingMessages, key)
@@ -657,42 +633,8 @@ func (m *MessageServer) scheduleTaskBlocking(ctx context.Context, task interface
 	return nil
 }
 
-func (m *MessageServer) receiveLocalMessage(ctx context.Context, localCh <-chan RawMessageEntry) error {
-	batchRawMessages := []RawMessageEntry{}
-	sendTaskBlocking := func() {
-		if len(batchRawMessages) == 0 {
-			return
-		}
-		_ = m.scheduleTaskBlocking(ctx, taskOnMessageBatch{
-			rawMessageEntries: batchRawMessages,
-		})
-		batchRawMessages = []RawMessageEntry{}
-	}
-
-	ticker := time.NewTicker(10 * time.Millisecond)
-	for {
-		select {
-		case <-ctx.Done():
-			return errors.Trace(ctx.Err())
-		case entry, ok := <-localCh:
-			if !ok {
-				errMsg := "local server stream closed since the channel is closed"
-				return cerror.ErrPeerMessageServerClosed.GenWithStackByArgs(errMsg)
-			}
-			batchRawMessages = append(batchRawMessages, entry)
-
-			if len(batchRawMessages) >= 1024 {
-				sendTaskBlocking()
-			}
-		case <-ticker.C:
-			sendTaskBlocking()
-		}
-	}
-}
-
 // SendMessage implements the gRPC call SendMessage.
 func (m *MessageServer) SendMessage(stream p2p.CDCPeerToPeer_SendMessageServer) error {
-	ctx := stream.Context()
 	packet, err := stream.Recv()
 	if err != nil {
 		return errors.Trace(err)
@@ -712,23 +654,18 @@ func (m *MessageServer) SendMessage(stream p2p.CDCPeerToPeer_SendMessageServer) 
 
 	sendCh := make(chan p2p.SendMessageResponse, m.config.SendChannelSize)
 	streamHandle := newStreamHandle(packet.Meta, sendCh)
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
-	errg, egCtx := errgroup.WithContext(ctx)
+	errg, ctx := errgroup.WithContext(ctx)
 
-	// receive messages from the sender
 	errg.Go(func() error {
 		defer streamHandle.Close()
-		clientSocketAddr := unknownPeerLabel
-		if p, ok := gRPCPeer.FromContext(egCtx); ok {
-			clientSocketAddr = p.Addr.String()
-		}
-		if err := m.receive(egCtx, clientSocketAddr, stream, streamHandle); err != nil {
+		if err := m.receive(stream, streamHandle); err != nil {
 			log.Warn("peer-to-peer message handler error", zap.Error(err))
 			select {
-			case <-egCtx.Done():
-				log.Warn("error receiving from peer", zap.Error(egCtx.Err()))
-				return errors.Trace(egCtx.Err())
+			case <-ctx.Done():
+				log.Warn("error receiving from peer", zap.Error(ctx.Err()))
+				return errors.Trace(ctx.Err())
 			case sendCh <- errorToRPCResponse(err):
 			default:
 				log.Warn("sendCh congested, could not send error", zap.Error(err))
@@ -737,8 +674,6 @@ func (m *MessageServer) SendMessage(stream p2p.CDCPeerToPeer_SendMessageServer) 
 		}
 		return nil
 	})
-
-	// send acks to the sender
 	errg.Go(func() error {
 		rl := rate.NewLimiter(rate.Limit(m.config.SendRateLimitPerStream), 1)
 		for {
@@ -780,18 +715,17 @@ func (m *MessageServer) SendMessage(stream p2p.CDCPeerToPeer_SendMessageServer) 
 	// namely this function.
 }
 
-func (m *MessageServer) receive(
-	ctx context.Context,
-	clientSocketAddr string,
-	stream p2p.CDCPeerToPeer_SendMessageServer,
-	streamHandle *streamHandle,
-) error {
+func (m *MessageServer) receive(stream p2p.CDCPeerToPeer_SendMessageServer, streamHandle *streamHandle) error {
+	clientIP := unknownPeerLabel
+	if p, ok := gRPCPeer.FromContext(stream.Context()); ok {
+		clientIP = p.Addr.String()
+	}
 	// We use scheduleTaskBlocking because blocking here is acceptable.
 	// Blocking here will cause grpc-go to back propagate the pressure
 	// to the client, which is what we want.
-	if err := m.scheduleTaskBlocking(ctx, taskOnRegisterPeer{
+	if err := m.scheduleTaskBlocking(stream.Context(), taskOnRegisterPeer{
 		sender:     streamHandle,
-		clientAddr: clientSocketAddr,
+		clientAddr: clientIP,
 	}); err != nil {
 		return errors.Trace(err)
 	}
@@ -844,39 +778,13 @@ func (m *MessageServer) receive(
 			}
 
 			// See the comment above on why use scheduleTaskBlocking.
-			if err := m.scheduleTaskBlocking(ctx, taskOnMessageBatch{
+			if err := m.scheduleTaskBlocking(stream.Context(), taskOnMessageBatch{
 				streamMeta:     streamHandle.GetStreamMeta(),
 				messageEntries: packet.GetEntries(),
 			}); err != nil {
 				return errors.Trace(err)
 			}
 		}
-	}
-}
-
-func (m *MessageServer) handleRawMessage(ctx context.Context, entry RawMessageEntry) {
-	handler, ok := m.handlers[entry.topic]
-	if !ok {
-		// handler not found
-		pendingMessageKey := topicSenderPair{
-			Topic:    entry.topic,
-			SenderID: m.serverID,
-		}
-		pendingEntries := m.pendingMessages[pendingMessageKey]
-		m.pendingMessages[pendingMessageKey] = append(pendingEntries, pendingMessageEntry{
-			RawEntry: entry,
-		})
-		if len(m.pendingMessages[pendingMessageKey]) >= m.config.MaxPendingMessageCountPerTopic {
-			delete(m.pendingMessages, pendingMessageKey)
-			log.Warn("Topic congested because no handler has been registered", zap.Any("topic", pendingMessageKey))
-		}
-		return
-	}
-	// handler is found
-	if err := handler.AddEvent(ctx, entry.value); err != nil {
-		// just ignore the message if handler returns an error
-		errMsg := "Failed to process message due to a handler error"
-		log.Debug(errMsg, zap.Error(err), zap.String("topic", entry.topic))
 	}
 }
 
@@ -951,12 +859,8 @@ type topicSenderPair struct {
 }
 
 type pendingMessageEntry struct {
-	// for grpc msgs
 	StreamMeta *p2p.StreamMeta
 	Entry      *p2p.MessageEntry
-
-	// for local msgs
-	RawEntry RawMessageEntry
 }
 
 func errorToRPCResponse(err error) p2p.SendMessageResponse {

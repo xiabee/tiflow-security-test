@@ -19,6 +19,7 @@ import (
 	"io"
 	"math/rand"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,15 +30,13 @@ import (
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/kv/regionlock"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/pkg/chann"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/pdutil"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/retry"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/pingcap/tiflow/pkg/txnutil"
 	"github.com/pingcap/tiflow/pkg/version"
 	"github.com/prometheus/client_golang/prometheus"
@@ -72,6 +71,8 @@ const (
 	// failed region will be reloaded via `BatchLoadRegionsWithKeyRange` API. So we
 	// don't need to force reload region anymore.
 	regionScheduleReload = false
+
+	resolveLockMinInterval = 10 * time.Second
 
 	scanRegionsConcurrency = 1024
 
@@ -112,7 +113,6 @@ var (
 	metricFeedRPCCtxUnavailable       = eventFeedErrorCounter.WithLabelValues("RPCCtxUnavailable")
 	metricStoreSendRequestErr         = eventFeedErrorCounter.WithLabelValues("SendRequestToStore")
 	metricConnectToStoreErr           = eventFeedErrorCounter.WithLabelValues("ConnectToStore")
-	metricKvIsBusyCounter             = eventFeedErrorCounter.WithLabelValues("KvIsBusy")
 )
 
 var (
@@ -135,7 +135,6 @@ func newRegionErrorInfo(info singleRegionInfo, err error) regionErrorInfo {
 	}
 }
 
-// eventFeedStream stores an EventFeed stream and pointer to the underlying gRPC connection
 type eventFeedStream struct {
 	client cdcpb.ChangeData_EventFeedClient
 	conn   *sharedConn
@@ -163,7 +162,7 @@ func (s *eventFeedStream) close() {
 type CDCKVClient interface {
 	EventFeed(
 		ctx context.Context,
-		span tablepb.Span,
+		span regionspan.ComparableSpan,
 		ts uint64,
 		lockResolver txnutil.LockResolver,
 		eventCh chan<- model.RegionFeedEvent,
@@ -206,8 +205,6 @@ type CDCClient struct {
 	// filterLoop is used in BDR mode, when it is true, tikv cdc component
 	// will filter data that are written by another TiCDC.
 	filterLoop bool
-
-	logRegionDetails func(msg string, fields ...zap.Field)
 }
 
 type tableStoreStat struct {
@@ -245,11 +242,6 @@ func NewCDCClient(
 		filterLoop: filterLoop,
 	}
 	c.tableStoreStats.v = make(map[string]*tableStoreStat)
-	if cfg.Debug.Puller.LogRegionDetails {
-		c.logRegionDetails = log.Info
-	} else {
-		c.logRegionDetails = log.Debug
-	}
 	return c
 }
 
@@ -271,6 +263,7 @@ func (c *CDCClient) newStream(
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
+
 	err = version.CheckStoreVersion(ctx, c.pd, storeID)
 	if err != nil {
 		cancel()
@@ -279,7 +272,6 @@ func (c *CDCClient) newStream(
 
 	client := cdcpb.NewChangeDataClient(conn.ClientConn)
 	var streamClient cdcpb.ChangeData_EventFeedClient
-
 	streamClient, err = client.EventFeed(ctx)
 	if err != nil {
 		cancel()
@@ -306,6 +298,7 @@ func (c *CDCClient) newStream(
 		zap.String("store", addr),
 		zap.Uint64("storeID", storeID),
 		zap.Uint64("streamID", stream.id))
+
 	return stream, nil
 }
 
@@ -314,7 +307,7 @@ func (c *CDCClient) newStream(
 // provided channel.
 // The `Start` and `End` field in input span must be memcomparable encoded.
 func (c *CDCClient) EventFeed(
-	ctx context.Context, span tablepb.Span, ts uint64,
+	ctx context.Context, span regionspan.ComparableSpan, ts uint64,
 	lockResolver txnutil.LockResolver,
 	eventCh chan<- model.RegionFeedEvent,
 	enableTableMonitor bool,
@@ -388,7 +381,7 @@ type eventFeedSession struct {
 	lockResolver txnutil.LockResolver
 
 	// The whole range that is being subscribed.
-	totalSpan tablepb.Span
+	totalSpan regionspan.ComparableSpan
 
 	// The channel to send the processed events.
 	eventCh      chan<- model.RegionFeedEvent
@@ -401,7 +394,7 @@ type eventFeedSession struct {
 	// The channel to schedule scanning and requesting regions in a specified range.
 	requestRangeCh *chann.DrainableChann[rangeRequestTask]
 
-	rangeLock *regionlock.RegionRangeLock
+	rangeLock *regionspan.RegionRangeLock
 
 	enableTableMonitor bool
 	regionChSizeGauge  prometheus.Gauge
@@ -419,21 +412,22 @@ type eventFeedSession struct {
 }
 
 type rangeRequestTask struct {
-	span tablepb.Span
+	span regionspan.ComparableSpan
 }
 
 func newEventFeedSession(
 	client *CDCClient,
-	totalSpan tablepb.Span,
+	totalSpan regionspan.ComparableSpan,
 	lockResolver txnutil.LockResolver,
 	startTs uint64,
 	eventCh chan<- model.RegionFeedEvent,
 	enableTableMonitor bool,
 ) *eventFeedSession {
 	id := allocateRequestID()
-	rangeLock := regionlock.NewRegionRangeLock(
-		id, totalSpan.StartKey, totalSpan.EndKey, startTs,
+	rangeLock := regionspan.NewRegionRangeLock(
+		id, totalSpan.Start, totalSpan.End, startTs,
 		client.changefeed.Namespace+"."+client.changefeed.ID)
+
 	return &eventFeedSession{
 		client:             client,
 		startTs:            startTs,
@@ -463,10 +457,10 @@ func newEventFeedSession(
 }
 
 func (s *eventFeedSession) eventFeed(ctx context.Context) error {
-	s.requestRangeCh = chann.NewAutoDrainChann[rangeRequestTask]()
-	s.regionCh = chann.NewAutoDrainChann[singleRegionInfo]()
-	s.regionRouter = chann.NewAutoDrainChann[singleRegionInfo]()
-	s.errCh = chann.NewAutoDrainChann[regionErrorInfo]()
+	s.requestRangeCh = chann.NewDrainableChann[rangeRequestTask]()
+	s.regionCh = chann.NewDrainableChann[singleRegionInfo]()
+	s.regionRouter = chann.NewDrainableChann[singleRegionInfo]()
+	s.errCh = chann.NewDrainableChann[regionErrorInfo]()
 
 	eventFeedGauge.Inc()
 	defer func() {
@@ -532,7 +526,7 @@ func (s *eventFeedSession) eventFeed(ctx context.Context) error {
 		zap.Int64("tableID", s.tableID),
 		zap.String("tableName", s.tableName),
 		zap.Uint64("startTs", s.startTs),
-		zap.Stringer("span", &s.totalSpan))
+		zap.Stringer("span", s.totalSpan))
 
 	return g.Wait()
 }
@@ -540,7 +534,7 @@ func (s *eventFeedSession) eventFeed(ctx context.Context) error {
 // scheduleDivideRegionAndRequest schedules a range to be divided by regions,
 // and these regions will be then scheduled to send ChangeData requests.
 func (s *eventFeedSession) scheduleDivideRegionAndRequest(
-	ctx context.Context, span tablepb.Span,
+	ctx context.Context, span regionspan.ComparableSpan,
 ) {
 	task := rangeRequestTask{span: span}
 	select {
@@ -553,60 +547,57 @@ func (s *eventFeedSession) scheduleDivideRegionAndRequest(
 // scheduleRegionRequest locks the region's range and schedules sending ChangeData request to the region.
 // This function is blocking until the region range is locked successfully
 func (s *eventFeedSession) scheduleRegionRequest(ctx context.Context, sri singleRegionInfo) {
-	handleResult := func(res regionlock.LockRangeResult) {
+	handleResult := func(res regionspan.LockRangeResult) {
 		switch res.Status {
-		case regionlock.LockRangeStatusSuccess:
+		case regionspan.LockRangeStatusSuccess:
 			sri.lockedRange = res.LockedRange
 			select {
 			case s.regionCh.In() <- sri:
 				s.regionChSizeGauge.Inc()
 			case <-ctx.Done():
 			}
-		case regionlock.LockRangeStatusStale:
-			s.client.logRegionDetails("request expired",
+		case regionspan.LockRangeStatusStale:
+			log.Info("request expired",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
-				zap.Int64("tableID", s.tableID),
-				zap.String("tableName", s.tableName),
 				zap.Uint64("regionID", sri.verID.GetID()),
-				zap.Stringer("span", &sri.span),
+				zap.Stringer("span", sri.span),
 				zap.Any("retrySpans", res.RetryRanges))
 			for _, r := range res.RetryRanges {
 				// This call is always blocking, otherwise if scheduling in a new
 				// goroutine, it won't block the caller of `schedulerRegionRequest`.
 				s.scheduleDivideRegionAndRequest(ctx, r)
 			}
-		case regionlock.LockRangeStatusCancel:
+		case regionspan.LockRangeStatusCancel:
 			return
 		default:
 			panic("unreachable")
 		}
 	}
 
-	res := s.rangeLock.LockRange(
-		ctx, sri.span.StartKey, sri.span.EndKey, sri.verID.GetID(), sri.verID.GetVer())
-
+	res := s.rangeLock.LockRange(ctx, sri.span.Start, sri.span.End, sri.verID.GetID(), sri.verID.GetVer())
 	failpoint.Inject("kvClientMockRangeLock", func(val failpoint.Value) {
 		// short sleep to wait region has split
 		time.Sleep(time.Second)
-		s.rangeLock.UnlockRange(sri.span.StartKey, sri.span.EndKey,
+		s.rangeLock.UnlockRange(sri.span.Start, sri.span.End,
 			sri.verID.GetID(), sri.verID.GetVer())
 		regionNum := val.(int)
-		retryRanges := make([]tablepb.Span, 0, regionNum)
+		retryRanges := make([]regionspan.ComparableSpan, 0, regionNum)
 		start := []byte("a")
 		end := []byte("b1001")
 		for i := 0; i < regionNum; i++ {
-			retryRanges = append(retryRanges, spanz.ToSpan(start, end))
+			span := regionspan.Span{Start: start, End: end}
+			retryRanges = append(retryRanges, regionspan.ToComparableSpan(span))
 			start = end
 			end = []byte(fmt.Sprintf("b%d", 1002+i))
 		}
-		res = regionlock.LockRangeResult{
-			Status:      regionlock.LockRangeStatusStale,
+		res = regionspan.LockRangeResult{
+			Status:      regionspan.LockRangeStatusStale,
 			RetryRanges: retryRanges,
 		}
 	})
 
-	if res.Status == regionlock.LockRangeStatusWait {
+	if res.Status == regionspan.LockRangeStatusWait {
 		res = res.WaitFn()
 	}
 
@@ -617,9 +608,11 @@ func (s *eventFeedSession) scheduleRegionRequest(ctx context.Context, sri single
 // error handling. This function is non-blocking even if error channel is full.
 // CAUTION: Note that this should only be called in a context that the region has locked its range.
 func (s *eventFeedSession) onRegionFail(ctx context.Context, errorInfo regionErrorInfo) {
-	s.rangeLock.UnlockRange(errorInfo.span.StartKey, errorInfo.span.EndKey,
+	s.rangeLock.UnlockRange(errorInfo.span.Start, errorInfo.span.End,
 		errorInfo.verID.GetID(), errorInfo.verID.GetVer(), errorInfo.resolvedTs())
-
+	log.Info("region failed", zap.Stringer("span", &errorInfo.span),
+		zap.Any("regionId", errorInfo.verID.GetID()),
+		zap.Error(errorInfo.err))
 	select {
 	case s.errCh.In() <- errorInfo:
 		s.errChSizeGauge.Inc()
@@ -662,8 +655,8 @@ func (s *eventFeedSession) requestRegionToStore(
 			RequestId:    requestID,
 			RegionEpoch:  regionEpoch,
 			CheckpointTs: sri.resolvedTs(),
-			StartKey:     sri.span.StartKey,
-			EndKey:       sri.span.EndKey,
+			StartKey:     sri.span.Start,
+			EndKey:       sri.span.End,
 			ExtraOp:      extraOp,
 			FilterLoop:   s.client.filterLoop,
 		}
@@ -673,7 +666,6 @@ func (s *eventFeedSession) requestRegionToStore(
 		// each TiKV store has an independent pendingRegions.
 		storeAddr := rpcCtx.Addr
 		storeID := rpcCtx.Peer.GetStoreId()
-
 		var (
 			stream *eventFeedStream
 			err    error
@@ -690,10 +682,9 @@ func (s *eventFeedSession) requestRegionToStore(
 				log.Warn("get grpc stream client failed",
 					zap.String("namespace", s.changefeed.Namespace),
 					zap.String("changefeed", s.changefeed.ID),
-					zap.Int64("tableID", s.tableID),
-					zap.String("tableName", s.tableName),
+					zap.Uint64("regionID", regionID),
+					zap.Uint64("requestID", requestID),
 					zap.Uint64("storeID", storeID),
-					zap.String("store", storeAddr),
 					zap.Error(err))
 				if cerror.ErrVersionIncompatible.Equal(err) {
 					// It often occurs on rolling update. Sleep 20s to reduce logs.
@@ -709,19 +700,16 @@ func (s *eventFeedSession) requestRegionToStore(
 				s.onRegionFail(ctx, errInfo)
 				continue
 			}
-
 			s.addStream(stream)
-
 			log.Info("creating new stream to store to send request",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
-				zap.Int64("tableID", s.tableID),
-				zap.String("tableName", s.tableName),
 				zap.Uint64("regionID", regionID),
 				zap.Uint64("requestID", requestID),
 				zap.Uint64("storeID", storeID),
 				zap.String("store", storeAddr),
 				zap.Uint64("streamID", stream.id))
+
 			g.Go(func() error {
 				return s.receiveFromStream(ctx, stream)
 			})
@@ -729,24 +717,24 @@ func (s *eventFeedSession) requestRegionToStore(
 
 		state := newRegionFeedState(sri, requestID)
 		stream.regions.setByRequestID(requestID, state)
-		s.client.logRegionDetails("start new request",
+		log.Debug("start new request",
 			zap.String("namespace", s.changefeed.Namespace),
 			zap.String("changefeed", s.changefeed.ID),
 			zap.Int64("tableID", s.tableID),
 			zap.String("tableName", s.tableName),
-			zap.Uint64("storeID", storeID),
-			zap.String("store", storeAddr),
 			zap.Uint64("regionID", sri.verID.GetID()),
-			zap.Uint64("requestID", requestID),
-			zap.Stringer("span", &sri.span))
+			zap.String("addr", storeAddr))
 
 		err = stream.client.Send(req)
+		// If Send returns an error, the stream.client.Recv (In s.receiveFromStream)
+		// would also receive an error.
 		if err != nil {
 			log.Warn("send request to stream failed",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
 				zap.Int64("tableID", s.tableID),
 				zap.String("tableName", s.tableName),
+				zap.String("addr", storeAddr),
 				zap.Uint64("storeID", storeID),
 				zap.String("store", storeAddr),
 				zap.Uint64("streamID", stream.id),
@@ -761,7 +749,8 @@ func (s *eventFeedSession) requestRegionToStore(
 					zap.String("tableName", s.tableName),
 					zap.Uint64("streamID", stream.id),
 					zap.Uint64("storeID", storeID),
-					zap.String("store", storeAddr),
+					zap.Uint64("regionID", regionID),
+					zap.Uint64("requestID", requestID),
 					zap.Error(err))
 			}
 
@@ -774,7 +763,7 @@ func (s *eventFeedSession) requestRegionToStore(
 			if !ok {
 				continue
 			}
-			s.client.logRegionDetails("region send to store failed",
+			log.Debug("region send to store failed",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
 				zap.Int64("tableID", s.tableID),
@@ -838,13 +827,13 @@ func (s *eventFeedSession) dispatchRequest(ctx context.Context) error {
 		}
 		if rpcCtx == nil {
 			// The region info is invalid. Retry the span.
-			s.client.logRegionDetails("get rpc context for region is nil, retry it",
+			log.Info("get rpc context for region is nil, retry it",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
 				zap.Int64("tableID", s.tableID),
 				zap.String("tableName", s.tableName),
 				zap.Uint64("regionID", sri.verID.GetID()),
-				zap.Stringer("span", &sri.span),
+				zap.Stringer("span", sri.span),
 				zap.Uint64("resolvedTs", sri.resolvedTs()))
 			errInfo := newRegionErrorInfo(sri, &rpcCtxUnavailableErr{verID: sri.verID})
 			s.onRegionFail(ctx, errInfo)
@@ -859,7 +848,7 @@ func (s *eventFeedSession) dispatchRequest(ctx context.Context) error {
 // to region boundaries. When region merging happens, it's possible that it
 // will produce some overlapping spans.
 func (s *eventFeedSession) divideAndSendEventFeedToRegions(
-	ctx context.Context, span tablepb.Span,
+	ctx context.Context, span regionspan.ComparableSpan,
 ) error {
 	limit := 20
 	nextSpan := span
@@ -873,7 +862,7 @@ func (s *eventFeedSession) divideAndSendEventFeedToRegions(
 			bo := tikv.NewBackoffer(ctx, tikvRequestMaxBackoff)
 			start := time.Now()
 			regions, err = s.client.regionCache.BatchLoadRegionsWithKeyRange(
-				bo, nextSpan.StartKey, nextSpan.EndKey, limit)
+				bo, nextSpan.Start, nextSpan.End, limit)
 			scanRegionsDuration.Observe(time.Since(start).Seconds())
 			if err != nil {
 				return cerror.WrapError(cerror.ErrPDBatchLoadRegions, err)
@@ -885,7 +874,7 @@ func (s *eventFeedSession) divideAndSendEventFeedToRegions(
 				}
 				metas = append(metas, region.GetMeta())
 			}
-			if !regionlock.CheckRegionsLeftCover(metas, nextSpan) {
+			if !regionspan.CheckRegionsLeftCover(metas, nextSpan) {
 				return cerror.ErrRegionsNotCoverSpan.FastGenByArgs(nextSpan, metas)
 			}
 			return nil
@@ -895,8 +884,6 @@ func (s *eventFeedSession) divideAndSendEventFeedToRegions(
 			log.Warn("load regions failed",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
-				zap.Int64("tableID", s.tableID),
-				zap.String("tableName", s.tableName),
 				zap.Any("span", nextSpan),
 				zap.Error(retryErr))
 			return retryErr
@@ -904,19 +891,19 @@ func (s *eventFeedSession) divideAndSendEventFeedToRegions(
 
 		for _, tiRegion := range regions {
 			region := tiRegion.GetMeta()
-			partialSpan, err := spanz.Intersect(
-				s.totalSpan, tablepb.Span{StartKey: region.StartKey, EndKey: region.EndKey})
+			partialSpan, err := regionspan.Intersect(
+				s.totalSpan, regionspan.ComparableSpan{Start: region.StartKey, End: region.EndKey})
 			if err != nil {
 				return errors.Trace(err)
 			}
-			nextSpan.StartKey = region.EndKey
+			nextSpan.Start = region.EndKey
 			// the End key return by the PD API will be nil to represent the biggest key,
-			partialSpan = spanz.HackSpan(partialSpan)
+			partialSpan = partialSpan.Hack()
 
 			sri := newSingleRegionInfo(tiRegion.VerID(), partialSpan, nil)
 			s.scheduleRegionRequest(ctx, sri)
 			// return if no more regions
-			if spanz.EndCompare(nextSpan.StartKey, span.EndKey) >= 0 {
+			if regionspan.EndCompare(nextSpan.Start, span.End) >= 0 {
 				return nil
 			}
 		}
@@ -932,13 +919,11 @@ func (s *eventFeedSession) handleError(ctx context.Context, errInfo regionErrorI
 	switch eerr := errors.Cause(err).(type) {
 	case *eventError:
 		innerErr := eerr.err
-		s.client.logRegionDetails("cdc region error",
+		log.Info("cdc region error",
 			zap.String("namespace", s.changefeed.Namespace),
 			zap.String("changefeed", s.changefeed.ID),
 			zap.Int64("tableID", s.tableID),
 			zap.String("tableName", s.tableName),
-			zap.Uint64("regionID", errInfo.verID.GetID()),
-			zap.Stringer("span", &errInfo.span),
 			zap.Stringer("error", innerErr))
 
 		if notLeader := innerErr.GetNotLeader(); notLeader != nil {
@@ -953,10 +938,6 @@ func (s *eventFeedSession) handleError(ctx context.Context, errInfo regionErrorI
 			metricFeedRegionNotFoundCounter.Inc()
 			s.scheduleDivideRegionAndRequest(ctx, errInfo.span)
 			return nil
-		} else if busy := innerErr.GetServerIsBusy(); busy != nil {
-			metricKvIsBusyCounter.Inc()
-			s.scheduleRegionRequest(ctx, errInfo.singleRegionInfo)
-			return nil
 		} else if duplicatedRequest := innerErr.GetDuplicateRequest(); duplicatedRequest != nil {
 			metricFeedDuplicateRequestCounter.Inc()
 			logPanic("tikv reported duplicated request to the same region, which is not expected",
@@ -966,8 +947,6 @@ func (s *eventFeedSession) handleError(ctx context.Context, errInfo regionErrorI
 			log.Error("tikv reported compatibility error, which is not expected",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
-				zap.Int64("tableID", s.tableID),
-				zap.String("tableName", s.tableName),
 				zap.String("rpcCtx", errInfo.rpcCtx.String()),
 				zap.Stringer("error", compatibility))
 			return cerror.ErrVersionIncompatible.GenWithStackByArgs(compatibility)
@@ -975,8 +954,6 @@ func (s *eventFeedSession) handleError(ctx context.Context, errInfo regionErrorI
 			log.Error("tikv reported the request cluster ID mismatch error, which is not expected",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
-				zap.Int64("tableID", s.tableID),
-				zap.String("tableName", s.tableName),
 				zap.Uint64("tikvCurrentClusterID", mismatch.Current),
 				zap.Uint64("requestClusterID", mismatch.Request))
 			return cerror.ErrClusterIDMismatch.GenWithStackByArgs(mismatch.Current, mismatch.Request)
@@ -985,8 +962,6 @@ func (s *eventFeedSession) handleError(ctx context.Context, errInfo regionErrorI
 			log.Warn("receive empty or unknown error msg",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
-				zap.Int64("tableID", s.tableID),
-				zap.String("tableName", s.tableName),
 				zap.Stringer("error", innerErr))
 		}
 	case *rpcCtxUnavailableErr:
@@ -1034,7 +1009,7 @@ func (s *eventFeedSession) receiveFromStream(
 ) error {
 	var tsStat *tableStoreStat
 	s.client.tableStoreStats.Lock()
-	key := fmt.Sprintf("%d_%d", s.totalSpan.TableID, stream.storeID)
+	key := fmt.Sprintf("%d_%d", s.client.tableID, stream.storeID)
 	if tsStat = s.client.tableStoreStats.v[key]; tsStat == nil {
 		tsStat = new(tableStoreStat)
 		s.client.tableStoreStats.v[key] = tsStat
@@ -1058,13 +1033,6 @@ func (s *eventFeedSession) receiveFromStream(
 
 		remainingRegions := stream.regions.takeAll()
 		for _, state := range remainingRegions {
-			s.client.logRegionDetails("region canceled",
-				zap.String("namespace", s.changefeed.Namespace),
-				zap.String("changefeed", s.changefeed.ID),
-				zap.Int64("tableID", s.tableID),
-				zap.String("tableName", s.tableName),
-				zap.Any("regionId", state.sri.verID.GetID()),
-				zap.Stringer("span", &state.sri.span))
 			errInfo := newRegionErrorInfo(state.sri, cerror.ErrPendingRegionCancel.FastGenByArgs())
 			s.onRegionFail(parentCtx, errInfo)
 		}
@@ -1152,7 +1120,8 @@ func (s *eventFeedSession) receiveFromStream(
 			})
 			if err != nil {
 				if status.Code(errors.Cause(err)) == codes.Canceled {
-					log.Info("receive from stream canceled",
+					log.Info(
+						"receive from stream canceled",
 						zap.String("namespace", s.changefeed.Namespace),
 						zap.String("changefeed", s.changefeed.ID),
 						zap.Int64("tableID", s.tableID),
@@ -1161,7 +1130,8 @@ func (s *eventFeedSession) receiveFromStream(
 						zap.Uint64("storeID", stream.storeID),
 						zap.Uint64("streamID", stream.id))
 				} else {
-					log.Warn("failed to receive from stream",
+					log.Warn(
+						"failed to receive from stream",
 						zap.String("namespace", s.changefeed.Namespace),
 						zap.String("changefeed", s.changefeed.ID),
 						zap.Int64("tableID", s.tableID),
@@ -1203,17 +1173,19 @@ func (s *eventFeedSession) receiveFromStream(
 				log.Warn("change data event size too large",
 					zap.String("namespace", s.changefeed.Namespace),
 					zap.String("changefeed", s.changefeed.ID),
-					zap.Int64("tableID", s.tableID),
-					zap.String("tableName", s.tableName),
-					zap.Int("size", size), zap.Int("count", len(cevent.Events)),
+					zap.Int("size", size), zap.Int("eventLen", len(cevent.Events)),
 					zap.Int("resolvedRegionCount", regionCount))
 			}
 
-			if commitTs := getChangeDataEventCommitTs(cevent); commitTs > 0 && maxCommitTs < commitTs {
-				maxCommitTs = commitTs
+			if len(cevent.Events) != 0 {
+				if entries, ok := cevent.Events[0].Event.(*cdcpb.Event_Entries_); ok && len(entries.Entries.Entries) > 0 {
+					commitTs := entries.Entries.Entries[0].CommitTs
+					if maxCommitTs < commitTs {
+						maxCommitTs = commitTs
+					}
+				}
 			}
-
-			err = s.sendRegionChangeEvents(ctx, cevent.Events, worker, stream.regions)
+			err = s.sendRegionChangeEvents(ctx, cevent.Events, worker)
 			if err != nil {
 				return err
 			}
@@ -1251,7 +1223,6 @@ func (s *eventFeedSession) sendRegionChangeEvents(
 	ctx context.Context,
 	events []*cdcpb.Event,
 	worker *regionWorker,
-	pendingRegions *syncRegionFeedStateMap,
 ) error {
 	statefulEvents := make([][]*regionStatefulEvent, worker.concurrency)
 	for i := 0; i < worker.concurrency; i++ {
@@ -1267,16 +1238,26 @@ func (s *eventFeedSession) sendRegionChangeEvents(
 		// is receiving messages with different requestID, only the messages with the larges requestID is valid.
 		if valid {
 			if state.requestID < event.RequestId {
+				log.Debug("region state entry will be replaced because received message of newer requestID",
+					zap.String("namespace", s.changefeed.Namespace),
+					zap.String("changefeed", s.changefeed.ID),
+					zap.Uint64("regionID", event.RegionId),
+					zap.Uint64("oldRequestID", state.requestID),
+					zap.Uint64("requestID", event.RequestId),
+					zap.String("addr", worker.stream.addr),
+					zap.Uint64("streamID", worker.stream.id),
+				)
 				valid = false
 			} else if state.requestID > event.RequestId {
 				log.Warn("drop event due to event belongs to a stale request",
 					zap.String("namespace", s.changefeed.Namespace),
 					zap.String("changefeed", s.changefeed.ID),
-					zap.Int64("tableID", s.tableID),
-					zap.String("tableName", s.tableName),
 					zap.Uint64("regionID", event.RegionId),
 					zap.Uint64("requestID", event.RequestId),
-					zap.Uint64("currRequestID", state.requestID))
+					zap.Uint64("currRequestID", state.requestID),
+					zap.String("addr", worker.stream.addr),
+					zap.Uint64("streamID", worker.stream.id),
+				)
 				continue
 			}
 		}
@@ -1286,48 +1267,42 @@ func (s *eventFeedSession) sendRegionChangeEvents(
 			// have been put in `pendingRegions`. So here we load the region info from `pendingRegions` and start
 			// a new goroutine to handle messages from this region.
 			// Firstly load the region info.
-			state, valid = pendingRegions.takeByRequestID(event.RequestId)
+			state, valid = worker.stream.regions.takeByRequestID(event.RequestId)
 			if !valid {
 				log.Warn("drop event due to region feed is removed",
 					zap.String("namespace", s.changefeed.Namespace),
 					zap.String("changefeed", s.changefeed.ID),
-					zap.Int64("tableID", s.tableID),
-					zap.String("tableName", s.tableName),
 					zap.Uint64("regionID", event.RegionId),
-					zap.Uint64("requestID", event.RequestId))
+					zap.Uint64("requestID", event.RequestId),
+					zap.String("addr", worker.stream.addr),
+					zap.Uint64("streamID", worker.stream.id),
+				)
 				continue
 			}
 			state.start()
 			worker.setRegionState(event.RegionId, state)
-			s.client.logRegionDetails("event feeds puts state into region worker",
-				zap.String("namespace", s.changefeed.Namespace),
-				zap.String("changefeed", s.changefeed.ID),
-				zap.Int64("tableID", s.tableID),
-				zap.String("tableName", s.tableName),
-				zap.Uint64("regionID", event.RegionId),
-				zap.Uint64("requestID", event.RequestId),
-				zap.Stringer("span", &state.sri.span))
 		} else if state.isStale() {
 			log.Warn("drop event due to region feed stopped",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
-				zap.Int64("tableID", s.tableID),
-				zap.String("tableName", s.tableName),
 				zap.Uint64("regionID", event.RegionId),
-				zap.Uint64("requestID", event.RequestId))
+				zap.Uint64("requestID", event.RequestId),
+				zap.String("addr", worker.stream.addr),
+				zap.Uint64("streamID", worker.stream.id),
+			)
 			continue
 		}
 
 		switch x := event.Event.(type) {
 		case *cdcpb.Event_Error:
-			s.client.logRegionDetails("event feed receives a region error",
+			log.Info("event feed receives a region error",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
 				zap.Int64("tableID", s.tableID),
 				zap.String("tableName", s.tableName),
 				zap.Uint64("regionID", event.RegionId),
-				zap.Uint64("requestID", event.RequestId),
-				zap.Stringer("span", &state.sri.span),
+				zap.String("addr", worker.stream.addr),
+				zap.Uint64("streamID", worker.stream.id),
 				zap.Any("error", x.Error))
 		}
 
@@ -1482,16 +1457,13 @@ func (s *eventFeedSession) logSlowRegions(ctx context.Context) error {
 		}
 
 		attr := s.rangeLock.CollectLockedRangeAttrs(nil)
-		ckptTime := oracle.GetTimeFromTS(attr.SlowestRegion.ResolvedTs)
+		ckptTime := oracle.GetTimeFromTS(attr.SlowestRegion.CheckpointTs)
 		currTime := s.client.pdClock.CurrentTime()
 		log.Info("event feed starts to check locked regions",
 			zap.String("namespace", s.changefeed.Namespace),
 			zap.String("changefeed", s.changefeed.ID),
 			zap.Int64("tableID", s.tableID),
-			zap.String("tableName", s.tableName),
-			zap.Any("slowRegion", attr.SlowestRegion),
-			zap.Bool("holesExist", len(attr.Holes) > 0),
-			zap.Int("lockedRegionCount", attr.LockedRegionCount))
+			zap.String("tableName", s.tableName))
 
 		if attr.SlowestRegion.Initialized {
 			if currTime.Sub(ckptTime) > 2*resolveLockMinInterval {
@@ -1502,14 +1474,14 @@ func (s *eventFeedSession) logSlowRegions(ctx context.Context) error {
 					zap.String("tableName", s.tableName),
 					zap.Any("slowRegion", attr.SlowestRegion))
 			}
-		} else if currTime.Sub(attr.SlowestRegion.Created) > 1*time.Minute {
+		} else if currTime.Sub(attr.SlowestRegion.Created) > 10*time.Minute {
 			log.Info("event feed initializes a region too slow",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
 				zap.Int64("tableID", s.tableID),
 				zap.String("tableName", s.tableName),
 				zap.Any("slowRegion", attr.SlowestRegion))
-		} else if currTime.Sub(ckptTime) > 1*time.Minute {
+		} else if currTime.Sub(ckptTime) > 10*time.Minute {
 			log.Info("event feed finds a uninitialized slow region",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
@@ -1518,12 +1490,16 @@ func (s *eventFeedSession) logSlowRegions(ctx context.Context) error {
 				zap.Any("slowRegion", attr.SlowestRegion))
 		}
 		if len(attr.Holes) > 0 {
+			holes := make([]string, 0, len(attr.Holes))
+			for _, hole := range attr.Holes {
+				holes = append(holes, fmt.Sprintf("[%s,%s)", hole.Start, hole.End))
+			}
 			log.Info("event feed holes exist",
 				zap.String("namespace", s.changefeed.Namespace),
 				zap.String("changefeed", s.changefeed.ID),
 				zap.Int64("tableID", s.tableID),
 				zap.String("tableName", s.tableName),
-				zap.Any("holes", attr.Holes))
+				zap.String("holes", strings.Join(holes, ", ")))
 		}
 	}
 }

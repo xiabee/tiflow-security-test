@@ -21,7 +21,6 @@ import (
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 )
 
 func main() {
@@ -50,14 +49,5 @@ func main() {
 
 func intercept(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	fmt.Println(info.FullMethod)
-	err := handler(srv, ss)
-	if err != nil {
-		md, ok := metadata.FromIncomingContext(ss.Context())
-		log.Error("failed to handle stream",
-			zap.String("method", info.FullMethod),
-			zap.Bool("ok", ok),
-			zap.Any("metadata", md),
-			zap.Error(err))
-	}
-	return err
+	return handler(srv, ss)
 }

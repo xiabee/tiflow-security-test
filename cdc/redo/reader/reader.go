@@ -87,7 +87,7 @@ type LogReaderConfig struct {
 type LogReader struct {
 	cfg   *LogReaderConfig
 	meta  *common.LogMeta
-	rowCh chan *model.RowChangedEventInRedoLog
+	rowCh chan *model.RowChangedEvent
 	ddlCh chan *model.DDLEvent
 }
 
@@ -106,7 +106,7 @@ func newLogReader(ctx context.Context, cfg *LogReaderConfig) (*LogReader, error)
 
 	logReader := &LogReader{
 		cfg:   cfg,
-		rowCh: make(chan *model.RowChangedEventInRedoLog, defaultReaderChanSize),
+		rowCh: make(chan *model.RowChangedEvent, defaultReaderChanSize),
 		ddlCh: make(chan *model.DDLEvent, defaultReaderChanSize),
 	}
 	// remove logs in local dir first, if have logs left belongs to previous changefeed with the same name may have error when apply logs
@@ -189,13 +189,29 @@ func (l *LogReader) runReader(egCtx context.Context, cfg *readerConfig) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
+	for i := 0; i < len(fileReaders); i++ {
+		rl, err := fileReaders[i].Read()
+		if err != nil {
+			if err != io.EOF {
+				return errors.Trace(err)
+			}
+			continue
+		}
+
+		ld := &logWithIdx{
+			data: rl,
+			idx:  i,
+		}
+		redoLogHeap = append(redoLogHeap, ld)
+	}
+	heap.Init(&redoLogHeap)
 
 	for redoLogHeap.Len() != 0 {
 		item := heap.Pop(&redoLogHeap).(*logWithIdx)
 
 		switch cfg.fileType {
 		case redo.RedoRowLogFileType:
-			row := item.data.RedoRow.Row
+			row := model.LogToRow(item.data.RedoRow)
 			// By design only data (startTs,endTs] is needed,
 			// so filter out data may beyond the boundary.
 			if row != nil && row.CommitTs > cfg.startTs && row.CommitTs <= cfg.endTs {
@@ -211,7 +227,7 @@ func (l *LogReader) runReader(egCtx context.Context, cfg *readerConfig) error {
 			}
 
 		case redo.RedoDDLLogFileType:
-			ddl := item.data.RedoDDL.DDL
+			ddl := model.LogToDDL(item.data.RedoDDL)
 			if ddl != nil && ddl.CommitTs > cfg.startTs && ddl.CommitTs <= cfg.endTs {
 				select {
 				case <-egCtx.Done():
@@ -243,30 +259,8 @@ func (l *LogReader) ReadNextRow(ctx context.Context) (*model.RowChangedEvent, er
 	select {
 	case <-ctx.Done():
 		return nil, errors.Trace(ctx.Err())
-	case rowInRedoLog := <-l.rowCh:
-		if rowInRedoLog != nil {
-			cols := rowInRedoLog.Columns
-			if cols == nil {
-				cols = rowInRedoLog.PreColumns
-			}
-			tableInfo := model.BuildTableInfo(
-				rowInRedoLog.Table.Schema,
-				rowInRedoLog.Table.Table,
-				cols,
-				rowInRedoLog.IndexColumns)
-			tableInfo.TableName.TableID = rowInRedoLog.Table.TableID
-			tableInfo.TableName.IsPartition = rowInRedoLog.Table.IsPartition
-			row := &model.RowChangedEvent{
-				StartTs:         rowInRedoLog.StartTs,
-				CommitTs:        rowInRedoLog.CommitTs,
-				PhysicalTableID: rowInRedoLog.Table.TableID,
-				TableInfo:       tableInfo,
-				Columns:         model.Columns2ColumnDatas(rowInRedoLog.Columns, tableInfo),
-				PreColumns:      model.Columns2ColumnDatas(rowInRedoLog.PreColumns, tableInfo),
-			}
-			return row, nil
-		}
-		return nil, nil
+	case row := <-l.rowCh:
+		return row, nil
 	}
 }
 
@@ -371,19 +365,19 @@ func (h logHeap) Len() int {
 
 func (h logHeap) Less(i, j int) bool {
 	if h[i].data.Type == model.RedoLogTypeDDL {
-		if h[i].data.RedoDDL.DDL == nil {
+		if h[i].data.RedoDDL == nil || h[i].data.RedoDDL.DDL == nil {
 			return true
 		}
-		if h[j].data.RedoDDL.DDL == nil {
+		if h[j].data.RedoDDL == nil || h[j].data.RedoDDL.DDL == nil {
 			return false
 		}
 		return h[i].data.RedoDDL.DDL.CommitTs < h[j].data.RedoDDL.DDL.CommitTs
 	}
 
-	if h[i].data.RedoRow.Row == nil {
+	if h[i].data.RedoRow == nil || h[i].data.RedoRow.Row == nil {
 		return true
 	}
-	if h[j].data.RedoRow.Row == nil {
+	if h[j].data.RedoRow == nil || h[j].data.RedoRow.Row == nil {
 		return false
 	}
 

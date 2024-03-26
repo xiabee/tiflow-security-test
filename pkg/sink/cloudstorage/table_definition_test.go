@@ -18,10 +18,10 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/parser/charset"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/parser/charset"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/stretchr/testify/require"
 )
@@ -75,7 +75,7 @@ func generateTableDef() (TableDefinition, *model.TableInfo) {
 	}
 
 	var def TableDefinition
-	def.FromTableInfo(tableInfo, tableInfo.Version, false)
+	def.FromTableInfo(tableInfo, tableInfo.Version)
 	return def, tableInfo
 }
 
@@ -368,12 +368,12 @@ func TestTableCol(t *testing.T) {
 		}
 		col := &timodel.ColumnInfo{FieldType: *ft}
 		var tableCol TableCol
-		tableCol.FromTiColumnInfo(col, false)
+		tableCol.FromTiColumnInfo(col)
 		encodedCol, err := json.Marshal(tableCol)
 		require.Nil(t, err, tc.name)
 		require.JSONEq(t, tc.expected, string(encodedCol), tc.name)
 
-		_, err = tableCol.ToTiColumnInfo(100)
+		_, err = tableCol.ToTiColumnInfo()
 		require.NoError(t, err)
 	}
 }
@@ -429,7 +429,7 @@ func TestTableDefinition(t *testing.T) {
 		Query:     "alter table schema1.table1 add Birthday date",
 		TableInfo: tableInfo,
 	}
-	def.FromDDLEvent(event, false)
+	def.FromDDLEvent(event)
 	encodedDef, err = json.MarshalIndent(def, "", "    ")
 	require.NoError(t, err)
 	require.JSONEq(t, `{

@@ -23,12 +23,11 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
-	"github.com/pingcap/tiflow/cdc/sink/tablesink"
+	"github.com/pingcap/tiflow/cdc/sinkv2/tablesink"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/retry"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
@@ -44,10 +43,9 @@ type tableSinkWrapper struct {
 
 	// changefeed used for logging.
 	changefeed model.ChangeFeedID
-	// tableSpan used for logging.
-	span tablepb.Span
+	tableID    model.TableID
 
-	tableSinkCreator func() (tablesink.TableSink, uint64)
+	tableSinkCreater func() (tablesink.TableSink, uint64)
 
 	// tableSink is the underlying sink.
 	tableSink struct {
@@ -83,7 +81,7 @@ type tableSinkWrapper struct {
 	// lastCleanTime indicates the last time the table has been cleaned.
 	lastCleanTime time.Time
 
-	// rangeEventCounts is for clean the table sorter.
+	// rangeEventCounts is for clean the table engine.
 	// If rangeEventCounts[i].events is greater than 0, it means there must be
 	// events in the range (rangeEventCounts[i-1].lastPos, rangeEventCounts[i].lastPos].
 	rangeEventCounts   []rangeEventCount
@@ -92,12 +90,12 @@ type tableSinkWrapper struct {
 
 type rangeEventCount struct {
 	// firstPos and lastPos are used to merge many rangeEventCount into one.
-	firstPos sorter.Position
-	lastPos  sorter.Position
+	firstPos engine.Position
+	lastPos  engine.Position
 	events   int
 }
 
-func newRangeEventCount(pos sorter.Position, events int) rangeEventCount {
+func newRangeEventCount(pos engine.Position, events int) rangeEventCount {
 	return rangeEventCount{
 		firstPos: pos,
 		lastPos:  pos,
@@ -107,7 +105,7 @@ func newRangeEventCount(pos sorter.Position, events int) rangeEventCount {
 
 func newTableSinkWrapper(
 	changefeed model.ChangeFeedID,
-	span tablepb.Span,
+	tableID model.TableID,
 	tableSinkCreater func() (tablesink.TableSink, uint64),
 	state tablepb.TableState,
 	startTs model.Ts,
@@ -117,8 +115,8 @@ func newTableSinkWrapper(
 	res := &tableSinkWrapper{
 		version:          atomic.AddUint64(&tableSinkWrapperVersion, 1),
 		changefeed:       changefeed,
-		span:             span,
-		tableSinkCreator: tableSinkCreater,
+		tableID:          tableID,
+		tableSinkCreater: tableSinkCreater,
 		state:            &state,
 		startTs:          startTs,
 		targetTs:         targetTs,
@@ -140,7 +138,7 @@ func (t *tableSinkWrapper) start(ctx context.Context, startTs model.Ts) (err err
 		log.Panic("The table sink has already started",
 			zap.String("namespace", t.changefeed.Namespace),
 			zap.String("changefeed", t.changefeed.ID),
-			zap.Stringer("span", &t.span),
+			zap.Int64("tableID", t.tableID),
 			zap.Uint64("startTs", startTs),
 			zap.Uint64("oldReplicateTs", t.replicateTs),
 		)
@@ -154,7 +152,7 @@ func (t *tableSinkWrapper) start(ctx context.Context, startTs model.Ts) (err err
 	log.Info("Sink is started",
 		zap.String("namespace", t.changefeed.Namespace),
 		zap.String("changefeed", t.changefeed.ID),
-		zap.Stringer("span", &t.span),
+		zap.Int64("tableID", t.tableID),
 		zap.Uint64("startTs", startTs),
 		zap.Uint64("replicateTs", t.replicateTs),
 	)
@@ -162,10 +160,12 @@ func (t *tableSinkWrapper) start(ctx context.Context, startTs model.Ts) (err err
 	// This start ts maybe greater than the initial start ts of the table sink.
 	// Because in two phase scheduling, the table sink may be advanced to a later ts.
 	// And we can just continue to replicate the table sink from the new start ts.
-	util.MustCompareAndMonotonicIncrease(&t.receivedSorterResolvedTs, startTs)
-	// the barrierTs should always larger than or equal to the checkpointTs, so we need to update
-	// barrierTs before the checkpointTs is updated.
-	t.updateBarrierTs(startTs)
+	for {
+		old := t.receivedSorterResolvedTs.Load()
+		if startTs <= old || t.receivedSorterResolvedTs.CompareAndSwap(old, startTs) {
+			break
+		}
+	}
 	if model.NewResolvedTs(startTs).Greater(t.tableSink.checkpointTs) {
 		t.tableSink.checkpointTs = model.NewResolvedTs(startTs)
 		t.tableSink.resolvedTs = model.NewResolvedTs(startTs)
@@ -187,14 +187,26 @@ func (t *tableSinkWrapper) appendRowChangedEvents(events ...*model.RowChangedEve
 }
 
 func (t *tableSinkWrapper) updateBarrierTs(ts model.Ts) {
-	util.MustCompareAndMonotonicIncrease(&t.barrierTs, ts)
+	for {
+		old := t.barrierTs.Load()
+		if ts <= old || t.barrierTs.CompareAndSwap(old, ts) {
+			break
+		}
+	}
 }
 
 func (t *tableSinkWrapper) updateReceivedSorterResolvedTs(ts model.Ts) {
-	increased := util.CompareAndMonotonicIncrease(&t.receivedSorterResolvedTs, ts)
-	if increased && t.state.Load() == tablepb.TableStatePreparing {
-		// Update the state to `Prepared` when the receivedSorterResolvedTs is updated for the first time.
-		t.state.Store(tablepb.TableStatePrepared)
+	for {
+		old := t.receivedSorterResolvedTs.Load()
+		if ts <= old {
+			return
+		}
+		if t.receivedSorterResolvedTs.CompareAndSwap(old, ts) {
+			if t.state.Load() == tablepb.TableStatePreparing {
+				t.state.Store(tablepb.TableStatePrepared)
+			}
+			return
+		}
 	}
 }
 
@@ -270,7 +282,7 @@ func (t *tableSinkWrapper) markAsClosing() {
 			log.Info("Sink is closing",
 				zap.String("namespace", t.changefeed.Namespace),
 				zap.String("changefeed", t.changefeed.ID),
-				zap.Stringer("span", &t.span))
+				zap.Int64("tableID", t.tableID))
 			break
 		}
 	}
@@ -286,7 +298,7 @@ func (t *tableSinkWrapper) markAsClosed() {
 			log.Info("Sink is closed",
 				zap.String("namespace", t.changefeed.Namespace),
 				zap.String("changefeed", t.changefeed.ID),
-				zap.Stringer("span", &t.span))
+				zap.Int64("tableID", t.tableID))
 			return
 		}
 	}
@@ -306,7 +318,7 @@ func (t *tableSinkWrapper) initTableSink() bool {
 	t.tableSink.Lock()
 	defer t.tableSink.Unlock()
 	if t.tableSink.s == nil {
-		t.tableSink.s, t.tableSink.version = t.tableSinkCreator()
+		t.tableSink.s, t.tableSink.version = t.tableSinkCreater()
 		if t.tableSink.s != nil {
 			t.tableSink.advanced = time.Now()
 			return true
@@ -385,7 +397,7 @@ func (t *tableSinkWrapper) restart(ctx context.Context) (err error) {
 	log.Info("Sink is restarted",
 		zap.String("namespace", t.changefeed.Namespace),
 		zap.String("changefeed", t.changefeed.ID),
-		zap.Stringer("span", &t.span),
+		zap.Int64("tableID", t.tableID),
 		zap.Uint64("replicateTs", t.replicateTs))
 	return nil
 }
@@ -415,7 +427,7 @@ func (t *tableSinkWrapper) updateRangeEventCounts(eventCount rangeEventCount) {
 	}
 }
 
-func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound sorter.Position, minEvents int) bool {
+func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound engine.Position, minEvents int) bool {
 	t.rangeEventCountsMu.Lock()
 	defer t.rangeEventCountsMu.Unlock()
 
@@ -433,7 +445,7 @@ func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound sorter.Position, min
 	shouldClean := count >= minEvents
 
 	if !shouldClean {
-		// To reduce sorter.CleanByTable calls.
+		// To reduce engine.CleanByTable calls.
 		t.rangeEventCounts[idx-1].events = count
 		t.rangeEventCounts = t.rangeEventCounts[idx-1:]
 	} else {
@@ -461,9 +473,10 @@ func (t *tableSinkWrapper) sinkMaybeStuck(stuckCheck time.Duration) (bool, uint6
 	return false, uint64(0)
 }
 
+// handleRowChangedEvents uses to convert RowChangedEvents to TableSinkRowChangedEvents.
+// It will deal with the old value compatibility.
 func handleRowChangedEvents(
-	changefeed model.ChangeFeedID, span tablepb.Span,
-	events ...*model.PolymorphicEvent,
+	changefeed model.ChangeFeedID, tableID model.TableID, events ...*model.PolymorphicEvent,
 ) ([]*model.RowChangedEvent, uint64) {
 	size := 0
 	rowChangedEvents := make([]*model.RowChangedEvent, 0, len(events))
@@ -472,26 +485,27 @@ func handleRowChangedEvents(
 			log.Warn("skip emit nil event",
 				zap.String("namespace", changefeed.Namespace),
 				zap.String("changefeed", changefeed.ID),
-				zap.Stringer("span", &span),
+				zap.Int64("tableID", tableID),
 				zap.Any("event", e))
 			continue
 		}
 
-		rowEvent := e.Row
+		colLen := len(e.Row.Columns)
+		preColLen := len(e.Row.PreColumns)
 		// Some transactions could generate empty row change event, such as
 		// begin; insert into t (id) values (1); delete from t where id=1; commit;
 		// Just ignore these row changed events.
-		if len(rowEvent.Columns) == 0 && len(rowEvent.PreColumns) == 0 {
+		if colLen == 0 && preColLen == 0 {
 			log.Warn("skip emit empty row event",
-				zap.Stringer("span", &span),
+				zap.Int64("tableID", tableID),
 				zap.String("namespace", changefeed.Namespace),
 				zap.String("changefeed", changefeed.ID),
 				zap.Any("event", e))
 			continue
 		}
 
-		size += rowEvent.ApproximateBytes()
-		rowChangedEvents = append(rowChangedEvents, rowEvent)
+		size += e.Row.ApproximateBytes()
+		rowChangedEvents = append(rowChangedEvents, e.Row)
 	}
 	return rowChangedEvents, uint64(size)
 }

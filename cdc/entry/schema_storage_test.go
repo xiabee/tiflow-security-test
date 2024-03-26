@@ -11,9 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build intest
-// +build intest
-
 package entry
 
 import (
@@ -24,18 +21,18 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	ticonfig "github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/domain"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
-	timeta "github.com/pingcap/tidb/pkg/meta"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/store/mockstore"
-	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/types"
+	ticonfig "github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/domain"
+	tidbkv "github.com/pingcap/tidb/kv"
+	timeta "github.com/pingcap/tidb/meta"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/store/mockstore"
+	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tiflow/cdc/entry/schema"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -58,7 +55,7 @@ func TestSchema(t *testing.T) {
 	// `createSchema` job1
 	job := &timodel.Job{
 		ID:         3,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   1,
 		Type:       timodel.ActionCreateSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 1, DBInfo: dbInfo, FinishedTS: 123},
@@ -74,7 +71,7 @@ func TestSchema(t *testing.T) {
 	// test drop schema
 	job = &timodel.Job{
 		ID:         6,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   1,
 		Type:       timodel.ActionDropSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 3, DBInfo: dbInfo, FinishedTS: 124},
@@ -87,7 +84,7 @@ func TestSchema(t *testing.T) {
 
 	job = &timodel.Job{
 		ID:         3,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   1,
 		Type:       timodel.ActionCreateSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 2, DBInfo: dbInfo, FinishedTS: 124},
@@ -102,7 +99,7 @@ func TestSchema(t *testing.T) {
 	// test schema drop schema error
 	job = &timodel.Job{
 		ID:         9,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   1,
 		Type:       timodel.ActionDropSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 1, DBInfo: dbInfo, FinishedTS: 123},
@@ -159,7 +156,7 @@ func TestTable(t *testing.T) {
 	// `createSchema` job
 	job := &timodel.Job{
 		ID:         5,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   3,
 		Type:       timodel.ActionCreateSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 1, DBInfo: dbInfo, FinishedTS: 123},
@@ -170,7 +167,7 @@ func TestTable(t *testing.T) {
 	// `createTable` job
 	job = &timodel.Job{
 		ID:         6,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   3,
 		TableID:    2,
 		Type:       timodel.ActionCreateTable,
@@ -183,7 +180,7 @@ func TestTable(t *testing.T) {
 	tblInfo.Columns = []*timodel.ColumnInfo{colInfo}
 	job = &timodel.Job{
 		ID:         7,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   3,
 		TableID:    2,
 		Type:       timodel.ActionAddColumn,
@@ -197,7 +194,7 @@ func TestTable(t *testing.T) {
 	tblInfo.Indices = []*timodel.IndexInfo{idxInfo}
 	job = &timodel.Job{
 		ID:         8,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   3,
 		TableID:    2,
 		Type:       timodel.ActionAddIndex,
@@ -233,7 +230,7 @@ func TestTable(t *testing.T) {
 	}
 	job = &timodel.Job{
 		ID:         9,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   3,
 		TableID:    2,
 		Type:       timodel.ActionTruncateTable,
@@ -260,7 +257,7 @@ func TestTable(t *testing.T) {
 	// check drop table
 	job = &timodel.Job{
 		ID:         9,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   3,
 		TableID:    9,
 		Type:       timodel.ActionDropTable,
@@ -284,7 +281,7 @@ func TestTable(t *testing.T) {
 	// drop schema
 	job = &timodel.Job{
 		ID:         10,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   3,
 		Type:       timodel.ActionDropSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 7, FinishedTS: 129},
@@ -406,7 +403,7 @@ func TestHandleRenameTables(t *testing.T) {
 		}
 		job := &timodel.Job{
 			ID:         i,
-			State:      timodel.JobStateDone,
+			State:      timodel.JobStateSynced,
 			SchemaID:   i,
 			Type:       timodel.ActionCreateSchema,
 			BinlogInfo: &timodel.HistoryInfo{SchemaVersion: i, DBInfo: dbInfo, FinishedTS: uint64(i)},
@@ -423,7 +420,7 @@ func TestHandleRenameTables(t *testing.T) {
 		}
 		job := &timodel.Job{
 			ID:         i,
-			State:      timodel.JobStateDone,
+			State:      timodel.JobStateSynced,
 			SchemaID:   i,
 			TableID:    10 + i,
 			Type:       timodel.ActionCreateTable,
@@ -500,7 +497,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `createSchema` job1
 	job := &timodel.Job{
 		ID:         13,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   11,
 		Type:       timodel.ActionCreateSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 1, DBInfo: dbInfo, FinishedTS: 100},
@@ -518,7 +515,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `createTable` job
 	job = &timodel.Job{
 		ID:         16,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   11,
 		TableID:    12,
 		Type:       timodel.ActionCreateTable,
@@ -538,7 +535,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `createTable` job
 	job = &timodel.Job{
 		ID:         16,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   11,
 		TableID:    13,
 		Type:       timodel.ActionCreateTable,
@@ -549,7 +546,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	jobs = append(jobs, job)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	storage, err := NewSchemaStorage(nil, 0, false, model.DefaultChangeFeedID("dummy"), util.RoleTester, f)
+	storage, err := NewSchemaStorage(nil, 0, false, dummyChangeFeedID, util.RoleTester, f)
 	require.Nil(t, err)
 	for _, job := range jobs {
 		err := storage.HandleDDLJob(job)
@@ -559,7 +556,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `dropTable` job
 	job = &timodel.Job{
 		ID:         16,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   11,
 		TableID:    12,
 		Type:       timodel.ActionDropTable,
@@ -572,7 +569,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `dropSchema` job
 	job = &timodel.Job{
 		ID:         16,
-		State:      timodel.JobStateDone,
+		State:      timodel.JobStateSynced,
 		SchemaID:   11,
 		Type:       timodel.ActionDropSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 5, FinishedTS: 140, DBInfo: dbInfo},
@@ -581,7 +578,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	err = storage.HandleDDLJob(job)
 	require.Nil(t, err)
 
-	require.Equal(t, storage.(*schemaStorage).resolvedTs, uint64(140))
+	require.Equal(t, storage.(*schemaStorageImpl).resolvedTs, uint64(140))
 	snap, err := storage.GetSnapshot(ctx, 100)
 	require.Nil(t, err)
 	_, exist := snap.SchemaByID(11)
@@ -628,8 +625,8 @@ func TestMultiVersionStorage(t *testing.T) {
 	require.False(t, exist)
 
 	lastSchemaTs := storage.DoGC(0)
-	require.Equal(t, uint64(0), lastSchemaTs)
 
+	require.Equal(t, uint64(0), lastSchemaTs)
 	snap, err = storage.GetSnapshot(ctx, 100)
 	require.Nil(t, err)
 	_, exist = snap.SchemaByID(11)
@@ -691,10 +688,11 @@ func TestCreateSnapFromMeta(t *testing.T) {
 	tk.MustExec("create table test2.simple_test5 (a bigint)")
 	ver, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
-	meta := kv.GetSnapshotMeta(store, ver.Ver)
+	meta, err := kv.GetSnapshotMeta(store, ver.Ver)
+	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ver.Ver, false, f)
+	snap, err := schema.NewSnapshotFromMeta(meta, ver.Ver, false, f)
 	require.Nil(t, err)
 	_, ok := snap.TableByName("test", "simple_test1")
 	require.True(t, ok)
@@ -728,15 +726,17 @@ func TestExplicitTables(t *testing.T) {
 	tk.MustExec("create table test2.simple_test5 (a varchar(20))")
 	ver2, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
-	meta1 := kv.GetSnapshotMeta(store, ver1.Ver)
+	meta1, err := kv.GetSnapshotMeta(store, ver1.Ver)
+	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap1, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta1, ver1.Ver, true /* forceReplicate */, f)
+	snap1, err := schema.NewSnapshotFromMeta(meta1, ver1.Ver, true /* forceReplicate */, f)
 	require.Nil(t, err)
-	meta2 := kv.GetSnapshotMeta(store, ver2.Ver)
-	snap2, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta2, ver2.Ver, false /* forceReplicate */, f)
+	meta2, err := kv.GetSnapshotMeta(store, ver2.Ver)
 	require.Nil(t, err)
-	snap3, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta2, ver2.Ver, true /* forceReplicate */, f)
+	snap2, err := schema.NewSnapshotFromMeta(meta2, ver2.Ver, false /* forceReplicate */, f)
+	require.Nil(t, err)
+	snap3, err := schema.NewSnapshotFromMeta(meta2, ver2.Ver, true /* forceReplicate */, f)
 	require.Nil(t, err)
 
 	// we don't need to count system tables since TiCDC
@@ -832,8 +832,6 @@ func TestSchemaStorage(t *testing.T) {
 		"alter table test_ddl2.simple_test1 add primary key pk(id)",                          // ActionAddPrimaryKey
 		"ALTER TABLE test_ddl2.simple_test1 ALTER id SET DEFAULT 18",                         // ActionSetDefaultValue
 		"ALTER TABLE test_ddl2.simple_test1 CHARACTER SET = utf8mb4",                         // ActionModifyTableCharsetAndCollate
-
-		"ALTER TABLE test_ddl2.employees REORGANIZE PARTITION p3 INTO (PARTITION p2 VALUES LESS THAN (15), PARTITION p3 VALUES LESS THAN (20))", // ActionReorganizePartition
 		// "recover table test_ddl2.employees",                                                  // ActionRecoverTable this ddl can't work on mock tikv
 
 		"DROP TABLE test_ddl2.employees",
@@ -880,17 +878,18 @@ func TestSchemaStorage(t *testing.T) {
 		jobs, err := getAllHistoryDDLJob(store, f)
 		require.Nil(t, err)
 
-		schemaStorage, err := NewSchemaStorage(nil, 0, false, model.DefaultChangeFeedID("dummy"), util.RoleTester, f)
-		require.NoError(t, err)
+		schemaStorage, err := NewSchemaStorage(nil, 0, false, dummyChangeFeedID, util.RoleTester, f)
+		require.Nil(t, err)
 		for _, job := range jobs {
 			err := schemaStorage.HandleDDLJob(job)
-			require.NoError(t, err)
+			require.Nil(t, err)
 		}
 
 		for _, job := range jobs {
 			ts := job.BinlogInfo.FinishedTS
-			meta := kv.GetSnapshotMeta(store, ts)
-			snapFromMeta, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ts, false, f)
+			meta, err := kv.GetSnapshotMeta(store, ts)
+			require.Nil(t, err)
+			snapFromMeta, err := schema.NewSnapshotFromMeta(meta, ts, false, f)
 			require.Nil(t, err)
 			snapFromSchemaStore, err := schemaStorage.GetSnapshot(ctx, ts)
 			require.Nil(t, err)
@@ -925,10 +924,11 @@ func getAllHistoryDDLJob(storage tidbkv.Storage, f filter.Filter) ([]*timodel.Jo
 	txnMeta := timeta.NewMeta(txn)
 
 	jobs, err := ddl.GetAllHistoryDDLJobs(txnMeta)
-	res := make([]*timodel.Job, 0)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+
+	res := make([]*timodel.Job, 0)
 	for i, job := range jobs {
 		ignoreSchema := f.ShouldIgnoreSchema(job.SchemaName)
 		ignoreTable := f.ShouldIgnoreTable(job.SchemaName, job.TableName)
@@ -942,7 +942,7 @@ func getAllHistoryDDLJob(storage tidbkv.Storage, f filter.Filter) ([]*timodel.Jo
 		jobs[i].State = timodel.JobStateDone
 		res = append(res, job)
 	}
-	return jobs, nil
+	return res, nil
 }
 
 // This test is used to show how the schemaStorage choose a handleKey of a table.
@@ -969,10 +969,11 @@ func TestHandleKey(t *testing.T) {
 	tk.MustExec("create table test.simple_test3 (id bigint, age int)")
 	ver, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
-	meta := kv.GetSnapshotMeta(store, ver.Ver)
+	meta, err := kv.GetSnapshotMeta(store, ver.Ver)
+	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ver.Ver, false, f)
+	snap, err := schema.NewSnapshotFromMeta(meta, ver.Ver, false, f)
 	require.Nil(t, err)
 	tb1, ok := snap.TableByName("test", "simple_test1")
 	require.True(t, ok)
@@ -1003,28 +1004,4 @@ func TestHandleKey(t *testing.T) {
 	tb3, ok := snap.TableByName("test", "simple_test3")
 	require.True(t, ok)
 	require.Equal(t, int64(-2), tb3.HandleIndexID)
-}
-
-func TestGetPrimaryKey(t *testing.T) {
-	t.Parallel()
-
-	helper := NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t1(a int primary key, b int)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 0, job.BinlogInfo.TableInfo)
-
-	names := tableInfo.GetPrimaryKeyColumnNames()
-	require.Len(t, names, 1)
-	require.Containsf(t, names, "a", "names: %v", names)
-
-	sql = `create table test.t2(a int, b int, c int, primary key(a, b))`
-	job = helper.DDL2Job(sql)
-	tableInfo = model.WrapTableInfo(0, "test", 0, job.BinlogInfo.TableInfo)
-
-	names = tableInfo.GetPrimaryKeyColumnNames()
-	require.Len(t, names, 2)
-	require.Containsf(t, names, "a", "names: %v", names)
-	require.Containsf(t, names, "b", "names: %v", names)
 }

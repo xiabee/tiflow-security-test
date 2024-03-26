@@ -237,8 +237,7 @@ func (f *fileWorkerGroup) bgWriteLogs(
 			return errors.Trace(egCtx.Err())
 		case event := <-inputCh:
 			if event == nil {
-				log.Error("inputCh of redo file worker is closed unexpectedly")
-				return errors.ErrUnexpected.FastGenByArgs("inputCh of redo file worker is closed unexpectedly")
+				log.Panic("inputCh of redo file worker is closed unexpectedly")
 			}
 
 			if event.data != nil {

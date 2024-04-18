@@ -36,18 +36,22 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/sink"
-	"github.com/pingcap/tiflow/cdc/sink/codec"
-	"github.com/pingcap/tiflow/cdc/sink/codec/canal"
-	"github.com/pingcap/tiflow/cdc/sink/codec/common"
-	"github.com/pingcap/tiflow/cdc/sink/codec/open"
-	"github.com/pingcap/tiflow/cdc/sink/mq/dispatcher"
+	"github.com/pingcap/tiflow/cdc/sink/ddlsink"
+	ddlsinkfactory "github.com/pingcap/tiflow/cdc/sink/ddlsink/factory"
+	eventsinkfactory "github.com/pingcap/tiflow/cdc/sink/dmlsink/factory"
+	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher"
+	"github.com/pingcap/tiflow/cdc/sink/tablesink"
 	cmdUtil "github.com/pingcap/tiflow/pkg/cmd/util"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/logutil"
 	"github.com/pingcap/tiflow/pkg/quotes"
 	"github.com/pingcap/tiflow/pkg/security"
+	"github.com/pingcap/tiflow/pkg/sink/codec"
+	"github.com/pingcap/tiflow/pkg/sink/codec/canal"
+	"github.com/pingcap/tiflow/pkg/sink/codec/common"
+	"github.com/pingcap/tiflow/pkg/sink/codec/open"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/pingcap/tiflow/pkg/version"
 	"go.uber.org/zap"
@@ -356,27 +360,27 @@ func main() {
 	}
 }
 
-type partitionSink struct {
-	sink.Sink
-	resolvedTs  uint64
-	partitionNo int
-	tablesMap   sync.Map
+type partitionSinks struct {
+	tablesCommitTsMap sync.Map
+	tableSinksMap     sync.Map
+	resolvedTs        uint64
+	partitionNo       int
 }
 
 // Consumer represents a Sarama consumer group consumer
 type Consumer struct {
 	ready chan bool
 
-	ddlList []*model.DDLEvent
-
-	ddlWithMaxCommitTs *model.DDLEvent
-	ddlListMu          sync.Mutex
-
-	sinks   []*partitionSink
-	sinksMu sync.Mutex
-
-	ddlSink              sink.Sink
+	ddlList              []*model.DDLEvent
+	ddlListMu            sync.Mutex
+	ddlWithMaxCommitTs   *model.DDLEvent
+	ddlSink              ddlsink.Sink
 	fakeTableIDGenerator *fakeTableIDGenerator
+
+	// sinkFactory is used to create table sink for each table.
+	sinkFactory *eventsinkfactory.SinkFactory
+	sinks       []*partitionSinks
+	sinksMu     sync.Mutex
 
 	// initialize to 0 by default
 	globalResolvedTs uint64
@@ -436,29 +440,30 @@ func NewConsumer(ctx context.Context) (*Consumer, error) {
 
 	}
 
-	c.sinks = make([]*partitionSink, kafkaPartitionNum)
+	c.sinks = make([]*partitionSinks, kafkaPartitionNum)
 	ctx, cancel := context.WithCancel(ctx)
 	ctx = contextutil.PutRoleInCtx(ctx, util.RoleKafkaConsumer)
-	errCh := make(chan error, 1)
+	errChan := make(chan error, 1)
 	for i := 0; i < int(kafkaPartitionNum); i++ {
-		s, err := sink.New(ctx,
-			model.DefaultChangeFeedID("kafka-consumer"),
-			downstreamURIStr, config.GetDefaultReplicaConfig(), errCh)
-		if err != nil {
-			cancel()
-			return nil, errors.Trace(err)
+		c.sinks[i] = &partitionSinks{
+			partitionNo: i,
 		}
-		c.sinks[i] = &partitionSink{Sink: s, partitionNo: i}
 	}
-	sink, err := sink.New(ctx,
-		model.DefaultChangeFeedID("kafka-consumer"),
-		downstreamURIStr, config.GetDefaultReplicaConfig(), errCh)
+	f, err := eventsinkfactory.New(
+		ctx,
+		downstreamURIStr,
+		config.GetDefaultReplicaConfig(),
+		errChan,
+		nil,
+	)
 	if err != nil {
 		cancel()
 		return nil, errors.Trace(err)
 	}
+	c.sinkFactory = f
+
 	go func() {
-		err := <-errCh
+		err := <-errChan
 		if errors.Cause(err) != context.Canceled {
 			log.Error("error on running consumer", zap.Error(err))
 		} else {
@@ -466,7 +471,17 @@ func NewConsumer(ctx context.Context) (*Consumer, error) {
 		}
 		cancel()
 	}()
-	c.ddlSink = sink
+
+	ddlSink, err := ddlsinkfactory.New(
+		ctx,
+		downstreamURIStr,
+		config.GetDefaultReplicaConfig(),
+	)
+	if err != nil {
+		cancel()
+		return nil, errors.Trace(err)
+	}
+	c.ddlSink = ddlSink
 	c.ready = make(chan bool)
 	return c, nil
 }
@@ -523,7 +538,7 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 
 	ctx := context.Background()
 	var (
-		decoder codec.EventBatchDecoder
+		decoder codec.RowEventDecoder
 		err     error
 	)
 
@@ -611,9 +626,6 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 						zap.Int32("partition", partition),
 						zap.Any("row", row))
 				}
-				// FIXME: hack to set start-ts in row changed event, as start-ts
-				// is not contained in TiCDC open protocol
-				row.StartTs = row.CommitTs
 				var partitionID int64
 				if row.Table.IsPartition {
 					partitionID = row.Table.TableID
@@ -647,16 +659,19 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 						if len(events) == 0 {
 							continue
 						}
-						if err := sink.EmitRowChangedEvents(ctx, events...); err != nil {
-							log.Panic("emit row changed event failed",
-								zap.Any("events", events),
-								zap.Error(err),
-								zap.Int32("partition", partition))
+						if _, ok := sink.tableSinksMap.Load(tableID); !ok {
+							sink.tableSinksMap.Store(tableID, c.sinkFactory.CreateTableSinkForConsumer(
+								model.DefaultChangeFeedID("kafka-consumer"),
+								spanz.TableIDToComparableSpan(tableID),
+								events[0].CommitTs,
+							))
 						}
+						s, _ := sink.tableSinksMap.Load(tableID)
+						s.(tablesink.TableSink).AppendRowChangedEvents(events...)
 						commitTs := events[len(events)-1].CommitTs
-						lastCommitTs, ok := sink.tablesMap.Load(tableID)
+						lastCommitTs, ok := sink.tablesCommitTsMap.Load(tableID)
 						if !ok || lastCommitTs.(uint64) < commitTs {
-							sink.tablesMap.Store(tableID, commitTs)
+							sink.tablesCommitTsMap.Store(tableID, commitTs)
 						}
 					}
 					log.Debug("update sink resolved ts",
@@ -727,7 +742,7 @@ func (c *Consumer) popDDL() *model.DDLEvent {
 	return nil
 }
 
-func (c *Consumer) forEachSink(fn func(sink *partitionSink) error) error {
+func (c *Consumer) forEachSink(fn func(sink *partitionSinks) error) error {
 	c.sinksMu.Lock()
 	defer c.sinksMu.Unlock()
 	for _, sink := range c.sinks {
@@ -740,7 +755,7 @@ func (c *Consumer) forEachSink(fn func(sink *partitionSink) error) error {
 
 func (c *Consumer) getMinPartitionResolvedTs() (result uint64, err error) {
 	result = uint64(math.MaxUint64)
-	err = c.forEachSink(func(sink *partitionSink) error {
+	err = c.forEachSink(func(sink *partitionSinks) error {
 		a := atomic.LoadUint64(&sink.resolvedTs)
 		if a < result {
 			result = a
@@ -770,14 +785,14 @@ func (c *Consumer) Run(ctx context.Context) error {
 		todoDDL := c.getFrontDDL()
 		if todoDDL != nil && todoDDL.CommitTs <= minPartitionResolvedTs {
 			// flush DMLs
-			if err := c.forEachSink(func(sink *partitionSink) error {
+			if err := c.forEachSink(func(sink *partitionSinks) error {
 				return syncFlushRowChangedEvents(ctx, sink, todoDDL.CommitTs)
 			}); err != nil {
 				return errors.Trace(err)
 			}
 
 			// DDL can be executed, do it first.
-			if err := c.ddlSink.EmitDDLEvent(ctx, todoDDL); err != nil {
+			if err := c.ddlSink.WriteDDLEvent(ctx, todoDDL); err != nil {
 				return errors.Trace(err)
 			}
 			c.popDDL()
@@ -803,7 +818,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 
 		c.globalResolvedTs = minPartitionResolvedTs
 
-		if err := c.forEachSink(func(sink *partitionSink) error {
+		if err := c.forEachSink(func(sink *partitionSinks) error {
 			return syncFlushRowChangedEvents(ctx, sink, c.globalResolvedTs)
 		}); err != nil {
 			return errors.Trace(err)
@@ -811,34 +826,30 @@ func (c *Consumer) Run(ctx context.Context) error {
 	}
 }
 
-func syncFlushRowChangedEvents(ctx context.Context, sink *partitionSink, resolvedTs uint64) error {
+func syncFlushRowChangedEvents(ctx context.Context, sink *partitionSinks, resolvedTs uint64) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		// tables are flushed
-		var (
-			err        error
-			checkpoint model.ResolvedTs
-		)
 		flushedResolvedTs := true
-		sink.tablesMap.Range(func(key, value interface{}) bool {
+		sink.tablesCommitTsMap.Range(func(key, value interface{}) bool {
 			tableID := key.(int64)
-			checkpoint, err = sink.FlushRowChangedEvents(ctx,
-				tableID, model.NewResolvedTs(resolvedTs))
-			if err != nil {
+			resolvedTs := model.NewResolvedTs(resolvedTs)
+			tableSink, ok := sink.tableSinksMap.Load(tableID)
+			if !ok {
+				log.Panic("Table sink not found", zap.Int64("tableID", tableID))
+			}
+			if err := tableSink.(tablesink.TableSink).UpdateResolvedTs(resolvedTs); err != nil {
+				log.Error("Failed to update resolved ts", zap.Error(err))
 				return false
 			}
-			if checkpoint.Ts < resolvedTs {
+			if !tableSink.(tablesink.TableSink).GetCheckpointTs().EqualOrGreater(resolvedTs) {
 				flushedResolvedTs = false
 			}
 			return true
 		})
-		if err != nil {
-			return err
-		}
 		if flushedResolvedTs {
 			return nil
 		}
@@ -869,7 +880,7 @@ func (g *fakeTableIDGenerator) generateFakeTableID(schema, table string, partiti
 func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		log.Error("open db failed", zap.Error(err))
+		log.Error("open db failed", zap.String("dsn", dsn), zap.Error(err))
 		return nil, errors.Trace(err)
 	}
 
@@ -880,7 +891,7 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err = db.PingContext(ctx); err != nil {
-		log.Error("ping db failed", zap.Error(err))
+		log.Error("ping db failed", zap.String("dsn", dsn), zap.Error(err))
 		return nil, errors.Trace(err)
 	}
 	log.Info("open db success", zap.String("dsn", dsn))

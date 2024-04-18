@@ -56,7 +56,7 @@ func NewConflictDetector[Worker worker[Txn], Txn txnEvent](
 		workers:      workers,
 		slots:        internal.NewSlots[*internal.Node](numSlots),
 		numSlots:     numSlots,
-		garbageNodes: chann.NewDrainableChann[txnFinishedEvent](),
+		garbageNodes: chann.NewAutoDrainChann[txnFinishedEvent](),
 		closeCh:      make(chan struct{}),
 	}
 

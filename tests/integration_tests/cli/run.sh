@@ -38,14 +38,16 @@ function run() {
 	TOPIC_NAME="ticdc-cli-test-$RANDOM"
 	case $SINK_TYPE in
 	kafka) SINK_URI="kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&kafka-version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
+	storage) SINK_URI="file://$WORK_DIR/storage_test/$TOPIC_NAME?protocol=canal-json&enable-tidb-extension=true" ;;
 	*) SINK_URI="mysql://normal:123456@127.0.0.1:3306/" ;;
 	esac
 
 	uuid="custom-changefeed-name"
 	run_cdc_cli changefeed create --start-ts=$start_ts --sink-uri="$SINK_URI" --tz="Asia/Shanghai" -c="$uuid"
-	if [ "$SINK_TYPE" == "kafka" ]; then
-		run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760"
-	fi
+	case $SINK_TYPE in
+	kafka) run_kafka_consumer $WORK_DIR "kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=open-protocol&partition-num=4&version=${KAFKA_VERSION}&max-message-bytes=10485760" ;;
+	storage) run_storage_consumer $WORK_DIR $SINK_URI "" "" ;;
+	esac
 
 	# Make sure changefeed is created.
 	check_table_exists test.simple ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
@@ -70,6 +72,8 @@ function run() {
 	# Update changefeed failed because changefeed is running
 	cat - >"$WORK_DIR/changefeed.toml" <<EOF
 case-sensitive = true
+[scheduler]
+enable-table-across-nodes = true
 EOF
 	set +e
 	update_result=$(cdc cli changefeed update --pd=$pd_addr --config="$WORK_DIR/changefeed.toml" --no-confirm --changefeed-id $uuid)
@@ -84,10 +88,22 @@ EOF
 
 	# Update changefeed
 	run_cdc_cli changefeed update --pd=$pd_addr --config="$WORK_DIR/changefeed.toml" --no-confirm --changefeed-id $uuid
-	changefeed_info=$(curl -X GET "http://127.0.0.1:8300/api/v2/changefeeds/$uuid/meta_info" 2>&1)
+	changefeed_info=$(curl -s -X GET "http://127.0.0.1:8300/api/v2/changefeeds/$uuid/meta_info" 2>&1)
 	if [[ ! $changefeed_info == *"\"case_sensitive\":true"* ]]; then
 		echo "[$(date)] <<<<< changefeed info is not updated as expected ${changefeed_info} >>>>>"
 		exit 1
+	fi
+	if [ "$SINK_TYPE" == "kafka" ]; then
+		if [[ ! $changefeed_info == *"\"enable_table_across_nodes\":true"* ]]; then
+			echo "[$(date)] <<<<< changefeed info is not updated as expected ${changefeed_info} >>>>>"
+			exit 1
+		fi
+	else
+		# Currently, MySQL changefeed does not support scale out feature.
+		if [[ $changefeed_info == *"\"enable_table_across_nodes\":true"* ]]; then
+			echo "[$(date)] <<<<< changefeed info is not updated as expected ${changefeed_info} >>>>>"
+			exit 1
+		fi
 	fi
 
 	# Resume changefeed

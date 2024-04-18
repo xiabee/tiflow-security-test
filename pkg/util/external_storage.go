@@ -195,7 +195,7 @@ func (s *extStorageWithTimeout) WalkDir(
 func (s *extStorageWithTimeout) Create(
 	ctx context.Context, path string, option *storage.WriterOption,
 ) (storage.ExternalFileWriter, error) {
-	if option.Concurrency <= 1 {
+	if option != nil && option.Concurrency <= 1 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.timeout)
 		defer cancel()

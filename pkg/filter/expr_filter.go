@@ -356,16 +356,16 @@ func getColumnFromError(err error) string {
 // dmlExprFilter is a filter that filters DML events by SQL expression.
 type dmlExprFilter struct {
 	rules   []*dmlExprFilterRule
-	sqlMode string
+	sqlMODE string
 }
 
 func newExprFilter(
 	timezone string,
 	cfg *config.FilterConfig,
-	sqlMode string,
+	sqlMODE string,
 ) (*dmlExprFilter, error) {
 	res := &dmlExprFilter{
-		sqlMode: sqlMode,
+		sqlMODE: sqlMODE,
 	}
 	sessCtx := utils.NewSessionCtx(map[string]string{
 		"time_zone": timezone,
@@ -394,7 +394,7 @@ func (f *dmlExprFilter) addRule(
 // verify checks if all rules in this filter is valid.
 func (f *dmlExprFilter) verify(tableInfos []*model.TableInfo) error {
 	for _, rule := range f.rules {
-		err := rule.verify(tableInfos, f.sqlMode)
+		err := rule.verify(tableInfos, f.sqlMODE)
 		if err != nil {
 			log.Error("failed to verify expression filter rule", zap.Error(err))
 			return errors.Trace(err)

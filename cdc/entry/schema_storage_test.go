@@ -11,6 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build intest
+// +build intest
+
 package entry
 
 import (
@@ -55,7 +58,7 @@ func TestSchema(t *testing.T) {
 	// `createSchema` job1
 	job := &timodel.Job{
 		ID:         3,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   1,
 		Type:       timodel.ActionCreateSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 1, DBInfo: dbInfo, FinishedTS: 123},
@@ -71,7 +74,7 @@ func TestSchema(t *testing.T) {
 	// test drop schema
 	job = &timodel.Job{
 		ID:         6,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   1,
 		Type:       timodel.ActionDropSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 3, DBInfo: dbInfo, FinishedTS: 124},
@@ -84,7 +87,7 @@ func TestSchema(t *testing.T) {
 
 	job = &timodel.Job{
 		ID:         3,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   1,
 		Type:       timodel.ActionCreateSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 2, DBInfo: dbInfo, FinishedTS: 124},
@@ -99,7 +102,7 @@ func TestSchema(t *testing.T) {
 	// test schema drop schema error
 	job = &timodel.Job{
 		ID:         9,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   1,
 		Type:       timodel.ActionDropSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 1, DBInfo: dbInfo, FinishedTS: 123},
@@ -156,7 +159,7 @@ func TestTable(t *testing.T) {
 	// `createSchema` job
 	job := &timodel.Job{
 		ID:         5,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   3,
 		Type:       timodel.ActionCreateSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 1, DBInfo: dbInfo, FinishedTS: 123},
@@ -167,7 +170,7 @@ func TestTable(t *testing.T) {
 	// `createTable` job
 	job = &timodel.Job{
 		ID:         6,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   3,
 		TableID:    2,
 		Type:       timodel.ActionCreateTable,
@@ -180,7 +183,7 @@ func TestTable(t *testing.T) {
 	tblInfo.Columns = []*timodel.ColumnInfo{colInfo}
 	job = &timodel.Job{
 		ID:         7,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   3,
 		TableID:    2,
 		Type:       timodel.ActionAddColumn,
@@ -194,7 +197,7 @@ func TestTable(t *testing.T) {
 	tblInfo.Indices = []*timodel.IndexInfo{idxInfo}
 	job = &timodel.Job{
 		ID:         8,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   3,
 		TableID:    2,
 		Type:       timodel.ActionAddIndex,
@@ -230,7 +233,7 @@ func TestTable(t *testing.T) {
 	}
 	job = &timodel.Job{
 		ID:         9,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   3,
 		TableID:    2,
 		Type:       timodel.ActionTruncateTable,
@@ -257,7 +260,7 @@ func TestTable(t *testing.T) {
 	// check drop table
 	job = &timodel.Job{
 		ID:         9,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   3,
 		TableID:    9,
 		Type:       timodel.ActionDropTable,
@@ -281,7 +284,7 @@ func TestTable(t *testing.T) {
 	// drop schema
 	job = &timodel.Job{
 		ID:         10,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   3,
 		Type:       timodel.ActionDropSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 7, FinishedTS: 129},
@@ -403,7 +406,7 @@ func TestHandleRenameTables(t *testing.T) {
 		}
 		job := &timodel.Job{
 			ID:         i,
-			State:      timodel.JobStateSynced,
+			State:      timodel.JobStateDone,
 			SchemaID:   i,
 			Type:       timodel.ActionCreateSchema,
 			BinlogInfo: &timodel.HistoryInfo{SchemaVersion: i, DBInfo: dbInfo, FinishedTS: uint64(i)},
@@ -420,7 +423,7 @@ func TestHandleRenameTables(t *testing.T) {
 		}
 		job := &timodel.Job{
 			ID:         i,
-			State:      timodel.JobStateSynced,
+			State:      timodel.JobStateDone,
 			SchemaID:   i,
 			TableID:    10 + i,
 			Type:       timodel.ActionCreateTable,
@@ -497,7 +500,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `createSchema` job1
 	job := &timodel.Job{
 		ID:         13,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   11,
 		Type:       timodel.ActionCreateSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 1, DBInfo: dbInfo, FinishedTS: 100},
@@ -515,7 +518,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `createTable` job
 	job = &timodel.Job{
 		ID:         16,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   11,
 		TableID:    12,
 		Type:       timodel.ActionCreateTable,
@@ -535,7 +538,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `createTable` job
 	job = &timodel.Job{
 		ID:         16,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   11,
 		TableID:    13,
 		Type:       timodel.ActionCreateTable,
@@ -556,7 +559,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `dropTable` job
 	job = &timodel.Job{
 		ID:         16,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   11,
 		TableID:    12,
 		Type:       timodel.ActionDropTable,
@@ -569,7 +572,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	// `dropSchema` job
 	job = &timodel.Job{
 		ID:         16,
-		State:      timodel.JobStateSynced,
+		State:      timodel.JobStateDone,
 		SchemaID:   11,
 		Type:       timodel.ActionDropSchema,
 		BinlogInfo: &timodel.HistoryInfo{SchemaVersion: 5, FinishedTS: 140, DBInfo: dbInfo},
@@ -625,8 +628,8 @@ func TestMultiVersionStorage(t *testing.T) {
 	require.False(t, exist)
 
 	lastSchemaTs := storage.DoGC(0)
-
 	require.Equal(t, uint64(0), lastSchemaTs)
+
 	snap, err = storage.GetSnapshot(ctx, 100)
 	require.Nil(t, err)
 	_, exist = snap.SchemaByID(11)
@@ -832,6 +835,8 @@ func TestSchemaStorage(t *testing.T) {
 		"alter table test_ddl2.simple_test1 add primary key pk(id)",                          // ActionAddPrimaryKey
 		"ALTER TABLE test_ddl2.simple_test1 ALTER id SET DEFAULT 18",                         // ActionSetDefaultValue
 		"ALTER TABLE test_ddl2.simple_test1 CHARACTER SET = utf8mb4",                         // ActionModifyTableCharsetAndCollate
+
+		"ALTER TABLE test_ddl2.employees REORGANIZE PARTITION p3 INTO (PARTITION p2 VALUES LESS THAN (15), PARTITION p3 VALUES LESS THAN (20))", // ActionReorganizePartition
 		// "recover table test_ddl2.employees",                                                  // ActionRecoverTable this ddl can't work on mock tikv
 
 		"DROP TABLE test_ddl2.employees",
@@ -924,11 +929,10 @@ func getAllHistoryDDLJob(storage tidbkv.Storage, f filter.Filter) ([]*timodel.Jo
 	txnMeta := timeta.NewMeta(txn)
 
 	jobs, err := ddl.GetAllHistoryDDLJobs(txnMeta)
+	res := make([]*timodel.Job, 0)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-
-	res := make([]*timodel.Job, 0)
 	for i, job := range jobs {
 		ignoreSchema := f.ShouldIgnoreSchema(job.SchemaName)
 		ignoreTable := f.ShouldIgnoreTable(job.SchemaName, job.TableName)
@@ -942,7 +946,7 @@ func getAllHistoryDDLJob(storage tidbkv.Storage, f filter.Filter) ([]*timodel.Jo
 		jobs[i].State = timodel.JobStateDone
 		res = append(res, job)
 	}
-	return res, nil
+	return jobs, nil
 }
 
 // This test is used to show how the schemaStorage choose a handleKey of a table.

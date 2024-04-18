@@ -434,7 +434,7 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-		// If it a rename table job and the schema does not exist,
+		// If the schema of a rename table job does not exist,
 		// there is no need to create the table, since this table
 		// will not be replicated in the future.
 		if _, ok := s.inner.schemaByID(job.SchemaID); !ok {
@@ -472,8 +472,10 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-	case timodel.ActionAddTablePartition,
-		timodel.ActionDropTablePartition:
+	case
+		timodel.ActionAddTablePartition,
+		timodel.ActionDropTablePartition,
+		timodel.ActionReorganizePartition:
 		err := s.inner.updatePartition(getWrapTableInfo(job), false, job.BinlogInfo.FinishedTS)
 		if err != nil {
 			return errors.Trace(err)
@@ -549,7 +551,6 @@ func (s *Snapshot) DumpToString() string {
 		schema, _ := s.inner.schemaByID(schemaID)
 		tableNames = append(tableNames, fmt.Sprintf("%s.%s:%d", schema.Name.O, table, target))
 	})
-
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s",
 		strings.Join(schemas, "\t"),
 		strings.Join(tables, "\t"),

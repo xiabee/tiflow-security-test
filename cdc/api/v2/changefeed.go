@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
 
@@ -49,6 +50,16 @@ const (
 
 // createChangefeed handles create changefeed request,
 // it returns the changefeed's changefeedInfo that it just created
+// CreateChangefeed creates a changefeed
+// @Summary Create changefeed
+// @Description create a new changefeed
+// @Tags changefeed,v2
+// @Accept json
+// @Produce json
+// @Param changefeed body ChangefeedConfig true "changefeed config"
+// @Success 200 {object} ChangeFeedInfo
+// @Failure 500,400 {object} model.HTTPError
+// @Router	/api/v2/changefeeds [post]
 func (h *OpenAPIV2) createChangefeed(c *gin.Context) {
 	ctx := c.Request.Context()
 	cfg := &ChangefeedConfig{ReplicaConfig: GetDefaultReplicaConfig()}
@@ -120,17 +131,26 @@ func (h *OpenAPIV2) createChangefeed(c *gin.Context) {
 		CAPath:        cfg.CAPath,
 		CertAllowedCN: cfg.CertAllowedCN,
 	}
-	o, err := h.capture.GetOwner()
+
 	// cannot create changefeed if there are running lightning/restore tasks
+	tlsCfg, err := credential.ToTLSConfig()
 	if err != nil {
-		needRemoveGCSafePoint = true
-		_ = c.Error(cerror.WrapError(cerror.ErrAPIInvalidParam, err))
+		_ = c.Error(err)
 		return
 	}
-	err = o.ValidateChangefeed(info)
+
+	cli, err := h.helpers.getEtcdClient(cfg.PDAddrs, tlsCfg)
 	if err != nil {
-		needRemoveGCSafePoint = true
-		_ = c.Error(cerror.WrapError(cerror.ErrAPIInvalidParam, err))
+		_ = c.Error(err)
+		return
+	}
+	err = hasRunningImport(ctx, cli)
+	if err != nil {
+		log.Error("failed to create changefeed", zap.Error(err))
+		_ = c.Error(
+			cerror.ErrUpstreamHasRunningImport.Wrap(err).
+				FastGenByArgs(info.UpstreamID),
+		)
 		return
 	}
 
@@ -147,6 +167,41 @@ func (h *OpenAPIV2) createChangefeed(c *gin.Context) {
 	c.JSON(http.StatusOK, toAPIModel(info,
 		info.StartTs, info.StartTs,
 		nil, true))
+}
+
+// hasRunningImport checks if there is running import tasks on the
+// upstream cluster.
+func hasRunningImport(ctx context.Context, cli *clientv3.Client) error {
+	resp, err := cli.KV.Get(
+		ctx, RegisterImportTaskPrefix, clientv3.WithPrefix(),
+	)
+	if err != nil {
+		return errors.Annotatef(
+			err, "failed to list import task related entries")
+	}
+
+	for _, kv := range resp.Kvs {
+		leaseResp, err := cli.Lease.TimeToLive(ctx, clientv3.LeaseID(kv.Lease))
+		if err != nil {
+			return errors.Annotatef(
+				err, "failed to get time-to-live of lease: %x", kv.Lease,
+			)
+		}
+		// the lease has expired
+		if leaseResp.TTL <= 0 {
+			continue
+		}
+
+		err = errors.New(
+			"There are lightning/restore tasks running" +
+				"please stop or wait for them to finish. " +
+				"If the task is terminated by system, " +
+				"please wait until the task lease ttl(3 mins) decreases to 0.",
+		)
+		return err
+	}
+
+	return nil
 }
 
 // listChangeFeeds lists all changgefeeds in cdc cluster
@@ -214,7 +269,6 @@ func (h *OpenAPIV2) listChangeFeeds(c *gin.Context) {
 		} else {
 			commonInfo.RunningError = cfInfo.Warning
 		}
-		log.Info("List changefeed successfully!", zap.Any("runningError", commonInfo.RunningError))
 
 		// if the state is normal, we shall not return the error info
 		// because changefeed will is retrying. errors will confuse the users
@@ -291,6 +345,17 @@ func (h *OpenAPIV2) verifyTable(c *gin.Context) {
 // Can only update a changefeed's: TargetTs, SinkURI,
 // ReplicaConfig, PDAddrs, CAPath, CertPath, KeyPath,
 // SyncPointEnabled, SyncPointInterval
+// UpdateChangefeed updates a changefeed
+// @Summary Update a changefeed
+// @Description Update a changefeed
+// @Tags changefeed,v2
+// @Accept json
+// @Produce json
+// @Param changefeed_id  path  string  true  "changefeed_id"
+// @Param changefeedConfig body ChangefeedConfig true "changefeed config"
+// @Success 200 {object} ChangeFeedInfo
+// @Failure 500,400 {object} model.HTTPError
+// @Router /api/v2/changefeeds/{changefeed_id} [put]
 func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -306,6 +371,7 @@ func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 		_ = c.Error(err)
 		return
 	}
+
 	switch oldCfInfo.State {
 	case model.StateStopped, model.StateFailed:
 	default:
@@ -316,16 +382,16 @@ func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 		)
 		return
 	}
+
 	cfStatus, err := h.capture.StatusProvider().GetChangeFeedStatus(ctx, changefeedID)
 	if err != nil {
 		_ = c.Error(err)
 		return
 	}
 
-	etcdClient := h.capture.GetEtcdClient()
 	oldCfInfo.Namespace = changefeedID.Namespace
 	oldCfInfo.ID = changefeedID.ID
-	OldUpInfo, err := etcdClient.GetUpstreamInfo(ctx, oldCfInfo.UpstreamID,
+	OldUpInfo, err := h.capture.GetEtcdClient().GetUpstreamInfo(ctx, oldCfInfo.UpstreamID,
 		oldCfInfo.Namespace)
 	if err != nil {
 		_ = c.Error(err)
@@ -571,7 +637,18 @@ func (h *OpenAPIV2) getChangeFeedMetaInfo(c *gin.Context) {
 		taskStatus, false))
 }
 
-// resumeChangefeed handles update changefeed request.
+// resumeChangefeed handles resume changefeed request.
+// ResumeChangefeed resumes a changefeed
+// @Summary Resume a changefeed
+// @Description Resume a changefeed
+// @Tags changefeed,v2
+// @Accept json
+// @Produce json
+// @Param changefeed_id path string true "changefeed_id"
+// @Param resumeConfig body ResumeChangefeedConfig true "resume config"
+// @Success 200 {object} EmptyResponse
+// @Failure 500,400 {object} model.HTTPError
+// @Router	/api/v2/changefeeds/{changefeed_id}/resume [post]
 func (h *OpenAPIV2) resumeChangefeed(c *gin.Context) {
 	ctx := c.Request.Context()
 	changefeedID := model.DefaultChangeFeedID(c.Param(apiOpVarChangefeedID))

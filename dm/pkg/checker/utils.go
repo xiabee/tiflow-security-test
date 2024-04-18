@@ -27,6 +27,7 @@ import (
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/format"
 	"github.com/pingcap/tiflow/dm/pkg/log"
+	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"go.uber.org/zap"
 )
 
@@ -138,7 +139,12 @@ func markCheckError(result *Result, err error) {
 		if result.State != StateFailure {
 			result.State = state
 		}
-		result.Errors = append(result.Errors, &Error{Severity: state, ShortErr: err.Error()})
+		if err2, ok := err.(*terror.Error); ok {
+			result.Errors = append(result.Errors, &Error{Severity: state, ShortErr: err2.ErrorWithoutWorkaround()})
+			result.Instruction = err2.Workaround()
+		} else {
+			result.Errors = append(result.Errors, &Error{Severity: state, ShortErr: err.Error()})
+		}
 	}
 }
 

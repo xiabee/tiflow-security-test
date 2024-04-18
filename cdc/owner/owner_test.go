@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"net/url"
 	"testing"
 	"time"
 
@@ -35,6 +34,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
 	"github.com/pingcap/tiflow/pkg/pdutil"
+	"github.com/pingcap/tiflow/pkg/sink/observer"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
 	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/pingcap/tiflow/pkg/version"
@@ -68,21 +68,27 @@ func newOwner4Test(
 	) (puller.DDLPuller, error),
 	newSink func(model.ChangeFeedID, *model.ChangeFeedInfo, func(error), func(error)) DDLSink,
 	newScheduler func(
-		ctx cdcContext.Context, pdClock pdutil.Clock,
-		epoch uint64, redoMetaManager redo.MetaManager,
+		ctx cdcContext.Context, up *upstream.Upstream, changefeedEpoch uint64,
+		cfg *config.SchedulerConfig, redoMetaManager redo.MetaManager,
 	) (scheduler.Scheduler, error),
+	newDownstreamObserver func(
+		ctx context.Context, sinkURIStr string, replCfg *config.ReplicaConfig,
+		opts ...observer.NewObserverOption,
+	) (observer.Observer, error),
 	pdClient pd.Client,
 ) Owner {
 	m := upstream.NewManager4Test(pdClient)
-	o := NewOwner(m).(*ownerImpl)
+	o := NewOwner(m, config.NewDefaultSchedulerConfig()).(*ownerImpl)
 	// Most tests do not need to test bootstrap.
 	o.bootstrapped = true
 	o.newChangefeed = func(
 		id model.ChangeFeedID,
 		state *orchestrator.ChangefeedReactorState,
 		up *upstream.Upstream,
+		cfg *config.SchedulerConfig,
 	) *changefeed {
-		return newChangefeed4Test(id, state, up, newDDLPuller, newSink, newScheduler)
+		return newChangefeed4Test(id, state, up, newDDLPuller, newSink,
+			newScheduler, newDownstreamObserver)
 	}
 	return o
 }
@@ -112,10 +118,17 @@ func createOwner4Test(ctx cdcContext.Context, t *testing.T) (*ownerImpl, *orches
 		},
 		// new scheduler
 		func(
-			ctx cdcContext.Context, pdClock pdutil.Clock,
-			changefeedEpoch uint64, redoMetaManager redo.MetaManager,
+			ctx cdcContext.Context, up *upstream.Upstream, changefeedEpoch uint64,
+			cfg *config.SchedulerConfig, redoMetaAManager redo.MetaManager,
 		) (scheduler.Scheduler, error) {
 			return &mockScheduler{}, nil
+		},
+		// new downstream observer
+		func(
+			ctx context.Context, sinkURIStr string, replCfg *config.ReplicaConfig,
+			opts ...observer.NewObserverOption,
+		) (observer.Observer, error) {
+			return observer.NewDummyObserver(), nil
 		},
 		pdClient,
 	)
@@ -428,7 +441,7 @@ func TestAdminJob(t *testing.T) {
 func TestUpdateGCSafePoint(t *testing.T) {
 	mockPDClient := &gc.MockPDClient{}
 	m := upstream.NewManager4Test(mockPDClient)
-	o := NewOwner(m).(*ownerImpl)
+	o := NewOwner(m, config.NewDefaultSchedulerConfig()).(*ownerImpl)
 	ctx := cdcContext.NewBackendContext4Test(true)
 	ctx, cancel := cdcContext.WithCancel(ctx)
 	defer cancel()
@@ -444,6 +457,13 @@ func TestUpdateGCSafePoint(t *testing.T) {
 	err := o.updateGCSafepoint(ctx, state)
 	require.Nil(t, err)
 
+	// add a failed changefeed, it must not trigger update GC safepoint.
+	mockPDClient.UpdateServiceGCSafePointFunc = func(
+		ctx context.Context, serviceID string, ttl int64, safePoint uint64,
+	) (uint64, error) {
+		t.Fatal("must not update")
+		return 0, nil
+	}
 	changefeedID1 := model.DefaultChangeFeedID("test-changefeed1")
 	tester.MustUpdate(
 		fmt.Sprintf("%s/changefeed/info/%s",
@@ -670,14 +690,14 @@ WorkLoop:
 }
 
 func TestCalculateGCSafepointTs(t *testing.T) {
-	state := orchestrator.NewGlobalStateForTest(etcd.DefaultCDCClusterID)
+	state := orchestrator.NewGlobalState(etcd.DefaultCDCClusterID, 0)
 	expectMinTsMap := make(map[uint64]uint64)
 	expectForceUpdateMap := make(map[uint64]interface{})
 	o := ownerImpl{changefeeds: make(map[model.ChangeFeedID]*changefeed)}
 	o.upstreamManager = upstream.NewManager4Test(nil)
 
 	stateMap := []model.FeedState{
-		model.StateNormal, model.StateStopped, model.StatePending,
+		model.StateNormal, model.StateStopped, model.StateWarning, model.StatePending,
 		model.StateFailed, /* failed changefeed with normal error should not be ignored */
 	}
 	for i := 0; i < 100; i++ {
@@ -740,7 +760,7 @@ func TestCalculateGCSafepointTs(t *testing.T) {
 }
 
 func TestCalculateGCSafepointTsNoChangefeed(t *testing.T) {
-	state := orchestrator.NewGlobalStateForTest(etcd.DefaultCDCClusterID)
+	state := orchestrator.NewGlobalState(etcd.DefaultCDCClusterID, 0)
 	expectForceUpdateMap := make(map[uint64]interface{})
 	o := ownerImpl{changefeeds: make(map[model.ChangeFeedID]*changefeed)}
 	o.upstreamManager = upstream.NewManager4Test(nil)
@@ -961,78 +981,4 @@ func TestIsHealthy(t *testing.T) {
 	err = o.handleQueries(query)
 	require.NoError(t, err)
 	require.False(t, query.Data.(bool))
-}
-
-func TestValidateChangefeed(t *testing.T) {
-	t.Parallel()
-
-	// Test `ValidateChangefeed` by setting `hasCIEnv` to false.
-	//
-	// FIXME: We need a better way to enable following tests
-	//        Changing global variable in a unit test is BAD practice.
-	hasCIEnv = false
-
-	o := &ownerImpl{
-		changefeeds: make(map[model.ChangeFeedID]*changefeed),
-		// logLimiter:  rate.NewLimiter(1, 1),
-		removedChangefeed: make(map[model.ChangeFeedID]time.Time),
-		removedSinkURI:    make(map[url.URL]time.Time),
-	}
-
-	id := model.ChangeFeedID{Namespace: "a", ID: "b"}
-	sinkURI := "mysql://host:1234/"
-	o.changefeeds[id] = &changefeed{
-		state: &orchestrator.ChangefeedReactorState{
-			Info: &model.ChangeFeedInfo{SinkURI: sinkURI},
-		},
-		feedStateManager: &feedStateManager{},
-	}
-
-	o.pushOwnerJob(&ownerJob{
-		Tp:           ownerJobTypeAdminJob,
-		ChangefeedID: id,
-		AdminJob: &model.AdminJob{
-			CfID: id,
-			Type: model.AdminRemove,
-		},
-		done: make(chan<- error, 1),
-	})
-	o.handleJobs(context.Background())
-
-	require.Error(t, o.ValidateChangefeed(&model.ChangeFeedInfo{
-		ID:        id.ID,
-		Namespace: id.Namespace,
-	}))
-	require.Error(t, o.ValidateChangefeed(&model.ChangeFeedInfo{
-		ID:        "unknown",
-		Namespace: "unknown",
-		SinkURI:   sinkURI,
-	}))
-
-	// Test invalid sink URI
-	require.Error(t, o.ValidateChangefeed(&model.ChangeFeedInfo{
-		SinkURI: "wrong uri\n\t",
-	}))
-
-	// Test limit passed.
-	o.removedChangefeed[id] = time.Now().Add(-2 * recreateChangefeedDelayLimit)
-	o.removedSinkURI[url.URL{
-		Scheme: "mysql",
-		Host:   "host:1234",
-	}] = time.Now().Add(-2 * recreateChangefeedDelayLimit)
-
-	require.Nil(t, o.ValidateChangefeed(&model.ChangeFeedInfo{
-		ID:        id.ID,
-		Namespace: id.Namespace,
-	}))
-	require.Nil(t, o.ValidateChangefeed(&model.ChangeFeedInfo{
-		ID:        "unknown",
-		Namespace: "unknown",
-		SinkURI:   sinkURI,
-	}))
-
-	// Test GC.
-	o.handleJobs(context.Background())
-	require.Equal(t, 0, len(o.removedChangefeed))
-	require.Equal(t, 0, len(o.removedSinkURI))
 }

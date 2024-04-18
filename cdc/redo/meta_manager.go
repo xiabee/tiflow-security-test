@@ -71,8 +71,8 @@ type metaManager struct {
 
 	startTs model.Ts
 
-	flushIntervalInMs      int64
 	lastFlushTime          time.Time
+	flushIntervalInMs      int64
 	cfg                    *config.ConsistentConfig
 	metricFlushLogDuration prometheus.Observer
 }
@@ -86,7 +86,8 @@ func NewDisabledMetaManager() *metaManager {
 
 // NewMetaManager creates a new meta Manager.
 func NewMetaManager(
-	changefeedID model.ChangeFeedID, cfg *config.ConsistentConfig, checkpoint model.Ts,
+	changefeedID model.ChangeFeedID,
+	cfg *config.ConsistentConfig, checkpoint model.Ts,
 ) *metaManager {
 	// return a disabled Manager if no consistent config or normal consistent level
 	if cfg == nil || !redo.IsConsistentEnabled(cfg.Level) {
@@ -94,8 +95,8 @@ func NewMetaManager(
 	}
 
 	m := &metaManager{
-		changeFeedID:      changefeedID,
 		captureID:         config.GetGlobalServerConfig().AdvertiseAddr,
+		changeFeedID:      changefeedID,
 		uuidGenerator:     uuid.NewGenerator(),
 		enabled:           true,
 		cfg:               cfg,
@@ -110,6 +111,7 @@ func NewMetaManager(
 			zap.Int64("interval", m.flushIntervalInMs))
 		m.flushIntervalInMs = redo.DefaultMetaFlushIntervalInMs
 	}
+
 	return m
 }
 
@@ -135,7 +137,6 @@ func (m *metaManager) preStart(ctx context.Context) error {
 	if redo.IsBlackholeStorage(uri.Scheme) {
 		uri, _ = storage.ParseRawURL("noop://")
 	}
-
 	extStorage, err := redo.InitExternalStorage(ctx, *uri)
 	if err != nil {
 		return err
@@ -165,7 +166,7 @@ func (m *metaManager) preStart(ctx context.Context) error {
 }
 
 // Run runs bgFlushMeta and bgGC.
-func (m *metaManager) Run(ctx context.Context) error {
+func (m *metaManager) Run(ctx context.Context, _ ...chan<- error) error {
 	if err := m.preStart(ctx); err != nil {
 		return err
 	}
@@ -176,10 +177,13 @@ func (m *metaManager) Run(ctx context.Context) error {
 	eg.Go(func() error {
 		return m.bgGC(egCtx)
 	})
-
 	m.running.Store(true)
 	return eg.Wait()
 }
+
+func (m *metaManager) WaitForReady(_ context.Context) {}
+
+func (m *metaManager) Close() {}
 
 // UpdateMeta updates meta.
 func (m *metaManager) UpdateMeta(checkpointTs, resolvedTs model.Ts) {
@@ -266,8 +270,8 @@ func (m *metaManager) initMeta(ctx context.Context) error {
 			zap.Uint64("checkpointTs", checkpointTs),
 			zap.Uint64("resolvedTs", resolvedTs))
 	}
-	m.metaResolvedTs.unflushed = resolvedTs
-	m.metaCheckpointTs.unflushed = checkpointTs
+	m.metaResolvedTs.unflushed.Store(resolvedTs)
+	m.metaCheckpointTs.unflushed.Store(checkpointTs)
 	if err := m.maybeFlushMeta(ctx); err != nil {
 		return errors.WrapError(errors.ErrRedoMetaInitialize, err)
 	}
@@ -278,6 +282,7 @@ func (m *metaManager) initMeta(ctx context.Context) error {
 		zap.String("changefeed", m.changeFeedID.ID),
 		zap.Uint64("checkpointTs", flushedMeta.CheckpointTs),
 		zap.Uint64("resolvedTs", flushedMeta.ResolvedTs))
+
 	return util.DeleteFilesInExtStorage(ctx, m.extStorage, toRemoveMetaFiles)
 }
 

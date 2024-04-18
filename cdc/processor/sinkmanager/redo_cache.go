@@ -20,6 +20,8 @@ import (
 
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -29,7 +31,7 @@ type redoEventCache struct {
 	allocated uint64 // atomically shared in several goroutines.
 
 	mu     sync.Mutex
-	tables map[model.TableID]*eventAppender
+	tables *spanz.HashMap[*eventAppender]
 
 	metricRedoEventCache prometheus.Gauge
 }
@@ -78,15 +80,15 @@ func newRedoEventCache(changefeedID model.ChangeFeedID, capacity uint64) *redoEv
 	return &redoEventCache{
 		capacity:  capacity,
 		allocated: 0,
-		tables:    make(map[model.TableID]*eventAppender),
+		tables:    spanz.NewHashMap[*eventAppender](),
 
 		metricRedoEventCache: RedoEventCache.WithLabelValues(changefeedID.Namespace, changefeedID.ID),
 	}
 }
 
-func (r *redoEventCache) removeTable(tableID model.TableID) {
+func (r *redoEventCache) removeTable(span tablepb.Span) {
 	r.mu.Lock()
-	item, exists := r.tables[tableID]
+	item, exists := r.tables.Get(span)
 	defer r.mu.Unlock()
 	if exists {
 		item.mu.Lock()
@@ -99,22 +101,28 @@ func (r *redoEventCache) removeTable(tableID model.TableID) {
 		item.sizes = nil
 		item.pushCounts = nil
 		item.mu.Unlock()
-		delete(r.tables, tableID)
+		r.tables.Delete(span)
 	}
 }
 
-func (r *redoEventCache) maybeCreateAppender(tableID model.TableID, lowerBound engine.Position) *eventAppender {
+func (r *redoEventCache) clear() {
+	r.metricRedoEventCache.Set(0.0)
+}
+
+func (r *redoEventCache) maybeCreateAppender(
+	span tablepb.Span, lowerBound engine.Position,
+) *eventAppender {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	item, exists := r.tables[tableID]
+	item, exists := r.tables.Get(span)
 	if !exists {
 		item = &eventAppender{
 			capacity:   r.capacity,
 			cache:      r,
 			lowerBound: lowerBound,
 		}
-		r.tables[tableID] = item
+		r.tables.ReplaceOrInsert(span, item)
 		return item
 	}
 
@@ -134,10 +142,10 @@ func (r *redoEventCache) maybeCreateAppender(tableID model.TableID, lowerBound e
 	return item
 }
 
-func (r *redoEventCache) getAppender(tableID model.TableID) *eventAppender {
+func (r *redoEventCache) getAppender(span tablepb.Span) *eventAppender {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.tables[tableID]
+	return r.tables.GetV(span)
 }
 
 func (e *eventAppender) pop(lowerBound, upperBound engine.Position) (res popResult) {
@@ -282,4 +290,12 @@ func (e *eventAppender) onBroken() (pendingSize uint64) {
 		e.cache.metricRedoEventCache.Sub(float64(pendingSize))
 	}
 	return
+}
+
+// getEvents only used for test.
+func (e *eventAppender) getEvents() []*model.RowChangedEvent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return e.events
 }

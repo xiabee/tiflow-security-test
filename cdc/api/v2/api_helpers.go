@@ -15,6 +15,7 @@ package v2
 
 import (
 	"context"
+	"crypto/tls"
 	"net/url"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/owner"
-	"github.com/pingcap/tiflow/cdc/sink"
+	"github.com/pingcap/tiflow/cdc/sink/validator"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
@@ -37,10 +38,18 @@ import (
 	"github.com/r3labs/diff"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
+	"go.etcd.io/etcd/client/pkg/v3/logutil"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 )
+
+// RegisterImportTaskPrefix denotes the key prefix associated with the entries
+// containning import/restore information in the embedded Etcd of the
+// upstream PD.
+const RegisterImportTaskPrefix = "/tidb/brie/import"
 
 // APIV2Helpers is a collections of helper functions of OpenAPIV2.
 // Defining it as an interface to make APIs more testable.
@@ -88,6 +97,13 @@ type APIV2Helpers interface {
 		pdAddrs []string,
 		credential *security.Credential,
 	) (pd.Client, error)
+
+	// getEtcdClient returns an Etcd client given the PD endpoints and
+	// tls config
+	getEtcdClient(
+		pdAddrs []string,
+		tlsConfig *tls.Config,
+	) (*clientv3.Client, error)
 
 	// getKVCreateTiStore wraps kv.createTiStore method to increase testability
 	createTiStore(
@@ -212,7 +228,7 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 	}
 
 	// verify sink
-	if err := sink.Validate(ctx, cfg.SinkURI, replicaCfg); err != nil {
+	if err := validator.Validate(ctx, cfg.SinkURI, replicaCfg, nil); err != nil {
 		return nil, err
 	}
 
@@ -256,6 +272,7 @@ func (h APIV2HelpersImpl) verifyUpstream(ctx context.Context,
 		return cerror.ErrUpstreamMissMatch.
 			GenWithStackByArgs(cfInfo.UpstreamID, pdClient.GetClusterID(ctx))
 	}
+
 	return nil
 }
 
@@ -321,7 +338,21 @@ func (APIV2HelpersImpl) verifyUpdateChangefeedConfig(
 			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 
-		if err := sink.Validate(ctx, newInfo.SinkURI, newInfo.Config); err != nil {
+		// use the sinkURI to validate and adjust the new config
+		sinkURI := oldInfo.SinkURI
+		if sinkURIUpdated {
+			sinkURI = newInfo.SinkURI
+		}
+		sinkURIParsed, err := url.Parse(sinkURI)
+		if err != nil {
+			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
+		}
+		err = newInfo.Config.ValidateAndAdjust(sinkURIParsed)
+		if err != nil {
+			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
+		}
+
+		if err := validator.Validate(ctx, newInfo.SinkURI, newInfo.Config, nil); err != nil {
 			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 	}
@@ -413,6 +444,41 @@ func (APIV2HelpersImpl) getPDClient(ctx context.Context,
 		return nil, cerror.WrapError(cerror.ErrAPIGetPDClientFailed, errors.Trace(err))
 	}
 	return pdClient, nil
+}
+
+func (h APIV2HelpersImpl) getEtcdClient(
+	pdAddrs []string, tlsCfg *tls.Config,
+) (*clientv3.Client, error) {
+	conf := config.GetGlobalServerConfig()
+	grpcTLSOption, err := conf.Security.ToGRPCDialOption()
+	if err != nil {
+		return nil, err
+	}
+	logConfig := &logutil.DefaultZapLoggerConfig
+	logConfig.Level = zap.NewAtomicLevelAt(zapcore.ErrorLevel)
+	return clientv3.New(
+		clientv3.Config{
+			Endpoints:   pdAddrs,
+			TLS:         tlsCfg,
+			LogConfig:   logConfig,
+			DialTimeout: 5 * time.Second,
+			DialOptions: []grpc.DialOption{
+				grpcTLSOption,
+				grpc.WithBlock(),
+				grpc.WithConnectParams(
+					grpc.ConnectParams{
+						Backoff: backoff.Config{
+							BaseDelay:  time.Second,
+							Multiplier: 1.1,
+							Jitter:     0.1,
+							MaxDelay:   3 * time.Second,
+						},
+						MinConnectTimeout: 3 * time.Second,
+					},
+				),
+			},
+		},
+	)
 }
 
 // getTiStore wrap the kv.createTiStore method to increase testability

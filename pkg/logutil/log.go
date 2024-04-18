@@ -16,11 +16,14 @@ package logutil
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/Shopify/sarama"
+	"github.com/gin-gonic/gin"
+	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
@@ -88,6 +91,7 @@ func SetLogLevel(level string) error {
 type loggerOp struct {
 	isInitGRPCLogger   bool
 	isInitSaramaLogger bool
+	isInitMySQLLogger  bool
 	output             zapcore.WriteSyncer
 }
 
@@ -111,6 +115,13 @@ func WithInitGRPCLogger() LoggerOpt {
 func WithInitSaramaLogger() LoggerOpt {
 	return func(op *loggerOp) {
 		op.isInitSaramaLogger = true
+	}
+}
+
+// WithInitMySQLLogger enables mysql logger initialization when initializes global logger
+func WithInitMySQLLogger() LoggerOpt {
+	return func(op *loggerOp) {
+		op.isInitMySQLLogger = true
 	}
 }
 
@@ -179,6 +190,12 @@ func initOptionalComponent(op *loggerOp, cfg *Config) error {
 		}
 	}
 
+	if op.isInitMySQLLogger {
+		if err := initMySQLLogger(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -191,6 +208,17 @@ func ZapErrorFilter(err error, filterErrors ...error) zap.Field {
 		}
 	}
 	return zap.Error(err)
+}
+
+// initMySQLLogger setup logger used in mysql lib
+func initMySQLLogger() error {
+	// MySQL lib only prints error logs.
+	level := zapcore.ErrorLevel
+	logger, err := zap.NewStdLogAt(log.L().With(zap.String("component", "[mysql]")), level)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return mysql.SetLogger(logger)
 }
 
 // initSaramaLogger hacks logger used in sarama lib
@@ -206,11 +234,11 @@ func initSaramaLogger(level zapcore.Level) error {
 	return nil
 }
 
-type grpcLoggerWriter struct {
+type loggerWriter struct {
 	logFunc func(msg string, fields ...zap.Field)
 }
 
-func (l *grpcLoggerWriter) Write(p []byte) (int, error) {
+func (l *loggerWriter) Write(p []byte) (int, error) {
 	p = bytes.TrimSpace(p)
 	l.logFunc(string(p))
 	return len(p), nil
@@ -265,7 +293,7 @@ func initGRPCLogger(level zapcore.Level) error {
 	if err != nil {
 		return err
 	}
-	writer := &grpcLoggerWriter{logFunc: logFunc}
+	writer := &loggerWriter{logFunc: logFunc}
 	grpclog.SetLoggerV2(grpclog.NewLoggerV2WithVerbosity(writer, writer, writer, v))
 	return nil
 }
@@ -301,4 +329,20 @@ func ShortError(err error) zap.Field {
 // WithComponent return a logger with specified component scope
 func WithComponent(component string) *zap.Logger {
 	return log.L().With(zap.String("component", component))
+}
+
+// InitGinLogWritter initialize loggers for Gin.
+func InitGinLogWritter() io.Writer {
+	currentLevel := log.GetLevel()
+	if currentLevel == zapcore.DebugLevel {
+		gin.SetMode(gin.DebugMode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
+	}
+	logger := WithComponent("gin")
+	logFunc, _ := levelToFunc(logger, currentLevel)
+	gin.DefaultWriter = &loggerWriter{logFunc: logFunc}
+	logFunc, _ = levelToFunc(logger, zapcore.ErrorLevel)
+	gin.DefaultErrorWriter = &loggerWriter{logFunc: logFunc}
+	return gin.DefaultErrorWriter
 }

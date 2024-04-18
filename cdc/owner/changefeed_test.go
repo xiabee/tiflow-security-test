@@ -35,8 +35,8 @@ import (
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
-	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/redo"
+	"github.com/pingcap/tiflow/pkg/sink/observer"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
 	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/stretchr/testify/require"
@@ -228,10 +228,20 @@ func createChangefeed4Test(ctx cdcContext.Context, t *testing.T,
 		},
 		// new scheduler
 		func(
-			ctx cdcContext.Context, pdClock pdutil.Clock, epoch uint64, redoMetaManager credo.MetaManager,
+			ctx cdcContext.Context, up *upstream.Upstream, epoch uint64,
+			cfg *config.SchedulerConfig, redoMetaManager credo.MetaManager,
 		) (scheduler.Scheduler, error) {
 			return &mockScheduler{}, nil
-		})
+		},
+		// new downstream observer
+		func(
+			ctx context.Context, sinkURIStr string, replCfg *config.ReplicaConfig,
+			opts ...observer.NewObserverOption,
+		) (observer.Observer, error) {
+			return observer.NewDummyObserver(), nil
+		},
+	)
+
 	cf.upstream = up
 
 	tester.MustUpdate(fmt.Sprintf("%s/capture/%s",
@@ -605,10 +615,12 @@ func TestBarrierAdvance(t *testing.T) {
 			cf.ddlManager.ddlResolvedTs += 10
 		}
 		_, barrier, err := cf.ddlManager.tick(ctx, cf.state.Status.CheckpointTs, nil)
+
 		require.Nil(t, err)
 
 		err = cf.handleBarrier(ctx, barrier)
 		require.Nil(t, err)
+
 		if i == 0 {
 			require.Equal(t, cf.state.Info.StartTs, barrier.GlobalBarrierTs)
 		}
@@ -625,19 +637,21 @@ func TestBarrierAdvance(t *testing.T) {
 			err = cf.handleBarrier(ctx, barrier)
 			require.Nil(t, err)
 			require.Equal(t, cf.state.Info.StartTs+10, barrier.GlobalBarrierTs)
-
 			// Then the last tick barrier must be advanced correctly.
 			cf.ddlManager.ddlResolvedTs += 1000000000000
 			_, barrier, err = cf.ddlManager.tick(ctx, cf.state.Status.CheckpointTs+10, nil)
 			require.Nil(t, err)
 			err = cf.handleBarrier(ctx, barrier)
-			nextSyncPointTs := oracle.
-				GoTimeToTS(oracle.GetTimeFromTS(cf.state.Status.CheckpointTs + 10).
-					Add(ctx.ChangefeedVars().Info.Config.SyncPointInterval))
+
+			nextSyncPointTs := oracle.GoTimeToTS(
+				oracle.GetTimeFromTS(cf.state.Status.CheckpointTs + 10).
+					Add(cf.state.Info.Config.SyncPointInterval))
+
 			require.Nil(t, err)
 			require.Equal(t, nextSyncPointTs, barrier.GlobalBarrierTs)
 			require.Less(t, cf.state.Status.CheckpointTs+10, barrier.GlobalBarrierTs)
 			require.Less(t, barrier.GlobalBarrierTs, cf.ddlManager.ddlResolvedTs)
 		}
+
 	}
 }

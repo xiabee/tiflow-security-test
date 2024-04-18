@@ -15,12 +15,13 @@ package checker
 
 import (
 	"context"
-	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/tidb/util/filter"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,7 +42,7 @@ func TestShardingTablesChecker(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-2`").WillReturnRows(createTableRow2)
 
 	checker := NewShardingTablesChecker("test-name",
-		map[string]*sql.DB{"test-source": db},
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
 		map[string][]filter.Table{"test-source": {
 			{Schema: "test-db", Name: "test-table-1"},
 			{Schema: "test-db", Name: "test-table-2"},
@@ -54,7 +55,7 @@ func TestShardingTablesChecker(t *testing.T) {
 
 	// 2. check different column number
 	checker = NewShardingTablesChecker("test-name",
-		map[string]*sql.DB{"test-source": db},
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
 		map[string][]filter.Table{"test-source": {
 			{Schema: "test-db", Name: "test-table-1"},
 			{Schema: "test-db", Name: "test-table-2"},
@@ -77,7 +78,7 @@ func TestShardingTablesChecker(t *testing.T) {
 
 	// 3. check different column def
 	checker = NewShardingTablesChecker("test-name",
-		map[string]*sql.DB{"test-source": db},
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
 		map[string][]filter.Table{"test-source": {
 			{Schema: "test-db", Name: "test-table-1"},
 			{Schema: "test-db", Name: "test-table-2"},
@@ -99,7 +100,7 @@ func TestShardingTablesChecker(t *testing.T) {
 
 	// 4. test tiflow#5759
 	checker = NewShardingTablesChecker("test-name",
-		map[string]*sql.DB{"test-source": db},
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
 		map[string][]filter.Table{"test-source": {
 			{Schema: "test-db", Name: "test-table-1"},
 			{Schema: "test-db", Name: "test-table-2"},
@@ -168,8 +169,8 @@ func TestTablesChecker(t *testing.T) {
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnError(errNoSuchTable)
 
 	checker := NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -201,8 +202,8 @@ func TestTablesChecker(t *testing.T) {
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRow2)
 
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -217,6 +218,7 @@ func TestTablesChecker(t *testing.T) {
 	require.Len(t, result.Errors, 2)
 	require.NoError(t, mock.ExpectationsWereMet())
 	require.NoError(t, downMock.ExpectationsWereMet())
+	require.False(t, strings.HasSuffix(result.Instruction, "; "))
 
 	// 3. test #5759
 
@@ -239,8 +241,8 @@ func TestTablesChecker(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-3`").WillReturnRows(createTableRow3)
 
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table"}: {
@@ -280,8 +282,8 @@ func TestTablesChecker(t *testing.T) {
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table`").WillReturnRows(createTableRow2)
 
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table"}: {
@@ -311,6 +313,7 @@ func TestTablesChecker(t *testing.T) {
 		result.Errors[4].ShortErr)
 	require.NoError(t, mock.ExpectationsWereMet())
 	require.NoError(t, downMock.ExpectationsWereMet())
+	require.False(t, strings.HasSuffix(result.Instruction, "; "))
 
 	// 5. check extended columns
 	commonMock()
@@ -330,8 +333,8 @@ func TestTablesChecker(t *testing.T) {
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRowDown)
 
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -346,6 +349,7 @@ func TestTablesChecker(t *testing.T) {
 	result = checker.Check(ctx)
 	require.Equal(t, StateFailure, result.State)
 	require.Len(t, result.Errors, 2)
+	require.False(t, strings.HasSuffix(result.Instruction, "; "))
 	require.Equal(t,
 		"table `test-db`.`test-table-1` upstream table must not contain extended column [ext1]",
 		result.Errors[0].ShortErr)
@@ -386,8 +390,8 @@ func TestCombineInstruction(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRowUp)
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnError(errNoSuchTable)
 	checker := NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -425,8 +429,8 @@ func TestCombineInstruction(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRowUp)
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableDown)
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -463,8 +467,8 @@ func TestCombineInstruction(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRowUp)
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableDown)
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -501,8 +505,8 @@ func TestCombineInstruction(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRowUp)
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableDown)
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -538,8 +542,8 @@ func TestCombineInstruction(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRowUp)
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableDown)
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -571,8 +575,8 @@ func TestCombineInstruction(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRowUp)
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnError(errNoSuchTable)
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -694,7 +698,7 @@ func TestOptimisticShardingTablesChecker(t *testing.T) {
 		mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-2`").WillReturnRows(createTableRow2)
 		checker := NewOptimisticShardingTablesChecker(
 			"test-name",
-			map[string]*sql.DB{"test-source": db},
+			map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
 			map[string][]filter.Table{"test-source": {
 				{Schema: "test-db", Name: "test-table-1"},
 				{Schema: "test-db", Name: "test-table-2"},
@@ -733,8 +737,8 @@ func TestUnknownCharsetCollation(t *testing.T) {
 	downMock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlModeRow2)
 
 	checker := NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -765,7 +769,7 @@ PRIMARY KEY ("c")
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRow)
 
 	checker = NewShardingTablesChecker("test-name",
-		map[string]*sql.DB{"test-source": db},
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
 		map[string][]filter.Table{"test-source": {
 			{Schema: "test-db", Name: "test-table-1"},
 			{Schema: "test-db", Name: "test-table-2"},
@@ -789,7 +793,7 @@ PRIMARY KEY ("c")
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-2`").WillReturnRows(createTableRow2)
 
 	checker = NewShardingTablesChecker("test-name",
-		map[string]*sql.DB{"test-source": db},
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
 		map[string][]filter.Table{"test-source": {
 			{Schema: "test-db", Name: "test-table-1"},
 			{Schema: "test-db", Name: "test-table-2"},
@@ -813,7 +817,7 @@ PRIMARY KEY ("c")
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-2`").WillReturnRows(createTableRow2)
 
 	checker = NewShardingTablesChecker("test-name",
-		map[string]*sql.DB{"test-source": db},
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
 		map[string][]filter.Table{"test-source": {
 			{Schema: "test-db", Name: "test-table-1"},
 			{Schema: "test-db", Name: "test-table-2"},
@@ -845,7 +849,7 @@ CREATE TABLE "test-table-2" (
 	mock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-2`").WillReturnRows(createTableRow2)
 	checker = NewOptimisticShardingTablesChecker(
 		"test-name",
-		map[string]*sql.DB{"test-source": db},
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
 		map[string][]filter.Table{"test-source": {
 			{Schema: "test-db", Name: "test-table-1"},
 			{Schema: "test-db", Name: "test-table-2"},
@@ -919,9 +923,10 @@ func TestExpressionUK(t *testing.T) {
 		  UNIQUE KEY "uk" (("c2"+1), "c")
 		) ENGINE=InnoDB`)
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRow2)
+
 	checker := NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {
@@ -965,8 +970,8 @@ func TestExpressionUK(t *testing.T) {
 	downMock.ExpectQuery("SHOW CREATE TABLE `test-db`.`test-table-1`").WillReturnRows(createTableRow2)
 
 	checker = NewTablesChecker(
-		map[string]*sql.DB{"test-source": db},
-		downDB,
+		map[string]*conn.BaseDB{"test-source": conn.NewBaseDBForTest(db)},
+		conn.NewBaseDBForTest(downDB),
 		map[string]map[filter.Table][]filter.Table{
 			"test-source": {
 				{Schema: "test-db", Name: "test-table-1"}: {

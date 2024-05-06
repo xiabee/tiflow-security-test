@@ -178,8 +178,8 @@ function run_case_with_unavailable_tikv() {
 	info=$(echo $synced_status | jq -r '.info')
 	target_message="Please check whether PD is online and TiKV Regions are all available. \
 If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. \
-To check whether TiKV regions are all available, \
-you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. \
+To check whether TiKV regions are all available, you can view \
+'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. \
 If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. \
 Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait"
 
@@ -277,8 +277,8 @@ function run_case_with_failpoint() {
 	info=$(echo $synced_status | jq -r '.info')
 	target_message="Please check whether PD is online and TiKV Regions are all available. \
 If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. \
-To check whether TiKV regions are all available, \
-you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. \
+To check whether TiKV regions are all available, you can view \
+'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. \
 If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. \
 Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait"
 	if [ "$info" != "$target_message" ]; then
@@ -297,12 +297,6 @@ run_normal_case_and_unavailable_pd "conf/changefeed.toml"
 run_case_with_unavailable_tikv "conf/changefeed.toml"
 run_case_with_unavailable_tidb "conf/changefeed.toml"
 run_case_with_failpoint "conf/changefeed.toml"
-
-# enable redo
-run_normal_case_and_unavailable_pd "conf/changefeed-redo.toml"
-run_case_with_unavailable_tikv "conf/changefeed-redo.toml"
-run_case_with_unavailable_tidb "conf/changefeed-redo.toml"
-run_case_with_failpoint "conf/changefeed-redo.toml"
 
 check_logs $WORK_DIR
 echo "[$(date)] <<<<<< run test case $TEST_NAME success! >>>>>>"

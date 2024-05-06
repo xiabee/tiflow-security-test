@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -44,8 +44,7 @@ func TestCompleteOptions(t *testing.T) {
 	sinkURI, err := url.Parse(uri)
 	require.NoError(t, err)
 
-	ctx := context.Background()
-	err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+	err = options.Apply(model.DefaultChangeFeedID("test"), sinkURI, config.GetDefaultReplicaConfig())
 	require.NoError(t, err)
 	require.Equal(t, int32(1), options.PartitionNum)
 	require.Equal(t, int16(3), options.ReplicationFactor)
@@ -58,7 +57,8 @@ func TestCompleteOptions(t *testing.T) {
 	sinkURI, err = url.Parse(uri)
 	require.NoError(t, err)
 	options = NewOptions()
-	err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+	err = options.Apply(model.DefaultChangeFeedID("test"),
+		sinkURI, config.GetDefaultReplicaConfig())
 	require.NoError(t, err)
 	require.Len(t, options.BrokerEndpoints, 3)
 
@@ -67,7 +67,7 @@ func TestCompleteOptions(t *testing.T) {
 	sinkURI, err = url.Parse(uri)
 	require.NoError(t, err)
 	options = NewOptions()
-	err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+	err = options.Apply(model.DefaultChangeFeedID("test"), sinkURI, config.GetDefaultReplicaConfig())
 	require.Regexp(t, ".*invalid syntax.*", errors.Cause(err))
 
 	// Illegal max-message-bytes.
@@ -75,7 +75,7 @@ func TestCompleteOptions(t *testing.T) {
 	sinkURI, err = url.Parse(uri)
 	require.NoError(t, err)
 	options = NewOptions()
-	err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+	err = options.Apply(model.DefaultChangeFeedID("test"), sinkURI, config.GetDefaultReplicaConfig())
 	require.Regexp(t, ".*invalid syntax.*", errors.Cause(err))
 
 	// Illegal partition-num.
@@ -83,7 +83,7 @@ func TestCompleteOptions(t *testing.T) {
 	sinkURI, err = url.Parse(uri)
 	require.NoError(t, err)
 	options = NewOptions()
-	err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+	err = options.Apply(model.DefaultChangeFeedID("test"), sinkURI, config.GetDefaultReplicaConfig())
 	require.Regexp(t, ".*invalid syntax.*", errors.Cause(err))
 
 	// Out of range partition-num.
@@ -91,7 +91,7 @@ func TestCompleteOptions(t *testing.T) {
 	sinkURI, err = url.Parse(uri)
 	require.NoError(t, err)
 	options = NewOptions()
-	err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+	err = options.Apply(model.DefaultChangeFeedID("test"), sinkURI, config.GetDefaultReplicaConfig())
 	require.Regexp(t, ".*invalid partition num.*", errors.Cause(err))
 
 	// Unknown required-acks.
@@ -99,7 +99,7 @@ func TestCompleteOptions(t *testing.T) {
 	sinkURI, err = url.Parse(uri)
 	require.NoError(t, err)
 	options = NewOptions()
-	err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+	err = options.Apply(model.DefaultChangeFeedID("test"), sinkURI, config.GetDefaultReplicaConfig())
 	require.Regexp(t, ".*invalid required acks 3.*", errors.Cause(err))
 
 	// invalid kafka client id
@@ -107,7 +107,7 @@ func TestCompleteOptions(t *testing.T) {
 	sinkURI, err = url.Parse(uri)
 	require.NoError(t, err)
 	options = NewOptions()
-	err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+	err = options.Apply(model.DefaultChangeFeedID("test"), sinkURI, config.GetDefaultReplicaConfig())
 	require.True(t, cerror.ErrKafkaInvalidClientID.Equal(err))
 }
 
@@ -183,8 +183,7 @@ func TestTimeout(t *testing.T) {
 	sinkURI, err := url.Parse(uri)
 	require.NoError(t, err)
 
-	ctx := context.Background()
-	err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+	err = options.Apply(model.DefaultChangeFeedID("test"), sinkURI, config.GetDefaultReplicaConfig())
 	require.NoError(t, err)
 
 	require.Equal(t, 5*time.Second, options.DialTimeout)
@@ -193,41 +192,49 @@ func TestTimeout(t *testing.T) {
 }
 
 func TestAdjustConfigTopicNotExist(t *testing.T) {
+	// When the topic does not exist, use the broker's configuration to create the topic.
 	adminClient := NewClusterAdminClientMockImpl()
 	defer adminClient.Close()
 
 	options := NewOptions()
 	options.BrokerEndpoints = []string{"127.0.0.1:9092"}
 
-	// When the topic does not exist, use the broker's configuration to create the topic.
 	// topic not exist, `max-message-bytes` = `message.max.bytes`
 	options.MaxMessageBytes = adminClient.GetBrokerMessageMaxBytes()
 	ctx := context.Background()
-	saramaConfig, err := NewSaramaConfig(ctx, options)
-	require.Nil(t, err)
+	err := AdjustOptions(ctx, adminClient, options, "create-random")
+	require.NoError(t, err)
 
-	err = AdjustOptions(ctx, adminClient, options, "create-random1")
-	require.Nil(t, err)
-	expectedSaramaMaxMessageBytes := options.MaxMessageBytes
-	require.Equal(t, expectedSaramaMaxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+	saramaConfig, err := NewSaramaConfig(ctx, options)
+	require.NoError(t, err)
+	require.Equal(t, options.MaxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+
+	realMaxMessageBytes := adminClient.GetBrokerMessageMaxBytes() - maxMessageBytesOverhead
+	require.Equal(t, realMaxMessageBytes, options.MaxMessageBytes)
 
 	// topic not exist, `max-message-bytes` > `message.max.bytes`
 	options.MaxMessageBytes = adminClient.GetBrokerMessageMaxBytes() + 1
+	err = AdjustOptions(ctx, adminClient, options, "create-random1")
+	require.NoError(t, err)
+
 	saramaConfig, err = NewSaramaConfig(ctx, options)
-	require.Nil(t, err)
-	err = AdjustOptions(ctx, adminClient, options, "create-random2")
-	require.Nil(t, err)
-	expectedSaramaMaxMessageBytes = adminClient.GetBrokerMessageMaxBytes()
-	require.Equal(t, expectedSaramaMaxMessageBytes, options.MaxMessageBytes)
+	require.NoError(t, err)
+	require.Equal(t, options.MaxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+
+	realMaxMessageBytes = adminClient.GetBrokerMessageMaxBytes() - maxMessageBytesOverhead
+	require.Equal(t, realMaxMessageBytes, options.MaxMessageBytes)
 
 	// topic not exist, `max-message-bytes` < `message.max.bytes`
 	options.MaxMessageBytes = adminClient.GetBrokerMessageMaxBytes() - 1
+	err = AdjustOptions(ctx, adminClient, options, "create-random2")
+	require.NoError(t, err)
+
 	saramaConfig, err = NewSaramaConfig(ctx, options)
-	require.Nil(t, err)
-	err = AdjustOptions(ctx, adminClient, options, "create-random3")
-	require.Nil(t, err)
-	expectedSaramaMaxMessageBytes = options.MaxMessageBytes
-	require.Equal(t, expectedSaramaMaxMessageBytes, options.MaxMessageBytes)
+	require.NoError(t, err)
+	require.Equal(t, options.MaxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+
+	realMaxMessageBytes = adminClient.GetBrokerMessageMaxBytes() - maxMessageBytesOverhead
+	require.Equal(t, realMaxMessageBytes, options.MaxMessageBytes)
 }
 
 func TestAdjustConfigTopicExist(t *testing.T) {
@@ -237,40 +244,45 @@ func TestAdjustConfigTopicExist(t *testing.T) {
 	options := NewOptions()
 	options.BrokerEndpoints = []string{"127.0.0.1:9092"}
 
+	ctx := context.Background()
 	// topic exists, `max-message-bytes` = `max.message.bytes`.
 	options.MaxMessageBytes = adminClient.GetTopicMaxMessageBytes()
 
-	ctx := context.Background()
+	err := AdjustOptions(ctx, adminClient, options, adminClient.GetDefaultMockTopicName())
+	require.NoError(t, err)
+
 	saramaConfig, err := NewSaramaConfig(ctx, options)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
-	err = AdjustOptions(ctx, adminClient, options, adminClient.GetDefaultMockTopicName())
-	require.Nil(t, err)
-
-	expectedSaramaMaxMessageBytes := options.MaxMessageBytes
-	require.Equal(t, expectedSaramaMaxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+	maxMessageBytes := adminClient.GetTopicMaxMessageBytes() - maxMessageBytesOverhead
+	require.Equal(t, maxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+	require.Equal(t, maxMessageBytes, options.MaxMessageBytes)
 
 	// topic exists, `max-message-bytes` > `max.message.bytes`
 	options.MaxMessageBytes = adminClient.GetTopicMaxMessageBytes() + 1
-	saramaConfig, err = NewSaramaConfig(ctx, options)
-	require.Nil(t, err)
 
 	err = AdjustOptions(ctx, adminClient, options, adminClient.GetDefaultMockTopicName())
-	require.Nil(t, err)
+	require.NoError(t, err)
 
-	expectedSaramaMaxMessageBytes = adminClient.GetTopicMaxMessageBytes()
-	require.Equal(t, expectedSaramaMaxMessageBytes, options.MaxMessageBytes)
+	saramaConfig, err = NewSaramaConfig(ctx, options)
+	require.NoError(t, err)
+
+	maxMessageBytes = adminClient.GetTopicMaxMessageBytes() - maxMessageBytesOverhead
+	require.Equal(t, maxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+	require.Equal(t, maxMessageBytes, options.MaxMessageBytes)
 
 	// topic exists, `max-message-bytes` < `max.message.bytes`
 	options.MaxMessageBytes = adminClient.GetTopicMaxMessageBytes() - 1
-	saramaConfig, err = NewSaramaConfig(ctx, options)
-	require.Nil(t, err)
 
 	err = AdjustOptions(ctx, adminClient, options, adminClient.GetDefaultMockTopicName())
-	require.Nil(t, err)
+	require.NoError(t, err)
 
-	expectedSaramaMaxMessageBytes = options.MaxMessageBytes
-	require.Equal(t, expectedSaramaMaxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+	saramaConfig, err = NewSaramaConfig(ctx, options)
+	require.NoError(t, err)
+
+	maxMessageBytes = adminClient.GetTopicMaxMessageBytes() - maxMessageBytesOverhead
+	require.Equal(t, maxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+	require.Equal(t, maxMessageBytes, options.MaxMessageBytes)
 
 	// When the topic exists, but the topic does not have `max.message.bytes`
 	// create a topic without `max.message.bytes`
@@ -280,29 +292,31 @@ func TestAdjustConfigTopicExist(t *testing.T) {
 		NumPartitions: 3,
 	}
 	err = adminClient.CreateTopic(context.Background(), detail, false)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	options.MaxMessageBytes = adminClient.GetBrokerMessageMaxBytes() - 1
-	saramaConfig, err = NewSaramaConfig(ctx, options)
-	require.Nil(t, err)
-
 	err = AdjustOptions(ctx, adminClient, options, topicName)
-	require.Nil(t, err)
+	require.NoError(t, err)
+
+	saramaConfig, err = NewSaramaConfig(ctx, options)
+	require.NoError(t, err)
 
 	// since `max.message.bytes` cannot be found, use broker's `message.max.bytes` instead.
-	expectedSaramaMaxMessageBytes = options.MaxMessageBytes
-	require.Equal(t, expectedSaramaMaxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
+	maxMessageBytes = adminClient.GetBrokerMessageMaxBytes() - maxMessageBytesOverhead
+	require.Equal(t, maxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
 
 	// When the topic exists, but the topic doesn't have `max.message.bytes`
 	// `max-message-bytes` > `message.max.bytes`
 	options.MaxMessageBytes = adminClient.GetBrokerMessageMaxBytes() + 1
-	saramaConfig, err = NewSaramaConfig(ctx, options)
-	require.Nil(t, err)
 
 	err = AdjustOptions(ctx, adminClient, options, topicName)
-	require.Nil(t, err)
-	expectedSaramaMaxMessageBytes = adminClient.GetBrokerMessageMaxBytes()
-	require.Equal(t, expectedSaramaMaxMessageBytes, options.MaxMessageBytes)
+	require.NoError(t, err)
+
+	saramaConfig, err = NewSaramaConfig(ctx, options)
+	require.NoError(t, err)
+
+	maxMessageBytes = adminClient.GetBrokerMessageMaxBytes() - maxMessageBytesOverhead
+	require.Equal(t, maxMessageBytes, saramaConfig.Producer.MaxMessageBytes)
 }
 
 func TestAdjustConfigMinInsyncReplicas(t *testing.T) {
@@ -593,7 +607,7 @@ func TestConfigurationCombinations(t *testing.T) {
 
 		ctx := context.Background()
 		options := NewOptions()
-		err = options.Apply(ctx, sinkURI, config.GetDefaultReplicaConfig())
+		err = options.Apply(model.DefaultChangeFeedID("test"), sinkURI, config.GetDefaultReplicaConfig())
 		require.Nil(t, err)
 
 		changefeed := model.DefaultChangeFeedID("changefeed-test")
@@ -610,7 +624,13 @@ func TestConfigurationCombinations(t *testing.T) {
 		require.Nil(t, err)
 
 		encoderConfig := common.NewConfig(config.ProtocolOpen)
-		err = encoderConfig.Apply(sinkURI, &config.ReplicaConfig{})
+		err = encoderConfig.Apply(sinkURI, &config.ReplicaConfig{
+			Sink: &config.SinkConfig{
+				KafkaConfig: &config.KafkaConfig{
+					LargeMessageHandle: config.NewDefaultLargeMessageHandleConfig(),
+				},
+			},
+		})
 		require.Nil(t, err)
 		encoderConfig.WithMaxMessageBytes(options.MaxMessageBytes)
 
@@ -619,10 +639,6 @@ func TestConfigurationCombinations(t *testing.T) {
 
 		// producer's `MaxMessageBytes` = encoder's `MaxMessageBytes`.
 		require.Equal(t, encoderConfig.MaxMessageBytes, options.MaxMessageBytes)
-
-		expected, err := strconv.Atoi(a.expectedMaxMessageBytes)
-		require.Nil(t, err)
-		require.Equal(t, expected, options.MaxMessageBytes)
 
 		adminClient.Close()
 	}
@@ -660,7 +676,7 @@ func TestMerge(t *testing.T) {
 		Key:                       aws.String("key.pem"),
 	}
 	c := NewOptions()
-	err = c.Apply(context.TODO(), sinkURI, replicaConfig)
+	err = c.Apply(model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
 	require.NoError(t, err)
 	require.Equal(t, int32(12), c.PartitionNum)
 	require.Equal(t, int16(5), c.ReplicationFactor)
@@ -741,7 +757,7 @@ func TestMerge(t *testing.T) {
 		Key:                       aws.String("key2.pem"),
 	}
 	c = NewOptions()
-	err = c.Apply(context.TODO(), sinkURI, replicaConfig)
+	err = c.Apply(model.DefaultChangeFeedID("test"), sinkURI, replicaConfig)
 	require.NoError(t, err)
 	require.Equal(t, int32(12), c.PartitionNum)
 	require.Equal(t, int16(5), c.ReplicationFactor)

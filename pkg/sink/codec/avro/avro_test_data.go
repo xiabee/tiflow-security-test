@@ -15,9 +15,18 @@ package avro
 
 var expectedSchemaWithoutExtension = `{
   "type": "record",
-  "name": "rowtoavroschema",
+  "name": "avroencode",
   "namespace": "default.testdb",
   "fields": [
+    {
+      "name": "id",
+      "type": {
+        "type": "int",
+        "connect.parameters": {
+          "tidb_type": "INT"
+        }
+      }
+    },
     {
       "name": "tiny",
       "type": {
@@ -647,7 +656,7 @@ var expectedSchemaWithoutExtension = `{
       "type": {
         "type": "string",
         "connect.parameters": {
-          "allowed": "a\\,,b",
+          "allowed": "a,b",
           "tidb_type": "ENUM"
         }
       }
@@ -660,7 +669,7 @@ var expectedSchemaWithoutExtension = `{
         {
           "type": "string",
           "connect.parameters": {
-            "allowed": "a\\,,b",
+            "allowed": "a,b",
             "tidb_type": "ENUM"
           }
         }
@@ -671,7 +680,7 @@ var expectedSchemaWithoutExtension = `{
       "type": {
         "type": "string",
         "connect.parameters": {
-          "allowed": "a\\,,b",
+          "allowed": "a,b",
           "tidb_type": "SET"
         }
       }
@@ -684,7 +693,7 @@ var expectedSchemaWithoutExtension = `{
         {
           "type": "string",
           "connect.parameters": {
-            "allowed": "a\\,,b",
+            "allowed": "a,b",
             "tidb_type": "SET"
           }
         }
@@ -827,9 +836,18 @@ var expectedSchemaWithoutExtension = `{
 
 var expectedSchemaWithExtension = `{
   "type": "record",
-  "name": "rowtoavroschema",
+  "name": "avroencode",
   "namespace": "default.testdb",
   "fields": [
+    {
+      "name": "id",
+      "type": {
+        "type": "int",
+        "connect.parameters": {
+          "tidb_type": "INT"
+        }
+      }
+    },
     {
       "name": "tiny",
       "type": {
@@ -1459,7 +1477,7 @@ var expectedSchemaWithExtension = `{
       "type": {
         "type": "string",
         "connect.parameters": {
-          "allowed": "a\\,,b",
+          "allowed": "a,b",
           "tidb_type": "ENUM"
         }
       }
@@ -1472,7 +1490,7 @@ var expectedSchemaWithExtension = `{
         {
           "type": "string",
           "connect.parameters": {
-            "allowed": "a\\,,b",
+            "allowed": "a,b",
             "tidb_type": "ENUM"
           }
         }
@@ -1483,7 +1501,7 @@ var expectedSchemaWithExtension = `{
       "type": {
         "type": "string",
         "connect.parameters": {
-          "allowed": "a\\,,b",
+          "allowed": "a,b",
           "tidb_type": "SET"
         }
       }
@@ -1496,7 +1514,7 @@ var expectedSchemaWithExtension = `{
         {
           "type": "string",
           "connect.parameters": {
-            "allowed": "a\\,,b",
+            "allowed": "a,b",
             "tidb_type": "SET"
           }
         }
@@ -1654,7 +1672,7 @@ var expectedSchemaWithExtension = `{
 
 var expectedSchemaWithExtensionEnableChecksum = `{
   "type": "record",
-  "name": "rowtoavroschema",
+  "name": "avroencode",
   "namespace": "default.testdb",
   "fields": [
     {
@@ -1915,7 +1933,7 @@ var expectedSchemaWithExtensionEnableChecksum = `{
       "type": {
         "type": "string",
         "connect.parameters": {
-          "allowed": "a\\,,b",
+          "allowed": "a,b",
           "tidb_type": "ENUM"
         }
       }
@@ -1925,7 +1943,7 @@ var expectedSchemaWithExtensionEnableChecksum = `{
       "type": {
         "type": "string",
         "connect.parameters": {
-          "allowed": "a\\,,b",
+          "allowed": "a,b",
           "tidb_type": "SET"
         }
       }
@@ -2357,7 +2375,7 @@ var expectedSchemaWithExtensionEnableChecksum = `{
         {
           "type": "string",
           "connect.parameters": {
-            "allowed": "a\\,,b",
+            "allowed": "a,b",
             "tidb_type": "ENUM"
           }
         }
@@ -2371,7 +2389,7 @@ var expectedSchemaWithExtensionEnableChecksum = `{
         {
           "type": "string",
           "connect.parameters": {
-            "allowed": "a\\,,b",
+            "allowed": "a,b",
             "tidb_type": "SET"
           }
         }
@@ -2454,6 +2472,15 @@ var expectedSchemaWithExtensionEnableChecksum = `{
           }
         }
       ]
+    },
+    {
+      "name": "id",
+      "type": {
+        "type": "int",
+        "connect.parameters": {
+          "tidb_type": "INT"
+        }
+      }
     },
     {
       "default": "",

@@ -159,12 +159,10 @@ func (e *EventTableSink[E, P]) UpdateResolvedTs(resolvedTs model.ResolvedTs) err
 						e.lastSyncedTs.lastSyncedTs = evCommitTs
 					}
 				}
-				pdTime, err := e.pdClock.CurrentTime()
-				if err != nil {
-					currentTs := oracle.GetPhysical(pdTime)
-					flushLag := float64(currentTs-phyCommitTs) / 1e3
-					e.metricsTableSinkFlushLagDuration.Observe(flushLag)
-				}
+				pdTime := e.pdClock.CurrentTime()
+				currentTs := oracle.GetPhysical(pdTime)
+				flushLag := float64(currentTs-phyCommitTs) / 1e3
+				e.metricsTableSinkFlushLagDuration.Observe(flushLag)
 				postEventFlushFunc()
 			},
 			SinkState: &e.state,

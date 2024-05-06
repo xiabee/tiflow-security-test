@@ -1,4 +1,4 @@
-// Copyright 2024 PingCAP, Inc.
+// Copyright 2020 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,11 +18,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec"
@@ -34,7 +35,7 @@ type decoder struct {
 	config *common.Config
 	topic  string
 
-	schemaM *schemaManager
+	schemaM SchemaManager
 
 	key   []byte
 	value []byte
@@ -43,7 +44,7 @@ type decoder struct {
 // NewDecoder return an avro decoder
 func NewDecoder(
 	config *common.Config,
-	schemaM *schemaManager,
+	schemaM SchemaManager,
 	topic string,
 ) codec.RowEventDecoder {
 	return &decoder{
@@ -72,7 +73,7 @@ func (d *decoder) HasNext() (model.MessageType, bool, error) {
 		return model.MessageTypeRow, true, nil
 	}
 	if len(d.value) < 1 {
-		return model.MessageTypeUnknown, false, errors.ErrDecodeFailed.FastGenByArgs(d.value)
+		return model.MessageTypeUnknown, false, errors.ErrAvroInvalidMessage.FastGenByArgs(d.value)
 	}
 	switch d.value[0] {
 	case magicByte:
@@ -82,7 +83,7 @@ func (d *decoder) HasNext() (model.MessageType, bool, error) {
 	case checkpointByte:
 		return model.MessageTypeResolved, true, nil
 	}
-	return model.MessageTypeUnknown, false, errors.ErrDecodeFailed.FastGenByArgs(d.value)
+	return model.MessageTypeUnknown, false, errors.ErrAvroInvalidMessage.FastGenByArgs(d.value)
 }
 
 // NextRowChangedEvent returns the next row changed event if exists
@@ -118,6 +119,38 @@ func (d *decoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 		return nil, errors.Trace(err)
 	}
 
+	// Delete event only has Primary Key Columns, but the checksum is calculated based on the whole row columns,
+	// checksum verification cannot be done here, so skip it.
+	if isDelete {
+		return event, nil
+	}
+
+	expectedChecksum, found, err := extractExpectedChecksum(valueMap)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	if isCorrupted(valueMap) {
+		log.Warn("row data is corrupted",
+			zap.String("topic", d.topic), zap.Uint64("checksum", expectedChecksum))
+		for _, col := range event.Columns {
+			colInfo := event.TableInfo.ForceGetColumnInfo(col.ColumnID)
+			log.Info("data corrupted, print each column for debugging",
+				zap.String("name", colInfo.Name.O),
+				zap.Any("type", colInfo.GetType()),
+				zap.Any("charset", colInfo.GetCharset()),
+				zap.Any("flag", colInfo.GetFlag()),
+				zap.Any("value", col.Value),
+				zap.Any("default", colInfo.GetDefaultValue()))
+		}
+	}
+
+	if found {
+		if err := common.VerifyChecksum(event.Columns, event.TableInfo.Columns, uint32(expectedChecksum)); err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+
 	return event, nil
 }
 
@@ -125,7 +158,9 @@ func (d *decoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 // keyMap hold primary key or unique key columns
 // valueMap hold all columns information
 // schema is corresponding to the valueMap, it can be used to decode the valueMap to construct columns.
-func assembleEvent(keyMap, valueMap, schema map[string]interface{}, isDelete bool) (*model.RowChangedEvent, error) {
+func assembleEvent(
+	keyMap, valueMap, schema map[string]interface{}, isDelete bool,
+) (*model.RowChangedEvent, error) {
 	fields, ok := schema["fields"].([]interface{})
 	if !ok {
 		return nil, errors.New("schema fields should be a map")
@@ -170,6 +205,7 @@ func assembleEvent(keyMap, valueMap, schema map[string]interface{}, isDelete boo
 		flag := flagFromTiDBType(tidbType)
 		if _, ok := keyMap[colName]; ok {
 			flag.SetIsHandleKey()
+			flag.SetIsPrimaryKey()
 		}
 
 		value, ok := valueMap[colName]
@@ -206,23 +242,54 @@ func assembleEvent(keyMap, valueMap, schema map[string]interface{}, isDelete boo
 
 	event := new(model.RowChangedEvent)
 	event.CommitTs = uint64(commitTs)
-	event.Table = &model.TableName{
-		Schema: schemaName,
-		Table:  tableName,
+	pkNameSet := make(map[string]struct{}, len(keyMap))
+	for name := range keyMap {
+		pkNameSet[name] = struct{}{}
 	}
+	event.TableInfo = model.BuildTableInfoWithPKNames4Test(schemaName, tableName, columns, pkNameSet)
 
 	if isDelete {
-		event.PreColumns = columns
+		event.PreColumns = model.Columns2ColumnDatas(columns, event.TableInfo)
 	} else {
-		event.Columns = columns
+		event.Columns = model.Columns2ColumnDatas(columns, event.TableInfo)
 	}
 
 	return event, nil
 }
 
+func isCorrupted(valueMap map[string]interface{}) bool {
+	o, ok := valueMap[tidbCorrupted]
+	if !ok {
+		return false
+	}
+
+	corrupted := o.(bool)
+	return corrupted
+}
+
+// extract the checksum from the received value map
+// return true if the checksum found, and return error if the checksum is not valid
+func extractExpectedChecksum(valueMap map[string]interface{}) (uint64, bool, error) {
+	o, ok := valueMap[tidbRowLevelChecksum]
+	if !ok {
+		return 0, false, nil
+	}
+	checksum := o.(string)
+	if checksum == "" {
+		return 0, false, nil
+	}
+	result, err := strconv.ParseUint(checksum, 10, 64)
+	if err != nil {
+		return 0, true, errors.Trace(err)
+	}
+	return result, true, nil
+}
+
 // value is an interface, need to convert it to the real value with the help of type info.
 // holder has the value's column info.
-func getColumnValue(value interface{}, holder map[string]interface{}, mysqlType byte) (interface{}, error) {
+func getColumnValue(
+	value interface{}, holder map[string]interface{}, mysqlType byte,
+) (interface{}, error) {
 	switch t := value.(type) {
 	// for nullable columns, the value is encoded as a map with one pair.
 	// key is the encoded type, value is the encoded value, only care about the value here.
@@ -231,36 +298,29 @@ func getColumnValue(value interface{}, holder map[string]interface{}, mysqlType 
 			value = v
 		}
 	}
+	if value == nil {
+		return nil, nil
+	}
 
 	switch mysqlType {
 	case mysql.TypeEnum:
 		// enum type is encoded as string,
 		// we need to convert it to int by the order of the enum values definition.
 		allowed := strings.Split(holder["allowed"].(string), ",")
-		switch t := value.(type) {
-		case string:
-			enum, err := types.ParseEnum(allowed, t, "")
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			value = enum.Value
-		case nil:
-			value = nil
+		enum, err := types.ParseEnum(allowed, value.(string), "")
+		if err != nil {
+			return nil, errors.Trace(err)
 		}
+		value = enum.Value
 	case mysql.TypeSet:
 		// set type is encoded as string,
 		// we need to convert it to int by the order of the set values definition.
 		elems := strings.Split(holder["allowed"].(string), ",")
-		switch t := value.(type) {
-		case string:
-			s, err := types.ParseSet(elems, t, "")
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			value = s.Value
-		case nil:
-			value = nil
+		s, err := types.ParseSet(elems, value.(string), "")
+		if err != nil {
+			return nil, errors.Trace(err)
 		}
+		value = s.Value
 	}
 	return value, nil
 }
@@ -308,27 +368,69 @@ func (d *decoder) NextDDLEvent() (*model.DDLEvent, error) {
 // return the schema ID and the encoded binary data
 // schemaID can be used to fetch the corresponding schema from schema registry,
 // which should be used to decode the binary data.
-func extractConfluentSchemaIDAndBinaryData(data []byte) (uint64, []byte, error) {
+func extractConfluentSchemaIDAndBinaryData(data []byte) (int, []byte, error) {
 	if len(data) < 5 {
-		return 0, nil, errors.ErrDecodeFailed.
+		return 0, nil, errors.ErrAvroInvalidMessage.
 			FastGenByArgs("an avro message using confluent schema registry should have at least 5 bytes")
 	}
 	if data[0] != magicByte {
-		return 0, nil, errors.ErrDecodeFailed.
+		return 0, nil, errors.ErrAvroInvalidMessage.
 			FastGenByArgs("magic byte is not match, it should be 0")
 	}
-	id := binary.BigEndian.Uint64(data[1:5])
-	return id, data[5:], nil
+	id, err := getConfluentSchemaIDFromHeader(data[0:5])
+	if err != nil {
+		return 0, nil, errors.Trace(err)
+	}
+	return int(id), data[5:], nil
+}
+
+func extractGlueSchemaIDAndBinaryData(data []byte) (string, []byte, error) {
+	if len(data) < 18 {
+		return "", nil, errors.ErrAvroInvalidMessage.
+			FastGenByArgs("an avro message using glue schema registry should have at least 18 bytes")
+	}
+	if data[0] != headerVersionByte {
+		return "", nil, errors.ErrAvroInvalidMessage.
+			FastGenByArgs("header version byte is not match, it should be %d", headerVersionByte)
+	}
+	if data[1] != compressionDefaultByte {
+		return "", nil, errors.ErrAvroInvalidMessage.
+			FastGenByArgs("compression byte is not match, it should be %d", compressionDefaultByte)
+	}
+	id, err := getGlueSchemaIDFromHeader(data[0:18])
+	if err != nil {
+		return "", nil, errors.Trace(err)
+	}
+	return id, data[18:], nil
 }
 
 func decodeRawBytes(
-	ctx context.Context, schemaM *schemaManager, data []byte, topic string,
+	ctx context.Context, schemaM SchemaManager, data []byte, topic string,
 ) (map[string]interface{}, map[string]interface{}, error) {
-	schemaID, binary, err := extractConfluentSchemaIDAndBinaryData(data)
-	if err != nil {
-		return nil, nil, err
+	var schemaID schemaID
+	var binary []byte
+	var err error
+	var cid int
+	var gid string
+
+	switch schemaM.RegistryType() {
+	case common.SchemaRegistryTypeConfluent:
+		cid, binary, err = extractConfluentSchemaIDAndBinaryData(data)
+		if err != nil {
+			return nil, nil, err
+		}
+		schemaID.confluentSchemaID = cid
+	case common.SchemaRegistryTypeGlue:
+		gid, binary, err = extractGlueSchemaIDAndBinaryData(data)
+		if err != nil {
+			return nil, nil, err
+		}
+		schemaID.glueSchemaID = gid
+	default:
+		return nil, nil, errors.New("unknown schema registry type")
 	}
-	codec, _, err := schemaM.Lookup(ctx, topic, schemaID)
+
+	codec, err := schemaM.Lookup(ctx, topic, schemaID)
 	if err != nil {
 		return nil, nil, err
 	}

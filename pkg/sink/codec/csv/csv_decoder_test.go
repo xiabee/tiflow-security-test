@@ -16,9 +16,9 @@ import (
 	"context"
 	"testing"
 
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/types"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/stretchr/testify/require"
@@ -78,7 +78,7 @@ func TestCSVBatchDecoder(t *testing.T) {
 		require.True(t, hasNext)
 		require.Equal(t, model.MessageTypeRow, tp)
 		event, err := decoder.NextRowChangedEvent()
-		require.Nil(t, err)
+		require.NoError(t, err)
 		require.NotNil(t, event)
 	}
 

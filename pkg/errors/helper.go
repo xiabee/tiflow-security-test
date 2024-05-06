@@ -75,9 +75,10 @@ var changefeedUnRetryableErrors = []*errors.Error{
 	ErrExpressionParseFailed,
 	ErrSchemaSnapshotNotFound,
 	ErrSyncRenameTableFailed,
-	ErrHandleDDLFailed,
 	ErrChangefeedUnretryable,
 	ErrCorruptedDataMutation,
+	ErrDispatcherFailed,
+	ErrColumnSelectorFailed,
 
 	ErrSinkURIInvalid,
 	ErrKafkaInvalidConfig,

@@ -11,9 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build intest
-// +build intest
-
 package mq
 
 import (
@@ -23,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
@@ -51,9 +47,10 @@ func TestNewKafkaDMLSinkFailed(t *testing.T) {
 	require.NoError(t, replicaConfig.ValidateAndAdjust(sinkURI))
 
 	ctx = context.WithValue(ctx, "testing.T", t)
+	changefeedID := model.DefaultChangeFeedID("test")
 
 	errCh := make(chan error, 1)
-	s, err := NewKafkaDMLSink(ctx, sinkURI, replicaConfig, errCh,
+	s, err := NewKafkaDMLSink(ctx, changefeedID, sinkURI, replicaConfig, errCh,
 		kafka.NewMockFactory, dmlproducer.NewDMLMockProducer)
 	require.ErrorContains(t, err, "Avro protocol requires parameter \"schema-registry\"",
 		"should report error when protocol is avro but schema-registry is not set")
@@ -76,7 +73,8 @@ func TestWriteEvents(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	ctx = context.WithValue(ctx, "testing.T", t)
-	s, err := NewKafkaDMLSink(ctx, sinkURI, replicaConfig, errCh,
+	changefeedID := model.DefaultChangeFeedID("test")
+	s, err := NewKafkaDMLSink(ctx, changefeedID, sinkURI, replicaConfig, errCh,
 		kafka.NewMockFactory, dmlproducer.NewDMLMockProducer)
 	require.NoError(t, err)
 	require.NotNil(t, s)
@@ -88,15 +86,12 @@ func TestWriteEvents(t *testing.T) {
 	sql := `create table test.t(a varchar(255) primary key)`
 	job := helper.DDL2Job(sql)
 	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-	_, _, colInfo := tableInfo.GetRowColInfos()
 
 	tableStatus := state.TableSinkSinking
 	row := &model.RowChangedEvent{
 		CommitTs:  1,
-		Table:     &model.TableName{Schema: "test", Table: "t"},
 		TableInfo: tableInfo,
-		Columns:   []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "aa"}},
-		ColInfos:  colInfo,
+		Columns:   model.Columns2ColumnDatas([]*model.Column{{Name: "a", Value: "aa"}}, tableInfo),
 	}
 
 	events := make([]*dmlsink.CallbackableEvent[*model.SingleTableTxn], 0, 3000)

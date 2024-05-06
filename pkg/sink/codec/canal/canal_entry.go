@@ -21,12 +21,14 @@ import (
 
 	"github.com/golang/protobuf/proto" // nolint:staticcheck
 	"github.com/pingcap/errors"
-	mm "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
+	mm "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/codec/internal"
+	"github.com/pingcap/tiflow/pkg/sink/codec/utils"
 	canal "github.com/pingcap/tiflow/proto/canal"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
@@ -97,6 +99,7 @@ func (b *canalEntryBuilder) formatValue(value interface{}, isBinary bool) (resul
 	case string:
 		result = v
 	case []byte:
+		// see https://github.com/alibaba/canal/blob/9f6021cf36f78cc8ac853dcf37a1769f359b868b/parse/src/main/java/com/alibaba/otter/canal/parse/inbound/mysql/dbsync/LogEventConvert.java#L801
 		if isBinary {
 			decoded, err := b.bytesDecoder.Bytes(v)
 			if err != nil {
@@ -114,8 +117,8 @@ func (b *canalEntryBuilder) formatValue(value interface{}, isBinary bool) (resul
 
 // build the Column in the canal RowData
 // see https://github.com/alibaba/canal/blob/b54bea5e3337c9597c427a53071d214ff04628d1/parse/src/main/java/com/alibaba/otter/canal/parse/inbound/mysql/dbsync/LogEventConvert.java#L756-L872
-func (b *canalEntryBuilder) buildColumn(c *model.Column, columnInfo *mm.ColumnInfo, updated bool) (*canal.Column, error) {
-	mysqlType := common.GetMySQLType(columnInfo, b.config.ContentCompatible)
+func (b *canalEntryBuilder) buildColumn(c *model.Column, columnInfo *timodel.ColumnInfo, updated bool) (*canal.Column, error) {
+	mysqlType := utils.GetMySQLType(columnInfo, b.config.ContentCompatible)
 	javaType, err := getJavaSQLType(c.Value, c.Type, c.Flag)
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrCanalEncodeFailed, err)
@@ -141,14 +144,15 @@ func (b *canalEntryBuilder) buildColumn(c *model.Column, columnInfo *mm.ColumnIn
 // build the RowData of a canal entry
 func (b *canalEntryBuilder) buildRowData(e *model.RowChangedEvent, onlyHandleKeyColumns bool) (*canal.RowData, error) {
 	var columns []*canal.Column
-	for idx, column := range e.Columns {
+	colInfos := e.TableInfo.GetColInfosForRowChangedEvent()
+	for idx, column := range e.GetColumns() {
 		if column == nil {
 			continue
 		}
-		columnInfo, ok := e.TableInfo.GetColumnInfo(e.ColInfos[idx].ID)
+		columnInfo, ok := e.TableInfo.GetColumnInfo(colInfos[idx].ID)
 		if !ok {
 			return nil, cerror.ErrCanalEncodeFailed.GenWithStack(
-				"column info not found for column id: %d", e.ColInfos[idx].ID)
+				"column info not found for column id: %d", colInfos[idx].ID)
 		}
 		c, err := b.buildColumn(column, columnInfo, !e.IsDelete())
 		if err != nil {
@@ -159,17 +163,17 @@ func (b *canalEntryBuilder) buildRowData(e *model.RowChangedEvent, onlyHandleKey
 
 	onlyHandleKeyColumns = onlyHandleKeyColumns && e.IsDelete()
 	var preColumns []*canal.Column
-	for idx, column := range e.PreColumns {
+	for idx, column := range e.GetPreColumns() {
 		if column == nil {
 			continue
 		}
 		if onlyHandleKeyColumns && !column.Flag.IsHandleKey() {
 			continue
 		}
-		columnInfo, ok := e.TableInfo.GetColumnInfo(e.ColInfos[idx].ID)
+		columnInfo, ok := e.TableInfo.GetColumnInfo(colInfos[idx].ID)
 		if !ok {
 			return nil, cerror.ErrCanalEncodeFailed.GenWithStack(
-				"column info not found for column id: %d", e.ColInfos[idx].ID)
+				"column info not found for column id: %d", colInfos[idx].ID)
 		}
 		c, err := b.buildColumn(column, columnInfo, !e.IsDelete())
 		if err != nil {
@@ -187,7 +191,7 @@ func (b *canalEntryBuilder) buildRowData(e *model.RowChangedEvent, onlyHandleKey
 // fromRowEvent builds canal entry from cdc RowChangedEvent
 func (b *canalEntryBuilder) fromRowEvent(e *model.RowChangedEvent, onlyHandleKeyColumns bool) (*canal.Entry, error) {
 	eventType := convertRowEventType(e)
-	header := b.buildHeader(e.CommitTs, e.Table.Schema, e.Table.Table, eventType, 1)
+	header := b.buildHeader(e.CommitTs, e.TableInfo.GetSchemaName(), e.TableInfo.GetTableName(), eventType, 1)
 	isDdl := isCanalDDL(eventType) // false
 	rowData, err := b.buildRowData(e, onlyHandleKeyColumns)
 	if err != nil {
@@ -276,6 +280,7 @@ func convertDdlEventType(e *model.DDLEvent) canal.EventType {
 		mm.ActionSetDefaultValue, mm.ActionModifyTableComment, mm.ActionRenameIndex, mm.ActionAddTablePartition,
 		mm.ActionDropTablePartition, mm.ActionModifyTableCharsetAndCollate, mm.ActionTruncateTablePartition,
 		mm.ActionAlterIndexVisibility, mm.ActionMultiSchemaChange, mm.ActionReorganizePartition,
+		mm.ActionAlterTablePartitioning, mm.ActionRemovePartitioning,
 		// AddColumns and DropColumns are removed in TiDB v6.2.0, see https://github.com/pingcap/tidb/pull/35862.
 		mm.ActionAddColumns, mm.ActionDropColumns:
 		return canal.EventType_ALTER

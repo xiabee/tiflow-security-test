@@ -67,6 +67,11 @@ func createRealUnits(cfg *config.SubTaskConfig, etcdClient *clientv3.Client, wor
 		us = append(us, loader.NewLightning(cfg, etcdClient, workerName))
 	case config.ModeIncrement:
 		us = append(us, syncer.NewSyncer(cfg, etcdClient, relay))
+	case config.ModeDump:
+		us = append(us, dumpling.NewDumpling(cfg))
+	case config.ModeLoadSync:
+		us = append(us, loader.NewLightning(cfg, etcdClient, workerName))
+		us = append(us, syncer.NewSyncer(cfg, etcdClient, relay))
 	default:
 		log.L().Error("unsupported task mode", zap.String("subtask", cfg.Name), zap.String("task mode", cfg.Mode))
 	}
@@ -867,6 +872,14 @@ func (st *SubTask) GetValidatorError(errState pb.ValidateErrorState) ([]*pb.Vali
 func (st *SubTask) OperateValidatorError(op pb.ValidationErrOp, errID uint64, isAll bool) error {
 	if validator := st.getValidator(); validator != nil {
 		return validator.OperateValidatorError(op, errID, isAll)
+	}
+	cfg := st.getCfg()
+	return terror.ErrValidatorNotFound.Generate(cfg.Name, cfg.SourceID)
+}
+
+func (st *SubTask) UpdateValidator(req *pb.UpdateValidationWorkerRequest) error {
+	if validator := st.getValidator(); validator != nil {
+		return validator.UpdateValidator(req)
 	}
 	cfg := st.getCfg()
 	return terror.ErrValidatorNotFound.Generate(cfg.Name, cfg.SourceID)

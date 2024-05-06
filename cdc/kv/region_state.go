@@ -31,32 +31,60 @@ const (
 	stateRemoved uint32 = 2
 )
 
-type singleRegionInfo struct {
-	verID  tikv.RegionVerID
+type regionInfo struct {
+	verID tikv.RegionVerID
+	// The span of the region.
+	// Note(dongmen): The span doesn't always represent the whole span of a region.
+	// Instead, it is the portion of the region that belongs the subcribed table.
+	// Multiple tables can belong to the same region.
+	// For instance, consider region-1 with a span of [a, d).
+	// It contains 3 tables: t1[a, b), t2[b,c), and t3[c,d).
+	// If only table t1 is subscribed to, then the span of interest is [a,b).
 	span   tablepb.Span
 	rpcCtx *tikv.RPCContext
 
-	lockedRange *regionlock.LockedRange
+	// The table that the region belongs to.
+	subscribedTable *subscribedTable
+	lockedRange     *regionlock.LockedRange
 }
 
-func newSingleRegionInfo(
+func (s regionInfo) isStoped() bool {
+	// lockedRange only nil when the region's subscribedTable is stopped.
+	return s.lockedRange == nil
+}
+
+func newRegionInfo(
 	verID tikv.RegionVerID,
 	span tablepb.Span,
 	rpcCtx *tikv.RPCContext,
-) singleRegionInfo {
-	return singleRegionInfo{
-		verID:  verID,
-		span:   span,
-		rpcCtx: rpcCtx,
+	subscribedTable *subscribedTable,
+) regionInfo {
+	return regionInfo{
+		verID:           verID,
+		span:            span,
+		rpcCtx:          rpcCtx,
+		subscribedTable: subscribedTable,
 	}
 }
 
-func (s singleRegionInfo) resolvedTs() uint64 {
-	return s.lockedRange.CheckpointTs.Load()
+func (s regionInfo) resolvedTs() uint64 {
+	return s.lockedRange.ResolvedTs.Load()
+}
+
+type regionErrorInfo struct {
+	regionInfo
+	err error
+}
+
+func newRegionErrorInfo(info regionInfo, err error) regionErrorInfo {
+	return regionErrorInfo{
+		regionInfo: info,
+		err:        err,
+	}
 }
 
 type regionFeedState struct {
-	sri       singleRegionInfo
+	region    regionInfo
 	requestID uint64
 	matcher   *matcher
 
@@ -68,12 +96,15 @@ type regionFeedState struct {
 	state struct {
 		sync.RWMutex
 		v uint32
+		// All region errors should be handled in region workers.
+		// `err` is used to retrieve errors generated outside.
+		err error
 	}
 }
 
-func newRegionFeedState(sri singleRegionInfo, requestID uint64) *regionFeedState {
+func newRegionFeedState(region regionInfo, requestID uint64) *regionFeedState {
 	return &regionFeedState{
-		sri:       sri,
+		region:    region,
 		requestID: requestID,
 	}
 }
@@ -83,12 +114,24 @@ func (s *regionFeedState) start() {
 }
 
 // mark regionFeedState as stopped with the given error if possible.
-func (s *regionFeedState) markStopped() {
+func (s *regionFeedState) markStopped(err error) {
 	s.state.Lock()
 	defer s.state.Unlock()
 	if s.state.v == stateNormal {
 		s.state.v = stateStopped
+		s.state.err = err
 	}
+}
+
+// mark regionFeedState as removed if possible.
+func (s *regionFeedState) markRemoved() (changed bool) {
+	s.state.Lock()
+	defer s.state.Unlock()
+	if s.state.v == stateStopped {
+		s.state.v = stateRemoved
+		changed = true
+	}
+	return
 }
 
 func (s *regionFeedState) isStale() bool {
@@ -97,42 +140,58 @@ func (s *regionFeedState) isStale() bool {
 	return s.state.v == stateStopped || s.state.v == stateRemoved
 }
 
+func (s *regionFeedState) takeError() (err error) {
+	s.state.Lock()
+	defer s.state.Unlock()
+	err = s.state.err
+	s.state.err = nil
+	return
+}
+
 func (s *regionFeedState) isInitialized() bool {
-	return s.sri.lockedRange.Initialzied.Load()
+	return s.region.lockedRange.Initialzied.Load()
 }
 
 func (s *regionFeedState) setInitialized() {
-	s.sri.lockedRange.Initialzied.Store(true)
+	s.region.lockedRange.Initialzied.Store(true)
 }
 
 func (s *regionFeedState) getRegionID() uint64 {
-	return s.sri.verID.GetID()
+	return s.region.verID.GetID()
 }
 
 func (s *regionFeedState) getLastResolvedTs() uint64 {
-	return s.sri.lockedRange.CheckpointTs.Load()
+	return s.region.lockedRange.ResolvedTs.Load()
 }
 
 // updateResolvedTs update the resolved ts of the current region feed
 func (s *regionFeedState) updateResolvedTs(resolvedTs uint64) {
-	state := s.sri.lockedRange
+	state := s.region.lockedRange
 	for {
-		last := state.CheckpointTs.Load()
+		last := state.ResolvedTs.Load()
 		if last > resolvedTs {
 			return
 		}
-		if state.CheckpointTs.CompareAndSwap(last, resolvedTs) {
+		if state.ResolvedTs.CompareAndSwap(last, resolvedTs) {
 			break
 		}
 	}
+	if s.region.subscribedTable != nil {
+		s.region.subscribedTable.postUpdateRegionResolvedTs(
+			s.region.verID.GetID(),
+			s.region.verID.GetVer(),
+			state,
+			s.region.span,
+		)
+	}
 }
 
-func (s *regionFeedState) getRegionInfo() singleRegionInfo {
-	return s.sri
+func (s *regionFeedState) getRegionInfo() regionInfo {
+	return s.region
 }
 
 func (s *regionFeedState) getRegionMeta() (uint64, tablepb.Span, string) {
-	return s.sri.verID.GetID(), s.sri.span, s.sri.rpcCtx.Addr
+	return s.region.verID.GetID(), s.region.span, s.region.rpcCtx.Addr
 }
 
 type syncRegionFeedStateMap struct {
@@ -164,26 +223,6 @@ func (m *syncRegionFeedStateMap) setByRequestID(requestID uint64, state *regionF
 	m.statesInternal[requestID] = state
 }
 
-func (m *syncRegionFeedStateMap) takeByRequestID(requestID uint64) (*regionFeedState, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	state, ok := m.statesInternal[requestID]
-	if ok {
-		delete(m.statesInternal, requestID)
-	}
-	return state, ok
-}
-
-func (m *syncRegionFeedStateMap) takeAll() map[uint64]*regionFeedState {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	state := m.statesInternal
-	m.statesInternal = make(map[uint64]*regionFeedState)
-	return state
-}
-
 func (m *syncRegionFeedStateMap) setByRegionID(regionID uint64, state *regionFeedState) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -201,12 +240,6 @@ func (m *syncRegionFeedStateMap) delByRegionID(regionID uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.statesInternal, regionID)
-}
-
-func (m *syncRegionFeedStateMap) len() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.statesInternal)
 }
 
 type regionStateManagerInterface interface {
@@ -260,11 +293,4 @@ func (rsm *regionStateManager) setState(regionID uint64, state *regionFeedState)
 func (rsm *regionStateManager) delState(regionID uint64) {
 	bucket := rsm.getBucket(regionID)
 	rsm.states[bucket].delByRegionID(regionID)
-}
-
-func (rsm *regionStateManager) regionCount() (count int64) {
-	for _, bucket := range rsm.states {
-		count += int64(bucket.len())
-	}
-	return
 }

@@ -112,8 +112,8 @@ type DMLManager interface {
 }
 
 // NewDMLManager creates a new dml Manager.
-func NewDMLManager(
-	changefeedID model.ChangeFeedID, cfg *config.ConsistentConfig,
+func NewDMLManager(changefeedID model.ChangeFeedID,
+	cfg *config.ConsistentConfig,
 ) *dmlManager {
 	return &dmlManager{
 		logManager: newLogManager(changefeedID, cfg, redo.RedoRowLogFileType),
@@ -274,7 +274,8 @@ func (m *logManager) getFlushDuration() time.Duration {
 	}
 	if flushIntervalInMs < redo.MinFlushIntervalInMs {
 		log.Warn("redo flush interval is too small, use default value",
-			zap.Stringer("namespace", m.cfg.ChangeFeedID),
+			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
+			zap.String("changefeed", m.cfg.ChangeFeedID.ID),
 			zap.Int("default", defaultFlushIntervalInMs),
 			zap.String("logType", m.cfg.LogType),
 			zap.Int64("interval", flushIntervalInMs))

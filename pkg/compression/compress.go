@@ -15,12 +15,11 @@ package compression
 
 import (
 	"bytes"
-	"fmt"
 	"sync"
 
 	"github.com/klauspost/compress/snappy"
 	"github.com/pierrec/lz4/v4"
-	"github.com/pingcap/errors"
+	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
 
 const (
@@ -68,16 +67,16 @@ func Encode(cc string, data []byte) ([]byte, error) {
 		var buf bytes.Buffer
 		writer := lz4.NewWriter(&buf)
 		if _, err := writer.Write(data); err != nil {
-			return nil, errors.Trace(err)
+			return nil, cerror.WrapError(cerror.ErrCompressionFailed, err)
 		}
 		if err := writer.Close(); err != nil {
-			return nil, errors.Trace(err)
+			return nil, cerror.WrapError(cerror.ErrCompressionFailed, err)
 		}
 		return buf.Bytes(), nil
 	default:
 	}
 
-	return nil, errors.New(fmt.Sprintf("Unsupported compression %s", cc))
+	return nil, cerror.ErrCompressionFailed.GenWithStack("Unsupported compression %s", cc)
 }
 
 // Decode the given data by the given compression codec.
@@ -108,5 +107,5 @@ func Decode(cc string, data []byte) ([]byte, error) {
 	default:
 	}
 
-	return nil, errors.New(fmt.Sprintf("Unsupported compression %s", cc))
+	return nil, cerror.ErrCompressionFailed.GenWithStack("Unsupported compression %s", cc)
 }

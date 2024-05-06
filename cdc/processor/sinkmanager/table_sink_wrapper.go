@@ -23,7 +23,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
@@ -47,7 +47,7 @@ type tableSinkWrapper struct {
 	// tableSpan used for logging.
 	span tablepb.Span
 
-	tableSinkCreater func() (tablesink.TableSink, uint64)
+	tableSinkCreator func() (tablesink.TableSink, uint64)
 
 	// tableSink is the underlying sink.
 	tableSink struct {
@@ -83,7 +83,7 @@ type tableSinkWrapper struct {
 	// lastCleanTime indicates the last time the table has been cleaned.
 	lastCleanTime time.Time
 
-	// rangeEventCounts is for clean the table engine.
+	// rangeEventCounts is for clean the table sorter.
 	// If rangeEventCounts[i].events is greater than 0, it means there must be
 	// events in the range (rangeEventCounts[i-1].lastPos, rangeEventCounts[i].lastPos].
 	rangeEventCounts   []rangeEventCount
@@ -92,12 +92,12 @@ type tableSinkWrapper struct {
 
 type rangeEventCount struct {
 	// firstPos and lastPos are used to merge many rangeEventCount into one.
-	firstPos engine.Position
-	lastPos  engine.Position
+	firstPos sorter.Position
+	lastPos  sorter.Position
 	events   int
 }
 
-func newRangeEventCount(pos engine.Position, events int) rangeEventCount {
+func newRangeEventCount(pos sorter.Position, events int) rangeEventCount {
 	return rangeEventCount{
 		firstPos: pos,
 		lastPos:  pos,
@@ -118,7 +118,7 @@ func newTableSinkWrapper(
 		version:          atomic.AddUint64(&tableSinkWrapperVersion, 1),
 		changefeed:       changefeed,
 		span:             span,
-		tableSinkCreater: tableSinkCreater,
+		tableSinkCreator: tableSinkCreater,
 		state:            &state,
 		startTs:          startTs,
 		targetTs:         targetTs,
@@ -306,7 +306,7 @@ func (t *tableSinkWrapper) initTableSink() bool {
 	t.tableSink.Lock()
 	defer t.tableSink.Unlock()
 	if t.tableSink.s == nil {
-		t.tableSink.s, t.tableSink.version = t.tableSinkCreater()
+		t.tableSink.s, t.tableSink.version = t.tableSinkCreator()
 		if t.tableSink.s != nil {
 			t.tableSink.advanced = time.Now()
 			return true
@@ -415,7 +415,7 @@ func (t *tableSinkWrapper) updateRangeEventCounts(eventCount rangeEventCount) {
 	}
 }
 
-func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound engine.Position, minEvents int) bool {
+func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound sorter.Position, minEvents int) bool {
 	t.rangeEventCountsMu.Lock()
 	defer t.rangeEventCountsMu.Unlock()
 
@@ -433,7 +433,7 @@ func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound engine.Position, min
 	shouldClean := count >= minEvents
 
 	if !shouldClean {
-		// To reduce engine.CleanByTable calls.
+		// To reduce sorter.CleanByTable calls.
 		t.rangeEventCounts[idx-1].events = count
 		t.rangeEventCounts = t.rangeEventCounts[idx-1:]
 	} else {
@@ -462,7 +462,8 @@ func (t *tableSinkWrapper) sinkMaybeStuck(stuckCheck time.Duration) (bool, uint6
 }
 
 func handleRowChangedEvents(
-	changefeed model.ChangeFeedID, span tablepb.Span, events ...*model.PolymorphicEvent,
+	changefeed model.ChangeFeedID, span tablepb.Span,
+	events ...*model.PolymorphicEvent,
 ) ([]*model.RowChangedEvent, uint64) {
 	size := 0
 	rowChangedEvents := make([]*model.RowChangedEvent, 0, len(events))
@@ -476,12 +477,11 @@ func handleRowChangedEvents(
 			continue
 		}
 
-		colLen := len(e.Row.Columns)
-		preColLen := len(e.Row.PreColumns)
+		rowEvent := e.Row
 		// Some transactions could generate empty row change event, such as
 		// begin; insert into t (id) values (1); delete from t where id=1; commit;
 		// Just ignore these row changed events.
-		if colLen == 0 && preColLen == 0 {
+		if len(rowEvent.Columns) == 0 && len(rowEvent.PreColumns) == 0 {
 			log.Warn("skip emit empty row event",
 				zap.Stringer("span", &span),
 				zap.String("namespace", changefeed.Namespace),
@@ -490,8 +490,8 @@ func handleRowChangedEvents(
 			continue
 		}
 
-		size += e.Row.ApproximateBytes()
-		rowChangedEvents = append(rowChangedEvents, e.Row)
+		size += rowEvent.ApproximateBytes()
+		rowChangedEvents = append(rowChangedEvents, rowEvent)
 	}
 	return rowChangedEvents, uint64(size)
 }

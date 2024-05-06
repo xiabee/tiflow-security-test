@@ -46,7 +46,8 @@ func newForTest(ctx context.Context,
 	schema := strings.ToLower(sinkURI.Scheme)
 	switch schema {
 	case "kafka", "kafka+ssl":
-		mqs, err := mq.NewKafkaDMLSink(ctx, sinkURI, cfg, errCh,
+		mqs, err := mq.NewKafkaDMLSink(ctx, model.DefaultChangeFeedID("test"),
+			sinkURI, cfg, errCh,
 			// Use mock kafka clients for test.
 			kafka.NewMockFactory, dmlproducer.NewDMLMockProducer)
 		if err != nil {
@@ -75,6 +76,7 @@ func TestSinkFactory(t *testing.T) {
 	sinkURI, err := url.Parse(uri)
 	require.NoError(t, err)
 	replicaConfig := config.GetDefaultReplicaConfig()
+	replicaConfig.Sink.KafkaConfig = &config.KafkaConfig{}
 	require.NoError(t, replicaConfig.ValidateAndAdjust(sinkURI))
 	errCh := make(chan error, 1)
 

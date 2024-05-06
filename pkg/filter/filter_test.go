@@ -17,7 +17,7 @@ import (
 	"testing"
 
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	timodel "github.com/pingcap/tidb/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/stretchr/testify/require"
@@ -142,7 +142,12 @@ func TestShouldIgnoreDMLEvent(t *testing.T) {
 		require.Nil(t, err)
 		for _, tc := range ftc.cases {
 			dml := &model.RowChangedEvent{
-				Table:   &model.TableName{Table: tc.table, Schema: tc.schema},
+				TableInfo: &model.TableInfo{
+					TableName: model.TableName{
+						Schema: tc.schema,
+						Table:  tc.table,
+					},
+				},
 				StartTs: tc.ts,
 			}
 			ignoreDML, err := filter.ShouldIgnoreDMLEvent(dml, model.RowChangedDatums{}, nil)
@@ -366,13 +371,14 @@ func TestShouldDiscardDDL(t *testing.T) {
 }
 
 func TestIsAllowedDDL(t *testing.T) {
+	require.Len(t, ddlWhiteListMap, 36)
 	type testCase struct {
 		timodel.ActionType
 		allowed bool
 	}
-	testCases := make([]testCase, 0, len(allowDDLList))
-	for _, action := range allowDDLList {
-		testCases = append(testCases, testCase{action, true})
+	testCases := make([]testCase, 0, len(ddlWhiteListMap))
+	for ddlType := range ddlWhiteListMap {
+		testCases = append(testCases, testCase{ddlType, true})
 	}
 	testCases = append(testCases, testCase{timodel.ActionAddForeignKey, false})
 	testCases = append(testCases, testCase{timodel.ActionDropForeignKey, false})

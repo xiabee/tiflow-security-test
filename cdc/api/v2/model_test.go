@@ -20,6 +20,7 @@ import (
 	"time"
 
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/redo"
@@ -30,11 +31,10 @@ import (
 // note: this is api published default value, not change it
 var defaultAPIConfig = &ReplicaConfig{
 	MemoryQuota:        config.DefaultChangefeedMemoryQuota,
-	CaseSensitive:      false,
+	CaseSensitive:      true,
+	EnableOldValue:     true,
 	CheckGCSafePoint:   true,
-	BDRMode:            util.AddressOf(false),
-	EnableSyncPoint:    util.AddressOf(false),
-	EnableTableMonitor: util.AddressOf(false),
+	EnableSyncPoint:    false,
 	SyncPointInterval:  &JSONDuration{10 * time.Minute},
 	SyncPointRetention: &JSONDuration{24 * time.Hour},
 	Filter: &FilterConfig{
@@ -50,34 +50,19 @@ var defaultAPIConfig = &ReplicaConfig{
 			NullString:           config.NULL,
 			BinaryEncodingMethod: config.BinaryEncodingBase64,
 		},
-		EncoderConcurrency:               util.AddressOf(config.DefaultEncoderGroupConcurrency),
-		Terminator:                       util.AddressOf(config.CRLF),
-		DateSeparator:                    util.AddressOf(config.DateSeparatorDay.String()),
-		EnablePartitionSeparator:         util.AddressOf(true),
-		EnableKafkaSinkV2:                util.AddressOf(false),
-		OnlyOutputUpdatedColumns:         util.AddressOf(false),
-		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
-		ContentCompatible:                util.AddressOf(false),
-		AdvanceTimeoutInSec:              util.AddressOf(uint(150)),
-		SendBootstrapIntervalInSec:       util.AddressOf(int64(120)),
-		SendBootstrapInMsgCount:          util.AddressOf(int32(10000)),
-		SendBootstrapToAllPartition:      util.AddressOf(true),
-		DebeziumDisableSchema:            util.AddressOf(false),
-		OpenProtocolConfig:               &OpenProtocolConfig{OutputOldValue: true},
-		DebeziumConfig:                   &DebeziumConfig{OutputOldValue: true},
+		EncoderConcurrency:       16,
+		Terminator:               config.CRLF,
+		DateSeparator:            config.DateSeparatorDay.String(),
+		EnablePartitionSeparator: true,
+		EnableKafkaSinkV2:        false,
+		AdvanceTimeoutInSec:      util.AddressOf(uint(150)),
 	},
 	Consistent: &ConsistentConfig{
-		Level:                 "none",
-		MaxLogSize:            64,
-		FlushIntervalInMs:     redo.DefaultFlushIntervalInMs,
-		MetaFlushIntervalInMs: redo.DefaultMetaFlushIntervalInMs,
-		EncodingWorkerNum:     redo.DefaultEncodingWorkerNum,
-		FlushWorkerNum:        redo.DefaultFlushWorkerNum,
-		Storage:               "",
-		UseFileBackend:        false,
-		MemoryUsage: &ConsistentMemoryUsage{
-			MemoryQuotaPercentage: 50,
-		},
+		Level:             "none",
+		MaxLogSize:        64,
+		FlushIntervalInMs: redo.DefaultFlushIntervalInMs,
+		Storage:           "",
+		UseFileBackend:    false,
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
 		EnableTableAcrossNodes: config.GetDefaultReplicaConfig().
@@ -93,7 +78,6 @@ var defaultAPIConfig = &ReplicaConfig{
 	},
 	ChangefeedErrorStuckDuration: &JSONDuration{*config.
 		GetDefaultReplicaConfig().ChangefeedErrorStuckDuration},
-	SyncedStatus: (*SyncedStatusConfig)(config.GetDefaultReplicaConfig().SyncedStatus),
 }
 
 func TestDefaultReplicaConfig(t *testing.T) {
@@ -110,6 +94,7 @@ func TestDefaultReplicaConfig(t *testing.T) {
 
 func TestToAPIReplicaConfig(t *testing.T) {
 	cfg := config.GetDefaultReplicaConfig()
+	cfg.EnableOldValue = false
 	cfg.CheckGCSafePoint = false
 	cfg.Sink = &config.SinkConfig{
 		DispatchRules: []*config.DispatchRule{
@@ -120,15 +105,15 @@ func TestToAPIReplicaConfig(t *testing.T) {
 				TopicRule:      "topic",
 			},
 		},
-		Protocol: util.AddressOf("aaa"),
+		Protocol: "aaa",
 		ColumnSelectors: []*config.ColumnSelector{
 			{
 				Matcher: []string{"a", "b", "c"},
 				Columns: []string{"a", "b"},
 			},
 		},
-		SchemaRegistry: util.AddressOf("bbb"),
-		TxnAtomicity:   util.AddressOf(config.AtomicityLevel("aa")),
+		SchemaRegistry: "bbb",
+		TxnAtomicity:   "aa",
 	}
 	cfg.Consistent = &config.ConsistentConfig{
 		Level:             "1",
@@ -137,7 +122,21 @@ func TestToAPIReplicaConfig(t *testing.T) {
 		Storage:           "s3",
 	}
 	cfg.Filter = &config.FilterConfig{
-		Rules:            []string{"a", "b", "c"},
+		Rules: []string{"a", "b", "c"},
+		MySQLReplicationRules: &filter.MySQLReplicationRules{
+			DoTables: []*filter.Table{{
+				Schema: "testdo",
+				Name:   "testgotable",
+			}},
+			DoDBs: []string{"ad", "bdo"},
+			IgnoreTables: []*filter.Table{
+				{
+					Schema: "testignore",
+					Name:   "testaaaingore",
+				},
+			},
+			IgnoreDBs: []string{"aa", "b2"},
+		},
 		IgnoreTxnStartTs: []uint64{1, 2, 3},
 		EventFilters: []*config.EventFilterRule{{
 			Matcher:                  []string{"test.t1", "test.t2"},

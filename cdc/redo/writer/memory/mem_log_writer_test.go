@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
-	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/redo"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
@@ -33,21 +32,9 @@ func TestWriteDDL(t *testing.T) {
 
 	rows := []writer.RedoEvent{
 		nil,
-		&model.RowChangedEvent{
-			PhysicalTableID: 11,
-			CommitTs:        11,
-			TableInfo:       &model.TableInfo{TableName: model.TableName{Schema: "test", Table: "t1"}},
-		},
-		&model.RowChangedEvent{
-			PhysicalTableID: 12,
-			CommitTs:        15,
-			TableInfo:       &model.TableInfo{TableName: model.TableName{Schema: "test", Table: "t2"}},
-		},
-		&model.RowChangedEvent{
-			PhysicalTableID: 12,
-			CommitTs:        8,
-			TableInfo:       &model.TableInfo{TableName: model.TableName{Schema: "test", Table: "t2"}},
-		},
+		&model.RowChangedEvent{Table: &model.TableName{TableID: 11}, CommitTs: 11},
+		&model.RowChangedEvent{Table: &model.TableName{TableID: 12}, CommitTs: 15},
+		&model.RowChangedEvent{Table: &model.TableName{TableID: 12}, CommitTs: 8},
 	}
 	testWriteEvents(t, rows)
 }
@@ -74,7 +61,7 @@ func testWriteEvents(t *testing.T, events []writer.RedoEvent) {
 		LogType:            redo.RedoDDLLogFileType,
 		CaptureID:          "test-capture",
 		ChangeFeedID:       model.DefaultChangeFeedID("test-changefeed"),
-		URI:                uri,
+		URI:                *uri,
 		UseExternalStorage: true,
 		MaxLogSizeInBytes:  10 * redo.Megabyte,
 	}
@@ -105,7 +92,7 @@ func testWriteEvents(t *testing.T, events []writer.RedoEvent) {
 		err = lw.WriteEvents(ctx, events...)
 		return err != nil
 	}, 2*time.Second, 10*time.Millisecond)
-	require.ErrorIs(t, err, cerror.ErrRedoWriterStopped)
+	require.ErrorContains(t, err, "redo log writer stopped")
 	err = lw.FlushLog(ctx)
-	require.ErrorIs(t, err, cerror.ErrRedoWriterStopped)
+	require.ErrorContains(t, err, "redo log writer stopped")
 }

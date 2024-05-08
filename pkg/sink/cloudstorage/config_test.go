@@ -30,14 +30,14 @@ func TestConfigApply(t *testing.T) {
 	expected.FlushInterval = 10 * time.Second
 	expected.FileSize = 16 * 1024 * 1024
 	expected.FileIndexWidth = config.DefaultFileIndexWidth
-	expected.DateSeparator = config.DateSeparatorDay.String()
+	expected.DateSeparator = config.DateSeparatorNone.String()
 	expected.EnablePartitionSeparator = true
-	expected.FlushConcurrency = 1
 	uri := "s3://bucket/prefix?worker-count=32&flush-interval=10s&file-size=16777216&protocol=csv"
 	sinkURI, err := url.Parse(uri)
 	require.Nil(t, err)
 
 	replicaConfig := config.GetDefaultReplicaConfig()
+	replicaConfig.Sink.DateSeparator = config.DateSeparatorNone.String()
 	err = replicaConfig.ValidateAndAdjust(sinkURI)
 	require.NoError(t, err)
 	cfg := NewConfig()
@@ -136,10 +136,9 @@ func TestMergeConfig(t *testing.T) {
 	require.NoError(t, err)
 	replicaConfig := config.GetDefaultReplicaConfig()
 	replicaConfig.Sink.CloudStorageConfig = &config.CloudStorageConfig{
-		WorkerCount:    aws.Int(12),
-		FileSize:       aws.Int(1485760),
-		FlushInterval:  aws.String("1m2s"),
-		OutputColumnID: aws.Bool(false),
+		WorkerCount:   aws.Int(12),
+		FileSize:      aws.Int(1485760),
+		FlushInterval: aws.String("1m2s"),
 	}
 	c := NewConfig()
 	err = c.Apply(context.TODO(), sinkURI, replicaConfig)
@@ -153,10 +152,9 @@ func TestMergeConfig(t *testing.T) {
 	sinkURI, err = url.Parse(uri)
 	require.NoError(t, err)
 	replicaConfig.Sink.CloudStorageConfig = &config.CloudStorageConfig{
-		WorkerCount:    aws.Int(12),
-		FileSize:       aws.Int(10485760),
-		FlushInterval:  aws.String("1m2s"),
-		OutputColumnID: aws.Bool(false),
+		WorkerCount:   aws.Int(12),
+		FileSize:      aws.Int(10485760),
+		FlushInterval: aws.String("1m2s"),
 	}
 	c = NewConfig()
 	err = c.Apply(context.TODO(), sinkURI, replicaConfig)

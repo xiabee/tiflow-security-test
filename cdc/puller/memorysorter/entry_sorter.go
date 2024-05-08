@@ -21,13 +21,13 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/notify"
+	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
-
-// DDLPullerTableName is the fake table name for ddl puller
-const DDLPullerTableName = "DDL_PULLER"
 
 // EntrySorter accepts out-of-order raw kv entries and output sorted entries.
 // For now, it only uses for DDL puller and test.
@@ -39,22 +39,20 @@ type EntrySorter struct {
 
 	outputCh         chan *model.PolymorphicEvent
 	resolvedNotifier *notify.Notifier
-	changeFeedID     model.ChangeFeedID
 }
 
 // NewEntrySorter creates a new EntrySorter
-func NewEntrySorter(changeFeedID model.ChangeFeedID) *EntrySorter {
+func NewEntrySorter() *EntrySorter {
 	return &EntrySorter{
 		resolvedNotifier: new(notify.Notifier),
 		outputCh:         make(chan *model.PolymorphicEvent, 128000),
-		changeFeedID:     changeFeedID,
 	}
 }
 
 // Run runs EntrySorter
 func (es *EntrySorter) Run(ctx context.Context) error {
-	changefeedID := es.changeFeedID
-	tableName := DDLPullerTableName
+	changefeedID := contextutil.ChangefeedIDFromCtx(ctx)
+	_, tableName := contextutil.TableIDFromCtx(ctx)
 	metricEntrySorterResolvedChanSizeGauge := entrySorterResolvedChanSizeGauge.
 		WithLabelValues(changefeedID.Namespace, changefeedID.ID, tableName)
 	metricEntrySorterOutputChanSizeGauge := entrySorterOutputChanSizeGauge.
@@ -177,4 +175,51 @@ func mergeEvents(kvsA []*model.PolymorphicEvent, kvsB []*model.PolymorphicEvent,
 	for ; j < len(kvsB); j++ {
 		output(kvsB[j])
 	}
+}
+
+// SortOutput receives a channel from a puller, then sort event and output to the channel returned.
+// Only for DDL puller.
+func SortOutput(ctx context.Context, input <-chan *model.RawKVEntry) <-chan *model.RawKVEntry {
+	ctx, cancel := context.WithCancel(ctx)
+	sorter := NewEntrySorter()
+	outputCh := make(chan *model.RawKVEntry, 128)
+	output := func(rawKV *model.RawKVEntry) {
+		select {
+		case <-ctx.Done():
+			if errors.Cause(ctx.Err()) != context.Canceled {
+				log.Error("sorter exited with error", zap.Error(ctx.Err()))
+			}
+			return
+		case outputCh <- rawKV:
+		}
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				if errors.Cause(ctx.Err()) != context.Canceled {
+					log.Error("sorter exited with error", zap.Error(ctx.Err()))
+				}
+				return
+			case rawKV := <-input:
+				if rawKV == nil {
+					continue
+				}
+				sorter.AddEntry(ctx, model.NewPolymorphicEvent(rawKV))
+			case sorted := <-sorter.Output():
+				if sorted != nil {
+					output(sorted.RawKV)
+				}
+			}
+		}
+	}()
+	go func() {
+		if err := sorter.Run(ctx); err != nil {
+			if errors.Cause(ctx.Err()) != context.Canceled {
+				log.Error("sorter exited with error", zap.Error(ctx.Err()))
+			}
+		}
+		cancel()
+	}()
+	return outputCh
 }

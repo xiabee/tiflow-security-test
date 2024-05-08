@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
-	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/prometheus/client_golang/prometheus"
@@ -42,16 +41,16 @@ func (m *mockEventSink) WriteEvents(rows ...*dmlsink.TxnCallbackableEvent) error
 	return nil
 }
 
+func (m *mockEventSink) Scheme() string {
+	return sink.BlackHoleScheme
+}
+
 func (m *mockEventSink) Close() {
 	close(m.dead)
 }
 
 func (m *mockEventSink) Dead() <-chan struct{} {
 	return m.dead
-}
-
-func (m *mockEventSink) Scheme() string {
-	return sink.BlackHoleScheme
 }
 
 // acknowledge the txn events by call the callback function.
@@ -85,79 +84,77 @@ func (m *mockEventSink) acknowledge(commitTs uint64) []*dmlsink.TxnCallbackableE
 }
 
 func getTestRows() []*model.RowChangedEvent {
-	tableInfo := &model.TableInfo{
-		TableName: model.TableName{
-			Schema:      "test",
-			Table:       "t1",
-			TableID:     1,
-			IsPartition: false,
-		},
+	tableInfo := &model.TableName{
+		Schema:      "test",
+		Table:       "t1",
+		TableID:     1,
+		IsPartition: false,
 	}
 
 	return []*model.RowChangedEvent{
 		{
-			TableInfo: tableInfo,
-			CommitTs:  101,
-			StartTs:   98,
+			Table:    tableInfo,
+			CommitTs: 101,
+			StartTs:  98,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  102,
-			StartTs:   99,
+			Table:    tableInfo,
+			CommitTs: 102,
+			StartTs:  99,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  102,
-			StartTs:   100,
+			Table:    tableInfo,
+			CommitTs: 102,
+			StartTs:  100,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  102,
-			StartTs:   100,
+			Table:    tableInfo,
+			CommitTs: 102,
+			StartTs:  100,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  103,
-			StartTs:   101,
+			Table:    tableInfo,
+			CommitTs: 103,
+			StartTs:  101,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  103,
-			StartTs:   101,
+			Table:    tableInfo,
+			CommitTs: 103,
+			StartTs:  101,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  104,
-			StartTs:   102,
+			Table:    tableInfo,
+			CommitTs: 104,
+			StartTs:  102,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  105,
-			StartTs:   103,
+			Table:    tableInfo,
+			CommitTs: 105,
+			StartTs:  103,
 			// Batch1
 			SplitTxn: true,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  105,
-			StartTs:   103,
+			Table:    tableInfo,
+			CommitTs: 105,
+			StartTs:  103,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  105,
-			StartTs:   103,
+			Table:    tableInfo,
+			CommitTs: 105,
+			StartTs:  103,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  105,
-			StartTs:   103,
+			Table:    tableInfo,
+			CommitTs: 105,
+			StartTs:  103,
 			// Batch2
 			SplitTxn: true,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  105,
-			StartTs:   103,
+			Table:    tableInfo,
+			CommitTs: 105,
+			StartTs:  103,
 		},
 	}
 }
@@ -168,10 +165,7 @@ func TestNewEventTableSink(t *testing.T) {
 	sink := &mockEventSink{dead: make(chan struct{})}
 	tb := New[*model.SingleTableTxn](
 		model.DefaultChangeFeedID("1"), spanz.TableIDToComparableSpan(1), model.Ts(0),
-		sink, &dmlsink.TxnEventAppender{},
-		pdutil.NewClock4Test(),
-		prometheus.NewCounter(prometheus.CounterOpts{}),
-		prometheus.NewHistogram(prometheus.HistogramOpts{}))
+		sink, &dmlsink.TxnEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
 
 	require.Equal(t, model.NewResolvedTs(0), tb.maxResolvedTs, "maxResolvedTs should start from 0")
 	require.NotNil(t, sink, tb.backendSink, "backendSink should be set")
@@ -187,10 +181,7 @@ func TestAppendRowChangedEvents(t *testing.T) {
 	sink := &mockEventSink{dead: make(chan struct{})}
 	tb := New[*model.SingleTableTxn](
 		model.DefaultChangeFeedID("1"), spanz.TableIDToComparableSpan(1), model.Ts(0),
-		sink, &dmlsink.TxnEventAppender{},
-		pdutil.NewClock4Test(),
-		prometheus.NewCounter(prometheus.CounterOpts{}),
-		prometheus.NewHistogram(prometheus.HistogramOpts{}))
+		sink, &dmlsink.TxnEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
 
 	tb.AppendRowChangedEvents(getTestRows()...)
 	require.Len(t, tb.eventBuffer, 7, "txn event buffer should have 7 txns")
@@ -202,10 +193,7 @@ func TestUpdateResolvedTs(t *testing.T) {
 	sink := &mockEventSink{dead: make(chan struct{})}
 	tb := New[*model.SingleTableTxn](
 		model.DefaultChangeFeedID("1"), spanz.TableIDToComparableSpan(1), model.Ts(0),
-		sink, &dmlsink.TxnEventAppender{},
-		pdutil.NewClock4Test(),
-		prometheus.NewCounter(prometheus.CounterOpts{}),
-		prometheus.NewHistogram(prometheus.HistogramOpts{}))
+		sink, &dmlsink.TxnEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
 
 	tb.AppendRowChangedEvents(getTestRows()...)
 	// No event will be flushed.
@@ -255,14 +243,10 @@ func TestGetCheckpointTs(t *testing.T) {
 	sink := &mockEventSink{dead: make(chan struct{})}
 	tb := New[*model.SingleTableTxn](
 		model.DefaultChangeFeedID("1"), spanz.TableIDToComparableSpan(1), model.Ts(0),
-		sink, &dmlsink.TxnEventAppender{},
-		pdutil.NewClock4Test(),
-		prometheus.NewCounter(prometheus.CounterOpts{}),
-		prometheus.NewHistogram(prometheus.HistogramOpts{}))
+		sink, &dmlsink.TxnEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
 
 	tb.AppendRowChangedEvents(getTestRows()...)
 	require.Equal(t, model.NewResolvedTs(0), tb.GetCheckpointTs(), "checkpointTs should be 0")
-	require.Equal(t, tb.lastSyncedTs.getLastSyncedTs(), uint64(0), "lastSyncedTs should be not updated")
 
 	// One event will be flushed.
 	err := tb.UpdateResolvedTs(model.NewResolvedTs(101))
@@ -270,13 +254,11 @@ func TestGetCheckpointTs(t *testing.T) {
 	require.Equal(t, model.NewResolvedTs(0), tb.GetCheckpointTs(), "checkpointTs should be 0")
 	sink.acknowledge(101)
 	require.Equal(t, model.NewResolvedTs(101), tb.GetCheckpointTs(), "checkpointTs should be 101")
-	require.Equal(t, tb.lastSyncedTs.getLastSyncedTs(), uint64(101), "lastSyncedTs should be the same as the flushed event")
 
 	// Flush all events.
 	err = tb.UpdateResolvedTs(model.NewResolvedTs(105))
 	require.Nil(t, err)
 	require.Equal(t, model.NewResolvedTs(101), tb.GetCheckpointTs(), "checkpointTs should be 101")
-	require.Equal(t, tb.lastSyncedTs.getLastSyncedTs(), uint64(101), "lastSyncedTs should be not updated")
 
 	// Only acknowledge some events.
 	sink.acknowledge(102)
@@ -286,12 +268,10 @@ func TestGetCheckpointTs(t *testing.T) {
 		tb.GetCheckpointTs(),
 		"checkpointTs should still be 101",
 	)
-	require.Equal(t, tb.lastSyncedTs.getLastSyncedTs(), uint64(102), "lastSyncedTs should be updated")
 
 	// Ack all events.
 	sink.acknowledge(105)
 	require.Equal(t, model.NewResolvedTs(105), tb.GetCheckpointTs(), "checkpointTs should be 105")
-	require.Equal(t, tb.lastSyncedTs.getLastSyncedTs(), uint64(105), "lastSyncedTs should be updated")
 }
 
 func TestClose(t *testing.T) {
@@ -300,10 +280,7 @@ func TestClose(t *testing.T) {
 	sink := &mockEventSink{dead: make(chan struct{})}
 	tb := New[*model.SingleTableTxn](
 		model.DefaultChangeFeedID("1"), spanz.TableIDToComparableSpan(1), model.Ts(0),
-		sink, &dmlsink.TxnEventAppender{},
-		pdutil.NewClock4Test(),
-		prometheus.NewCounter(prometheus.CounterOpts{}),
-		prometheus.NewHistogram(prometheus.HistogramOpts{}))
+		sink, &dmlsink.TxnEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
 
 	tb.AppendRowChangedEvents(getTestRows()...)
 	err := tb.UpdateResolvedTs(model.NewResolvedTs(105))
@@ -332,10 +309,7 @@ func TestOperationsAfterClose(t *testing.T) {
 	sink := &mockEventSink{dead: make(chan struct{})}
 	tb := New[*model.SingleTableTxn](
 		model.DefaultChangeFeedID("1"), spanz.TableIDToComparableSpan(1), model.Ts(0),
-		sink, &dmlsink.TxnEventAppender{},
-		pdutil.NewClock4Test(),
-		prometheus.NewCounter(prometheus.CounterOpts{}),
-		prometheus.NewHistogram(prometheus.HistogramOpts{}))
+		sink, &dmlsink.TxnEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
 
 	require.True(t, tb.AsyncClose())
 
@@ -350,10 +324,7 @@ func TestCloseCancellable(t *testing.T) {
 	sink := &mockEventSink{dead: make(chan struct{})}
 	tb := New[*model.SingleTableTxn](
 		model.DefaultChangeFeedID("1"), spanz.TableIDToComparableSpan(1), model.Ts(0),
-		sink, &dmlsink.TxnEventAppender{},
-		pdutil.NewClock4Test(),
-		prometheus.NewCounter(prometheus.CounterOpts{}),
-		prometheus.NewHistogram(prometheus.HistogramOpts{}))
+		sink, &dmlsink.TxnEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
 
 	tb.AppendRowChangedEvents(getTestRows()...)
 	err := tb.UpdateResolvedTs(model.NewResolvedTs(105))
@@ -383,10 +354,7 @@ func TestCloseReentrant(t *testing.T) {
 	sink := &mockEventSink{dead: make(chan struct{})}
 	tb := New[*model.SingleTableTxn](
 		model.DefaultChangeFeedID("1"), spanz.TableIDToComparableSpan(1), model.Ts(0),
-		sink, &dmlsink.TxnEventAppender{},
-		pdutil.NewClock4Test(),
-		prometheus.NewCounter(prometheus.CounterOpts{}),
-		prometheus.NewHistogram(prometheus.HistogramOpts{}))
+		sink, &dmlsink.TxnEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
 
 	tb.AppendRowChangedEvents(getTestRows()...)
 	err := tb.UpdateResolvedTs(model.NewResolvedTs(105))
@@ -419,10 +387,7 @@ func TestCheckpointTsFrozenWhenStopping(t *testing.T) {
 	sink := &mockEventSink{dead: make(chan struct{})}
 	tb := New[*model.SingleTableTxn](
 		model.DefaultChangeFeedID("1"), spanz.TableIDToComparableSpan(1), model.Ts(0),
-		sink, &dmlsink.TxnEventAppender{},
-		pdutil.NewClock4Test(),
-		prometheus.NewCounter(prometheus.CounterOpts{}),
-		prometheus.NewHistogram(prometheus.HistogramOpts{}))
+		sink, &dmlsink.TxnEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
 
 	tb.AppendRowChangedEvents(getTestRows()...)
 	err := tb.UpdateResolvedTs(model.NewResolvedTs(105))
@@ -439,5 +404,4 @@ func TestCheckpointTsFrozenWhenStopping(t *testing.T) {
 	currentTs := tb.GetCheckpointTs()
 	sink.acknowledge(105)
 	require.Equal(t, currentTs, tb.GetCheckpointTs(), "checkpointTs should not be updated")
-	require.Equal(t, tb.lastSyncedTs.getLastSyncedTs(), uint64(105), "lastSyncedTs should not change")
 }

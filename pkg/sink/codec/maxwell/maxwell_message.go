@@ -16,12 +16,12 @@ package maxwell
 import (
 	"encoding/json"
 
-	model2 "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	model2 "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec/internal"
-	"github.com/tikv/client-go/v2/oracle"
+	"github.com/tikv/pd/pkg/utils/tsoutil"
 )
 
 type maxwellMessage struct {
@@ -45,64 +45,58 @@ func (m *maxwellMessage) encode() ([]byte, error) {
 
 func rowChangeToMaxwellMsg(e *model.RowChangedEvent, onlyHandleKeyColumns bool) (*internal.MessageKey, *maxwellMessage) {
 	var partition *int64
-	if e.TableInfo.IsPartitionTable() {
-		partition = &e.PhysicalTableID
+	if e.Table.IsPartition {
+		partition = &e.Table.TableID
 	}
 	key := &internal.MessageKey{
 		Ts:        e.CommitTs,
-		Schema:    e.TableInfo.GetSchemaName(),
-		Table:     e.TableInfo.GetTableName(),
+		Schema:    e.Table.Schema,
+		Table:     e.Table.Table,
 		Partition: partition,
 		Type:      model.MessageTypeRow,
 	}
 	value := &maxwellMessage{
 		Ts:       0,
-		Database: e.TableInfo.GetSchemaName(),
-		Table:    e.TableInfo.GetTableName(),
+		Database: e.Table.Schema,
+		Table:    e.Table.Table,
 		Data:     make(map[string]interface{}),
 		Old:      make(map[string]interface{}),
 	}
-	physicalTime := oracle.GetTimeFromTS(e.CommitTs)
+
+	physicalTime, _ := tsoutil.ParseTS(e.CommitTs)
 	value.Ts = physicalTime.Unix()
-	tableInfo := e.TableInfo
 	if e.IsDelete() {
 		value.Type = "delete"
 		for _, v := range e.PreColumns {
-			colFlag := tableInfo.ForceGetColumnFlagType(v.ColumnID)
-			if onlyHandleKeyColumns && !colFlag.IsHandleKey() {
+			if onlyHandleKeyColumns && !v.Flag.IsHandleKey() {
 				continue
 			}
-			colInfo := tableInfo.ForceGetColumnInfo(v.ColumnID)
-			colName := tableInfo.ForceGetColumnName(v.ColumnID)
-			switch colInfo.GetType() {
+			switch v.Type {
 			case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob:
 				if v.Value == nil {
-					value.Old[colName] = nil
-				} else if colFlag.IsBinary() {
-					value.Old[colName] = v.Value
+					value.Old[v.Name] = nil
+				} else if v.Flag.IsBinary() {
+					value.Old[v.Name] = v.Value
 				} else {
-					value.Old[colName] = string(v.Value.([]byte))
+					value.Old[v.Name] = string(v.Value.([]byte))
 				}
 			default:
-				value.Old[colName] = v.Value
+				value.Old[v.Name] = v.Value
 			}
 		}
 	} else {
 		for _, v := range e.Columns {
-			colFlag := tableInfo.ForceGetColumnFlagType(v.ColumnID)
-			colInfo := tableInfo.ForceGetColumnInfo(v.ColumnID)
-			colName := tableInfo.ForceGetColumnName(v.ColumnID)
-			switch colInfo.GetType() {
+			switch v.Type {
 			case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob:
 				if v.Value == nil {
-					value.Data[colName] = nil
-				} else if colFlag.IsBinary() {
-					value.Data[colName] = v.Value
+					value.Data[v.Name] = nil
+				} else if v.Flag.IsBinary() {
+					value.Data[v.Name] = v.Value
 				} else {
-					value.Data[colName] = string(v.Value.([]byte))
+					value.Data[v.Name] = string(v.Value.([]byte))
 				}
 			default:
-				value.Data[colName] = v.Value
+				value.Data[v.Name] = v.Value
 			}
 		}
 		if e.PreColumns == nil {
@@ -110,27 +104,24 @@ func rowChangeToMaxwellMsg(e *model.RowChangedEvent, onlyHandleKeyColumns bool) 
 		} else {
 			value.Type = "update"
 			for _, v := range e.PreColumns {
-				colFlag := tableInfo.ForceGetColumnFlagType(v.ColumnID)
-				colInfo := tableInfo.ForceGetColumnInfo(v.ColumnID)
-				colName := tableInfo.ForceGetColumnName(v.ColumnID)
-				switch colInfo.GetType() {
+				switch v.Type {
 				case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob:
 					if v.Value == nil {
-						if value.Data[colName] != nil {
-							value.Old[colName] = nil
+						if value.Data[v.Name] != nil {
+							value.Old[v.Name] = nil
 						}
-					} else if colFlag.IsBinary() {
-						if value.Data[colName] != v.Value {
-							value.Old[colName] = v.Value
+					} else if v.Flag.IsBinary() {
+						if value.Data[v.Name] != v.Value {
+							value.Old[v.Name] = v.Value
 						}
 					} else {
-						if value.Data[colName] != string(v.Value.([]byte)) {
-							value.Old[colName] = string(v.Value.([]byte))
+						if value.Data[v.Name] != string(v.Value.([]byte)) {
+							value.Old[v.Name] = string(v.Value.([]byte))
 						}
 					}
 				default:
-					if value.Data[colName] != v.Value {
-						value.Old[colName] = v.Value
+					if value.Data[v.Name] != v.Value {
+						value.Old[v.Name] = v.Value
 					}
 				}
 			}

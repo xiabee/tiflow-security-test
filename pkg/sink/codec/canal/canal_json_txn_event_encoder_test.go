@@ -16,8 +16,7 @@ package canal
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tiflow/cdc/entry"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
@@ -35,25 +34,20 @@ func TestBuildCanalJSONTxnEventEncoder(t *testing.T) {
 }
 
 func TestCanalJSONTxnEventEncoderMaxMessageBytes(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(a varchar(255) primary key)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
+	t.Parallel()
 
 	// the size of `testEvent` after being encoded by canal-json is 200
 	testEvent := &model.SingleTableTxn{
-		TableInfo: tableInfo,
+		Table: &model.TableName{Schema: "a", Table: "b"},
 		Rows: []*model.RowChangedEvent{
 			{
-				CommitTs:  1,
-				TableInfo: tableInfo,
-				Columns: model.Columns2ColumnDatas([]*model.Column{{
-					Name:  "a",
+				CommitTs: 1,
+				Table:    &model.TableName{Schema: "a", Table: "b"},
+				Columns: []*model.Column{{
+					Name:  "col1",
 					Type:  mysql.TypeVarchar,
 					Value: []byte("aa"),
-				}}, tableInfo),
+				}},
 			},
 		},
 	}
@@ -73,12 +67,7 @@ func TestCanalJSONTxnEventEncoderMaxMessageBytes(t *testing.T) {
 }
 
 func TestCanalJSONAppendTxnEventEncoderWithCallback(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(a varchar(255) primary key)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
+	t.Parallel()
 
 	cfg := common.NewConfig(config.ProtocolCanalJSON)
 	encoder := NewJSONTxnEventEncoderBuilder(cfg).Build()
@@ -87,25 +76,25 @@ func TestCanalJSONAppendTxnEventEncoderWithCallback(t *testing.T) {
 	count := 0
 
 	txn := &model.SingleTableTxn{
-		TableInfo: tableInfo,
+		Table: &model.TableName{Schema: "a", Table: "b"},
 		Rows: []*model.RowChangedEvent{
 			{
-				CommitTs:  1,
-				TableInfo: tableInfo,
-				Columns: model.Columns2ColumnDatas([]*model.Column{{
-					Name:  "a",
+				CommitTs: 1,
+				Table:    &model.TableName{Schema: "a", Table: "b"},
+				Columns: []*model.Column{{
+					Name:  "col1",
 					Type:  mysql.TypeVarchar,
 					Value: []byte("aa"),
-				}}, tableInfo),
+				}},
 			},
 			{
-				CommitTs:  2,
-				TableInfo: tableInfo,
-				Columns: model.Columns2ColumnDatas([]*model.Column{{
-					Name:  "a",
+				CommitTs: 2,
+				Table:    &model.TableName{Schema: "a", Table: "b"},
+				Columns: []*model.Column{{
+					Name:  "col1",
 					Type:  mysql.TypeVarchar,
 					Value: []byte("bb"),
-				}}, tableInfo),
+				}},
 			},
 		},
 	}

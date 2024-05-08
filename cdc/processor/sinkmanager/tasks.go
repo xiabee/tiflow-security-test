@@ -18,7 +18,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
@@ -39,15 +39,15 @@ var (
 	maxUpdateIntervalSize = defaultMaxUpdateIntervalSize
 
 	// Sink manager schedules table tasks based on lag. Limit the max task range
-	// can be helpful to reduce changefeed latency for large initial data.
-	maxTaskTimeRange = 30 * time.Minute
+	// can be helpful to reduce changefeed latency.
+	maxTaskTimeRange = 5 * time.Second
 )
 
 // Used to record the progress of the table.
-type writeSuccessCallback func(lastWrittenPos sorter.Position)
+type writeSuccessCallback func(lastWrittenPos engine.Position)
 
 // Used to get an upper bound.
-type upperBoundGetter func(tableSinkUpperBoundTs model.Ts) sorter.Position
+type upperBoundGetter func(tableSinkUpperBoundTs model.Ts) engine.Position
 
 // Used to abort the task processing of the table.
 type isCanceled func() bool
@@ -58,7 +58,7 @@ type sinkTask struct {
 	span tablepb.Span
 	// lowerBound indicates the lower bound of the task.
 	// It is a closed interval.
-	lowerBound sorter.Position
+	lowerBound engine.Position
 	// getUpperBound is used to get the upper bound of the task.
 	// It is a closed interval.
 	// Use a method to get the latest value, because the upper bound may change(only can increase).
@@ -71,7 +71,7 @@ type sinkTask struct {
 // redoTask is a task for the redo log.
 type redoTask struct {
 	span          tablepb.Span
-	lowerBound    sorter.Position
+	lowerBound    engine.Position
 	getUpperBound upperBoundGetter
 	tableSink     *tableSinkWrapper
 	callback      writeSuccessCallback
@@ -81,15 +81,15 @@ type redoTask struct {
 func validateAndAdjustBound(
 	changefeedID model.ChangeFeedID,
 	span *tablepb.Span,
-	lowerBound, upperBound sorter.Position,
-) (sorter.Position, sorter.Position) {
+	lowerBound, upperBound engine.Position,
+) (engine.Position, engine.Position) {
 	lowerPhs := oracle.GetTimeFromTS(lowerBound.CommitTs)
 	upperPhs := oracle.GetTimeFromTS(upperBound.CommitTs)
 	// The time range of a task should not exceed maxTaskTimeRange.
 	// This would help for reduce changefeed latency.
 	if upperPhs.Sub(lowerPhs) > maxTaskTimeRange {
 		newUpperCommitTs := oracle.GoTimeToTS(lowerPhs.Add(maxTaskTimeRange))
-		upperBound = sorter.GenCommitFence(newUpperCommitTs)
+		upperBound = engine.GenCommitFence(newUpperCommitTs)
 	}
 
 	if !upperBound.IsCommitFence() {

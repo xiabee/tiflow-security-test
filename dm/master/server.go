@@ -31,7 +31,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	toolutils "github.com/pingcap/tidb-tools/pkg/utils"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
+	"github.com/pingcap/tidb/util/dbutil"
 	"github.com/pingcap/tiflow/dm/checker"
 	dmcommon "github.com/pingcap/tiflow/dm/common"
 	"github.com/pingcap/tiflow/dm/config"
@@ -61,7 +61,6 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 const (
@@ -348,8 +347,7 @@ func (s *Server) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerReque
 	}
 	log.L().Info("register worker successfully", zap.String("name", req.Name), zap.String("address", req.Address))
 	return &pb.RegisterWorkerResponse{
-		Result:    true,
-		SecretKey: s.cfg.SecretKey,
+		Result: true,
 	}, nil
 }
 
@@ -513,11 +511,7 @@ func (s *Server) StartTask(ctx context.Context, req *pb.StartTaskRequest) (*pb.S
 	if err != nil {
 		return respWithErr(err)
 	}
-	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
-	if err != nil {
-		return respWithErr(err)
-	}
-	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
+	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgs, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
 	if err != nil {
 		resp.CheckResult = terror.WithClass(err, terror.ClassDMMaster).Error()
 		return resp, nil
@@ -735,14 +729,8 @@ func (s *Server) UpdateTask(ctx context.Context, req *pb.UpdateTaskRequest) (*pb
 		// nolint:nilerr
 		return resp, nil
 	}
-	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
-	if err != nil {
-		resp.Msg = err.Error()
-		// nolint:nilerr
-		return resp, nil
-	}
 
-	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
+	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgs, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
 	if err != nil {
 		resp.CheckResult = terror.WithClass(err, terror.ClassDMMaster).Error()
 		return resp, nil
@@ -1286,11 +1274,13 @@ func (s *Server) getStatusFromWorkers(
 }
 
 // TODO: refine the call stack of this API, query worker configs that we needed only.
-func (s *Server) getSourceConfigs(sources []string) map[string]*config.SourceConfig {
+func (s *Server) getSourceConfigs(sources []*config.MySQLInstance) map[string]*config.SourceConfig {
 	cfgs := make(map[string]*config.SourceConfig)
 	for _, source := range sources {
-		if cfg := s.scheduler.GetSourceCfgByID(source); cfg != nil {
-			cfgs[source] = cfg
+		if cfg := s.scheduler.GetSourceCfgByID(source.SourceID); cfg != nil {
+			// check the password
+			cfg.DecryptPassword()
+			cfgs[source.SourceID] = cfg
 		}
 	}
 	return cfgs
@@ -1324,14 +1314,8 @@ func (s *Server) CheckTask(ctx context.Context, req *pb.CheckTaskRequest) (*pb.C
 		// nolint:nilerr
 		return resp, nil
 	}
-	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
-	if err != nil {
-		resp.Msg = err.Error()
-		// nolint:nilerr
-		return resp, nil
-	}
 
-	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, req.ErrCnt, req.WarnCnt)
+	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgs, req.ErrCnt, req.WarnCnt)
 	if err != nil {
 		resp.Msg = terror.WithClass(err, terror.ClassDMMaster).Error()
 		return resp, nil
@@ -1345,7 +1329,7 @@ func (s *Server) CheckTask(ctx context.Context, req *pb.CheckTaskRequest) (*pb.C
 func parseAndAdjustSourceConfig(ctx context.Context, contents []string) ([]*config.SourceConfig, error) {
 	cfgs := make([]*config.SourceConfig, len(contents))
 	for i, content := range contents {
-		cfg, err := config.SourceCfgFromYaml(content)
+		cfg, err := config.ParseYaml(content)
 		if err != nil {
 			return cfgs, err
 		}
@@ -1393,7 +1377,7 @@ func checkAndAdjustSourceConfigForDMCtl(ctx context.Context, cfg *config.SourceC
 func parseSourceConfig(contents []string) ([]*config.SourceConfig, error) {
 	cfgs := make([]*config.SourceConfig, len(contents))
 	for i, content := range contents {
-		cfg, err := config.SourceCfgFromYaml(content)
+		cfg, err := config.ParseYaml(content)
 		if err != nil {
 			return cfgs, err
 		}
@@ -1427,7 +1411,7 @@ func GetLatestMeta(ctx context.Context, flavor string, dbConfig *dbconfig.DBConf
 	return &config.Meta{BinLogName: pos.Name, BinLogPos: pos.Pos, BinLogGTID: gSet}, nil
 }
 
-func AdjustTargetDBSessionCfg(ctx context.Context, dbConfig *dbconfig.DBConfig) error {
+func AdjustTargetDB(ctx context.Context, dbConfig *dbconfig.DBConfig) error {
 	cfg := *dbConfig
 	if len(cfg.Password) > 0 {
 		cfg.Password = utils.DecryptOrPlaintext(cfg.Password)
@@ -1651,22 +1635,18 @@ func (s *Server) generateSubTask(
 		}
 		err = cfg.Adjust()
 	} else {
-		err = cfg.FromYaml(task)
+		err = cfg.Decode(task)
 	}
 	if err != nil {
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
 
-	err = AdjustTargetDBSessionCfg(ctx, cfg.TargetDB)
+	err = AdjustTargetDB(ctx, cfg.TargetDB)
 	if err != nil {
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
 
-	sourceIDs := make([]string, 0, len(cfg.MySQLInstances))
-	for _, inst := range cfg.MySQLInstances {
-		sourceIDs = append(sourceIDs, inst.SourceID)
-	}
-	sourceCfgs := s.getSourceConfigs(sourceIDs)
+	sourceCfgs := s.getSourceConfigs(cfg.MySQLInstances)
 	dbConfigs := make(map[string]dbconfig.DBConfig, len(sourceCfgs))
 	for _, sourceCfg := range sourceCfgs {
 		dbConfigs[sourceCfg.SourceID] = sourceCfg.From
@@ -1699,39 +1679,6 @@ func (s *Server) generateSubTask(
 		}
 	}
 	return cfg, stCfgs, nil
-}
-
-func (s *Server) generateSubTasksForCheck(stCfgs []*config.SubTaskConfig) ([]*config.SubTaskConfig, error) {
-	sourceIDs := make([]string, 0, len(stCfgs))
-	for _, stCfg := range stCfgs {
-		sourceIDs = append(sourceIDs, stCfg.SourceID)
-	}
-
-	sourceCfgs := s.getSourceConfigs(sourceIDs)
-	stCfgsForCheck := make([]*config.SubTaskConfig, 0, len(stCfgs))
-	for i, stCfg := range stCfgs {
-		stCfgForCheck, err := stCfg.Clone()
-		if err != nil {
-			return nil, err
-		}
-		stCfgsForCheck = append(stCfgsForCheck, stCfgForCheck)
-		if sourceCfg, ok := sourceCfgs[stCfgForCheck.SourceID]; ok {
-			stCfgsForCheck[i].Flavor = sourceCfg.Flavor
-			stCfgsForCheck[i].ServerID = sourceCfg.ServerID
-			stCfgsForCheck[i].EnableGTID = sourceCfg.EnableGTID
-
-			if sourceCfg.EnableRelay {
-				stCfgsForCheck[i].UseRelay = true
-				continue // skip the following check
-			}
-		}
-		workers, err := s.scheduler.GetRelayWorkers(stCfgForCheck.SourceID)
-		if err != nil {
-			return nil, err
-		}
-		stCfgsForCheck[i].UseRelay = len(workers) > 0
-	}
-	return stCfgsForCheck, nil
 }
 
 func setUseTLS(tlsCfg *security.Security) {
@@ -2470,7 +2417,7 @@ func (s *Server) GetCfg(ctx context.Context, req *pb.GetCfgRequest) (*pb.GetCfgR
 			return resp2, nil
 		}
 		toDBCfg := config.GetTargetDBCfgFromOpenAPITask(task)
-		if adjustDBErr := AdjustTargetDBSessionCfg(ctx, toDBCfg); adjustDBErr != nil {
+		if adjustDBErr := AdjustTargetDB(ctx, toDBCfg); adjustDBErr != nil {
 			if adjustDBErr != nil {
 				resp2.Msg = adjustDBErr.Error()
 				// nolint:nilerr
@@ -3217,183 +3164,4 @@ func genValidationWorkerErrorResp(req *workerrpc.Request, err error, logMsg, wor
 	default:
 		return nil
 	}
-}
-
-func (s *Server) UpdateValidation(ctx context.Context, req *pb.UpdateValidationRequest) (*pb.UpdateValidationResponse, error) {
-	var (
-		resp2 *pb.UpdateValidationResponse
-		err   error
-	)
-	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
-	if shouldRet {
-		return resp2, err
-	}
-	resp := &pb.UpdateValidationResponse{
-		Result: false,
-	}
-	subTaskCfgs := s.scheduler.GetSubTaskCfgsByTaskAndSource(req.TaskName, req.Sources)
-	if len(subTaskCfgs) == 0 {
-		if len(req.Sources) > 0 {
-			resp.Msg = fmt.Sprintf("cannot get subtask by task name `%s` and sources `%v`",
-				req.TaskName, req.Sources)
-		} else {
-			resp.Msg = fmt.Sprintf("cannot get subtask by task name `%s`", req.TaskName)
-		}
-		return resp, nil
-	}
-
-	workerReq := workerrpc.Request{
-		Type: workerrpc.CmdUpdateValidation,
-		UpdateValidation: &pb.UpdateValidationWorkerRequest{
-			TaskName:   req.TaskName,
-			BinlogPos:  req.BinlogPos,
-			BinlogGTID: req.BinlogGTID,
-		},
-	}
-
-	sourcesLen := 0
-	for _, subTaskCfg := range subTaskCfgs {
-		sourcesLen += len(subTaskCfg)
-	}
-	workerRespCh := make(chan *pb.CommonWorkerResponse, sourcesLen)
-	var wg sync.WaitGroup
-	for _, subTaskCfg := range subTaskCfgs {
-		for sourceID := range subTaskCfg {
-			wg.Add(1)
-			go func(source string) {
-				defer wg.Done()
-				sourceCfg := s.scheduler.GetSourceCfgByID(source)
-				// can't directly use subtaskCfg here, because it will be overwritten by sourceCfg
-				if sourceCfg.EnableGTID {
-					if len(req.BinlogGTID) == 0 {
-						workerRespCh <- errorCommonWorkerResponse(fmt.Sprintf("source %s didn't specify cutover-binlog-gtid when enableGTID is true", source), source, "")
-						return
-					}
-				} else if len(req.BinlogPos) == 0 {
-					workerRespCh <- errorCommonWorkerResponse(fmt.Sprintf("source %s didn't specify cutover-binlog-pos when enableGTID is false", source), source, "")
-					return
-				}
-				worker := s.scheduler.GetWorkerBySource(source)
-				if worker == nil {
-					workerRespCh <- errorCommonWorkerResponse(fmt.Sprintf("source %s relevant worker-client not found", source), source, "")
-					return
-				}
-				var workerResp *pb.CommonWorkerResponse
-				resp, err := worker.SendRequest(ctx, &workerReq, s.cfg.RPCTimeout)
-				if err != nil {
-					workerResp = errorCommonWorkerResponse(err.Error(), source, worker.BaseInfo().Name)
-				} else {
-					workerResp = resp.UpdateValidation
-				}
-				workerResp.Source = source
-				workerRespCh <- workerResp
-			}(sourceID)
-		}
-	}
-	wg.Wait()
-
-	workerResps := make([]*pb.CommonWorkerResponse, 0, sourcesLen)
-	for len(workerRespCh) > 0 {
-		workerResp := <-workerRespCh
-		workerResps = append(workerResps, workerResp)
-	}
-
-	sort.Slice(workerResps, func(i, j int) bool {
-		return workerResps[i].Source < workerResps[j].Source
-	})
-
-	return &pb.UpdateValidationResponse{
-		Result:  true,
-		Sources: workerResps,
-	}, nil
-}
-
-func (s *Server) Encrypt(ctx context.Context, req *pb.EncryptRequest) (*pb.EncryptResponse, error) {
-	var (
-		resp2 *pb.EncryptResponse
-		err   error
-	)
-	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
-	if shouldRet {
-		return resp2, err
-	}
-	ciphertext, err := utils.Encrypt(req.Plaintext)
-	if err != nil {
-		// nolint:nilerr
-		return &pb.EncryptResponse{
-			Result: false,
-			Msg:    err.Error(),
-		}, nil
-	}
-	return &pb.EncryptResponse{
-		Result:     true,
-		Ciphertext: ciphertext,
-	}, nil
-}
-
-func (s *Server) ListTaskConfigs(ctx context.Context, req *emptypb.Empty) (*pb.ListTaskConfigsResponse, error) {
-	var (
-		resp2 *pb.ListTaskConfigsResponse
-		err   error
-	)
-	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
-	if shouldRet {
-		return resp2, err
-	}
-
-	subtaskCfgsOfTasks := s.scheduler.GetSubTaskCfgs()
-	contents := make(map[string]string, len(subtaskCfgsOfTasks))
-	for taskName, subtaskCfgMap := range subtaskCfgsOfTasks {
-		subtaskCfgs := make([]*config.SubTaskConfig, 0, len(subtaskCfgMap))
-		for sourceID := range subtaskCfgMap {
-			subTaskConfig := subtaskCfgMap[sourceID]
-			subtaskCfgs = append(subtaskCfgs, &subTaskConfig)
-		}
-		sort.Slice(subtaskCfgs, func(i, j int) bool {
-			return subtaskCfgs[i].SourceID < subtaskCfgs[j].SourceID
-		})
-		taskCfg := config.SubTaskConfigsToTaskConfig(subtaskCfgs...)
-		content, err := taskCfg.YamlForDowngrade()
-		if err != nil {
-			// nolint:nilerr
-			return &pb.ListTaskConfigsResponse{
-				Result: false,
-				Msg:    fmt.Sprintf("failed to marshal task config of %s: %s", taskName, err.Error()),
-			}, nil
-		}
-		contents[taskName] = content
-	}
-	return &pb.ListTaskConfigsResponse{
-		Result:      true,
-		TaskConfigs: contents,
-	}, nil
-}
-
-func (s *Server) ListSourceConfigs(ctx context.Context, req *emptypb.Empty) (*pb.ListSourceConfigsResponse, error) {
-	var (
-		resp2 *pb.ListSourceConfigsResponse
-		err   error
-	)
-	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
-	if shouldRet {
-		return resp2, err
-	}
-
-	sourceCfgs := s.scheduler.GetSourceCfgs()
-	contents := make(map[string]string, len(sourceCfgs))
-	for sourceID, cfg := range sourceCfgs {
-		yamlContent, err := cfg.YamlForDowngrade()
-		if err != nil {
-			// nolint:nilerr
-			return &pb.ListSourceConfigsResponse{
-				Result: false,
-				Msg:    fmt.Sprintf("fail to marshal source config of %s: %s", sourceID, err.Error()),
-			}, nil
-		}
-		contents[sourceID] = yamlContent
-	}
-	return &pb.ListSourceConfigsResponse{
-		Result:        true,
-		SourceConfigs: contents,
-	}, nil
 }

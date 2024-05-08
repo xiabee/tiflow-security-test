@@ -16,7 +16,6 @@ package owner
 import (
 	"time"
 
-	"github.com/pingcap/tiflow/cdc/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -57,7 +56,7 @@ var (
 			Subsystem: "owner",
 			Name:      "checkpoint_lag_histogram",
 			Help:      "checkpoint lag histogram of changefeeds",
-			Buckets:   metrics.LagBucket(),
+			Buckets:   lagBucket(),
 		}, []string{"namespace", "changefeed"})
 
 	changefeedResolvedTsGauge = prometheus.NewGaugeVec(
@@ -81,7 +80,7 @@ var (
 			Subsystem: "owner",
 			Name:      "resolved_ts_lag_histogram",
 			Help:      "resolved_ts lag histogram of changefeeds",
-			Buckets:   metrics.LagBucket(),
+			Buckets:   lagBucket(),
 		}, []string{"namespace", "changefeed"})
 
 	ownershipCounter = prometheus.NewCounter(
@@ -114,13 +113,13 @@ var (
 			Help:      "Bucketed histogram of owner close changefeed reactor time (s).",
 			Buckets:   prometheus.ExponentialBuckets(0.01 /* 10 ms */, 2, 18),
 		})
-	changefeedStartTimeGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
+	changefeedIgnoredDDLEventCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
 			Namespace: "ticdc",
 			Subsystem: "owner",
-			Name:      "changefeed_start_time",
-			Help:      "The start time of changefeeds",
-		}, []string{"namespace", "changefeed", "type"})
+			Name:      "ignored_ddl_event_count",
+			Help:      "The total count of ddl events that are ignored in changefeed.",
+		}, []string{"namespace", "changefeed"})
 )
 
 const (
@@ -150,5 +149,16 @@ func InitMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(changefeedStatusGauge)
 	registry.MustRegister(changefeedTickDuration)
 	registry.MustRegister(changefeedCloseDuration)
-	registry.MustRegister(changefeedStartTimeGauge)
+	registry.MustRegister(changefeedIgnoredDDLEventCounter)
+}
+
+// lagBucket returns the lag buckets for prometheus metric
+// 10 seconds is the reasonable LAG for most cases,
+// for prometheus histogram_quantile func,
+// we use small bucket distance to do accurate approximation
+func lagBucket() []float64 {
+	buckets := prometheus.LinearBuckets(0.5, 0.5, 20)
+	buckets = append(buckets, prometheus.LinearBuckets(11, 1, 10)...)
+	buckets = append(buckets, prometheus.ExponentialBuckets(40, 2, 10)...)
+	return buckets
 }

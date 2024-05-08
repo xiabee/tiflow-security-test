@@ -22,8 +22,6 @@ import (
 )
 
 func TestEtcdKey(t *testing.T) {
-	t.Parallel()
-
 	testcases := []struct {
 		key      string
 		expected *CDCKey
@@ -124,8 +122,6 @@ func TestEtcdKey(t *testing.T) {
 }
 
 func TestEtcdKeyParseError(t *testing.T) {
-	t.Parallel()
-
 	testCases := []struct {
 		key   string
 		error bool

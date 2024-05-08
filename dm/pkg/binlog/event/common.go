@@ -19,7 +19,6 @@ import (
 
 	gmysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
-	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 )
 
@@ -163,11 +162,7 @@ func GTIDIncrease(flavor string, gSet gmysql.GTIDSet) (gmysql.GTIDSet, error) {
 		mariaGTID := singleGTID.(*gmysql.MariadbGTID)
 		mariaGTID.SequenceNumber++
 		gtidSet := new(gmysql.MariadbGTIDSet)
-		gtidSet.Sets = map[uint32]map[uint32]*gmysql.MariadbGTID{
-			mariaGTID.DomainID: {
-				mariaGTID.ServerID: mariaGTID,
-			},
-		}
+		gtidSet.Sets = map[uint32]*gmysql.MariadbGTID{mariaGTID.DomainID: mariaGTID}
 		clone = gtidSet
 	default:
 		err = terror.ErrBinlogGTIDSetNotValid.Generate(gSet, flavor)
@@ -177,7 +172,7 @@ func GTIDIncrease(flavor string, gSet gmysql.GTIDSet) (gmysql.GTIDSet, error) {
 
 // verifySingleGTID verifies gSet whether only containing a single valid GTID.
 func verifySingleGTID(flavor string, gSet gmysql.GTIDSet) (interface{}, error) {
-	if gtid.CheckGTIDSetEmpty(gSet) {
+	if gSet == nil || len(gSet.String()) == 0 {
 		return nil, terror.ErrBinlogEmptyGTID.Generate()
 	}
 
@@ -207,15 +202,11 @@ func verifySingleGTID(flavor string, gSet gmysql.GTIDSet) (interface{}, error) {
 		if !ok {
 			return nil, terror.ErrBinlogGTIDMariaDBNotValid.Generate(gSet)
 		}
-		gtidCount := 0
-		var mariaGTID *gmysql.MariadbGTID
-		for _, set := range mariaGTIDs.Sets {
-			gtidCount += len(set)
-			for _, mariaGTID = range set {
-			}
+		if len(mariaGTIDs.Sets) != 1 {
+			return nil, terror.ErrBinlogOnlyOneGTIDSupport.Generate(len(mariaGTIDs.Sets), gSet)
 		}
-		if gtidCount != 1 {
-			return nil, terror.ErrBinlogOnlyOneGTIDSupport.Generate(gtidCount, gSet)
+		var mariaGTID *gmysql.MariadbGTID
+		for _, mariaGTID = range mariaGTIDs.Sets {
 		}
 		return mariaGTID, nil
 	default:

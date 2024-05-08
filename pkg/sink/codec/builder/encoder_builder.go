@@ -24,36 +24,31 @@ import (
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/codec/craft"
 	"github.com/pingcap/tiflow/pkg/sink/codec/csv"
-	"github.com/pingcap/tiflow/pkg/sink/codec/debezium"
 	"github.com/pingcap/tiflow/pkg/sink/codec/maxwell"
 	"github.com/pingcap/tiflow/pkg/sink/codec/open"
-	"github.com/pingcap/tiflow/pkg/sink/codec/simple"
 )
 
 // NewRowEventEncoderBuilder returns an RowEventEncoderBuilder
 func NewRowEventEncoderBuilder(
 	ctx context.Context,
-	cfg *common.Config,
+	c *common.Config,
 ) (codec.RowEventEncoderBuilder, error) {
-	switch cfg.Protocol {
+	switch c.Protocol {
 	case config.ProtocolDefault, config.ProtocolOpen:
-		return open.NewBatchEncoderBuilder(ctx, cfg)
+		return open.NewBatchEncoderBuilder(c), nil
 	case config.ProtocolCanal:
-		return canal.NewBatchEncoderBuilder(cfg), nil
+		return canal.NewBatchEncoderBuilder(c), nil
 	case config.ProtocolAvro:
-		return avro.NewBatchEncoderBuilder(ctx, cfg)
+		return avro.NewBatchEncoderBuilder(ctx, c)
 	case config.ProtocolMaxwell:
-		return maxwell.NewBatchEncoderBuilder(cfg), nil
+		return maxwell.NewBatchEncoderBuilder(c), nil
 	case config.ProtocolCanalJSON:
-		return canal.NewJSONRowEventEncoderBuilder(ctx, cfg)
+		return canal.NewJSONRowEventEncoderBuilder(c), nil
 	case config.ProtocolCraft:
-		return craft.NewBatchEncoderBuilder(cfg), nil
-	case config.ProtocolDebezium:
-		return debezium.NewBatchEncoderBuilder(cfg, config.GetGlobalServerConfig().ClusterID), nil
-	case config.ProtocolSimple:
-		return simple.NewBuilder(ctx, cfg)
+		return craft.NewBatchEncoderBuilder(c), nil
+
 	default:
-		return nil, cerror.ErrSinkUnknownProtocol.GenWithStackByArgs(cfg.Protocol)
+		return nil, cerror.ErrSinkUnknownProtocol.GenWithStackByArgs(c.Protocol)
 	}
 }
 

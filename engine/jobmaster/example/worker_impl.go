@@ -83,7 +83,7 @@ func (w *exampleWorker) Tick(ctx context.Context) error {
 		return err
 	}
 
-	file, err := storage.BrExternalStorage().Create(ctx, strconv.Itoa(count)+".txt", nil)
+	file, err := storage.BrExternalStorage().Create(ctx, strconv.Itoa(count)+".txt")
 	if err != nil {
 		return err
 	}

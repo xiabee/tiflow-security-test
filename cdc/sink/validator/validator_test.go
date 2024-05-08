@@ -17,9 +17,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,26 +99,26 @@ func TestValidateSink(t *testing.T) {
 
 	// test sink uri error
 	sinkURI := "mysql://root:111@127.0.0.1:3306/"
-	err := Validate(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicateConfig, nil)
+	err := Validate(ctx, sinkURI, replicateConfig)
 	require.NotNil(t, err)
 	require.Contains(t, err.Error(), "fail to open MySQL connection")
 
 	// test sink uri right
 	sinkURI = "blackhole://"
-	err = Validate(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicateConfig, nil)
+	err = Validate(ctx, sinkURI, replicateConfig)
 	require.Nil(t, err)
 
 	// test bdr mode error
-	replicateConfig.BDRMode = util.AddressOf(true)
+	replicateConfig.BDRMode = true
 	sinkURI = "blackhole://"
-	err = Validate(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicateConfig, nil)
+	err = Validate(ctx, sinkURI, replicateConfig)
 	require.NotNil(t, err)
 	require.Contains(t, err.Error(), "sink uri scheme is not supported in BDR mode")
 
 	// test sink-scheme/syncpoint error
-	replicateConfig.EnableSyncPoint = util.AddressOf(true)
+	replicateConfig.EnableSyncPoint = true
 	sinkURI = "kafka://"
-	err = Validate(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicateConfig, nil)
+	err = Validate(ctx, sinkURI, replicateConfig)
 	require.NotNil(t, err)
 	require.Contains(
 		t, err.Error(),

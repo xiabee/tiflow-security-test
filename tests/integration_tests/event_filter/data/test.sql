@@ -38,8 +38,8 @@ WHERE id = 4;
 /* ignore by event type*/
 DROP TABLE t1;
 
-/* all event of t_normal will be replicated to downstream */
-CREATE TABLE t_normal (
+/* all event of t2 will be replicated to downstream */
+CREATE TABLE t2 (
                     id INT,
                     name varchar(128),
                     country char(32),
@@ -48,45 +48,16 @@ CREATE TABLE t_normal (
                     gender char(32),
                     PRIMARY KEY (id)
 );
-INSERT INTO t_normal
+INSERT INTO t2
 VALUES (1, 'guagua', "china", "chengdu", 1, "female");
 
-INSERT INTO t_normal
+INSERT INTO t2
 VALUES (2, 'huahua', "china", "chengdu", 2, "female");
 
-INSERT INTO t_normal
+INSERT INTO t2
 VALUES (3, 'xigua', "japan", "tokyo", 2, "male");
 
-INSERT INTO t_normal
+INSERT INTO t2
 VALUES (4, 'yuko', "japan", "nagoya", 33, "female");
 
-CREATE TABLE t_truncate (
-                    id INT,
-                    name varchar(128),
-                    PRIMARY KEY (id)
-);
-CREATE TABLE t_alter
-(
-    id          INT AUTO_INCREMENT,
-    t_boolean   BOOLEAN,
-    t_bigint    DECIMAL(38, 19),
-    t_double    DOUBLE,
-    t_decimal   DECIMAL(38, 19),
-    t_bit       BIT(64),
-    t_date      DATE,
-    t_datetime  DATETIME,
-    t_timestamp TIMESTAMP NULL,
-    t_time      TIME,
-    t_year      YEAR,
-    t_char      CHAR,
-    t_varchar   VARCHAR(10),
-    t_blob      BLOB,
-    t_text      TEXT,
-    t_enum      ENUM ('enum1', 'enum2', 'enum3'),
-    t_set       SET ('a', 'b', 'c'),
-    t_json      JSON,
-    PRIMARY KEY (id)
-) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8
-  COLLATE = utf8_bin;
-  
+create table finish_mark(id int primary key);

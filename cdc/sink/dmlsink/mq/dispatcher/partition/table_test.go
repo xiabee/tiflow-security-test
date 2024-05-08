@@ -28,73 +28,57 @@ func TestTableDispatcher(t *testing.T) {
 		expectPartition int32
 	}{
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t1",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
 			},
 			CommitTs: 1,
 		}, expectPartition: 15},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t1",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
 			},
 			CommitTs: 2,
 		}, expectPartition: 15},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t1",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t1",
 			},
 			CommitTs: 3,
 		}, expectPartition: 15},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			CommitTs: 1,
 		}, expectPartition: 5},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			CommitTs: 2,
 		}, expectPartition: 5},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t2",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t2",
 			},
 			CommitTs: 3,
 		}, expectPartition: 5},
 		{row: &model.RowChangedEvent{
-			TableInfo: &model.TableInfo{
-				TableName: model.TableName{
-					Schema: "test",
-					Table:  "t3",
-				},
+			Table: &model.TableName{
+				Schema: "test",
+				Table:  "t3",
 			},
 			CommitTs: 3,
 		}, expectPartition: 3},
 	}
 	p := NewTableDispatcher()
 	for _, tc := range testCases {
-		index, _, err := p.DispatchRowChangedEvent(tc.row, 16)
-		require.NoError(t, err)
-		require.Equal(t, tc.expectPartition, index)
+		require.Equal(t, tc.expectPartition, p.DispatchRowChangedEvent(tc.row, 16))
 	}
 }

@@ -27,19 +27,7 @@ var PullerEventCounter = prometheus.NewCounterVec(
 		Help:      "The number of events received by a puller",
 	}, []string{"namespace", "changefeed", "type"})
 
-var pullerQueueDuration = prometheus.NewHistogramVec(
-	prometheus.HistogramOpts{
-		Namespace: "ticdc",
-		Subsystem: "puller",
-		Name:      "queue_duration",
-		Help:      "time of queue in puller",
-		Buckets:   prometheus.ExponentialBuckets(1, 2, 20),
-	},
-	// types : kv, resolved.
-	[]string{"namespace", "changefeed", "type"})
-
 // InitMetrics registers all metrics in this file
 func InitMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(PullerEventCounter)
-	registry.MustRegister(pullerQueueDuration)
 }

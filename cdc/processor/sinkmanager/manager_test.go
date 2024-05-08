@@ -15,7 +15,6 @@ package sinkmanager
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -23,31 +22,28 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
 
 func getChangefeedInfo() *model.ChangeFeedInfo {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Consistent.MemoryUsage.MemoryQuotaPercentage = 75
 	return &model.ChangeFeedInfo{
 		Error:   nil,
 		SinkURI: "blackhole://",
-		Config:  replicaConfig,
+		Config:  config.GetDefaultReplicaConfig(),
 	}
 }
 
 // nolint:unparam
 // It is ok to use the same tableID in test.
 func addTableAndAddEventsToSortEngine(
-	_ *testing.T,
-	engine sorter.SortEngine,
+	t *testing.T,
+	engine engine.SortEngine,
 	span tablepb.Span,
-) uint64 {
+) {
 	engine.AddTable(span, 0)
 	events := []*model.PolymorphicEvent{
 		{
@@ -97,22 +93,10 @@ func addTableAndAddEventsToSortEngine(
 				CRTs:   4,
 			},
 		},
-		{
-			CRTs: 6,
-			RawKV: &model.RawKVEntry{
-				OpType: model.OpTypeResolved,
-				CRTs:   6,
-			},
-		},
 	}
-	size := uint64(0)
 	for _, event := range events {
-		if event.Row != nil {
-			size += uint64(event.Row.ApproximateBytes())
-		}
 		engine.Add(span, event)
 	}
-	return size
 }
 
 func TestAddTable(t *testing.T) {
@@ -162,13 +146,13 @@ func TestRemoveTable(t *testing.T) {
 	require.NotNil(t, tableSink)
 	err := manager.StartTable(span, 0)
 	require.NoError(t, err)
-	totalEventSize := addTableAndAddEventsToSortEngine(t, e, span)
+	addTableAndAddEventsToSortEngine(t, e, span)
 	manager.UpdateBarrierTs(4, nil)
 	manager.UpdateReceivedSorterResolvedTs(span, 5)
 	manager.schemaStorage.AdvanceResolvedTs(5)
 	// Check all the events are sent to sink and record the memory usage.
 	require.Eventually(t, func() bool {
-		return manager.sinkMemQuota.GetUsedBytes() == totalEventSize
+		return manager.sinkMemQuota.GetUsedBytes() == 904
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// Call this function times to test the idempotence.
@@ -190,6 +174,8 @@ func TestRemoveTable(t *testing.T) {
 }
 
 func TestGenerateTableSinkTaskWithBarrierTs(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	changefeedInfo := getChangefeedInfo()
 	manager, _, e := CreateManagerWithMemEngine(t, ctx, model.DefaultChangeFeedID("1"),
@@ -209,18 +195,10 @@ func TestGenerateTableSinkTaskWithBarrierTs(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		s := manager.GetTableStats(span)
-		return s.CheckpointTs == 4 && s.LastSyncedTs == 4
-	}, 5*time.Second, 10*time.Millisecond)
-
-	manager.UpdateBarrierTs(6, nil)
-	manager.UpdateReceivedSorterResolvedTs(span, 6)
-	manager.schemaStorage.AdvanceResolvedTs(6)
-	require.Eventually(t, func() bool {
-		s := manager.GetTableStats(span)
-		log.Info("checkpoint ts", zap.Uint64("checkpointTs", s.CheckpointTs), zap.Uint64("lastSyncedTs", s.LastSyncedTs))
-		fmt.Printf("debug checkpoint ts %d, lastSyncedTs %d\n", s.CheckpointTs, s.LastSyncedTs)
-		return s.CheckpointTs == 6 && s.LastSyncedTs == 4
+		tableSink, ok := manager.tableSinks.Load(span)
+		require.True(t, ok)
+		checkpointTS := tableSink.(*tableSinkWrapper).getCheckpointTs()
+		return checkpointTS.ResolvedMark() == 4
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
@@ -248,8 +226,10 @@ func TestGenerateTableSinkTaskWithResolvedTs(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
-		s := manager.GetTableStats(span)
-		return s.CheckpointTs == 3 && s.LastSyncedTs == 3
+		tableSink, ok := manager.tableSinks.Load(span)
+		require.True(t, ok)
+		checkpointTS := tableSink.(*tableSinkWrapper).getCheckpointTs()
+		return checkpointTS.ResolvedMark() == 3
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
@@ -277,7 +257,7 @@ func TestGetTableStatsToReleaseMemQuota(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		s := manager.GetTableStats(span)
-		return manager.sinkMemQuota.GetUsedBytes() == 0 && s.CheckpointTs == 4 && s.LastSyncedTs == 4
+		return manager.sinkMemQuota.GetUsedBytes() == 0 && s.CheckpointTs == 4
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
@@ -391,46 +371,4 @@ func TestSinkManagerNeedsStuckCheck(t *testing.T) {
 	}()
 
 	require.False(t, manager.needsStuckCheck())
-}
-
-func TestSinkManagerRestartTableSinks(t *testing.T) {
-	failpoint.Enable("github.com/pingcap/tiflow/cdc/processor/sinkmanager/SinkWorkerTaskHandlePause", "return")
-	defer failpoint.Disable("github.com/pingcap/tiflow/cdc/processor/sinkmanager/SinkWorkerTaskHandlePause")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 16)
-	changefeedInfo := getChangefeedInfo()
-	manager, _, _ := CreateManagerWithMemEngine(t, ctx, model.ChangeFeedID{}, changefeedInfo, errCh)
-	defer func() {
-		cancel()
-		manager.Close()
-	}()
-
-	span := tablepb.Span{TableID: 1}
-	manager.AddTable(span, 1, 100)
-	require.Nil(t, manager.StartTable(span, 2))
-	table, exists := manager.tableSinks.Load(span)
-	require.True(t, exists)
-
-	table.(*tableSinkWrapper).updateReceivedSorterResolvedTs(4)
-	table.(*tableSinkWrapper).updateBarrierTs(4)
-	select {
-	case task := <-manager.sinkTaskChan:
-		require.Equal(t, sorter.Position{StartTs: 0, CommitTs: 3}, task.lowerBound)
-		task.callback(sorter.Position{StartTs: 3, CommitTs: 4})
-	case <-time.After(2 * time.Second):
-		panic("should always get a sink task")
-	}
-
-	// With the failpoint blackhole/WriteEventsFail enabled, sink manager should restarts
-	// the table sink at its checkpoint.
-	failpoint.Enable("github.com/pingcap/tiflow/cdc/sink/dmlsink/blackhole/WriteEventsFail", "1*return")
-	defer failpoint.Disable("github.com/pingcap/tiflow/cdc/sink/dmlsink/blackhole/WriteEventsFail")
-	select {
-	case task := <-manager.sinkTaskChan:
-		require.Equal(t, sorter.Position{StartTs: 2, CommitTs: 2}, task.lowerBound)
-		task.callback(sorter.Position{StartTs: 3, CommitTs: 4})
-	case <-time.After(2 * time.Second):
-		panic("should always get a sink task")
-	}
 }

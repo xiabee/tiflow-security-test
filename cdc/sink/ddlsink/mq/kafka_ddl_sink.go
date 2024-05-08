@@ -20,7 +20,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/sink/ddlsink/mq/ddlproducer"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher"
 	"github.com/pingcap/tiflow/cdc/sink/util"
@@ -28,14 +28,12 @@ import (
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec/builder"
 	"github.com/pingcap/tiflow/pkg/sink/kafka"
-	tiflowutil "github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 )
 
 // NewKafkaDDLSink will verify the config and create a Kafka DDL Sink.
 func NewKafkaDDLSink(
 	ctx context.Context,
-	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
 	factoryCreator kafka.FactoryCreator,
@@ -47,11 +45,12 @@ func NewKafkaDDLSink(
 	}
 
 	options := kafka.NewOptions()
-	if err := options.Apply(changefeedID, sinkURI, replicaConfig); err != nil {
+	if err := options.Apply(ctx, sinkURI, replicaConfig); err != nil {
 		return nil, cerror.WrapError(cerror.ErrKafkaInvalidConfig, err)
 	}
 
-	factory, err := factoryCreator(options, changefeedID)
+	changefeed := contextutil.ChangefeedIDFromCtx(ctx)
+	factory, err := factoryCreator(options, changefeed)
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrKafkaNewProducer, err)
 	}
@@ -72,14 +71,13 @@ func NewKafkaDDLSink(
 		return nil, cerror.WrapError(cerror.ErrKafkaNewProducer, err)
 	}
 
-	protocol, err := util.GetProtocol(tiflowutil.GetOrZero(replicaConfig.Sink.Protocol))
+	protocol, err := util.GetProtocol(replicaConfig.Sink.Protocol)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	topicManager, err := util.GetTopicManagerAndTryCreateTopic(
 		ctx,
-		changefeedID,
 		topic,
 		options.DeriveTopicConfig(),
 		adminClient,
@@ -88,31 +86,31 @@ func NewKafkaDDLSink(
 		return nil, errors.Trace(err)
 	}
 
-	eventRouter, err := dispatcher.NewEventRouter(replicaConfig, protocol, topic, sinkURI.Scheme)
+	eventRouter, err := dispatcher.NewEventRouter(replicaConfig, topic)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	encoderConfig, err := util.GetEncoderConfig(changefeedID, sinkURI, protocol, replicaConfig, options.MaxMessageBytes)
+	encoderConfig, err := util.GetEncoderConfig(sinkURI, protocol, replicaConfig,
+		options.MaxMessageBytes)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-
 	encoderBuilder, err := builder.NewRowEventEncoderBuilder(ctx, encoderConfig)
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrKafkaInvalidConfig, err)
 	}
 
 	start := time.Now()
-	log.Info("Try to create a DDL sink producer",
-		zap.String("changefeed", changefeedID.String()))
+
+	log.Info("Try to create a DDL sink producer", zap.Any("options", options))
 	syncProducer, err := factory.SyncProducer(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	ddlProducer := producerCreator(ctx, changefeedID, syncProducer)
-	s := newDDLSink(ctx, changefeedID, ddlProducer, adminClient, topicManager, eventRouter, encoderBuilder, protocol)
-	log.Info("DDL sink producer client created", zap.Duration("duration", time.Since(start)))
+	p := producerCreator(ctx, changefeed, syncProducer)
+	s := newDDLSink(ctx, changefeed, p, adminClient, topicManager, eventRouter, encoderBuilder, protocol)
+	log.Info("DDL sink created", zap.Duration("duration", time.Since(start)))
 	return s, nil
 }

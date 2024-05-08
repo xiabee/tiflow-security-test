@@ -17,21 +17,18 @@ import (
 	"context"
 	"time"
 
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 // NewStatistics creates a statistics
-func NewStatistics(ctx context.Context,
-	changefeed model.ChangeFeedID,
-	sinkType sink.Type,
-) *Statistics {
+func NewStatistics(ctx context.Context, sinkType sink.Type) *Statistics {
 	statistics := &Statistics{
 		sinkType:     sinkType,
-		captureAddr:  config.GetGlobalServerConfig().AdvertiseAddr,
-		changefeedID: changefeed,
+		captureAddr:  contextutil.CaptureAddrFromCtx(ctx),
+		changefeedID: contextutil.ChangefeedIDFromCtx(ctx),
 	}
 
 	namespcae := statistics.changefeedID.Namespace
@@ -39,7 +36,6 @@ func NewStatistics(ctx context.Context,
 	s := sinkType.String()
 	statistics.metricExecDDLHis = ExecDDLHistogram.WithLabelValues(namespcae, changefeedID, s)
 	statistics.metricExecBatchHis = ExecBatchHistogram.WithLabelValues(namespcae, changefeedID, s)
-	statistics.metricTotalWriteBytesCnt = TotalWriteBytesCounter.WithLabelValues(namespcae, changefeedID, s)
 	statistics.metricRowSizeHis = LargeRowSizeHistogram.WithLabelValues(namespcae, changefeedID, s)
 	statistics.metricExecErrCnt = ExecutionErrorCounter.WithLabelValues(namespcae, changefeedID, s)
 	return statistics
@@ -56,8 +52,6 @@ type Statistics struct {
 	metricExecDDLHis prometheus.Observer
 	// Histogram for DML batch size.
 	metricExecBatchHis prometheus.Observer
-	// Counter for total bytes of DML.
-	metricTotalWriteBytesCnt prometheus.Counter
 	// Histogram for Row size.
 	metricRowSizeHis prometheus.Observer
 	// Counter for sink error.
@@ -76,14 +70,13 @@ func (b *Statistics) ObserveRows(rows ...*model.RowChangedEvent) {
 }
 
 // RecordBatchExecution stats batch executors which return (batchRowCount, error).
-func (b *Statistics) RecordBatchExecution(executor func() (int, int64, error)) error {
-	batchSize, batchWriteBytes, err := executor()
+func (b *Statistics) RecordBatchExecution(executor func() (int, error)) error {
+	batchSize, err := executor()
 	if err != nil {
 		b.metricExecErrCnt.Inc()
 		return err
 	}
 	b.metricExecBatchHis.Observe(float64(batchSize))
-	b.metricTotalWriteBytesCnt.Add(float64(batchWriteBytes))
 	return nil
 }
 

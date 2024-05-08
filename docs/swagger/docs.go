@@ -552,7 +552,7 @@ var doc = `{
         },
         "/api/v1/owner/resign": {
             "post": {
-                "description": "notify the current controller to resign",
+                "description": "notify the current owner to resign",
                 "consumes": [
                     "application/json"
                 ],
@@ -562,7 +562,7 @@ var doc = `{
                 "tags": [
                     "owner"
                 ],
-                "summary": "notify the ticdc cluster controller to resign",
+                "summary": "notify the owner to resign",
                 "responses": {
                     "202": {
                         "description": ""
@@ -762,12 +762,6 @@ var doc = `{
                         "description": "state",
                         "name": "state",
                         "in": "query"
-                    },
-                    {
-                        "type": "string",
-                        "description": "default",
-                        "name": "namespace",
-                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -855,12 +849,6 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "default",
-                        "name": "namespace",
-                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -904,12 +892,6 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "default",
-                        "name": "namespace",
-                        "in": "query"
                     },
                     {
                         "description": "changefeed config",
@@ -962,12 +944,6 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "default",
-                        "name": "namespace",
-                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -1013,12 +989,6 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "default",
-                        "name": "namespace",
-                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -1066,12 +1036,6 @@ var doc = `{
                         "required": true
                     },
                     {
-                        "type": "string",
-                        "description": "default",
-                        "name": "namespace",
-                        "in": "query"
-                    },
-                    {
                         "description": "resume config",
                         "name": "resumeConfig",
                         "in": "body",
@@ -1086,57 +1050,6 @@ var doc = `{
                         "description": "OK",
                         "schema": {
                             "$ref": "#/definitions/v2.EmptyResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/model.HTTPError"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/model.HTTPError"
-                        }
-                    }
-                }
-            }
-        },
-        "/api/v2/changefeeds/{changefeed_id}/synced": {
-            "get": {
-                "description": "get the synced status of a changefeed",
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "changefeed",
-                    "v2"
-                ],
-                "summary": "Get synced status",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "changefeed_id",
-                        "name": "changefeed_id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "default",
-                        "name": "namespace",
-                        "in": "query"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/v2.SyncedStatus"
                         }
                     },
                     "400": {
@@ -1230,7 +1143,7 @@ var doc = `{
         },
         "/api/v2/owner/resign": {
             "post": {
-                "description": "Notify the current controller to resign",
+                "description": "Notify the current owner to resign",
                 "consumes": [
                     "application/json"
                 ],
@@ -1241,7 +1154,7 @@ var doc = `{
                     "owner",
                     "v2"
                 ],
-                "summary": "Notify the controller to resign",
+                "summary": "Notify the owner to resign",
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -1321,12 +1234,6 @@ var doc = `{
                     },
                     {
                         "type": "string",
-                        "description": "default",
-                        "name": "namespace",
-                        "in": "query"
-                    },
-                    {
-                        "type": "string",
                         "description": "capture ID",
                         "name": "capture_id",
                         "in": "path",
@@ -1401,7 +1308,7 @@ var doc = `{
                     "type": "string"
                 },
                 "delimiter": {
-                    "description": "delimiter between fields, it can be 1 character or at most 2 characters\nIt can not be CR or LF or contains CR or LF.\nIt should have exclusive characters with quote.",
+                    "description": "delimiter between fields",
                     "type": "string"
                 },
                 "include-commit-ts": {
@@ -1412,14 +1319,6 @@ var doc = `{
                     "description": "representation of null values",
                     "type": "string"
                 },
-                "output-handle-key": {
-                    "description": "output handle key",
-                    "type": "boolean"
-                },
-                "output-old-value": {
-                    "description": "output old value",
-                    "type": "boolean"
-                },
                 "quote": {
                     "description": "quoting character",
                     "type": "string"
@@ -1429,23 +1328,11 @@ var doc = `{
         "config.CloudStorageConfig": {
             "type": "object",
             "properties": {
-                "file-cleanup-cron-spec": {
-                    "type": "string"
-                },
-                "file-expiration-days": {
-                    "type": "integer"
-                },
                 "file-size": {
-                    "type": "integer"
-                },
-                "flush-concurrency": {
                     "type": "integer"
                 },
                 "flush-interval": {
                     "type": "string"
-                },
-                "output-column-id": {
-                    "type": "boolean"
                 },
                 "worker-count": {
                     "type": "integer"
@@ -1466,9 +1353,6 @@ var doc = `{
                 },
                 "enable-tidb-extension": {
                     "type": "boolean"
-                },
-                "encoding-format": {
-                    "type": "string"
                 },
                 "max-batch-size": {
                     "type": "integer"
@@ -1492,30 +1376,11 @@ var doc = `{
                 }
             }
         },
-        "config.DebeziumConfig": {
-            "type": "object",
-            "properties": {
-                "output-old-value": {
-                    "type": "boolean"
-                }
-            }
-        },
         "config.DispatchRule": {
             "type": "object",
             "properties": {
-                "columns": {
-                    "description": "Columns are set when using columns dispatcher.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
                 "dispatcher": {
                     "description": "Deprecated, please use PartitionRule.",
-                    "type": "string"
-                },
-                "index": {
-                    "description": "IndexName is set when using index-value dispatcher with specified index.",
                     "type": "string"
                 },
                 "matcher": {
@@ -1529,30 +1394,6 @@ var doc = `{
                     "type": "string"
                 },
                 "topic": {
-                    "type": "string"
-                }
-            }
-        },
-        "config.GlueSchemaRegistryConfig": {
-            "type": "object",
-            "properties": {
-                "access-key": {
-                    "description": "AccessKey of the schema registry",
-                    "type": "string"
-                },
-                "region": {
-                    "description": "Region of the schema registry",
-                    "type": "string"
-                },
-                "registry-name": {
-                    "description": "Name of the schema registry",
-                    "type": "string"
-                },
-                "secret-access-key": {
-                    "description": "SecretAccessKey of the schema registry",
-                    "type": "string"
-                },
-                "token": {
                     "type": "string"
                 }
             }
@@ -1580,9 +1421,6 @@ var doc = `{
                 },
                 "enable-tls": {
                     "type": "boolean"
-                },
-                "glue-schema-registry-config": {
-                    "$ref": "#/definitions/config.GlueSchemaRegistryConfig"
                 },
                 "insecure-skip-verify": {
                     "type": "boolean"
@@ -1676,12 +1514,6 @@ var doc = `{
         "config.LargeMessageHandleConfig": {
             "type": "object",
             "properties": {
-                "claim-check-storage-uri": {
-                    "type": "string"
-                },
-                "large-message-handle-compression": {
-                    "type": "string"
-                },
                 "large-message-handle-option": {
                     "type": "string"
                 }
@@ -1737,113 +1569,6 @@ var doc = `{
                 }
             }
         },
-        "config.OAuth2": {
-            "type": "object",
-            "properties": {
-                "oauth2-audience": {
-                    "description": "OAuth2Audience  the URL of the resource server.",
-                    "type": "string"
-                },
-                "oauth2-client-id": {
-                    "description": "OAuth2ClientID  the client ID of the application.",
-                    "type": "string"
-                },
-                "oauth2-issuer-url": {
-                    "description": "OAuth2IssuerURL  the URL of the authorization server.",
-                    "type": "string"
-                },
-                "oauth2-private-key": {
-                    "description": "OAuth2PrivateKey the private key used to sign the server.",
-                    "type": "string"
-                },
-                "oauth2-scope": {
-                    "description": "OAuth2Scope scope",
-                    "type": "string"
-                }
-            }
-        },
-        "config.OpenProtocolConfig": {
-            "type": "object",
-            "properties": {
-                "output-old-value": {
-                    "type": "boolean"
-                }
-            }
-        },
-        "config.PulsarConfig": {
-            "type": "object",
-            "properties": {
-                "auth-tls-certificate-path": {
-                    "description": "AuthTLSCertificatePath  create new pulsar authentication provider with specified TLS certificate and private key",
-                    "type": "string"
-                },
-                "auth-tls-private-key-path": {
-                    "description": "AuthTLSPrivateKeyPath private key",
-                    "type": "string"
-                },
-                "authentication-token": {
-                    "description": "AuthenticationToken the token for the Pulsar server",
-                    "type": "string"
-                },
-                "basic-password": {
-                    "description": "BasicPassword with account",
-                    "type": "string"
-                },
-                "basic-user-name": {
-                    "description": "BasicUserName Account name for pulsar basic authentication (the second priority authentication method)",
-                    "type": "string"
-                },
-                "batching-max-messages": {
-                    "description": "BatchingMaxMessages specifies the maximum number of messages permitted in a batch. (default: 1000)",
-                    "type": "integer"
-                },
-                "batching-max-publish-delay": {
-                    "description": "BatchingMaxPublishDelay specifies the time period within which the messages sent will be batched (default: 10ms)\nif batch messages are enabled. If set to a non zero value, messages will be queued until this time\ninterval or until",
-                    "type": "integer"
-                },
-                "compression-type": {
-                    "description": "pulsar client compression",
-                    "type": "string"
-                },
-                "connection-timeout": {
-                    "description": "ConnectionTimeout Timeout for the establishment of a TCP connection (default: 5 seconds)",
-                    "type": "integer"
-                },
-                "oauth2": {
-                    "description": "Oauth2 include  oauth2-issuer-url oauth2-audience oauth2-private-key oauth2-client-id\nand 'type' always use 'client_credentials'",
-                    "$ref": "#/definitions/config.OAuth2"
-                },
-                "operation-timeout": {
-                    "description": "Set the operation timeout (default: 30 seconds)\nProducer-create, subscribe and unsubscribe operations will be retried until this interval, after which the\noperation will be marked as failed",
-                    "type": "integer"
-                },
-                "pulsar-producer-cache-size": {
-                    "description": "PulsarProducerCacheSize is the size of the cache of pulsar producers",
-                    "type": "integer"
-                },
-                "pulsar-version": {
-                    "description": "PulsarVersion print the version of pulsar",
-                    "type": "string"
-                },
-                "send-timeout": {
-                    "description": "SendTimeout specifies the timeout for a message that has not been acknowledged by the server since sent.\nSend and SendAsync returns an error after timeout.\ndefault: 30s",
-                    "type": "integer"
-                },
-                "tls-certificate-file": {
-                    "type": "string"
-                },
-                "tls-key-file-path": {
-                    "type": "string"
-                },
-                "tls-trust-certs-file-path": {
-                    "type": "string"
-                },
-                "token-from-file": {
-                    "description": "TokenFromFile Authentication from the file token,\nthe path name of the file (the third priority authentication method)",
-                    "type": "string"
-                }
-            }
-        },
         "config.SinkConfig": {
             "type": "object",
             "properties": {
@@ -1860,51 +1585,29 @@ var doc = `{
                         "$ref": "#/definitions/config.ColumnSelector"
                     }
                 },
-                "content-compatible": {
-                    "description": "ContentCompatible is only available when the downstream is MQ.",
-                    "type": "boolean"
-                },
                 "csv": {
-                    "description": "CSVConfig is only available when the downstream is Storage.",
                     "$ref": "#/definitions/config.CSVConfig"
                 },
                 "date-separator": {
-                    "description": "DateSeparator is only available when the downstream is Storage.",
                     "type": "string"
                 },
-                "debezium": {
-                    "description": "DebeziumConfig related configurations",
-                    "$ref": "#/definitions/config.DebeziumConfig"
-                },
-                "debezium-disable-schema": {
-                    "description": "Debezium only. Whether schema should be excluded in the output.",
-                    "type": "boolean"
-                },
-                "delete-only-output-handle-key-columns": {
-                    "description": "DeleteOnlyOutputHandleKeyColumns is only available when the downstream is MQ.",
-                    "type": "boolean"
-                },
                 "dispatchers": {
-                    "description": "DispatchRules is only available when the downstream is MQ.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/config.DispatchRule"
                     }
                 },
                 "enable-kafka-sink-v2": {
-                    "description": "EnableKafkaSinkV2 enabled then the kafka-go sink will be used.\nIt is only available when the downstream is MQ.",
+                    "description": "EnableKafkaSinkV2 enabled then the kafka-go sink will be used.",
                     "type": "boolean"
                 },
                 "enable-partition-separator": {
-                    "description": "EnablePartitionSeparator is only available when the downstream is Storage.",
                     "type": "boolean"
                 },
                 "encoder-concurrency": {
-                    "description": "EncoderConcurrency is only available when the downstream is MQ.",
                     "type": "integer"
                 },
                 "file-index-digit": {
-                    "description": "FileIndexWidth is only available when the downstream is Storage",
                     "type": "integer"
                 },
                 "kafka-config": {
@@ -1914,42 +1617,18 @@ var doc = `{
                     "$ref": "#/definitions/config.MySQLConfig"
                 },
                 "only-output-updated-columns": {
-                    "description": "OnlyOutputUpdatedColumns is only available when the downstream is MQ.",
                     "type": "boolean"
                 },
-                "open": {
-                    "description": "OpenProtocol related configurations",
-                    "$ref": "#/definitions/config.OpenProtocolConfig"
-                },
                 "protocol": {
-                    "description": "Protocol is NOT available when the downstream is DB.",
                     "type": "string"
                 },
-                "pulsar-config": {
-                    "$ref": "#/definitions/config.PulsarConfig"
-                },
                 "safe-mode": {
-                    "description": "SafeMode is only available when the downstream is DB.",
                     "type": "boolean"
                 },
                 "schema-registry": {
-                    "description": "SchemaRegistry is only available when the downstream is MQ using avro protocol.",
                     "type": "string"
                 },
-                "send-bootstrap-in-msg-count": {
-                    "description": "SendBootstrapInMsgCount means bootstrap messages are being sent every SendBootstrapInMsgCount row change messages.",
-                    "type": "integer"
-                },
-                "send-bootstrap-interval-in-sec": {
-                    "description": "Simple Protocol only config, use to control the behavior of sending bootstrap message.\nNote: When one of the following conditions is set to negative value,\nbootstrap sending function will be disabled.\nSendBootstrapIntervalInSec is the interval in seconds to send bootstrap message.",
-                    "type": "integer"
-                },
-                "send-bootstrap-to-all-partition": {
-                    "description": "SendBootstrapToAllPartition determines whether to send bootstrap message to all partitions.\nIf set to false, bootstrap message will only be sent to the first partition of each topic.\nDefault value is true.",
-                    "type": "boolean"
-                },
                 "terminator": {
-                    "description": "Terminator is NOT available when the downstream is DB.",
                     "type": "string"
                 },
                 "transaction-atomicity": {
@@ -2257,12 +1936,6 @@ var doc = `{
                 "null": {
                     "type": "string"
                 },
-                "output_handle_key": {
-                    "type": "boolean"
-                },
-                "output_old_value": {
-                    "type": "boolean"
-                },
                 "quote": {
                     "type": "string"
                 }
@@ -2434,23 +2107,11 @@ var doc = `{
         "v2.CloudStorageConfig": {
             "type": "object",
             "properties": {
-                "file_cleanup_cron_spec": {
-                    "type": "string"
-                },
-                "file_expiration_days": {
-                    "type": "integer"
-                },
                 "file_size": {
-                    "type": "integer"
-                },
-                "flush_concurrency": {
                     "type": "integer"
                 },
                 "flush_interval": {
                     "type": "string"
-                },
-                "output_column_id": {
-                    "type": "boolean"
                 },
                 "worker_count": {
                     "type": "integer"
@@ -2471,9 +2132,6 @@ var doc = `{
                 },
                 "enable_tidb_extension": {
                     "type": "boolean"
-                },
-                "encoding_format": {
-                    "type": "string"
                 },
                 "max_batch_size": {
                     "type": "integer"
@@ -2500,31 +2158,13 @@ var doc = `{
         "v2.ConsistentConfig": {
             "type": "object",
             "properties": {
-                "compression": {
-                    "type": "string"
-                },
-                "encoding_worker_num": {
-                    "type": "integer"
-                },
-                "flush_concurrency": {
-                    "type": "integer"
-                },
                 "flush_interval": {
-                    "type": "integer"
-                },
-                "flush_worker_num": {
                     "type": "integer"
                 },
                 "level": {
                     "type": "string"
                 },
                 "max_log_size": {
-                    "type": "integer"
-                },
-                "memory_usage": {
-                    "$ref": "#/definitions/v2.ConsistentMemoryUsage"
-                },
-                "meta_flush_interval": {
                     "type": "integer"
                 },
                 "storage": {
@@ -2535,34 +2175,9 @@ var doc = `{
                 }
             }
         },
-        "v2.ConsistentMemoryUsage": {
-            "type": "object",
-            "properties": {
-                "memory_quota_percentage": {
-                    "type": "integer"
-                }
-            }
-        },
-        "v2.DebeziumConfig": {
-            "type": "object",
-            "properties": {
-                "output_old_value": {
-                    "type": "boolean"
-                }
-            }
-        },
         "v2.DispatchRule": {
             "type": "object",
             "properties": {
-                "columns": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "index": {
-                    "type": "string"
-                },
                 "matcher": {
                     "type": "array",
                     "items": {
@@ -2620,10 +2235,38 @@ var doc = `{
         "v2.FilterConfig": {
             "type": "object",
             "properties": {
+                "do_dbs": {
+                    "description": "DoDBs is an allowlist of schemas.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "do_tables": {
+                    "description": "DoTables is an allowlist of tables.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/v2.Table"
+                    }
+                },
                 "event_filters": {
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/v2.EventFilterRule"
+                    }
+                },
+                "ignore_dbs": {
+                    "description": "IgnoreDBs is a blocklist of schemas.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "ignore_tables": {
+                    "description": "IgnoreTables is a blocklist of tables.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/v2.Table"
                     }
                 },
                 "ignore_txn_start_ts": {
@@ -2640,30 +2283,6 @@ var doc = `{
                 }
             }
         },
-        "v2.GlueSchemaRegistryConfig": {
-            "type": "object",
-            "properties": {
-                "access_key": {
-                    "description": "AccessKey of the schema registry",
-                    "type": "string"
-                },
-                "region": {
-                    "description": "Region of the schema registry",
-                    "type": "string"
-                },
-                "registry_name": {
-                    "description": "Name of the schema registry",
-                    "type": "string"
-                },
-                "secret_access_key": {
-                    "description": "SecretAccessKey of the schema registry",
-                    "type": "string"
-                },
-                "token": {
-                    "type": "string"
-                }
-            }
-        },
         "v2.IntegrityConfig": {
             "type": "object",
             "properties": {
@@ -2674,9 +2293,6 @@ var doc = `{
                     "type": "string"
                 }
             }
-        },
-        "v2.JSONDuration": {
-            "type": "object"
         },
         "v2.KafkaConfig": {
             "type": "object",
@@ -2701,9 +2317,6 @@ var doc = `{
                 },
                 "enable_tls": {
                     "type": "boolean"
-                },
-                "glue_schema_registry_config": {
-                    "$ref": "#/definitions/v2.GlueSchemaRegistryConfig"
                 },
                 "insecure_skip_verify": {
                     "type": "boolean"
@@ -2797,12 +2410,6 @@ var doc = `{
         "v2.LargeMessageHandleConfig": {
             "type": "object",
             "properties": {
-                "claim_check_storage_uri": {
-                    "type": "string"
-                },
-                "large_message_handle_compression": {
-                    "type": "string"
-                },
                 "large_message_handle_option": {
                     "type": "string"
                 }
@@ -2874,14 +2481,6 @@ var doc = `{
                 }
             }
         },
-        "v2.OpenProtocolConfig": {
-            "type": "object",
-            "properties": {
-                "output_old_value": {
-                    "type": "boolean"
-                }
-            }
-        },
         "v2.ProcessorCommonInfo": {
             "type": "object",
             "properties": {
@@ -2908,85 +2507,6 @@ var doc = `{
                 }
             }
         },
-        "v2.PulsarConfig": {
-            "type": "object",
-            "properties": {
-                "auth-tls-certificate-path": {
-                    "type": "string"
-                },
-                "auth-tls-private-key-path": {
-                    "type": "string"
-                },
-                "authentication-token": {
-                    "type": "string"
-                },
-                "basic-password": {
-                    "type": "string"
-                },
-                "basic-user-name": {
-                    "type": "string"
-                },
-                "batching-max-messages": {
-                    "type": "integer"
-                },
-                "batching-max-publish-delay": {
-                    "type": "integer"
-                },
-                "compression-type": {
-                    "type": "string"
-                },
-                "connection-timeout": {
-                    "type": "integer"
-                },
-                "oauth2": {
-                    "$ref": "#/definitions/v2.PulsarOAuth2"
-                },
-                "operation-timeout": {
-                    "type": "integer"
-                },
-                "pulsar-producer-cache-size": {
-                    "type": "integer"
-                },
-                "pulsar-version": {
-                    "type": "string"
-                },
-                "send-timeout": {
-                    "type": "integer"
-                },
-                "tls-certificate-path": {
-                    "type": "string"
-                },
-                "tls-private-key-path": {
-                    "type": "string"
-                },
-                "tls-trust-certs-file-path": {
-                    "type": "string"
-                },
-                "token-from-file": {
-                    "type": "string"
-                }
-            }
-        },
-        "v2.PulsarOAuth2": {
-            "type": "object",
-            "properties": {
-                "oauth2-audience": {
-                    "type": "string"
-                },
-                "oauth2-client-id": {
-                    "type": "string"
-                },
-                "oauth2-issuer-url": {
-                    "type": "string"
-                },
-                "oauth2-private-key": {
-                    "type": "string"
-                },
-                "oauth2-scope": {
-                    "type": "string"
-                }
-            }
-        },
         "v2.ReplicaConfig": {
             "type": "object",
             "properties": {
@@ -2996,19 +2516,16 @@ var doc = `{
                 "case_sensitive": {
                     "type": "boolean"
                 },
-                "changefeed_error_stuck_duration": {
-                    "$ref": "#/definitions/v2.JSONDuration"
-                },
                 "check_gc_safe_point": {
                     "type": "boolean"
                 },
                 "consistent": {
                     "$ref": "#/definitions/v2.ConsistentConfig"
                 },
-                "enable_sync_point": {
+                "enable_old_value": {
                     "type": "boolean"
                 },
-                "enable_table_monitor": {
+                "enable_sync_point": {
                     "type": "boolean"
                 },
                 "filter": {
@@ -3035,18 +2552,11 @@ var doc = `{
                 "sink": {
                     "$ref": "#/definitions/v2.SinkConfig"
                 },
-                "sql_mode": {
-                    "description": "Deprecated: we don't use this field since v8.0.0.",
-                    "type": "string"
-                },
                 "sync_point_interval": {
                     "type": "string"
                 },
                 "sync_point_retention": {
                     "type": "string"
-                },
-                "synced_status": {
-                    "$ref": "#/definitions/v2.SyncedStatusConfig"
                 }
             }
         },
@@ -3137,23 +2647,11 @@ var doc = `{
                         "$ref": "#/definitions/v2.ColumnSelector"
                     }
                 },
-                "content_compatible": {
-                    "type": "boolean"
-                },
                 "csv": {
                     "$ref": "#/definitions/v2.CSVConfig"
                 },
                 "date_separator": {
                     "type": "string"
-                },
-                "debezium": {
-                    "$ref": "#/definitions/v2.DebeziumConfig"
-                },
-                "debezium_disable_schema": {
-                    "type": "boolean"
-                },
-                "delete_only_output_handle_key_columns": {
-                    "type": "boolean"
                 },
                 "dispatchers": {
                     "type": "array",
@@ -3170,7 +2668,7 @@ var doc = `{
                 "encoder_concurrency": {
                     "type": "integer"
                 },
-                "file_index_width": {
+                "file_index_digit": {
                     "type": "integer"
                 },
                 "kafka_config": {
@@ -3182,29 +2680,14 @@ var doc = `{
                 "only_output_updated_columns": {
                     "type": "boolean"
                 },
-                "open": {
-                    "$ref": "#/definitions/v2.OpenProtocolConfig"
-                },
                 "protocol": {
                     "type": "string"
-                },
-                "pulsar_config": {
-                    "$ref": "#/definitions/v2.PulsarConfig"
                 },
                 "safe_mode": {
                     "type": "boolean"
                 },
                 "schema_registry": {
                     "type": "string"
-                },
-                "send_bootstrap_in_msg_count": {
-                    "type": "integer"
-                },
-                "send_bootstrap_interval_in_sec": {
-                    "type": "integer"
-                },
-                "send_bootstrap_to_all_partition": {
-                    "type": "boolean"
                 },
                 "terminator": {
                     "type": "string"
@@ -3214,39 +2697,16 @@ var doc = `{
                 }
             }
         },
-        "v2.SyncedStatus": {
+        "v2.Table": {
             "type": "object",
             "properties": {
-                "info": {
+                "database_name": {
+                    "description": "Schema is the name of the schema (database) containing this table.",
                     "type": "string"
                 },
-                "last_synced_ts": {
+                "table_name": {
+                    "description": "Name is the unqualified table name.",
                     "type": "string"
-                },
-                "now_ts": {
-                    "type": "string"
-                },
-                "puller_resolved_ts": {
-                    "type": "string"
-                },
-                "sink_checkpoint_ts": {
-                    "type": "string"
-                },
-                "synced": {
-                    "type": "boolean"
-                }
-            }
-        },
-        "v2.SyncedStatusConfig": {
-            "type": "object",
-            "properties": {
-                "checkpoint_interval": {
-                    "description": "The maximum interval between latest checkpoint ts and now or\nbetween latest sink's checkpoint ts and puller's checkpoint ts required to reach synced state",
-                    "type": "integer"
-                },
-                "synced_check_interval": {
-                    "description": "The minimum interval between the latest synced ts and now required to reach synced state",
-                    "type": "integer"
                 }
             }
         }

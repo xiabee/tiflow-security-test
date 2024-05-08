@@ -31,10 +31,10 @@ import (
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tidb-tools/pkg/column-mapping"
 	extstorage "github.com/pingcap/tidb/br/pkg/storage"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
-	"github.com/pingcap/tidb/pkg/util/filter"
-	regexprrouter "github.com/pingcap/tidb/pkg/util/regexpr-router"
-	router "github.com/pingcap/tidb/pkg/util/table-router"
+	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/util/filter"
+	regexprrouter "github.com/pingcap/tidb/util/regexpr-router"
+	router "github.com/pingcap/tidb/util/table-router"
 	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/storage"
@@ -51,8 +51,6 @@ const (
 	ModeAll       = "all"
 	ModeFull      = "full"
 	ModeIncrement = "incremental"
-	ModeDump      = "dump"
-	ModeLoadSync  = "load&sync"
 
 	DefaultShadowTableRules = "^_(.+)_(?:new|gho)$"
 	DefaultTrashTableRules  = "^_(.+)_(?:ghc|del|old)$"
@@ -329,8 +327,8 @@ func (c *SubTaskConfig) Adjust(verifyDecryptPassword bool) error {
 		c.MetaSchema = defaultMetaSchema
 	}
 
-	// adjust dir, no need to do for load&sync mode because it needs its own s3 repository
-	if HasLoad(c.Mode) && c.Mode != ModeLoadSync {
+	// adjust dir
+	if c.Mode == ModeAll || c.Mode == ModeFull {
 		// check
 		isS3 := storage.IsS3Path(c.LoaderConfig.Dir)
 		if isS3 && c.ImportMode == LoadModeLoader {
@@ -350,11 +348,7 @@ func (c *SubTaskConfig) Adjust(verifyDecryptPassword bool) error {
 			return terror.ErrConfigLoaderDirInvalid.Delegate(err, c.LoaderConfig.Dir)
 		}
 		c.LoaderConfig.Dir = newDir
-	}
 
-	// adjust sorting dir
-	if HasLoad(c.Mode) {
-		newDir := c.LoaderConfig.Dir
 		if c.LoaderConfig.SortingDirPhysical == "" {
 			if storage.IsLocalDiskPath(newDir) {
 				// lightning will not recursively create directories, so we use same level dir
@@ -384,7 +378,7 @@ func (c *SubTaskConfig) Adjust(verifyDecryptPassword bool) error {
 	c.To.AdjustWithTimeZone(c.Timezone)
 
 	if verifyDecryptPassword {
-		_, err1 := c.DecryptedClone()
+		_, err1 := c.DecryptPassword()
 		if err1 != nil {
 			return err1
 		}
@@ -460,8 +454,8 @@ func (c *SubTaskConfig) Parse(arguments []string, verifyDecryptPassword bool) er
 	return c.Adjust(verifyDecryptPassword)
 }
 
-// DecryptedClone tries to decrypt db password in config.
-func (c *SubTaskConfig) DecryptedClone() (*SubTaskConfig, error) {
+// DecryptPassword tries to decrypt db password in config.
+func (c *SubTaskConfig) DecryptPassword() (*SubTaskConfig, error) {
 	clone, err := c.Clone()
 	if err != nil {
 		return nil, err

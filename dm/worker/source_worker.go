@@ -144,7 +144,7 @@ func (w *SourceWorker) Start() {
 	}
 
 	var err error
-	w.sourceDB, err = conn.GetUpstreamDB(&w.cfg.GetDecryptedClone().From)
+	w.sourceDB, err = conn.GetUpstreamDB(&w.cfg.DecryptPassword().From)
 	if err != nil {
 		w.l.Error("can't connected to upstream", zap.Error(err))
 	}
@@ -259,7 +259,7 @@ func (w *SourceWorker) updateSourceStatus(ctx context.Context, needLock bool) er
 	w.sourceDBMu.Lock()
 	if w.sourceDB == nil {
 		var err error
-		w.sourceDB, err = conn.GetUpstreamDB(&cfg.GetDecryptedClone().From)
+		w.sourceDB, err = conn.GetUpstreamDB(&cfg.DecryptPassword().From)
 		if err != nil {
 			w.sourceDBMu.Unlock()
 			return err
@@ -553,7 +553,7 @@ func (w *SourceWorker) StartSubTask(cfg *config.SubTaskConfig, expectStage, vali
 		return nil
 	}
 
-	cfg2, err := cfg.DecryptedClone()
+	cfg2, err := cfg.DecryptPassword()
 	if err != nil {
 		st.fail(errors.Annotate(err, "start sub task"))
 		return nil
@@ -1361,12 +1361,4 @@ func (w *SourceWorker) GetValidatorTableStatus(taskName string, filterStatus pb.
 		return nil, terror.ErrWorkerSubTaskNotFound.Generate(taskName)
 	}
 	return st.GetValidatorTableStatus(filterStatus)
-}
-
-func (w *SourceWorker) UpdateWorkerValidator(req *pb.UpdateValidationWorkerRequest) error {
-	st := w.subTaskHolder.findSubTask(req.TaskName)
-	if st == nil {
-		return terror.ErrWorkerSubTaskNotFound.Generate(req.TaskName)
-	}
-	return st.UpdateValidator(req)
 }

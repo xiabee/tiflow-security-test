@@ -57,11 +57,7 @@ func (b *BatchEncoder) Build() (messages []*common.Message) {
 		b.valueBuf.Bytes(), 0, model.MessageTypeRow, nil, nil)
 	ret.SetRowsCount(b.batchSize)
 	ret.Callback = b.callback
-	if b.valueBuf.Cap() > codec.MemBufShrinkThreshold {
-		b.valueBuf = &bytes.Buffer{}
-	} else {
-		b.valueBuf.Reset()
-	}
+	b.valueBuf.Reset()
 	b.callback = nil
 	b.batchSize = 0
 

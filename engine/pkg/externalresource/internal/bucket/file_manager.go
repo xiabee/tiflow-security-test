@@ -318,7 +318,7 @@ func createPlaceholderFile(ctx context.Context, storage brStorage.ExternalStorag
 		return errors.ErrExternalStorageAPI.GenWithStackByArgs("resource already exists")
 	}
 
-	writer, err := storage.Create(ctx, placeholderFileName, nil)
+	writer, err := storage.Create(ctx, placeholderFileName)
 	if err != nil {
 		return errors.ErrExternalStorageAPI.Wrap(err).GenWithStackByArgs("creating placeholder file")
 	}

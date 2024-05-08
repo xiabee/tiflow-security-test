@@ -29,8 +29,7 @@ func TestDynamicTopicDispatcherForSchema(t *testing.T) {
 
 	topicExpr := Expression("hello_{schema}_world")
 	err := topicExpr.Validate()
-	require.NoError(t, err)
-
+	require.Nil(t, err)
 	testCase := []struct {
 		schema      string
 		table       string
@@ -69,8 +68,7 @@ func TestDynamicTopicDispatcherForTable(t *testing.T) {
 
 	topicExpr := Expression("{schema}_{table}")
 	err := topicExpr.Validate()
-	require.NoError(t, err)
-
+	require.Nil(t, err)
 	testCases := []struct {
 		schema        string
 		table         string

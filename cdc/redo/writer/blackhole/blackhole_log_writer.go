@@ -26,21 +26,14 @@ var _ writer.RedoLogWriter = (*blackHoleWriter)(nil)
 
 // blackHoleSink defines a blackHole storage, it receives events and persists
 // without any latency
-type blackHoleWriter struct {
-	invalid bool
-}
+type blackHoleWriter struct{}
 
 // NewLogWriter creates a blackHole writer
-func NewLogWriter(invalid bool) *blackHoleWriter {
-	return &blackHoleWriter{
-		invalid: invalid,
-	}
+func NewLogWriter() *blackHoleWriter {
+	return &blackHoleWriter{}
 }
 
 func (bs *blackHoleWriter) WriteEvents(_ context.Context, events ...writer.RedoEvent) (err error) {
-	if bs.invalid {
-		return errors.New("[WriteLog] invalid black hole writer")
-	}
 	if len(events) == 0 {
 		return nil
 	}
@@ -52,12 +45,30 @@ func (bs *blackHoleWriter) WriteEvents(_ context.Context, events ...writer.RedoE
 }
 
 func (bs *blackHoleWriter) FlushLog(_ context.Context) error {
-	if bs.invalid {
-		return errors.New("[FlushLog] invalid black hole writer")
-	}
 	return nil
 }
 
 func (bs *blackHoleWriter) Close() error {
 	return nil
+}
+
+type invalidBlackHoleWriter struct {
+	*blackHoleWriter
+}
+
+// NewInvalidLogWriter creates a invalid blackHole writer
+func NewInvalidLogWriter(rl writer.RedoLogWriter) *invalidBlackHoleWriter {
+	return &invalidBlackHoleWriter{
+		blackHoleWriter: rl.(*blackHoleWriter),
+	}
+}
+
+func (ibs *invalidBlackHoleWriter) WriteEvents(
+	_ context.Context, _ ...writer.RedoEvent,
+) (err error) {
+	return errors.New("[WriteLog] invalid black hole writer")
+}
+
+func (ibs *invalidBlackHoleWriter) FlushLog(_ context.Context) error {
+	return errors.New("[FlushLog] invalid black hole writer")
 }

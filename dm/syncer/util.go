@@ -24,9 +24,9 @@ import (
 	"github.com/pingcap/tidb/br/pkg/version"
 	"github.com/pingcap/tidb/dumpling/export"
 	dlog "github.com/pingcap/tidb/dumpling/log"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/filter"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/filter"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog/common"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
@@ -150,7 +150,6 @@ func subtaskCfg2BinlogSyncerCfg(cfg *config.SubTaskConfig, timezone *time.Locati
 			util.WithCAContent(cfg.From.Security.SSLCABytes),
 			util.WithCertAndKeyContent(cfg.From.Security.SSLCertBytes, cfg.From.Security.SSLKeyBytes),
 			util.WithVerifyCommonName(cfg.From.Security.CertAllowedCN),
-			util.WithMinTLSVersion(tls.VersionTLS10),
 		)
 		if err != nil {
 			return replication.BinlogSyncerConfig{}, terror.ErrConnInvalidTLSConfig.Delegate(err)
@@ -242,7 +241,6 @@ func getDDLStatusFromTiDB(tctx *tcontext.Context, db *dbconn.DBConn, ddl string,
 	for {
 		// every attempt try 10 history jobs
 		showJobs := fmt.Sprintf("ADMIN SHOW DDL JOBS %d", rowNum)
-		//nolint:rowserrcheck
 		jobsRows, err := db.QuerySQL(tctx, nil, showJobs)
 		if err != nil {
 			return "", err
@@ -277,7 +275,6 @@ func getDDLStatusFromTiDB(tctx *tcontext.Context, db *dbconn.DBConn, ddl string,
 						// jobID does not exist, expand queryMap for deeper search
 						showJobsLimitNext := fmt.Sprintf("ADMIN SHOW DDL JOB QUERIES LIMIT 10 OFFSET %d", rowOffset)
 						var rowsLimitNext *sql.Rows
-						//nolint:rowserrcheck
 						rowsLimitNext, err = db.QuerySQL(tctx, nil, showJobsLimitNext)
 						if err != nil {
 							return "", err

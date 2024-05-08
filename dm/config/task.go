@@ -30,10 +30,10 @@ import (
 	"github.com/dustin/go-humanize"
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tidb-tools/pkg/column-mapping"
-	"github.com/pingcap/tidb/pkg/lightning/config"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/util/filter"
-	router "github.com/pingcap/tidb/pkg/util/table-router"
+	"github.com/pingcap/tidb/br/pkg/lightning/config"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/util/filter"
+	router "github.com/pingcap/tidb/util/table-router"
 	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -345,6 +345,9 @@ func (m *LoaderConfig) adjust() error {
 		m.PoolSize = defaultPoolSize
 	}
 
+	if m.OnDuplicateLogical == "" && m.OnDuplicate != "" {
+		m.OnDuplicateLogical = m.OnDuplicate
+	}
 	if m.OnDuplicateLogical == "" {
 		m.OnDuplicateLogical = OnDuplicateReplace
 	}
@@ -628,8 +631,8 @@ func (c *TaskConfig) DecodeFile(fpath string) error {
 	return c.adjust()
 }
 
-// FromYaml loads config from file data.
-func (c *TaskConfig) FromYaml(data string) error {
+// Decode loads config from file data.
+func (c *TaskConfig) Decode(data string) error {
 	err := yaml.UnmarshalStrict([]byte(data), c)
 	if err != nil {
 		return terror.ErrConfigYamlTransform.Delegate(err, "decode task config failed")
@@ -668,9 +671,7 @@ func (c *TaskConfig) adjust() error {
 	if len(c.Name) == 0 {
 		return terror.ErrConfigNeedUniqueTaskName.Generate()
 	}
-	switch c.TaskMode {
-	case ModeFull, ModeIncrement, ModeAll, ModeDump, ModeLoadSync:
-	default:
+	if c.TaskMode != ModeFull && c.TaskMode != ModeIncrement && c.TaskMode != ModeAll {
 		return terror.ErrConfigInvalidTaskMode.Generate()
 	}
 	if c.MetaSchema == "" {
@@ -774,7 +775,7 @@ func (c *TaskConfig) adjust() error {
 		instanceIDs[inst.SourceID] = i
 
 		switch c.TaskMode {
-		case ModeFull, ModeAll, ModeDump:
+		case ModeFull, ModeAll:
 			if inst.Meta != nil {
 				log.L().Warn("metadata will not be used. for Full mode, incremental sync will never occur; for All mode, the meta dumped by MyDumper will be used", zap.Int("mysql instance", i), zap.String("task mode", c.TaskMode))
 			}
@@ -835,7 +836,7 @@ func (c *TaskConfig) adjust() error {
 			inst.Mydumper.Threads = inst.MydumperThread
 		}
 
-		if HasDump(c.TaskMode) && len(inst.Mydumper.MydumperPath) == 0 {
+		if (c.TaskMode == ModeFull || c.TaskMode == ModeAll) && len(inst.Mydumper.MydumperPath) == 0 {
 			// only verify if set, whether is valid can only be verify when we run it
 			return terror.ErrConfigMydumperPathNotValid.Generate(i)
 		}
@@ -1076,8 +1077,12 @@ func checkValidExpr(expr string) error {
 func (c *TaskConfig) YamlForDowngrade() (string, error) {
 	t := NewTaskConfigForDowngrade(c)
 
-	// try to encrypt password
-	t.TargetDB.Password = utils.EncryptOrPlaintext(utils.DecryptOrPlaintext(t.TargetDB.Password))
+	// encrypt password
+	cipher, err := utils.Encrypt(utils.DecryptOrPlaintext(t.TargetDB.Password))
+	if err != nil {
+		return "", err
+	}
+	t.TargetDB.Password = cipher
 
 	// omit default values, so we can ignore them for later marshal
 	t.omitDefaultVals()
@@ -1246,7 +1251,6 @@ type TaskConfigForDowngrade struct {
 
 // NewTaskConfigForDowngrade create new TaskConfigForDowngrade.
 func NewTaskConfigForDowngrade(taskConfig *TaskConfig) *TaskConfigForDowngrade {
-	targetDB := *taskConfig.TargetDB
 	return &TaskConfigForDowngrade{
 		Name:                      taskConfig.Name,
 		TaskMode:                  taskConfig.TaskMode,
@@ -1260,7 +1264,7 @@ func NewTaskConfigForDowngrade(taskConfig *TaskConfig) *TaskConfigForDowngrade {
 		HeartbeatReportInterval:   taskConfig.HeartbeatReportInterval,
 		Timezone:                  taskConfig.Timezone,
 		CaseSensitive:             taskConfig.CaseSensitive,
-		TargetDB:                  &targetDB,
+		TargetDB:                  taskConfig.TargetDB,
 		OnlineDDLScheme:           taskConfig.OnlineDDLScheme,
 		Routes:                    taskConfig.Routes,
 		Filters:                   taskConfig.Filters,

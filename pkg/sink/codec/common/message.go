@@ -15,7 +15,6 @@ package common
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"time"
 
 	"github.com/pingcap/tiflow/cdc/model"
@@ -24,7 +23,7 @@ import (
 )
 
 // MaxRecordOverhead is used to calculate message size by sarama kafka client.
-// reference: https://github.com/IBM/sarama/blob/
+// reference: https://github.com/Shopify/sarama/blob/
 // 66521126c71c522c15a36663ae9cddc2b024c799/async_producer.go#L233
 // For TiCDC, minimum supported kafka version is `0.11.0.2`,
 // which will be treated as `version = 2` by sarama producer.
@@ -41,9 +40,6 @@ type Message struct {
 	Protocol  config.Protocol   // protocol
 	rowsCount int               // rows in one Message
 	Callback  func()            // Callback function will be called when the message is sent to the sink.
-
-	// PartitionKey for pulsar, route messages to one or different partitions
-	PartitionKey *string
 }
 
 // Length returns the expected size of the Kafka message
@@ -71,36 +67,6 @@ func (m *Message) SetRowsCount(cnt int) {
 // IncRowsCount increase the number of rows
 func (m *Message) IncRowsCount() {
 	m.rowsCount++
-}
-
-// GetSchema returns schema string
-func (m *Message) GetSchema() string {
-	if m.Schema == nil {
-		return ""
-	}
-	return *m.Schema
-}
-
-// GetTable returns the Table string
-func (m *Message) GetTable() string {
-	if m.Table == nil {
-		return ""
-	}
-	return *m.Table
-}
-
-// SetPartitionKey sets the PartitionKey for a message
-// PartitionKey is used for pulsar producer, route messages to one or different partitions
-func (m *Message) SetPartitionKey(key string) {
-	m.PartitionKey = &key
-}
-
-// GetPartitionKey returns the GetPartitionKey
-func (m *Message) GetPartitionKey() string {
-	if m.PartitionKey == nil {
-		return ""
-	}
-	return *m.PartitionKey
 }
 
 // NewDDLMsg creates a DDL message.
@@ -153,17 +119,4 @@ func NewMsg(
 	}
 
 	return ret
-}
-
-// ClaimCheckMessage is the message sent to the claim-check external storage.
-type ClaimCheckMessage struct {
-	Key   []byte `json:"key"`
-	Value []byte `json:"value"`
-}
-
-// UnmarshalClaimCheckMessage unmarshal bytes to ClaimCheckMessage.
-func UnmarshalClaimCheckMessage(data []byte) (*ClaimCheckMessage, error) {
-	var m ClaimCheckMessage
-	err := json.Unmarshal(data, &m)
-	return &m, err
 }

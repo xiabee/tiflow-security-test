@@ -25,6 +25,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dmlproducer"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/sink/kafka"
 	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/prometheus/client_golang/prometheus"
@@ -45,7 +46,8 @@ func newForTest(ctx context.Context,
 	schema := strings.ToLower(sinkURI.Scheme)
 	switch schema {
 	case "kafka", "kafka+ssl":
-		mqs, err := mq.NewKafkaDMLSink(ctx, sinkURI, cfg, errCh,
+		mqs, err := mq.NewKafkaDMLSink(ctx, model.DefaultChangeFeedID("test"),
+			sinkURI, cfg, errCh,
 			// Use mock kafka clients for test.
 			kafka.NewMockFactory, dmlproducer.NewDMLMockProducer)
 		if err != nil {
@@ -74,6 +76,7 @@ func TestSinkFactory(t *testing.T) {
 	sinkURI, err := url.Parse(uri)
 	require.NoError(t, err)
 	replicaConfig := config.GetDefaultReplicaConfig()
+	replicaConfig.Sink.KafkaConfig = &config.KafkaConfig{}
 	require.NoError(t, replicaConfig.ValidateAndAdjust(sinkURI))
 	errCh := make(chan error, 1)
 
@@ -83,7 +86,11 @@ func TestSinkFactory(t *testing.T) {
 	require.NotNil(t, sinkFactory.txnSink)
 
 	tableSink := sinkFactory.CreateTableSink(model.DefaultChangeFeedID("1"),
-		spanz.TableIDToComparableSpan(1), 0, prometheus.NewCounter(prometheus.CounterOpts{}))
+		spanz.TableIDToComparableSpan(1),
+		0,
+		pdutil.NewClock4Test(),
+		prometheus.NewCounter(prometheus.CounterOpts{}),
+		prometheus.NewHistogram(prometheus.HistogramOpts{}))
 	require.NotNil(t, tableSink, "table sink can be created")
 
 	sinkFactory.Close()

@@ -22,8 +22,8 @@ import (
 	"github.com/google/btree"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	timeta "github.com/pingcap/tidb/meta"
-	timodel "github.com/pingcap/tidb/parser/model"
+	timeta "github.com/pingcap/tidb/pkg/meta"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
@@ -45,7 +45,7 @@ func (s *Snapshot) PreTableInfo(job *timodel.Job) (*model.TableInfo, error) {
 	case timodel.ActionCreateTable, timodel.ActionCreateView, timodel.ActionRecoverTable:
 		// no pre table info
 		return nil, nil
-	case timodel.ActionRenameTable, timodel.ActionDropTable, timodel.ActionDropView, timodel.ActionTruncateTable:
+	case timodel.ActionRenameTable, timodel.ActionDropTable, timodel.ActionDropView, timodel.ActionTruncateTable, timodel.ActionAlterTablePartitioning, timodel.ActionRemovePartitioning:
 		// get the table will be dropped
 		table, ok := s.PhysicalTableByID(job.TableID)
 		if !ok {
@@ -123,6 +123,7 @@ func GetSchemaVersion(meta *timeta.Meta) (int64, error) {
 
 // NewSingleSnapshotFromMeta creates a new single schema snapshot from a tidb meta
 func NewSingleSnapshotFromMeta(
+	id model.ChangeFeedID,
 	meta *timeta.Meta,
 	currentTs uint64,
 	forceReplicate bool,
@@ -134,11 +135,12 @@ func NewSingleSnapshotFromMeta(
 		snap.inner.currentTs = currentTs
 		return snap, nil
 	}
-	return NewSnapshotFromMeta(meta, currentTs, forceReplicate, filter)
+	return NewSnapshotFromMeta(id, meta, currentTs, forceReplicate, filter)
 }
 
 // NewSnapshotFromMeta creates a schema snapshot from meta.
 func NewSnapshotFromMeta(
+	id model.ChangeFeedID,
 	meta *timeta.Meta,
 	currentTs uint64,
 	forceReplicate bool,
@@ -151,7 +153,8 @@ func NewSnapshotFromMeta(
 	}
 	// `tag` is used to reverse sort all versions in the generated snapshot.
 	tag := negative(currentTs)
-
+	// record all tables to be replicated for logging use
+	tables := make([]*model.TableInfo, 0, 1024)
 	for _, dbinfo := range dbinfos {
 		if filter.ShouldIgnoreSchema(dbinfo.Name.O) {
 			log.Debug("ignore database", zap.String("db", dbinfo.Name.O))
@@ -170,11 +173,11 @@ func NewSnapshotFromMeta(
 			return nil, cerror.WrapError(cerror.ErrMetaListDatabases, err)
 		}
 		for _, tableInfo := range tableInfos {
-			tableInfo := model.WrapTableInfo(dbinfo.ID, dbinfo.Name.O, currentTs, tableInfo)
-			if filter.ShouldIgnoreTable(tableInfo.TableName.Schema, tableInfo.TableName.Table) {
-				log.Debug("ignore table", zap.String("table", tableInfo.TableName.String()))
+			if filter.ShouldIgnoreTable(dbinfo.Name.O, tableInfo.Name.O) {
+				log.Debug("ignore table", zap.String("table", tableInfo.Name.O))
 				continue
 			}
+			tableInfo := model.WrapTableInfo(dbinfo.ID, dbinfo.Name.O, currentTs, tableInfo)
 			snap.inner.tables.ReplaceOrInsert(versionedID{
 				id:     tableInfo.ID,
 				tag:    tag,
@@ -190,6 +193,8 @@ func NewSnapshotFromMeta(
 			ineligible := !tableInfo.IsEligible(forceReplicate)
 			if ineligible {
 				snap.inner.ineligibleTables.ReplaceOrInsert(versionedID{id: tableInfo.ID, tag: tag})
+			} else {
+				tables = append(tables, tableInfo)
 			}
 			if pi := tableInfo.GetPartitionInfo(); pi != nil {
 				for _, partition := range pi.Definitions {
@@ -204,6 +209,15 @@ func NewSnapshotFromMeta(
 		}
 	}
 	snap.inner.currentTs = currentTs
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%d tables to be replicated: ", len(tables)))
+	for _, table := range tables {
+		sb.WriteString(fmt.Sprintf("%s.%s, ", table.TableName.Schema, table.TableName.Table))
+	}
+	log.Info("schema snapshot created",
+		zap.Stringer("changefeed", id),
+		zap.Uint64("currentTs", currentTs),
+		zap.String("tables", sb.String()))
 	return snap, nil
 }
 
@@ -400,17 +414,18 @@ func (s *Snapshot) Drop() {
 	s.inner.drop()
 }
 
+func getWrapTableInfo(job *timodel.Job) *model.TableInfo {
+	return model.WrapTableInfo(job.SchemaID, job.SchemaName,
+		job.BinlogInfo.FinishedTS,
+		job.BinlogInfo.TableInfo)
+}
+
 // DoHandleDDL is like HandleDDL but doesn't fill schema name into job.
 // NOTE: it's public because some tests in the upper package need this.
 func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 	s.rwlock.Lock()
 	defer s.rwlock.Unlock()
 
-	getWrapTableInfo := func(job *timodel.Job) *model.TableInfo {
-		return model.WrapTableInfo(job.SchemaID, job.SchemaName,
-			job.BinlogInfo.FinishedTS,
-			job.BinlogInfo.TableInfo)
-	}
 	switch job.Type {
 	case timodel.ActionCreateSchema:
 		// get the DBInfo from job rawArgs
@@ -434,7 +449,7 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-		// If the schema of a rename table job does not exist,
+		// If it a rename table job and the schema does not exist,
 		// there is no need to create the table, since this table
 		// will not be replicated in the future.
 		if _, ok := s.inner.schemaByID(job.SchemaID); !ok {
@@ -467,16 +482,26 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-	case timodel.ActionTruncateTablePartition,
+	case timodel.ActionTruncateTablePartition:
+		err := s.inner.updatePartition(getWrapTableInfo(job), true, job.BinlogInfo.FinishedTS)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	case
 		timodel.ActionAddTablePartition,
 		timodel.ActionDropTablePartition,
 		timodel.ActionReorganizePartition:
-		err := s.inner.updatePartition(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
+		err := s.inner.updatePartition(getWrapTableInfo(job), false, job.BinlogInfo.FinishedTS)
 		if err != nil {
 			return errors.Trace(err)
 		}
 	case timodel.ActionExchangeTablePartition:
 		err := s.inner.exchangePartition(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	case timodel.ActionRemovePartitioning, timodel.ActionAlterTablePartitioning:
+		err := s.inner.alterPartitioning(job)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -857,7 +882,7 @@ func (s *snapshot) doCreateTable(tbInfo *model.TableInfo, currentTs uint64) {
 }
 
 // updatePartition updates partition info for `tbInfo`.
-func (s *snapshot) updatePartition(tbInfo *model.TableInfo, currentTs uint64) error {
+func (s *snapshot) updatePartition(tbInfo *model.TableInfo, isTruncate bool, currentTs uint64) error {
 	oldTbInfo, ok := s.physicalTableByID(tbInfo.ID)
 	if !ok {
 		return cerror.ErrSnapshotTableNotFound.GenWithStackByArgs(tbInfo.ID)
@@ -882,12 +907,21 @@ func (s *snapshot) updatePartition(tbInfo *model.TableInfo, currentTs uint64) er
 	for _, partition := range oldPi.Definitions {
 		s.partitions.ReplaceOrInsert(newVersionedID(partition.ID, tag))
 	}
+	newPartitionIDMap := make(map[int64]struct{}, len(newPi.NewPartitionIDs))
 	for _, partition := range newPi.Definitions {
 		vid := newVersionedID(partition.ID, tag)
 		vid.target = tbInfo
 		s.partitions.ReplaceOrInsert(vid)
 		if ineligible {
 			s.ineligibleTables.ReplaceOrInsert(newVersionedID(partition.ID, tag))
+		}
+		newPartitionIDMap[partition.ID] = struct{}{}
+	}
+	if isTruncate {
+		for _, partition := range oldPi.Definitions {
+			if _, ok := newPartitionIDMap[partition.ID]; !ok {
+				s.truncatedTables.ReplaceOrInsert(newVersionedID(partition.ID, tag))
+			}
 		}
 	}
 	s.currentTs = currentTs
@@ -978,7 +1012,7 @@ func (s *snapshot) exchangePartition(targetTable *model.TableInfo, currentTS uin
 	// ref: https://github.com/pingcap/tidb/issues/43819
 	targetTable.SchemaID = oldTable.SchemaID
 	targetTable.TableName = oldTable.TableName
-	err = s.updatePartition(targetTable, currentTS)
+	err = s.updatePartition(targetTable, false, currentTS)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1001,6 +1035,27 @@ func (s *snapshot) exchangePartition(targetTable *model.TableInfo, currentTS uin
 		zap.Int64("exchangedPartition", exchangedPartitionID),
 		zap.String("targetTable", targetTable.TableName.String()),
 		zap.Any("partition", targetTable.GetPartitionInfo().Definitions))
+	return nil
+}
+
+// alterPartitioning changes the table id and updates the TableInfo (including the partitioning info)
+func (s *snapshot) alterPartitioning(job *timodel.Job) error {
+	// first drop the table (will work with both partitioned and non-partitioned tables
+	err := s.dropTable(job.TableID, job.BinlogInfo.FinishedTS)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	// (re)create table, again will work with both partitioned and non-paritioned tables
+	// it uses the model.TableInfo written to the job.BinlogInfo, which is the final one
+	err = s.createTable(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	log.Info("handle alter partitioning success",
+		zap.Int64("OldID", job.TableID),
+		zap.Int64("NewID", job.BinlogInfo.TableInfo.ID),
+		zap.String("Name", job.TableName))
 	return nil
 }
 

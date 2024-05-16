@@ -22,8 +22,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
-	ticonfig "github.com/pingcap/tidb/config"
-	"github.com/pingcap/tiflow/cdc/contextutil"
+	ticonfig "github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tiflow/cdc/server"
 	cmdcontext "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
@@ -105,14 +104,13 @@ func (o *options) run(cmd *cobra.Command) error {
 	})
 	defer cancel()
 
-	tz, err := ticdcutil.GetTimezone(o.serverConfig.TZ)
+	_, err := ticdcutil.GetTimezone(o.serverConfig.TZ)
 	if err != nil {
 		return errors.Annotate(err, "can not load timezone, Please specify the time zone through environment variable `TZ` or command line parameters `--tz`")
 	}
 
 	config.StoreGlobalServerConfig(o.serverConfig)
-	ctx := contextutil.PutTimezoneInCtx(cmdcontext.GetDefaultContext(), tz)
-	ctx = contextutil.PutCaptureAddrInCtx(ctx, o.serverConfig.AdvertiseAddr)
+	ctx := cmdcontext.GetDefaultContext()
 
 	version.LogVersionInfo("Change Data Capture (CDC)")
 	if ticdcutil.FailpointBuild {
@@ -133,8 +131,7 @@ func (o *options) run(cmd *cobra.Command) error {
 		return errors.Trace(err)
 	}
 	// Drain the server before shutdown.
-	shutdownNotify := func() <-chan struct{} { return server.Drain() }
-	util.InitSignalHandling(shutdownNotify, cancel)
+	util.InitSignalHandling(server.Drain, cancel)
 
 	// Run TiCDC server.
 	err = server.Run(ctx)

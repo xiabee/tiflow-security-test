@@ -32,14 +32,15 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/util/dbutil"
-	"github.com/pingcap/tidb/util/filter"
-	regexprrouter "github.com/pingcap/tidb/util/regexpr-router"
-	router "github.com/pingcap/tidb/util/table-router"
+	tidbddl "github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/util/dbutil"
+	"github.com/pingcap/tidb/pkg/util/filter"
+	regexprrouter "github.com/pingcap/tidb/pkg/util/regexpr-router"
+	router "github.com/pingcap/tidb/pkg/util/table-router"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pb"
@@ -49,6 +50,7 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	fr "github.com/pingcap/tiflow/dm/pkg/func-rollback"
+	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/ha"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	parserpkg "github.com/pingcap/tiflow/dm/pkg/parser"
@@ -215,6 +217,8 @@ type Syncer struct {
 		endLocation   *binlog.Location
 		isQueryEvent  bool
 	}
+
+	cutOverLocation atomic.Pointer[binlog.Location]
 
 	handleJobFunc func(*job) (bool, error)
 	flushSeq      int64
@@ -788,6 +792,9 @@ func (s *Syncer) Process(ctx context.Context, pr chan pb.ProcessResult) {
 
 // getTableInfo returns a table info for sourceTable, it should not be modified by caller.
 func (s *Syncer) getTableInfo(tctx *tcontext.Context, sourceTable, targetTable *filter.Table) (*model.TableInfo, error) {
+	if s.schemaTracker == nil {
+		return nil, terror.ErrSchemaTrackerIsClosed.New("schema tracker not init")
+	}
 	ti, err := s.schemaTracker.GetTableInfo(sourceTable)
 	if err == nil {
 		return ti, nil
@@ -811,6 +818,45 @@ func (s *Syncer) getTableInfo(tctx *tcontext.Context, sourceTable, targetTable *
 		return nil, terror.ErrSchemaTrackerCannotGetTable.Delegate(err, sourceTable)
 	}
 	return ti, nil
+}
+
+// getDBInfoFromDownstream tries to track the db info from the downstream. It will not overwrite existing table.
+func (s *Syncer) getDBInfoFromDownstream(tctx *tcontext.Context, sourceTable, targetTable *filter.Table) (*model.DBInfo, error) {
+	// TODO: Switch to use the HTTP interface to retrieve the TableInfo directly if HTTP port is available
+	// use parser for downstream.
+	parser2, err := dbconn.GetParserForConn(tctx, s.ddlDBConn)
+	if err != nil {
+		return nil, terror.ErrSchemaTrackerCannotParseDownstreamTable.Delegate(err, targetTable, sourceTable)
+	}
+
+	createSQL, err := dbconn.GetSchemaCreateSQL(tctx, s.ddlDBConn, targetTable.Schema)
+	if err != nil {
+		return nil, terror.ErrSchemaTrackerCannotFetchDownstreamTable.Delegate(err, targetTable, sourceTable)
+	}
+
+	createNode, err := parser2.ParseOneStmt(createSQL, "", "")
+	if err != nil {
+		return nil, terror.ErrSchemaTrackerCannotParseDownstreamTable.Delegate(err, targetTable, sourceTable)
+	}
+	stmt := createNode.(*ast.CreateDatabaseStmt)
+
+	// we only consider explicit charset/collate, if not found, fallback to default charset/collate.
+	charsetOpt := ast.CharsetOpt{}
+	for _, val := range stmt.Options {
+		switch val.Tp {
+		case ast.DatabaseOptionCharset:
+			charsetOpt.Chs = val.Value
+		case ast.DatabaseOptionCollate:
+			charsetOpt.Col = val.Value
+		}
+	}
+
+	chs, coll, err := tidbddl.ResolveCharsetCollation(nil, charsetOpt)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	return &model.DBInfo{Name: stmt.Name, Charset: chs, Collate: coll}, nil
 }
 
 // trackTableInfoFromDownstream tries to track the table info from the downstream. It will not overwrite existing table.
@@ -1069,7 +1115,12 @@ func (s *Syncer) handleJob(job *job) (added2Queue bool, err error) {
 	skipCheckFlush := false
 	defer func() {
 		if !skipCheckFlush && err == nil {
-			err = s.flushIfOutdated()
+			if cutoverLocation := s.cutOverLocation.Load(); cutoverLocation != nil && binlog.CompareLocation(*cutoverLocation, job.currentLocation, s.cfg.EnableGTID) <= 0 {
+				err = s.flushJobs()
+				s.cutOverLocation.Store(nil)
+			} else {
+				err = s.flushIfOutdated()
+			}
 		}
 	}()
 
@@ -1439,7 +1490,8 @@ func (s *Syncer) syncDDL(queueBucket string, db *dbconn.DBConn, ddlJobChan chan 
 					}
 				}
 				//nolint:sqlclosecheck
-				row.Close()
+				_ = row.Close()
+				_ = row.Err()
 			}
 			affected, err = db.ExecuteSQLWithIgnore(s.syncCtx, s.metricsProxies, errorutil.IsIgnorableMySQLDDLError, ddlJob.ddls)
 			failpoint.Inject("TestHandleSpecialDDLError", func() {
@@ -1741,7 +1793,7 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	if fresh && s.cfg.Mode == config.ModeAll {
+	if fresh && config.HasLoad(s.cfg.Mode) {
 		delLoadTask = true
 		flushCheckpoint = true
 		freshAndAllMode = true
@@ -2363,6 +2415,39 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 			if err2 != nil {
 				return err2
 			}
+		case *replication.TransactionPayloadEvent:
+			for _, tpev := range ev.Events {
+				switch tpevt := tpev.Event.(type) {
+				case *replication.RowsEvent:
+					eventIndex++
+					s.metricsProxies.Metrics.BinlogEventRowHistogram.Observe(float64(len(tpevt.Rows)))
+					ec.header.EventType = tpev.Header.EventType
+					sourceTable, err2 = s.handleRowsEvent(tpevt, ec)
+					if sourceTable != nil && err2 == nil && s.cfg.EnableGTID {
+						if _, ok := affectedSourceTables[sourceTable.Schema]; !ok {
+							affectedSourceTables[sourceTable.Schema] = make(map[string]struct{})
+						}
+						affectedSourceTables[sourceTable.Schema][sourceTable.Name] = struct{}{}
+					}
+				case *replication.QueryEvent:
+					originSQL = strings.TrimSpace(string(tpevt.Query))
+					err2 = s.ddlWorker.HandleQueryEvent(tpevt, ec, originSQL)
+				case *replication.XIDEvent:
+					eventType = "XID"
+					needContinue, err2 = funcCommit()
+				case *replication.TableMapEvent:
+				case *replication.FormatDescriptionEvent:
+				default:
+					s.tctx.L().Warn("unhandled event from transaction payload", zap.String("type", fmt.Sprintf("%T", tpevt)))
+				}
+			}
+			if needContinue {
+				continue
+			}
+		case *replication.TableMapEvent:
+		case *replication.FormatDescriptionEvent:
+		default:
+			s.tctx.L().Warn("unhandled event", zap.String("type", fmt.Sprintf("%T", ev)))
 		}
 		if err2 != nil {
 			if err := s.handleEventError(err2, startLocation, endLocation, e.Header.EventType == replication.QUERY_EVENT, originSQL); err != nil {
@@ -2909,6 +2994,11 @@ func (s *Syncer) genRouter() error {
 
 func (s *Syncer) loadTableStructureFromDump(ctx context.Context) error {
 	logger := s.tctx.L()
+	// TODO: delete this check after we support parallel reading the files to improve load speed
+	if !storage.IsLocalDiskPath(s.cfg.LoaderConfig.Dir) {
+		logger.Warn("skip load table structure from dump files for non-local-dir loader because it may be slow", zap.String("loaderDir", s.cfg.LoaderConfig.Dir))
+		return nil
+	}
 	files, err := storage.CollectDirFiles(ctx, s.cfg.LoaderConfig.Dir, nil)
 	if err != nil {
 		logger.Warn("fail to get dump files", zap.Error(err))
@@ -2963,7 +3053,7 @@ func (s *Syncer) loadTableStructureFromDump(ctx context.Context) error {
 				zap.String("db", db),
 				zap.String("path", s.cfg.LoaderConfig.Dir),
 				zap.String("file", file),
-				zap.Error(err))
+				zap.Error(err2))
 			setFirstErr(err2)
 			continue
 		}
@@ -3424,7 +3514,7 @@ func (s *Syncer) adjustGlobalPointGTID(tctx *tcontext.Context) (bool, error) {
 	// 2. location already has GTID position
 	// 3. location is totally new, has no position info
 	// 4. location is too early thus not a COMMIT location, which happens when it's reset by other logic
-	if !s.cfg.EnableGTID || location.GTIDSetStr() != "" || location.Position.Name == "" || location.Position.Pos == 4 {
+	if !s.cfg.EnableGTID || !gtid.CheckGTIDSetEmpty(location.GetGTID()) || location.Position.Name == "" || location.Position.Pos == 4 {
 		return false, nil
 	}
 	// set enableGTID to false for new streamerController

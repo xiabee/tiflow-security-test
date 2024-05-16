@@ -106,6 +106,5 @@ func (c *SchedulerConfig) ValidateAndAdjust() error {
 		return cerror.ErrInvalidServerOption.GenWithStackByArgs(
 			"add-table-batch-size must be large than 0")
 	}
-
 	return nil
 }

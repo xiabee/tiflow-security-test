@@ -75,9 +75,10 @@ var changefeedUnRetryableErrors = []*errors.Error{
 	ErrExpressionParseFailed,
 	ErrSchemaSnapshotNotFound,
 	ErrSyncRenameTableFailed,
-	ErrHandleDDLFailed,
 	ErrChangefeedUnretryable,
 	ErrCorruptedDataMutation,
+	ErrDispatcherFailed,
+	ErrColumnSelectorFailed,
 
 	ErrSinkURIInvalid,
 	ErrKafkaInvalidConfig,
@@ -119,6 +120,25 @@ func RFCCode(err error) (errors.RFCErrorCode, bool) {
 		return terr.RFCCode(), true
 	}
 	return RFCCode(cause)
+}
+
+// IsDupEntryError checks if an error is a duplicate entry error.
+func IsDupEntryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if ErrMySQLDuplicateEntry.Equal(err) {
+		return true
+	}
+	if code, ok := RFCCode(err); ok {
+		if code == ErrMySQLDuplicateEntry.RFCCode() {
+			return true
+		}
+	}
+	if strings.Contains(err.Error(), string(ErrMySQLDuplicateEntry.RFCCode())) {
+		return true
+	}
+	return false
 }
 
 // IsRetryableError check the error is safe or worth to retry

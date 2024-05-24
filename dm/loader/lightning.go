@@ -25,7 +25,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/dumpling/export"
-	lserver "github.com/pingcap/tidb/lightning/pkg/server"
+	"github.com/pingcap/tidb/lightning/pkg/server"
 	"github.com/pingcap/tidb/pkg/lightning/checkpoints"
 	"github.com/pingcap/tidb/pkg/lightning/common"
 	lcfg "github.com/pingcap/tidb/pkg/lightning/config"
@@ -68,7 +68,7 @@ type LightningLoader struct {
 
 	logger log.Logger
 	cli    *clientv3.Client
-	core   *lserver.Lightning
+	core   *server.Lightning
 	cancel context.CancelFunc // for per task context, which maybe different from lightning context
 
 	toDB *conn.BaseDB
@@ -96,7 +96,7 @@ func NewLightning(cfg *config.SubTaskConfig, cli *clientv3.Client, workerName st
 		cli:                   cli,
 		workerName:            workerName,
 		lightningGlobalConfig: lightningCfg,
-		core:                  lserver.New(lightningCfg),
+		core:                  server.New(lightningCfg),
 		logger:                logger.WithFields(zap.String("task", cfg.Name), zap.String("unit", "lightning-load")),
 		speedRecorder:         export.NewSpeedRecorder(),
 	}
@@ -234,7 +234,7 @@ func (l *LightningLoader) runLightning(ctx context.Context, cfg *lcfg.Config) (e
 		return err
 	}
 
-	var opts []lserver.Option
+	var opts []server.Option
 	if l.cfg.MetricsFactory != nil {
 		// this branch means dataflow engine has set a Factory, the Factory itself
 		// will register and deregister metrics, but lightning will expect the
@@ -242,13 +242,13 @@ func (l *LightningLoader) runLightning(ctx context.Context, cfg *lcfg.Config) (e
 		// So we use dataflow engine's Factory to register, and use dataflow engine's
 		// global metrics to manually deregister.
 		opts = append(opts,
-			lserver.WithPromFactory(
+			server.WithPromFactory(
 				promutil.NewWrappingFactory(
 					l.cfg.MetricsFactory,
 					"",
 					prometheus.Labels{"task": l.cfg.Name, "source_id": l.cfg.SourceID},
 				)),
-			lserver.WithPromRegistry(promutil.GetGlobalMetricRegistry()))
+			server.WithPromRegistry(promutil.GetGlobalMetricRegistry()))
 	} else {
 		registry := prometheus.DefaultGatherer.(prometheus.Registerer)
 		failpoint.Inject("DontUnregister", func() {
@@ -256,28 +256,28 @@ func (l *LightningLoader) runLightning(ctx context.Context, cfg *lcfg.Config) (e
 		})
 
 		opts = append(opts,
-			lserver.WithPromFactory(
+			server.WithPromFactory(
 				promutil.NewWrappingFactory(
 					tidbpromutil.NewDefaultFactory(),
 					"",
 					prometheus.Labels{"task": l.cfg.Name, "source_id": l.cfg.SourceID},
 				),
 			),
-			lserver.WithPromRegistry(registry))
+			server.WithPromRegistry(registry))
 	}
 	if l.cfg.ExtStorage != nil {
 		opts = append(opts,
-			lserver.WithDumpFileStorage(l.cfg.ExtStorage))
+			server.WithDumpFileStorage(l.cfg.ExtStorage))
 	}
 	if l.cfg.FrameworkLogger != nil {
-		opts = append(opts, lserver.WithLogger(l.cfg.FrameworkLogger))
+		opts = append(opts, server.WithLogger(l.cfg.FrameworkLogger))
 	} else {
-		opts = append(opts, lserver.WithLogger(l.logger.Logger))
+		opts = append(opts, server.WithLogger(l.logger.Logger))
 	}
 
 	var hasDup atomic.Bool
 	if l.cfg.LoaderConfig.ImportMode == config.LoadModePhysical {
-		opts = append(opts, lserver.WithDupIndicator(&hasDup))
+		opts = append(opts, server.WithDupIndicator(&hasDup))
 	}
 
 	err = l.core.RunOnceWithOptions(taskCtx, cfg, opts...)
@@ -335,8 +335,7 @@ func GetLightningConfig(globalCfg *lcfg.GlobalConfig, subtaskCfg *config.SubTask
 	cfg.App.RegionConcurrency = subtaskCfg.LoaderConfig.PoolSize
 	cfg.Routes = subtaskCfg.RouteRules
 
-	// Use MySQL checkpoint when we use s3/gcs as dumper storage
-	if subtaskCfg.ExtStorage != nil || !storage.IsLocalDiskPath(subtaskCfg.LoaderConfig.Dir) {
+	if subtaskCfg.ExtStorage != nil {
 		// NOTE: If we use bucket as dumper storage, write lightning checkpoint to downstream DB to avoid bucket ratelimit
 		// since we will use check Checkpoint in 'ignoreCheckpointError', MAKE SURE we have assigned the Checkpoint config properly here
 		if err := cfg.Security.BuildTLSConfig(); err != nil {
@@ -367,9 +366,8 @@ func GetLightningConfig(globalCfg *lcfg.GlobalConfig, subtaskCfg *config.SubTask
 	if cfg.TikvImporter.Backend == lcfg.BackendLocal {
 		cfg.TikvImporter.IncrementalImport = true
 	} else {
-		err := cfg.TikvImporter.OnDuplicate.FromStringValue(string(subtaskCfg.OnDuplicateLogical))
-		if err != nil {
-			return nil, errors.Trace(err)
+		if err := cfg.TikvImporter.OnDuplicate.FromStringValue(string(subtaskCfg.OnDuplicateLogical)); err != nil {
+			return nil, err
 		}
 	}
 	switch subtaskCfg.OnDuplicatePhysical {
@@ -606,7 +604,7 @@ func (l *LightningLoader) Resume(ctx context.Context, pr chan pb.ProcessResult) 
 		l.logger.Warn("try to resume, but already closed")
 		return
 	}
-	l.core = lserver.New(l.lightningGlobalConfig)
+	l.core = server.New(l.lightningGlobalConfig)
 	// continue the processing
 	l.Process(ctx, pr)
 }

@@ -22,16 +22,15 @@ function run() {
 
 	cd $WORK_DIR
 
-	TOPIC_NAME="ticdc-canal-json-basic"
+	TOPIC_NAME="ticdc-canal-json-test"
 
 	run_cdc_server --workdir $WORK_DIR --binary $CDC_BINARY
 
 	if [ "$SINK_TYPE" == "kafka" ]; then
-		SINK_URI="kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=canal-json&enable-tidb-extension=true"
+		SINK_URI="kafka://127.0.0.1:9092/$TOPIC_NAME?protocol=canal-json&enable-tidb-extension=true&kafka-version=${KAFKA_VERSION}"
 	fi
 
 	if [ "$SINK_TYPE" == "pulsar" ]; then
-		run_pulsar_cluster $WORK_DIR normal
 		SINK_URI="pulsar://127.0.0.1:6650/$TOPIC_NAME?protocol=canal-json&enable-tidb-extension=true"
 	fi
 
@@ -44,7 +43,7 @@ function run() {
 	fi
 
 	if [ "$SINK_TYPE" == "pulsar" ]; then
-		run_pulsar_consumer --upstream-uri $SINK_URI
+		run_pulsar_consumer $WORK_DIR $SINK_URI
 	fi
 
 	run_sql_file $CUR/data/data.sql ${UP_TIDB_HOST} ${UP_TIDB_PORT}

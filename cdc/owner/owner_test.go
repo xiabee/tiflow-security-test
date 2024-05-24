@@ -26,8 +26,8 @@ import (
 	"github.com/pingcap/tiflow/cdc/puller"
 	"github.com/pingcap/tiflow/cdc/redo"
 	"github.com/pingcap/tiflow/cdc/scheduler"
-	"github.com/pingcap/tiflow/cdc/vars"
 	"github.com/pingcap/tiflow/pkg/config"
+	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/filter"
@@ -57,44 +57,39 @@ var _ gc.Manager = (*mockManager)(nil)
 // newOwner4Test creates a new Owner for test
 func newOwner4Test(
 	newDDLPuller func(ctx context.Context,
+		replicaConfig *config.ReplicaConfig,
 		up *upstream.Upstream,
 		startTs uint64,
 		changefeed model.ChangeFeedID,
 		schemaStorage entry.SchemaStorage,
 		filter filter.Filter,
-	) puller.DDLPuller,
+	) (puller.DDLPuller, error),
 	newSink func(model.ChangeFeedID, *model.ChangeFeedInfo, func(error), func(error)) DDLSink,
 	newScheduler func(
-		ctx context.Context, id model.ChangeFeedID,
-		up *upstream.Upstream, changefeedEpoch uint64,
+		ctx cdcContext.Context, up *upstream.Upstream, changefeedEpoch uint64,
 		cfg *config.SchedulerConfig, redoMetaManager redo.MetaManager,
-		globalVars *vars.GlobalVars,
 	) (scheduler.Scheduler, error),
 	newDownstreamObserver func(
 		ctx context.Context, changefeedID model.ChangeFeedID, sinkURIStr string, replCfg *config.ReplicaConfig,
 		opts ...observer.NewObserverOption,
 	) (observer.Observer, error),
 	pdClient pd.Client,
-	globalVars *vars.GlobalVars,
 ) Owner {
 	m := upstream.NewManager4Test(pdClient)
-	o := NewOwner(m, config.NewDefaultSchedulerConfig(), globalVars).(*ownerImpl)
+	o := NewOwner(m, config.NewDefaultSchedulerConfig()).(*ownerImpl)
 	o.newChangefeed = func(
 		id model.ChangeFeedID,
-		cfInfo *model.ChangeFeedInfo,
-		cfStatus *model.ChangeFeedStatus,
-		cfstateManager FeedStateManager,
+		state *orchestrator.ChangefeedReactorState,
 		up *upstream.Upstream,
 		cfg *config.SchedulerConfig,
-		globalVars *vars.GlobalVars,
 	) *changefeed {
-		return newChangefeed4Test(id, cfInfo, cfStatus, cfstateManager, up, newDDLPuller, newSink,
-			newScheduler, newDownstreamObserver, globalVars)
+		return newChangefeed4Test(id, state, up, newDDLPuller, newSink,
+			newScheduler, newDownstreamObserver)
 	}
 	return o
 }
 
-func createOwner4Test(globalVars *vars.GlobalVars, t *testing.T) (*ownerImpl, *orchestrator.GlobalReactorState, *orchestrator.ReactorStateTester) {
+func createOwner4Test(ctx cdcContext.Context, t *testing.T) (*ownerImpl, *orchestrator.GlobalReactorState, *orchestrator.ReactorStateTester) {
 	pdClient := &gc.MockPDClient{
 		UpdateServiceGCSafePointFunc: func(ctx context.Context, serviceID string, ttl int64, safePoint uint64) (uint64, error) {
 			return safePoint, nil
@@ -104,13 +99,14 @@ func createOwner4Test(globalVars *vars.GlobalVars, t *testing.T) (*ownerImpl, *o
 	owner := newOwner4Test(
 		// new ddl puller
 		func(ctx context.Context,
+			replicaConfig *config.ReplicaConfig,
 			up *upstream.Upstream,
 			startTs uint64,
 			changefeed model.ChangeFeedID,
 			schemaStorage entry.SchemaStorage,
 			filter filter.Filter,
-		) puller.DDLPuller {
-			return &mockDDLPuller{resolvedTs: startTs - 1}
+		) (puller.DDLPuller, error) {
+			return &mockDDLPuller{resolvedTs: startTs - 1}, nil
 		},
 		// new ddl sink
 		func(model.ChangeFeedID, *model.ChangeFeedInfo, func(error), func(error)) DDLSink {
@@ -118,9 +114,8 @@ func createOwner4Test(globalVars *vars.GlobalVars, t *testing.T) (*ownerImpl, *o
 		},
 		// new scheduler
 		func(
-			ctx context.Context, id model.ChangeFeedID, up *upstream.Upstream, changefeedEpoch uint64,
+			ctx cdcContext.Context, up *upstream.Upstream, changefeedEpoch uint64,
 			cfg *config.SchedulerConfig, redoMetaAManager redo.MetaManager,
-			globalVars *vars.GlobalVars,
 		) (scheduler.Scheduler, error) {
 			return &mockScheduler{}, nil
 		},
@@ -133,7 +128,6 @@ func createOwner4Test(globalVars *vars.GlobalVars, t *testing.T) (*ownerImpl, *o
 			return observer.NewDummyObserver(), nil
 		},
 		pdClient,
-		globalVars,
 	)
 	o := owner.(*ownerImpl)
 	o.upstreamManager = upstream.NewManager4Test(pdClient)
@@ -145,20 +139,20 @@ func createOwner4Test(globalVars *vars.GlobalVars, t *testing.T) (*ownerImpl, *o
 	cdcKey := etcd.CDCKey{
 		ClusterID: state.ClusterID,
 		Tp:        etcd.CDCKeyTypeCapture,
-		CaptureID: globalVars.CaptureInfo.ID,
+		CaptureID: ctx.GlobalVars().CaptureInfo.ID,
 	}
-	captureBytes, err := globalVars.CaptureInfo.Marshal()
+	captureBytes, err := ctx.GlobalVars().CaptureInfo.Marshal()
 	require.Nil(t, err)
 	tester.MustUpdate(cdcKey.String(), captureBytes)
 	return o, state, tester
 }
 
 func TestCreateRemoveChangefeed(t *testing.T) {
-	globalVars := vars.NewGlobalVars4Test()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := cdcContext.NewBackendContext4Test(false)
+	ctx, cancel := cdcContext.WithCancel(ctx)
 	defer cancel()
 
-	owner, state, tester := createOwner4Test(globalVars, t)
+	owner, state, tester := createOwner4Test(ctx, t)
 
 	changefeedID := model.DefaultChangeFeedID("test-changefeed")
 	changefeedInfo := &model.ChangeFeedInfo{
@@ -225,10 +219,9 @@ func TestCreateRemoveChangefeed(t *testing.T) {
 }
 
 func TestStopChangefeed(t *testing.T) {
-	globalVars := vars.NewGlobalVars4Test()
-	ctx := context.Background()
-	owner, state, tester := createOwner4Test(globalVars, t)
-	ctx, cancel := context.WithCancel(ctx)
+	ctx := cdcContext.NewBackendContext4Test(false)
+	owner, state, tester := createOwner4Test(ctx, t)
+	ctx, cancel := cdcContext.WithCancel(ctx)
 	defer cancel()
 
 	changefeedID := model.DefaultChangeFeedID("test-changefeed")
@@ -271,10 +264,12 @@ func TestStopChangefeed(t *testing.T) {
 }
 
 func TestAdminJob(t *testing.T) {
-	globalVars := vars.NewGlobalVars4Test()
+	ctx := cdcContext.NewBackendContext4Test(false)
+	ctx, cancel := cdcContext.WithCancel(ctx)
+	defer cancel()
 
 	done1 := make(chan error, 1)
-	owner, _, _ := createOwner4Test(globalVars, t)
+	owner, _, _ := createOwner4Test(ctx, t)
 	owner.EnqueueJob(model.AdminJob{
 		CfID: model.DefaultChangeFeedID("test-changefeed1"),
 		Type: model.AdminResume,
@@ -322,10 +317,10 @@ func TestAdminJob(t *testing.T) {
 // make sure handleJobs works well even if there is two different
 // version of captures in the cluster
 func TestHandleJobsDontBlock(t *testing.T) {
-	globalVars := vars.NewGlobalVars4Test()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := cdcContext.NewBackendContext4Test(false)
+	ctx, cancel := cdcContext.WithCancel(ctx)
 	defer cancel()
-	owner, state, tester := createOwner4Test(globalVars, t)
+	owner, state, tester := createOwner4Test(ctx, t)
 
 	statusProvider := owner.StatusProvider()
 	// work well
@@ -426,20 +421,11 @@ func TestHandleJobsDontBlock(t *testing.T) {
 	ctx1, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
+	var errIn error
 	var infos map[model.ChangeFeedID]*model.ChangeFeedInfo
 	done := make(chan struct{})
 	go func() {
-		info1, err := statusProvider.GetChangeFeedInfo(ctx1, cf1)
-		require.Nil(t, err)
-		info2, err := statusProvider.GetChangeFeedInfo(ctx1, cf2)
-		require.Nil(t, err)
-		info3, err := statusProvider.GetChangeFeedInfo(ctx1, cf3)
-		require.Nil(t, err)
-		infos = map[model.ChangeFeedID]*model.ChangeFeedInfo{
-			cf1: info1,
-			cf2: info2,
-			cf3: info3,
-		}
+		infos, errIn = statusProvider.GetAllChangeFeedInfo(ctx1)
 		done <- struct{}{}
 	}()
 
@@ -457,6 +443,7 @@ WorkLoop:
 			require.Nil(t, err)
 		}
 	}
+	require.Nil(t, errIn)
 	require.NotNil(t, infos[cf1])
 	require.NotNil(t, infos[cf2])
 	require.NotNil(t, infos[cf3])
@@ -496,13 +483,11 @@ func TestAsyncStop(t *testing.T) {
 func TestHandleDrainCapturesSchedulerNotReady(t *testing.T) {
 	t.Parallel()
 
-	state := &orchestrator.ChangefeedReactorState{
-		Info: &model.ChangeFeedInfo{State: model.StateNormal},
-	}
 	cf := &changefeed{
-		scheduler:    nil, // scheduler is not set.
-		latestStatus: state.Status,
-		latestInfo:   state.Info,
+		scheduler: nil, // scheduler is not set.
+		state: &orchestrator.ChangefeedReactorState{
+			Info: &model.ChangeFeedInfo{State: model.StateNormal},
+		},
 	}
 
 	pdClient := &gc.MockPDClient{}
@@ -537,7 +522,7 @@ func TestHandleDrainCapturesSchedulerNotReady(t *testing.T) {
 	require.Nil(t, <-done)
 
 	// Only count changefeed that is normal.
-	state.Info.State = model.StateStopped
+	cf.state.Info.State = model.StateStopped
 	query = &scheduler.Query{CaptureID: "test"}
 	done = make(chan error, 1)
 	o.handleDrainCaptures(ctx, query, done)
@@ -580,19 +565,19 @@ func TestIsHealthyWithAbnormalChangefeeds(t *testing.T) {
 	require.True(t, query.Data.(bool))
 
 	// state is not normal
-	state := &orchestrator.ChangefeedReactorState{
+	cf.state = &orchestrator.ChangefeedReactorState{
 		Info: &model.ChangeFeedInfo{State: model.StateStopped},
 	}
-	cf.latestInfo = state.Info
-	cf.latestStatus = state.Status
 	err = o.handleQueries(query)
 	require.NoError(t, err)
 	require.True(t, query.Data.(bool))
 
 	// 2 changefeeds, another is normal, and scheduler initialized.
 	o.changefeeds[model.ChangeFeedID{ID: "2"}] = &changefeed{
-		latestInfo: &model.ChangeFeedInfo{State: model.StateNormal},
-		scheduler:  &healthScheduler{init: true},
+		state: &orchestrator.ChangefeedReactorState{
+			Info: &model.ChangeFeedInfo{State: model.StateNormal},
+		},
+		scheduler: &healthScheduler{init: true},
 	}
 	err = o.handleQueries(query)
 	require.NoError(t, err)
@@ -637,8 +622,10 @@ func TestIsHealthy(t *testing.T) {
 
 	// changefeed in normal, but the scheduler is not set, Unhealthy.
 	cf := &changefeed{
-		latestInfo: &model.ChangeFeedInfo{State: model.StateNormal},
-		scheduler:  nil, // scheduler is not set.
+		state: &orchestrator.ChangefeedReactorState{
+			Info: &model.ChangeFeedInfo{State: model.StateNormal},
+		},
+		scheduler: nil, // scheduler is not set.
 	}
 	o.changefeeds[model.ChangeFeedID{ID: "1"}] = cf
 	o.changefeedTicked = true
@@ -661,8 +648,10 @@ func TestIsHealthy(t *testing.T) {
 
 	// Unhealthy, there is another changefeed is not initialized.
 	o.changefeeds[model.ChangeFeedID{ID: "1"}] = &changefeed{
-		latestInfo: &model.ChangeFeedInfo{State: model.StateNormal},
-		scheduler:  &healthScheduler{init: false},
+		state: &orchestrator.ChangefeedReactorState{
+			Info: &model.ChangeFeedInfo{State: model.StateNormal},
+		},
+		scheduler: &healthScheduler{init: false},
 	}
 	o.changefeedTicked = true
 	err = o.handleQueries(query)

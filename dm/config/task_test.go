@@ -14,7 +14,6 @@
 package config
 
 import (
-	"crypto/rand"
 	"os"
 	"path"
 	"reflect"
@@ -23,14 +22,12 @@ import (
 	"testing"
 
 	"github.com/coreos/go-semver/semver"
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tidb/pkg/util/filter"
 	router "github.com/pingcap/tidb/pkg/util/table-router"
 	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/config/security"
-	"github.com/pingcap/tiflow/dm/pkg/encrypt"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
-	"github.com/pingcap/tiflow/dm/pkg/utils"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	"github.com/stretchr/testify/require"
 )
 
@@ -126,7 +123,7 @@ func TestUnusedTaskConfig(t *testing.T) {
 	t.Parallel()
 
 	taskConfig := NewTaskConfig()
-	err := taskConfig.FromYaml(correctTaskConfig)
+	err := taskConfig.Decode(correctTaskConfig)
 	require.NoError(t, err)
 	errorTaskConfig := `---
 name: test
@@ -216,7 +213,7 @@ mysql-instances:
     syncer-config-name: "global2"
 `
 	taskConfig = NewTaskConfig()
-	err = taskConfig.FromYaml(errorTaskConfig)
+	err = taskConfig.Decode(errorTaskConfig)
 	require.ErrorContains(t, err, "The configurations as following [expr-1 filter-rule-2 route-rule-2] are set in global configuration")
 }
 
@@ -272,11 +269,11 @@ mysql-instances:
     syncer-config-name: "global"
 `
 	taskConfig := NewTaskConfig()
-	err := taskConfig.FromYaml(errorTaskConfig1)
+	err := taskConfig.Decode(errorTaskConfig1)
 	// field server-id is not a member of TaskConfig
 	require.ErrorContains(t, err, "line 18: field server-id not found in type config.MySQLInstance")
 
-	err = taskConfig.FromYaml(errorTaskConfig2)
+	err = taskConfig.Decode(errorTaskConfig2)
 	// field name duplicate
 	require.ErrorContains(t, err, "line 3: field name already set in type config.TaskConfig")
 
@@ -1031,7 +1028,7 @@ func TestTaskConfigForDowngrade(t *testing.T) {
 	t.Parallel()
 
 	cfg := NewTaskConfig()
-	err := cfg.FromYaml(correctTaskConfig)
+	err := cfg.Decode(correctTaskConfig)
 	require.NoError(t, err)
 
 	cfgForDowngrade := NewTaskConfigForDowngrade(cfg)
@@ -1147,42 +1144,4 @@ func TestLoadConfigAdjust(t *testing.T) {
 	cfg.OnDuplicatePhysical = "wrong"
 	err := cfg.adjust()
 	require.True(t, terror.ErrConfigInvalidPhysicalDuplicateResolution.Equal(err))
-}
-
-func TestTaskYamlForDowngrade(t *testing.T) {
-	originCfg := TaskConfig{
-		Name:     "test",
-		TaskMode: ModeFull,
-		MySQLInstances: []*MySQLInstance{
-			{
-				SourceID: "mysql-3306",
-			},
-		},
-		TargetDB: &dbconfig.DBConfig{
-			Password: "123456",
-		},
-	}
-	// when secret key is empty, the password should be kept
-	content, err := originCfg.YamlForDowngrade()
-	require.NoError(t, err)
-	newCfg := &TaskConfig{}
-	require.NoError(t, newCfg.FromYaml(content))
-	require.Equal(t, originCfg.TargetDB.Password, newCfg.TargetDB.Password)
-
-	// when secret key is not empty, the password should be encrypted
-	key := make([]byte, 32)
-	_, err = rand.Read(key)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		encrypt.InitCipher(nil)
-	})
-	encrypt.InitCipher(key)
-	content, err = originCfg.YamlForDowngrade()
-	require.NoError(t, err)
-	newCfg = &TaskConfig{}
-	require.NoError(t, newCfg.FromYaml(content))
-	require.NotEqual(t, originCfg.TargetDB.Password, newCfg.TargetDB.Password)
-	decryptedPass, err := utils.Decrypt(newCfg.TargetDB.Password)
-	require.NoError(t, err)
-	require.Equal(t, originCfg.TargetDB.Password, decryptedPass)
 }

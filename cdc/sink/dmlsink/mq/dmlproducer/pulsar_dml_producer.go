@@ -192,7 +192,8 @@ func (p *pulsarDMLProducer) AsyncSendMessage(
 	return nil
 }
 
-func (p *pulsarDMLProducer) Close() { // We have to hold the lock to synchronize closing with writing.
+func (p *pulsarDMLProducer) Close() {
+	// We have to hold the lock to synchronize closing with writing.
 	p.closedMu.Lock()
 	defer p.closedMu.Unlock()
 	// If the producer has already been closed, we should skip this close operation.
@@ -206,6 +207,7 @@ func (p *pulsarDMLProducer) Close() { // We have to hold the lock to synchronize
 	}
 	close(p.failpointCh)
 	p.closed = true
+
 	start := time.Now()
 	keys := p.producers.Keys()
 	for _, topic := range keys {
@@ -216,6 +218,7 @@ func (p *pulsarDMLProducer) Close() { // We have to hold the lock to synchronize
 			zap.String("namespace", p.id.Namespace),
 			zap.String("changefeed", p.id.ID), zap.String("topic", topicName))
 	}
+
 	p.client.Close()
 }
 
@@ -226,26 +229,24 @@ func newProducer(
 	client pulsar.Client,
 	topicName string,
 ) (pulsar.Producer, error) {
-	maxReconnectToBroker := uint(config.DefaultMaxReconnectToPulsarBroker)
-	option := pulsar.ProducerOptions{
-		Topic:                topicName,
-		MaxReconnectToBroker: &maxReconnectToBroker,
+	po := pulsar.ProducerOptions{
+		Topic: topicName,
 	}
 	if pConfig.BatchingMaxMessages != nil {
-		option.BatchingMaxMessages = *pConfig.BatchingMaxMessages
+		po.BatchingMaxMessages = *pConfig.BatchingMaxMessages
 	}
 	if pConfig.BatchingMaxPublishDelay != nil {
-		option.BatchingMaxPublishDelay = pConfig.BatchingMaxPublishDelay.Duration()
+		po.BatchingMaxPublishDelay = pConfig.BatchingMaxPublishDelay.Duration()
 	}
 	if pConfig.CompressionType != nil {
-		option.CompressionType = pConfig.CompressionType.Value()
-		option.CompressionLevel = pulsar.Default
+		po.CompressionType = pConfig.CompressionType.Value()
+		po.CompressionLevel = pulsar.Default
 	}
 	if pConfig.SendTimeout != nil {
-		option.SendTimeout = pConfig.SendTimeout.Duration()
+		po.SendTimeout = pConfig.SendTimeout.Duration()
 	}
 
-	producer, err := client.CreateProducer(option)
+	producer, err := client.CreateProducer(po)
 	if err != nil {
 		return nil, err
 	}

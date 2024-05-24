@@ -31,7 +31,6 @@ import (
 	mysql2 "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	tidbddl "github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -50,7 +49,6 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	fr "github.com/pingcap/tiflow/dm/pkg/func-rollback"
-	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/ha"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	parserpkg "github.com/pingcap/tiflow/dm/pkg/parser"
@@ -69,6 +67,7 @@ import (
 	sm "github.com/pingcap/tiflow/dm/syncer/safe-mode"
 	"github.com/pingcap/tiflow/dm/syncer/shardddl"
 	"github.com/pingcap/tiflow/dm/unit"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	"github.com/pingcap/tiflow/pkg/errorutil"
 	"github.com/pingcap/tiflow/pkg/sqlmodel"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -2435,8 +2434,6 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 				case *replication.XIDEvent:
 					eventType = "XID"
 					needContinue, err2 = funcCommit()
-				case *replication.TableMapEvent:
-				case *replication.FormatDescriptionEvent:
 				default:
 					s.tctx.L().Warn("unhandled event from transaction payload", zap.String("type", fmt.Sprintf("%T", tpevt)))
 				}
@@ -2444,8 +2441,6 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 			if needContinue {
 				continue
 			}
-		case *replication.TableMapEvent:
-		case *replication.FormatDescriptionEvent:
 		default:
 			s.tctx.L().Warn("unhandled event", zap.String("type", fmt.Sprintf("%T", ev)))
 		}
@@ -2994,11 +2989,6 @@ func (s *Syncer) genRouter() error {
 
 func (s *Syncer) loadTableStructureFromDump(ctx context.Context) error {
 	logger := s.tctx.L()
-	// TODO: delete this check after we support parallel reading the files to improve load speed
-	if !storage.IsLocalDiskPath(s.cfg.LoaderConfig.Dir) {
-		logger.Warn("skip load table structure from dump files for non-local-dir loader because it may be slow", zap.String("loaderDir", s.cfg.LoaderConfig.Dir))
-		return nil
-	}
 	files, err := storage.CollectDirFiles(ctx, s.cfg.LoaderConfig.Dir, nil)
 	if err != nil {
 		logger.Warn("fail to get dump files", zap.Error(err))
@@ -3053,7 +3043,7 @@ func (s *Syncer) loadTableStructureFromDump(ctx context.Context) error {
 				zap.String("db", db),
 				zap.String("path", s.cfg.LoaderConfig.Dir),
 				zap.String("file", file),
-				zap.Error(err2))
+				zap.Error(err))
 			setFirstErr(err2)
 			continue
 		}
@@ -3514,7 +3504,7 @@ func (s *Syncer) adjustGlobalPointGTID(tctx *tcontext.Context) (bool, error) {
 	// 2. location already has GTID position
 	// 3. location is totally new, has no position info
 	// 4. location is too early thus not a COMMIT location, which happens when it's reset by other logic
-	if !s.cfg.EnableGTID || !gtid.CheckGTIDSetEmpty(location.GetGTID()) || location.Position.Name == "" || location.Position.Pos == 4 {
+	if !s.cfg.EnableGTID || location.GTIDSetStr() != "" || location.Position.Name == "" || location.Position.Pos == 4 {
 		return false, nil
 	}
 	// set enableGTID to false for new streamerController

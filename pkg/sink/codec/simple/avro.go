@@ -18,12 +18,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
-	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"go.uber.org/zap"
 )
 
 func newTableSchemaMap(tableInfo *model.TableInfo) interface{} {
@@ -40,7 +38,7 @@ func newTableSchemaMap(tableInfo *model.TableInfo) interface{} {
 		for _, col := range idx.Columns {
 			columns = append(columns, col.Name.O)
 			colInfo := tableInfo.Columns[col.Offset]
-			// An index is not null when all columns of aer not null
+			// An index is not null when all columns of are not null
 			if !mysql.HasNotNullFlag(colInfo.GetFlag()) {
 				index["nullable"] = true
 			}
@@ -214,6 +212,13 @@ var (
 		},
 	}
 
+	// rowMapPool return map for each row
+	rowMapPool = sync.Pool{
+		New: func() any {
+			return make(map[string]interface{})
+		},
+	}
+
 	// dmlPayloadHolderPool return holder for the payload
 	dmlPayloadHolderPool = sync.Pool{
 		New: func() any {
@@ -269,21 +274,19 @@ func (a *avroMarshaller) newDMLMessageMap(
 	}
 
 	if event.IsInsert() {
-		data := a.collectColumns(event.Columns, event.TableInfo, onlyHandleKey)
+		data := a.collectColumns(event.Columns, event.ColInfos, onlyHandleKey)
 		m["data"] = data
 		m["type"] = string(DMLTypeInsert)
 	} else if event.IsDelete() {
-		old := a.collectColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
+		old := a.collectColumns(event.PreColumns, event.ColInfos, onlyHandleKey)
 		m["old"] = old
 		m["type"] = string(DMLTypeDelete)
 	} else if event.IsUpdate() {
-		data := a.collectColumns(event.Columns, event.TableInfo, onlyHandleKey)
+		data := a.collectColumns(event.Columns, event.ColInfos, onlyHandleKey)
 		m["data"] = data
-		old := a.collectColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
+		old := a.collectColumns(event.PreColumns, event.ColInfos, onlyHandleKey)
 		m["old"] = old
 		m["type"] = string(DMLTypeUpdate)
-	} else {
-		log.Panic("invalid event type, this should not hit", zap.Any("event", event))
 	}
 
 	m = map[string]interface{}{
@@ -305,11 +308,11 @@ func recycleMap(m map[string]interface{}) {
 	payload := holder["payload"].(map[string]interface{})
 	eventMap := payload["com.pingcap.simple.avro.DML"].(map[string]interface{})
 
-	checksumMap := eventMap["com.pingcap.simple.avro.Checksum"]
-	if checksumMap != nil {
-		holder := checksumMap.(map[string]interface{})
-		clear(holder)
-		genericMapPool.Put(holder)
+	checksum := eventMap["checksum"]
+	if checksum != nil {
+		checksum := checksum.(map[string]interface{})
+		clear(checksum)
+		genericMapPool.Put(checksum)
 	}
 
 	dataMap := eventMap["data"]
@@ -320,6 +323,8 @@ func recycleMap(m map[string]interface{}) {
 			clear(colMap)
 			genericMapPool.Put(col)
 		}
+		clear(dataMap)
+		rowMapPool.Put(dataMap)
 	}
 
 	oldDataMap := eventMap["old"]
@@ -330,6 +335,8 @@ func recycleMap(m map[string]interface{}) {
 			clear(colMap)
 			genericMapPool.Put(col)
 		}
+		clear(oldDataMap)
+		rowMapPool.Put(oldDataMap)
 	}
 	holder["payload"] = nil
 	dmlPayloadHolderPool.Put(holder)
@@ -338,23 +345,19 @@ func recycleMap(m map[string]interface{}) {
 }
 
 func (a *avroMarshaller) collectColumns(
-	columns []*model.ColumnData, tableInfo *model.TableInfo, onlyHandleKey bool,
+	columns []*model.Column, columnInfos []rowcodec.ColInfo, onlyHandleKey bool,
 ) map[string]interface{} {
-	result := make(map[string]interface{}, len(columns))
-	for _, col := range columns {
-		if col == nil {
-			continue
+	result := rowMapPool.Get().(map[string]interface{})
+	for idx, col := range columns {
+		if col != nil {
+			if onlyHandleKey && !col.Flag.IsHandleKey() {
+				continue
+			}
+			value, avroType := a.encodeValue4Avro(col.Value, columnInfos[idx].Ft)
+			holder := genericMapPool.Get().(map[string]interface{})
+			holder[avroType] = value
+			result[col.Name] = holder
 		}
-		colFlag := tableInfo.ForceGetColumnFlagType(col.ColumnID)
-		colInfo := tableInfo.ForceGetColumnInfo(col.ColumnID)
-		colName := tableInfo.ForceGetColumnName(col.ColumnID)
-		if onlyHandleKey && !colFlag.IsHandleKey() {
-			continue
-		}
-		value, avroType := a.encodeValue4Avro(col.Value, &colInfo.FieldType)
-		holder := genericMapPool.Get().(map[string]interface{})
-		holder[avroType] = value
-		result[colName] = holder
 	}
 
 	return map[string]interface{}{
@@ -448,16 +451,9 @@ func newTableSchemaFromAvroNative(native map[string]interface{}) *TableSchema {
 	}
 }
 
-func newMessageFromAvroNative(native interface{}, m *message) error {
-	rawValues, ok := native.(map[string]interface{})["com.pingcap.simple.avro.Message"].(map[string]interface{})
-	if !ok {
-		return cerror.ErrDecodeFailed.GenWithStack("cannot convert the avro message to map")
-	}
-
-	rawPayload, ok := rawValues["payload"].(map[string]interface{})
-	if !ok {
-		return cerror.ErrDecodeFailed.GenWithStack("cannot convert the avro payload to map")
-	}
+func newMessageFromAvroNative(native interface{}, m *message) {
+	rawValues := native.(map[string]interface{})["com.pingcap.simple.avro.Message"].(map[string]interface{})
+	rawPayload := rawValues["payload"].(map[string]interface{})
 
 	rawMessage := rawPayload["com.pingcap.simple.avro.Watermark"]
 	if rawMessage != nil {
@@ -466,7 +462,7 @@ func newMessageFromAvroNative(native interface{}, m *message) error {
 		m.Type = MessageTypeWatermark
 		m.CommitTs = uint64(rawValues["commitTs"].(int64))
 		m.BuildTs = rawValues["buildTs"].(int64)
-		return nil
+		return
 	}
 
 	rawMessage = rawPayload["com.pingcap.simple.avro.Bootstrap"]
@@ -476,7 +472,7 @@ func newMessageFromAvroNative(native interface{}, m *message) error {
 		m.Type = MessageTypeBootstrap
 		m.BuildTs = rawValues["buildTs"].(int64)
 		m.TableSchema = newTableSchemaFromAvroNative(rawValues["tableSchema"].(map[string]interface{}))
-		return nil
+		return
 	}
 
 	rawMessage = rawPayload["com.pingcap.simple.avro.DDL"]
@@ -501,7 +497,7 @@ func newMessageFromAvroNative(native interface{}, m *message) error {
 			rawPreTableSchema = rawPreTableSchema["com.pingcap.simple.avro.TableSchema"].(map[string]interface{})
 			m.PreTableSchema = newTableSchemaFromAvroNative(rawPreTableSchema)
 		}
-		return nil
+		return
 	}
 
 	rawValues = rawPayload["com.pingcap.simple.avro.DML"].(map[string]interface{})
@@ -524,7 +520,6 @@ func newMessageFromAvroNative(native interface{}, m *message) error {
 	m.Checksum = newChecksum(rawValues)
 	m.Data = newDataMap(rawValues["data"])
 	m.Old = newDataMap(rawValues["old"])
-	return nil
 }
 
 func newChecksum(raw map[string]interface{}) *checksum {

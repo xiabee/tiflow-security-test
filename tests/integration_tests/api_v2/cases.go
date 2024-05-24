@@ -38,6 +38,12 @@ var customReplicaConfig = &ReplicaConfig{
 	SyncPointInterval:     util.AddressOf(JSONDuration{duration: 10 * time.Minute}),
 	SyncPointRetention:    util.AddressOf(JSONDuration{duration: 24 * time.Hour}),
 	Filter: &FilterConfig{
+		MySQLReplicationRules: &MySQLReplicationRules{
+			DoTables:     []*Table{{"a", "b"}, {"c", "d"}},
+			DoDBs:        []string{"a", "c"},
+			IgnoreTables: []*Table{{"d", "e"}, {"f", "g"}},
+			IgnoreDBs:    []string{"d", "x"},
+		},
 		IgnoreTxnStartTs: []uint64{1, 2, 3},
 		EventFilters: []EventFilterRule{{
 			Matcher:                  []string{"test.worker"},
@@ -73,13 +79,10 @@ var customReplicaConfig = &ReplicaConfig{
 		DateSeparator:               "day",
 		EncoderConcurrency:          util.AddressOf(32),
 		EnablePartitionSeparator:    util.AddressOf(true),
-		ContentCompatible:           util.AddressOf(true),
 		SendBootstrapIntervalInSec:  util.AddressOf(int64(120)),
 		SendBootstrapInMsgCount:     util.AddressOf(int32(10000)),
 		SendBootstrapToAllPartition: util.AddressOf(true),
-		DebeziumDisableSchema:       util.AddressOf(true),
 		OpenProtocolConfig:          &OpenProtocolConfig{OutputOldValue: true},
-		DebeziumConfig:              &DebeziumConfig{OutputOldValue: true},
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
 		EnableTableAcrossNodes: false,
@@ -126,13 +129,10 @@ var defaultReplicaConfig = &ReplicaConfig{
 		DateSeparator:               "day",
 		EncoderConcurrency:          util.AddressOf(32),
 		EnablePartitionSeparator:    util.AddressOf(true),
-		ContentCompatible:           util.AddressOf(false),
 		SendBootstrapIntervalInSec:  util.AddressOf(int64(120)),
 		SendBootstrapInMsgCount:     util.AddressOf(int32(10000)),
 		SendBootstrapToAllPartition: util.AddressOf(true),
-		DebeziumDisableSchema:       util.AddressOf(false),
 		OpenProtocolConfig:          &OpenProtocolConfig{OutputOldValue: true},
-		DebeziumConfig:              &DebeziumConfig{OutputOldValue: true},
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
 		EnableTableAcrossNodes: false,

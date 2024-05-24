@@ -34,9 +34,11 @@ func VerifyTables(
 	err error,
 ) {
 	meta := kv.GetSnapshotMeta(storage, startTs)
-	snap, err := schema.NewSingleSnapshotFromMeta(
-		model.ChangeFeedID4Test("api", "verifyTable"),
-		meta, startTs, false /* explicitTables */, f)
+	if err != nil {
+		return nil, nil, nil, errors.Trace(err)
+	}
+	snap, err := schema.NewSingleSnapshotFromMeta(model.
+		ChangeFeedID4Test("api", "verify-table"), meta, startTs, false /* explicitTables */, f)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}

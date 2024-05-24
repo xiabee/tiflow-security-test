@@ -178,7 +178,7 @@ func TestParseCfg(t *testing.T) {
 				WriterBufferSize:    8388608,
 				Compression:         "snappy",
 				WriteL0PauseTrigger: math.MaxInt32,
-				CompactionL0Trigger: 160,
+				CompactionL0Trigger: 16,
 			},
 			// We expect the default configuration here.
 			Messages: &config.MessagesConfig{
@@ -200,16 +200,13 @@ func TestParseCfg(t *testing.T) {
 				CheckBalanceInterval: 60000000000,
 				AddTableBatchSize:    50,
 			},
-			CDCV2: &config.CDCV2{
-				Enable:          false,
-				MetaStoreConfig: config.MetaStoreConfiguration{},
-			},
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
 			},
 		},
-		ClusterID: "default",
+		ClusterID:           "default",
+		MaxMemoryPercentage: config.DisableMemoryLimit,
 	}, o.serverConfig)
 }
 
@@ -347,16 +344,13 @@ check-balance-interval = "10s"
 				CheckBalanceInterval: config.TomlDuration(10 * time.Second),
 				AddTableBatchSize:    50,
 			},
-			CDCV2: &config.CDCV2{
-				Enable:          false,
-				MetaStoreConfig: config.MetaStoreConfiguration{},
-			},
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
 			},
 		},
-		ClusterID: "default",
+		ClusterID:           "default",
+		MaxMemoryPercentage: config.DisableMemoryLimit,
 	}, o.serverConfig)
 }
 
@@ -464,7 +458,7 @@ cert-allowed-cn = ["dd","ee"]
 				WriterBufferSize:    8388608,
 				Compression:         "snappy",
 				WriteL0PauseTrigger: math.MaxInt32,
-				CompactionL0Trigger: 160,
+				CompactionL0Trigger: 16,
 			},
 			// We expect the default configuration here.
 			Messages: &config.MessagesConfig{
@@ -486,16 +480,13 @@ cert-allowed-cn = ["dd","ee"]
 				CheckBalanceInterval: 60000000000,
 				AddTableBatchSize:    50,
 			},
-			CDCV2: &config.CDCV2{
-				Enable:          false,
-				MetaStoreConfig: config.MetaStoreConfiguration{},
-			},
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
 			},
 		},
-		ClusterID: "default",
+		ClusterID:           "default",
+		MaxMemoryPercentage: config.DisableMemoryLimit,
 	}, o.serverConfig)
 }
 
@@ -529,7 +520,7 @@ unknown3 = 3
 			WriterBufferSize:    8388608,
 			Compression:         "snappy",
 			WriteL0PauseTrigger: math.MaxInt32,
-			CompactionL0Trigger: 160,
+			CompactionL0Trigger: 16,
 		},
 		// We expect the default configuration here.
 		Messages: &config.MessagesConfig{
@@ -550,10 +541,6 @@ unknown3 = 3
 			MaxTaskConcurrency:   10,
 			CheckBalanceInterval: 60000000000,
 			AddTableBatchSize:    50,
-		},
-		CDCV2: &config.CDCV2{
-			Enable:          false,
-			MetaStoreConfig: config.MetaStoreConfiguration{},
 		},
 		Puller: &config.PullerConfig{
 			EnableResolvedTsStuckDetection: false,

@@ -63,9 +63,8 @@ func TestParseGTIDNoFlavor(t *testing.T) {
 	require.NoError(t, err)
 	require.IsType(t, &mysql.MariadbGTIDSet{}, gset)
 
-	gset, err = ParserGTID("", "")
-	require.NoError(t, err)
-	require.IsType(t, &mysql.MysqlGTIDSet{}, gset)
+	_, err = ParserGTID("", "")
+	require.Error(t, err)
 }
 
 func TestIsNilMySQLGTIDSet(t *testing.T) {
@@ -107,12 +106,12 @@ func TestParseZeroAsEmptyGTIDSet(t *testing.T) {
 	require.Equal(t, "", gset.String())
 }
 
-func TestCheckGTIDSetEmpty(t *testing.T) {
+func TestIsZeroGTIDSet(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
 		gsetStr string
-		isEmpty bool
+		isZero  bool
 		flavor  string
 	}{
 		{
@@ -150,6 +149,6 @@ func TestCheckGTIDSetEmpty(t *testing.T) {
 		t.Logf("test case %d", i)
 		gset, err := ParserGTID(testCase.flavor, testCase.gsetStr)
 		require.NoError(t, err)
-		require.Equal(t, testCase.isEmpty, CheckGTIDSetEmpty(gset))
+		require.Equal(t, testCase.isZero, IsZeroGTIDSet(gset))
 	}
 }

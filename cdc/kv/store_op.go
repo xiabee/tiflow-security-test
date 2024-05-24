@@ -27,6 +27,7 @@ import (
 )
 
 // GetSnapshotMeta returns tidb meta information
+// TODO: Simplify the signature of this function
 func GetSnapshotMeta(tiStore tidbkv.Storage, ts uint64) *meta.Meta {
 	snapshot := tiStore.GetSnapshot(tidbkv.NewVersion(ts))
 	return meta.NewSnapshotMeta(snapshot)

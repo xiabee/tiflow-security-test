@@ -24,7 +24,6 @@ import (
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/kafka"
-	"github.com/pingcap/tiflow/pkg/util"
 )
 
 // GetTopic returns the topic name from the sink URI.
@@ -52,7 +51,7 @@ func GetProtocol(protocolStr string) (config.Protocol, error) {
 func GetFileExtension(protocol config.Protocol) string {
 	switch protocol {
 	case config.ProtocolAvro, config.ProtocolCanalJSON, config.ProtocolMaxwell,
-		config.ProtocolOpen, config.ProtocolSimple:
+		config.ProtocolOpen:
 		return ".json"
 	case config.ProtocolCraft:
 		return ".craft"
@@ -80,15 +79,7 @@ func GetEncoderConfig(
 	// Always set encoder's `MaxMessageBytes` equal to producer's `MaxMessageBytes`
 	// to prevent that the encoder generate batched message too large
 	// then cause producer meet `message too large`.
-	encoderConfig = encoderConfig.
-		WithMaxMessageBytes(maxMsgBytes).
-		WithChangefeedID(changefeedID)
-
-	tz, err := util.GetTimezone(config.GetGlobalServerConfig().TZ)
-	if err != nil {
-		return nil, cerror.WrapError(cerror.ErrSinkInvalidConfig, err)
-	}
-	encoderConfig.TimeZone = tz
+	encoderConfig = encoderConfig.WithMaxMessageBytes(maxMsgBytes).WithChangefeedID(changefeedID)
 
 	if err := encoderConfig.Validate(); err != nil {
 		return nil, cerror.WrapError(cerror.ErrSinkInvalidConfig, err)

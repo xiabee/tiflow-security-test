@@ -27,7 +27,7 @@ enable: true
 from:
   host: 127.0.0.1
   user: root
-  password: '123456'
+  password: Up8156jArvIPymkVC+5LxkAT6rek
   port: 3306
 
 #relay log purge strategy

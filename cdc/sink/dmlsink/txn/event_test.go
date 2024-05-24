@@ -49,32 +49,6 @@ func TestGenKeyListCaseInSensitive(t *testing.T) {
 
 func TestGenKeys(t *testing.T) {
 	t.Parallel()
-	tableInfoWithOneCompositeUniqueKey := model.BuildTableInfo("common_1", "uk_without_pk", []*model.Column{
-		{
-			Name: "a1",
-			Type: mysql.TypeLong,
-			Flag: model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag | model.UniqueKeyFlag,
-		},
-		{
-			Name: "a3",
-			Type: mysql.TypeLong,
-			Flag: model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag | model.UniqueKeyFlag,
-		},
-	}, [][]int{{0, 1}})
-
-	tableInfoWithTwoUniqueKeys := model.BuildTableInfo("common_1", "uk_without_pk", []*model.Column{
-		{
-			Name: "a1",
-			Type: mysql.TypeLong,
-			Flag: model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag | model.UniqueKeyFlag,
-		},
-		{
-			Name: "a3",
-			Type: mysql.TypeLong,
-			Flag: model.BinaryFlag | model.MultipleKeyFlag | model.UniqueKeyFlag,
-		},
-	}, [][]int{{0}, {1}})
-
 	testCases := []struct {
 		txn      *model.SingleTableTxn
 		expected []uint64
@@ -85,35 +59,45 @@ func TestGenKeys(t *testing.T) {
 		txn: &model.SingleTableTxn{
 			Rows: []*model.RowChangedEvent{
 				{
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-					TableInfo:       tableInfoWithOneCompositeUniqueKey,
-					PreColumns: model.Columns2ColumnDatas([]*model.Column{
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
+					PreColumns: []*model.Column{
+						nil,
 						{
 							Name:  "a1",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
 							Value: 12,
 						},
 						{
 							Name:  "a3",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
 							Value: 1,
 						},
-					}, tableInfoWithOneCompositeUniqueKey),
+					},
+					IndexColumns: [][]int{{1, 2}},
 				}, {
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-					TableInfo:       tableInfoWithOneCompositeUniqueKey,
-					PreColumns: model.Columns2ColumnDatas([]*model.Column{
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
+					PreColumns: []*model.Column{
+						nil,
 						{
 							Name:  "a1",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
 							Value: 1,
 						},
 						{
 							Name:  "a3",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.MultipleKeyFlag | model.HandleKeyFlag,
 							Value: 21,
 						},
-					}, tableInfoWithOneCompositeUniqueKey),
+					},
+					IndexColumns: [][]int{{1, 2}},
 				},
 			},
 		},
@@ -122,35 +106,45 @@ func TestGenKeys(t *testing.T) {
 		txn: &model.SingleTableTxn{
 			Rows: []*model.RowChangedEvent{
 				{
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-					TableInfo:       tableInfoWithTwoUniqueKeys,
-					PreColumns: model.Columns2ColumnDatas([]*model.Column{
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
+					PreColumns: []*model.Column{
+						nil,
 						{
 							Name:  "a1",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.HandleKeyFlag,
 							Value: 12,
 						},
 						{
 							Name:  "a3",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.HandleKeyFlag,
 							Value: 1,
 						},
-					}, tableInfoWithTwoUniqueKeys),
+					},
+					IndexColumns: [][]int{{1}, {2}},
 				}, {
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					TableInfo:       tableInfoWithTwoUniqueKeys,
-					PhysicalTableID: 47,
-					PreColumns: model.Columns2ColumnDatas([]*model.Column{
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
+					PreColumns: []*model.Column{
+						nil,
 						{
 							Name:  "a1",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.HandleKeyFlag,
 							Value: 1,
 						},
 						{
 							Name:  "a3",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.HandleKeyFlag,
 							Value: 21,
 						},
-					}, tableInfoWithTwoUniqueKeys),
+					},
+					IndexColumns: [][]int{{1}, {2}},
 				},
 			},
 		},
@@ -159,35 +153,45 @@ func TestGenKeys(t *testing.T) {
 		txn: &model.SingleTableTxn{
 			Rows: []*model.RowChangedEvent{
 				{
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					PhysicalTableID: 47,
-					TableInfo:       tableInfoWithTwoUniqueKeys,
-					PreColumns: model.Columns2ColumnDatas([]*model.Column{
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
+					PreColumns: []*model.Column{
+						nil,
 						{
 							Name:  "a1",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.NullableFlag,
 							Value: nil,
 						},
 						{
 							Name:  "a3",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.NullableFlag,
 							Value: nil,
 						},
-					}, tableInfoWithTwoUniqueKeys),
+					},
+					IndexColumns: [][]int{{1}, {2}},
 				}, {
-					StartTs:         418658114257813514,
-					CommitTs:        418658114257813515,
-					TableInfo:       tableInfoWithTwoUniqueKeys,
-					PhysicalTableID: 47,
-					PreColumns: model.Columns2ColumnDatas([]*model.Column{
+					StartTs:  418658114257813514,
+					CommitTs: 418658114257813515,
+					Table:    &model.TableName{Schema: "common_1", Table: "uk_without_pk", TableID: 47},
+					PreColumns: []*model.Column{
+						nil,
 						{
 							Name:  "a1",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.HandleKeyFlag,
 							Value: 1,
 						},
 						{
 							Name:  "a3",
+							Type:  mysql.TypeLong,
+							Flag:  model.BinaryFlag | model.HandleKeyFlag,
 							Value: 21,
 						},
-					}, tableInfoWithTwoUniqueKeys),
+					},
+					IndexColumns: [][]int{{1}, {2}},
 				},
 			},
 		},
@@ -201,7 +205,7 @@ func TestGenKeys(t *testing.T) {
 }
 
 func TestSortAndDedupHash(t *testing.T) {
-	// If a transaction contains multiple rows, these rows may generate the same hash
+	// If a transaction contains multiple rows, those rows may generate the same hash
 	// in some rare cases. We should dedup these hashes to avoid unnecessary self cyclic
 	// dependency in the causality dependency graph.
 	t.Parallel()

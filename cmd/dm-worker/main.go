@@ -33,7 +33,6 @@ import (
 )
 
 func main() {
-	// NOTE: the line is removed from TiDB repo in https://github.com/pingcap/tidb/pull/52191#issuecomment-2024836481.
 	collate.SetNewCollationEnabledForTest(false)
 
 	cfg := worker.NewConfig()

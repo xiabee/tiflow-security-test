@@ -28,8 +28,6 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb-tools/pkg/column-mapping"
 	extstorage "github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/pkg/util/dbutil"
 	"github.com/pingcap/tidb/pkg/util/filter"
@@ -41,6 +39,8 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/engine/pkg/promutil"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
+	"github.com/pingcap/tiflow/pkg/column-mapping"
 	"github.com/pingcap/tiflow/pkg/version"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -384,7 +384,7 @@ func (c *SubTaskConfig) Adjust(verifyDecryptPassword bool) error {
 	c.To.AdjustWithTimeZone(c.Timezone)
 
 	if verifyDecryptPassword {
-		_, err1 := c.DecryptedClone()
+		_, err1 := c.DecryptPassword()
 		if err1 != nil {
 			return err1
 		}
@@ -460,8 +460,8 @@ func (c *SubTaskConfig) Parse(arguments []string, verifyDecryptPassword bool) er
 	return c.Adjust(verifyDecryptPassword)
 }
 
-// DecryptedClone tries to decrypt db password in config.
-func (c *SubTaskConfig) DecryptedClone() (*SubTaskConfig, error) {
+// DecryptPassword tries to decrypt db password in config.
+func (c *SubTaskConfig) DecryptPassword() (*SubTaskConfig, error) {
 	clone, err := c.Clone()
 	if err != nil {
 		return nil, err

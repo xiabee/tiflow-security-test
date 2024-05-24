@@ -55,7 +55,7 @@ func NewSchedulerManager(
 	sm.schedulers[schedulerPriorityDrainCapture] = newDrainCaptureScheduler(
 		cfg.MaxTaskConcurrency, changefeedID)
 	sm.schedulers[schedulerPriorityBalance] = newBalanceScheduler(
-		time.Duration(cfg.CheckBalanceInterval), cfg.MaxTaskConcurrency, sm.changefeedID)
+		time.Duration(cfg.CheckBalanceInterval), cfg.MaxTaskConcurrency)
 	sm.schedulers[schedulerPriorityMoveTable] = newMoveTableScheduler(changefeedID)
 	sm.schedulers[schedulerPriorityRebalance] = newRebalanceScheduler(changefeedID)
 

@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	tiTypes "github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/timeutil"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"go.uber.org/zap"
@@ -85,7 +85,7 @@ func GetTimeZoneName(tz *time.Location) string {
 
 // ConvertTimezone converts the timestamp to the specified timezone
 func ConvertTimezone(timestamp string, location string) (string, error) {
-	t, err := tiTypes.ParseTimestamp(tiTypes.StrictContext, timestamp)
+	t, err := types.ParseTimestamp(types.StrictContext, timestamp)
 	if err != nil {
 		return "", err
 	}

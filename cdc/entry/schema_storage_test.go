@@ -692,9 +692,10 @@ func TestCreateSnapFromMeta(t *testing.T) {
 	ver, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
 	meta := kv.GetSnapshotMeta(store, ver.Ver)
+	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ver.Ver, false, f)
+	snap, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta, ver.Ver, false, f)
 	require.Nil(t, err)
 	_, ok := snap.TableByName("test", "simple_test1")
 	require.True(t, ok)
@@ -729,14 +730,16 @@ func TestExplicitTables(t *testing.T) {
 	ver2, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
 	meta1 := kv.GetSnapshotMeta(store, ver1.Ver)
+	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap1, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta1, ver1.Ver, true /* forceReplicate */, f)
+	snap1, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta1, ver1.Ver, true /* forceReplicate */, f)
 	require.Nil(t, err)
 	meta2 := kv.GetSnapshotMeta(store, ver2.Ver)
-	snap2, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta2, ver2.Ver, false /* forceReplicate */, f)
 	require.Nil(t, err)
-	snap3, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta2, ver2.Ver, true /* forceReplicate */, f)
+	snap2, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta2, ver2.Ver, false /* forceReplicate */, f)
+	require.Nil(t, err)
+	snap3, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta2, ver2.Ver, true /* forceReplicate */, f)
 	require.Nil(t, err)
 
 	// we don't need to count system tables since TiCDC
@@ -881,16 +884,17 @@ func TestSchemaStorage(t *testing.T) {
 		require.Nil(t, err)
 
 		schemaStorage, err := NewSchemaStorage(nil, 0, false, model.DefaultChangeFeedID("dummy"), util.RoleTester, f)
-		require.NoError(t, err)
+		require.Nil(t, err)
 		for _, job := range jobs {
 			err := schemaStorage.HandleDDLJob(job)
-			require.NoError(t, err)
+			require.Nil(t, err)
 		}
 
 		for _, job := range jobs {
 			ts := job.BinlogInfo.FinishedTS
 			meta := kv.GetSnapshotMeta(store, ts)
-			snapFromMeta, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ts, false, f)
+			require.Nil(t, err)
+			snapFromMeta, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta, ts, false, f)
 			require.Nil(t, err)
 			snapFromSchemaStore, err := schemaStorage.GetSnapshot(ctx, ts)
 			require.Nil(t, err)
@@ -970,9 +974,10 @@ func TestHandleKey(t *testing.T) {
 	ver, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
 	meta := kv.GetSnapshotMeta(store, ver.Ver)
+	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ver.Ver, false, f)
+	snap, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta, ver.Ver, false, f)
 	require.Nil(t, err)
 	tb1, ok := snap.TableByName("test", "simple_test1")
 	require.True(t, ok)
@@ -1006,25 +1011,24 @@ func TestHandleKey(t *testing.T) {
 }
 
 func TestGetPrimaryKey(t *testing.T) {
-	t.Parallel()
-
 	helper := NewSchemaTestHelper(t)
 	defer helper.Close()
-
+	// PKISHandle is true, primary key is also the handle, since it's integer type.
 	sql := `create table test.t1(a int primary key, b int)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 0, job.BinlogInfo.TableInfo)
+	event := helper.DDL2Event(sql)
 
-	names := tableInfo.GetPrimaryKeyColumnNames()
-	require.Len(t, names, 1)
-	require.Containsf(t, names, "a", "names: %v", names)
+	names := event.TableInfo.GetPrimaryKeyColumnNames()
+	require.Equal(t, names, []string{"a"})
 
+	// IsCommonHandle is true, primary key is not the handle, since it contains multiple fields.
 	sql = `create table test.t2(a int, b int, c int, primary key(a, b))`
-	job = helper.DDL2Job(sql)
-	tableInfo = model.WrapTableInfo(0, "test", 0, job.BinlogInfo.TableInfo)
+	event = helper.DDL2Event(sql)
+	names = event.TableInfo.GetPrimaryKeyColumnNames()
+	require.Equal(t, names, []string{"a", "b"})
 
-	names = tableInfo.GetPrimaryKeyColumnNames()
-	require.Len(t, names, 2)
-	require.Containsf(t, names, "a", "names: %v", names)
-	require.Containsf(t, names, "b", "names: %v", names)
+	// IsCommonHandle is true, primary key is not the handle, since it's not integer type.
+	sql = `create table test.t3(a varchar(10) primary key, b int)`
+	event = helper.DDL2Event(sql)
+	names = event.TableInfo.GetPrimaryKeyColumnNames()
+	require.Equal(t, names, []string{"a"})
 }

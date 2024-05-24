@@ -128,6 +128,11 @@ max-days = 1
 max-backups = 1
 
 [sorter]
+chunk-size-limit = 10000000
+max-memory-consumption = 2000000
+max-memory-percentage = 3
+num-concurrent-worker = 4
+num-workerpool-goroutine = 5
 sort-dir = "/tmp/just_a_test"
 
 [security]
@@ -207,15 +212,12 @@ func TestAndWriteExampleReplicaTOML(t *testing.T) {
 		EnableKafkaSinkV2:                util.AddressOf(false),
 		OnlyOutputUpdatedColumns:         util.AddressOf(false),
 		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
-		ContentCompatible:                util.AddressOf(false),
 		Protocol:                         util.AddressOf("open-protocol"),
 		AdvanceTimeoutInSec:              util.AddressOf(uint(150)),
 		SendBootstrapIntervalInSec:       util.AddressOf(int64(120)),
 		SendBootstrapInMsgCount:          util.AddressOf(int32(10000)),
 		SendBootstrapToAllPartition:      util.AddressOf(true),
-		DebeziumDisableSchema:            util.AddressOf(false),
 		OpenProtocol:                     &config.OpenProtocolConfig{OutputOldValue: true},
-		Debezium:                         &config.DebeziumConfig{OutputOldValue: true},
 	}, cfg.Sink)
 }
 
@@ -248,14 +250,11 @@ func TestAndWriteStorageSinkTOML(t *testing.T) {
 		},
 		OnlyOutputUpdatedColumns:         util.AddressOf(false),
 		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
-		ContentCompatible:                util.AddressOf(false),
 		AdvanceTimeoutInSec:              util.AddressOf(uint(150)),
 		SendBootstrapIntervalInSec:       util.AddressOf(int64(120)),
 		SendBootstrapInMsgCount:          util.AddressOf(int32(10000)),
 		SendBootstrapToAllPartition:      util.AddressOf(true),
-		DebeziumDisableSchema:            util.AddressOf(false),
 		OpenProtocol:                     &config.OpenProtocolConfig{OutputOldValue: true},
-		Debezium:                         &config.DebeziumConfig{OutputOldValue: true},
 	}, cfg.Sink)
 }
 

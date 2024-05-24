@@ -31,8 +31,8 @@ import (
 	"github.com/pingcap/tidb/pkg/util/gctuner"
 	"github.com/pingcap/tiflow/cdc"
 	"github.com/pingcap/tiflow/cdc/capture"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter/factory"
-	capturev2 "github.com/pingcap/tiflow/cdcv2/capture"
+	"github.com/pingcap/tiflow/cdc/kv"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine/factory"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
@@ -129,6 +129,11 @@ func New(pdEndpoints []string) (*server, error) {
 
 func (s *server) prepare(ctx context.Context) error {
 	conf := config.GetGlobalServerConfig()
+
+	tlsConfig, err := conf.Security.ToTLSConfig()
+	if err != nil {
+		return errors.Trace(err)
+	}
 	grpcTLSOption, err := conf.Security.ToGRPCDialOption()
 	if err != nil {
 		return errors.Trace(err)
@@ -169,7 +174,7 @@ func (s *server) prepare(ctx context.Context) error {
 	// the key will be kept for the lease TTL, which is 10 seconds,
 	// then cause the new owner cannot be elected immediately after the old owner offline.
 	// see https://github.com/etcd-io/etcd/blob/525d53bd41/client/v3/concurrency/election.go#L98
-	etcdCli, err := etcd.CreateRawEtcdClient(conf.Security, grpcTLSOption, s.pdEndpoints...)
+	etcdCli, err := etcd.CreateRawEtcdClient(tlsConfig, grpcTLSOption, s.pdEndpoints...)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -197,13 +202,8 @@ func (s *server) prepare(ctx context.Context) error {
 	s.createSortEngineFactory()
 	s.setMemoryLimit()
 
-	if conf.Debug.CDCV2.Enable {
-		s.capture = capturev2.NewCapture(s.pdEndpoints, cdcEtcdClient,
-			s.grpcService, s.sortEngineFactory, s.pdClient)
-	} else {
-		s.capture = capture.NewCapture(s.pdEndpoints, cdcEtcdClient,
-			s.grpcService, s.sortEngineFactory, s.pdClient)
-	}
+	s.capture = capture.NewCapture(s.pdEndpoints, cdcEtcdClient,
+		s.grpcService, s.sortEngineFactory, s.pdClient)
 	return nil
 }
 
@@ -345,6 +345,10 @@ func (s *server) run(ctx context.Context) (err error) {
 
 	eg.Go(func() error {
 		return s.upstreamPDHealthChecker(egCtx)
+	})
+
+	eg.Go(func() error {
+		return kv.RunWorkerPool(egCtx)
 	})
 
 	eg.Go(func() error {

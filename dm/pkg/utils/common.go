@@ -20,7 +20,7 @@ import (
 	"sync"
 
 	exprctx "github.com/pingcap/tidb/pkg/expression/context"
-	exprctximpl "github.com/pingcap/tidb/pkg/expression/contextimpl"
+	"github.com/pingcap/tidb/pkg/expression/contextsession"
 	infoschema "github.com/pingcap/tidb/pkg/infoschema/context"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
@@ -152,8 +152,9 @@ func UnpackTableID(id string) *filter.Table {
 
 type exprCtxImpl struct {
 	*session
-	*exprctximpl.ExprCtxExtendedImpl
+	*contextsession.ExprCtxExtendedImpl
 }
+
 type session struct {
 	sessionctx.Context
 	vars                 *variable.SessionVars
@@ -168,6 +169,7 @@ func (se *session) GetSessionVars() *variable.SessionVars {
 	return se.vars
 }
 
+// GetExprCtx implements the sessionctx.Context interface.
 func (se *session) GetExprCtx() exprctx.ExprContext {
 	return se.exprctx
 }
@@ -220,7 +222,7 @@ func NewSessionCtx(vars map[string]string) sessionctx.Context {
 	}
 	sessionCtx.exprctx = &exprCtxImpl{
 		session:             &sessionCtx,
-		ExprCtxExtendedImpl: exprctximpl.NewExprExtendedImpl(&sessionCtx),
+		ExprCtxExtendedImpl: contextsession.NewExprExtendedImpl(&sessionCtx),
 	}
 	return &sessionCtx
 }

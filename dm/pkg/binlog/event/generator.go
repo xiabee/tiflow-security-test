@@ -86,11 +86,7 @@ func newGenerator(flavor, version string, serverID uint32, latestPos uint32, lat
 		if !ok || prevGSet == nil {
 			return nil, terror.ErrBinlogGTIDMariaDBNotValid.Generate(previousGTIDs)
 		}
-		set, ok := prevGSet.Sets[mariaGTID.DomainID]
-		if !ok {
-			return nil, terror.ErrBinlogLatestGTIDNotInPrev.Generate(latestGTID, previousGTIDs)
-		}
-		prevGTID, ok := set[mariaGTID.ServerID]
+		prevGTID, ok := prevGSet.Sets[mariaGTID.DomainID]
 		if !ok || prevGTID.ServerID != mariaGTID.ServerID || prevGTID.SequenceNumber != mariaGTID.SequenceNumber {
 			return nil, terror.ErrBinlogLatestGTIDNotInPrev.Generate(latestGTID, previousGTIDs)
 		}

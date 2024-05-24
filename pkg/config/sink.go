@@ -89,12 +89,6 @@ const (
 	// DefaultSendBootstrapToAllPartition is the default value of
 	// whether to send bootstrap message to all partitions.
 	DefaultSendBootstrapToAllPartition = true
-
-	// DefaultMaxReconnectToPulsarBroker is the default max reconnect times to pulsar broker.
-	// The pulsar client uses an exponential backoff with jitter to reconnect to the broker.
-	// Based on test, when the max reconnect times is 3,
-	// the total time of reconnecting to brokers is about 30 seconds.
-	DefaultMaxReconnectToPulsarBroker = 3
 )
 
 // AtomicityLevel represents the atomicity level of a changefeed.
@@ -161,13 +155,11 @@ type SinkConfig struct {
 	// DeleteOnlyOutputHandleKeyColumns is only available when the downstream is MQ.
 	DeleteOnlyOutputHandleKeyColumns *bool `toml:"delete-only-output-handle-key-columns" json:"delete-only-output-handle-key-columns,omitempty"`
 
-	// ContentCompatible is only available when the downstream is MQ.
-	ContentCompatible *bool `toml:"content-compatible" json:"content-compatible,omitempty"`
-
 	// TiDBSourceID is the source ID of the upstream TiDB,
 	// which is used to set the `tidb_cdc_write_source` session variable.
 	// Note: This field is only used internally and only used in the MySQL sink.
 	TiDBSourceID uint64 `toml:"-" json:"-"`
+
 	// SafeMode is only available when the downstream is DB.
 	SafeMode           *bool               `toml:"safe-mode" json:"safe-mode,omitempty"`
 	KafkaConfig        *KafkaConfig        `toml:"kafka-config" json:"kafka-config,omitempty"`
@@ -191,14 +183,8 @@ type SinkConfig struct {
 	// Default value is true.
 	SendBootstrapToAllPartition *bool `toml:"send-bootstrap-to-all-partition" json:"send-bootstrap-to-all-partition,omitempty"`
 
-	// Debezium only. Whether schema should be excluded in the output.
-	DebeziumDisableSchema *bool `toml:"debezium-disable-schema" json:"debezium-disable-schema,omitempty"`
-
 	// OpenProtocol related configurations
 	OpenProtocol *OpenProtocolConfig `toml:"open" json:"open,omitempty"`
-
-	// DebeziumConfig related configurations
-	Debezium *DebeziumConfig `toml:"debezium" json:"debezium,omitempty"`
 }
 
 // MaskSensitiveData masks sensitive data in SinkConfig
@@ -230,9 +216,7 @@ func (s *SinkConfig) ShouldSendBootstrapMsg() bool {
 
 // CSVConfig defines a series of configuration items for csv codec.
 type CSVConfig struct {
-	// delimiter between fields, it can be 1 character or at most 2 characters
-	// It can not be CR or LF or contains CR or LF.
-	// It should have exclusive characters with quote.
+	// delimiter between fields
 	Delimiter string `toml:"delimiter" json:"delimiter"`
 	// quoting character
 	Quote string `toml:"quote" json:"quote"`
@@ -242,10 +226,6 @@ type CSVConfig struct {
 	IncludeCommitTs bool `toml:"include-commit-ts" json:"include-commit-ts"`
 	// encoding method of binary type
 	BinaryEncodingMethod string `toml:"binary-encoding-method" json:"binary-encoding-method"`
-	// output old value
-	OutputOldValue bool `toml:"output-old-value" json:"output-old-value"`
-	// output handle key
-	OutputHandleKey bool `toml:"output-handle-key" json:"output-handle-key"`
 }
 
 func (c *CSVConfig) validateAndAdjust() error {
@@ -271,24 +251,19 @@ func (c *CSVConfig) validateAndAdjust() error {
 	case 0:
 		return cerror.WrapError(cerror.ErrSinkInvalidConfig,
 			errors.New("csv config delimiter cannot be empty"))
-	case 1, 2, 3:
+	case 1:
 		if strings.ContainsRune(c.Delimiter, CR) || strings.ContainsRune(c.Delimiter, LF) {
 			return cerror.WrapError(cerror.ErrSinkInvalidConfig,
 				errors.New("csv config delimiter contains line break characters"))
 		}
 	default:
 		return cerror.WrapError(cerror.ErrSinkInvalidConfig,
-			errors.New("csv config delimiter contains more than three characters, note that escape "+
-				"sequences can only be used in double quotes in toml configuration items."))
+			errors.New("csv config delimiter contains more than one character"))
 	}
 
-	if len(c.Quote) > 0 {
-		for _, r := range c.Delimiter {
-			if strings.ContainsRune(c.Quote, r) {
-				return cerror.WrapError(cerror.ErrSinkInvalidConfig,
-					errors.New("csv config quote and delimiter has common characters which is not allowed"))
-			}
-		}
+	if len(c.Quote) > 0 && strings.Contains(c.Delimiter, c.Quote) {
+		return cerror.WrapError(cerror.ErrSinkInvalidConfig,
+			errors.New("csv config quote and delimiter cannot be the same"))
 	}
 
 	// validate binary encoding method
@@ -932,10 +907,5 @@ func (g *GlueSchemaRegistryConfig) NoCredentials() bool {
 
 // OpenProtocolConfig represents the configurations for open protocol encoding
 type OpenProtocolConfig struct {
-	OutputOldValue bool `toml:"output-old-value" json:"output-old-value"`
-}
-
-// DebeziumConfig represents the configurations for debezium protocol encoding
-type DebeziumConfig struct {
 	OutputOldValue bool `toml:"output-old-value" json:"output-old-value"`
 }

@@ -27,7 +27,6 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/go-mysql-org/go-mysql/mysql"
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
@@ -35,6 +34,7 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
 )
@@ -158,28 +158,20 @@ func (c *SourceConfig) Yaml() (string, error) {
 	return string(b), nil
 }
 
-// FromToml parses flag definitions from the argument list.
+// Parse parses flag definitions from the argument list.
 // accept toml content for legacy use (mainly used by etcd).
-func (c *SourceConfig) FromToml(content string) error {
+func (c *SourceConfig) Parse(content string) error {
 	// Parse first to get config file.
 	metaData, err := toml.Decode(content, c)
-	if err != nil {
-		return terror.ErrWorkerDecodeConfigFromFile.Delegate(err)
+	err2 := c.check(&metaData, err)
+	if err2 != nil {
+		return err2
 	}
-	undecoded := metaData.Undecoded()
-	if len(undecoded) > 0 {
-		var undecodedItems []string
-		for _, item := range undecoded {
-			undecodedItems = append(undecodedItems, item.String())
-		}
-		return terror.ErrWorkerUndecodedItemFromFile.Generate(strings.Join(undecodedItems, ","))
-	}
-	c.adjust()
 	return c.Verify()
 }
 
-// SourceCfgFromYaml parses flag definitions from the argument list, content should be yaml format.
-func SourceCfgFromYaml(content string) (*SourceConfig, error) {
+// ParseYaml parses flag definitions from the argument list, content should be yaml format.
+func ParseYaml(content string) (*SourceConfig, error) {
 	c := newSourceConfig()
 	if err := yaml.UnmarshalStrict([]byte(content), c); err != nil {
 		return nil, terror.ErrConfigYamlTransform.Delegate(err, "decode source config")
@@ -188,9 +180,9 @@ func SourceCfgFromYaml(content string) (*SourceConfig, error) {
 	return c, nil
 }
 
-// SourceCfgFromYamlAndVerify does SourceCfgFromYaml and Verify.
-func SourceCfgFromYamlAndVerify(content string) (*SourceConfig, error) {
-	c, err := SourceCfgFromYaml(content)
+// ParseYamlAndVerify does ParseYaml and Verify.
+func ParseYamlAndVerify(content string) (*SourceConfig, error) {
+	c, err := ParseYaml(content)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +241,8 @@ func (c *SourceConfig) Verify() error {
 		}
 	}
 
+	c.DecryptPassword()
+
 	_, err = bf.NewBinlogEvent(c.CaseSensitive, c.Filters)
 	if err != nil {
 		return terror.ErrConfigBinlogEventFilter.Delegate(err)
@@ -261,8 +255,8 @@ func (c *SourceConfig) Verify() error {
 	return nil
 }
 
-// GetDecryptedClone returns a decrypted config replica in config.
-func (c *SourceConfig) GetDecryptedClone() *SourceConfig {
+// DecryptPassword returns a decrypted config replica in config.
+func (c *SourceConfig) DecryptPassword() *SourceConfig {
 	clone := c.Clone()
 	var pswdFrom string
 	if len(clone.From.Password) > 0 {
@@ -275,7 +269,7 @@ func (c *SourceConfig) GetDecryptedClone() *SourceConfig {
 // GenerateDBConfig creates DBConfig for DB.
 func (c *SourceConfig) GenerateDBConfig() *dbconfig.DBConfig {
 	// decrypt password
-	clone := c.GetDecryptedClone()
+	clone := c.DecryptPassword()
 	from := &clone.From
 	from.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(conn.DefaultDBTimeout.String())
 	return from
@@ -386,15 +380,35 @@ func LoadFromFile(path string) (*SourceConfig, error) {
 	if err != nil {
 		return nil, terror.ErrConfigReadCfgFromFile.Delegate(err, path)
 	}
-	return SourceCfgFromYaml(string(content))
+	return ParseYaml(string(content))
+}
+
+func (c *SourceConfig) check(metaData *toml.MetaData, err error) error {
+	if err != nil {
+		return terror.ErrWorkerDecodeConfigFromFile.Delegate(err)
+	}
+	undecoded := metaData.Undecoded()
+	if len(undecoded) > 0 && err == nil {
+		var undecodedItems []string
+		for _, item := range undecoded {
+			undecodedItems = append(undecodedItems, item.String())
+		}
+		return terror.ErrWorkerUndecodedItemFromFile.Generate(strings.Join(undecodedItems, ","))
+	}
+	c.adjust()
+	return nil
 }
 
 // YamlForDowngrade returns YAML format represents of config for downgrade.
 func (c *SourceConfig) YamlForDowngrade() (string, error) {
 	s := NewSourceConfigForDowngrade(c)
 
-	// try to encrypt password
-	s.From.Password = utils.EncryptOrPlaintext(utils.DecryptOrPlaintext(c.From.Password))
+	// encrypt password
+	cipher, err := utils.Encrypt(utils.DecryptOrPlaintext(c.From.Password))
+	if err != nil {
+		return "", err
+	}
+	s.From.Password = cipher
 	s.omitDefaultVals()
 	return s.Yaml()
 }

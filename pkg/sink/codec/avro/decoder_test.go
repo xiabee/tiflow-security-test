@@ -20,63 +20,36 @@ import (
 	"time"
 
 	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/stretchr/testify/require"
 )
 
-func TestDMLEventE2E(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	helper.Tk().MustExec("use test")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	codecConfig := common.NewConfig(config.ProtocolAvro)
-	codecConfig.EnableTiDBExtension = true
-	encoder, err := SetupEncoderAndSchemaRegistry4Testing(ctx, codecConfig)
-	defer TeardownEncoderAndSchemaRegistry4Testing()
-	require.NoError(t, err)
-	require.NotNil(t, encoder)
-
-	_ = helper.DDL2Event(`create table t(a varchar(64) not null, b varchar(64) default null, primary key(a))`)
-
-	event := helper.DML2Event(`insert into t values('a', 'b')`, "test", "t")
-
-	topic := "avro-test-topic"
-	err = encoder.AppendRowChangedEvent(ctx, topic, event, func() {})
-	require.NoError(t, err)
-
-	event = helper.DML2Event(`insert into t(a) values ('b')`, "test", "t")
-	err = encoder.AppendRowChangedEvent(ctx, topic, event, func() {})
-	require.NoError(t, err)
-
-	event = helper.DML2Event(`insert into t(a) values ('')`, "test", "t")
-	err = encoder.AppendRowChangedEvent(ctx, topic, event, func() {})
-	require.NoError(t, err)
-}
-
 func TestDecodeEvent(t *testing.T) {
-	codecConfig := common.NewConfig(config.ProtocolAvro)
-	codecConfig.EnableTiDBExtension = true
+	config := &common.Config{
+		MaxMessageBytes:                1024 * 1024,
+		EnableTiDBExtension:            true,
+		AvroDecimalHandlingMode:        "precise",
+		AvroBigintUnsignedHandlingMode: "long",
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	encoder, err := SetupEncoderAndSchemaRegistry4Testing(ctx, codecConfig)
+	encoder, err := SetupEncoderAndSchemaRegistry4Testing(ctx, config)
 	defer TeardownEncoderAndSchemaRegistry4Testing()
 	require.NoError(t, err)
 	require.NotNil(t, encoder)
 
 	event := newLargeEvent()
-	colInfos := event.TableInfo.GetColInfosForRowChangedEvent()
+	input := &avroEncodeInput{
+		columns:  event.Columns,
+		colInfos: event.ColInfos,
+	}
 
-	rand.New(rand.NewSource(time.Now().Unix())).Shuffle(len(event.Columns), func(i, j int) {
-		event.Columns[i], event.Columns[j] = event.Columns[j], event.Columns[i]
-		colInfos[i], colInfos[j] = colInfos[j], colInfos[i]
+	rand.New(rand.NewSource(time.Now().Unix())).Shuffle(len(input.columns), func(i, j int) {
+		input.columns[i], input.columns[j] = input.columns[j], input.columns[i]
+		input.colInfos[i], input.colInfos[j] = input.colInfos[j], input.colInfos[i]
 	})
 
 	topic := "avro-test-topic"
@@ -90,7 +63,7 @@ func TestDecodeEvent(t *testing.T) {
 	schemaM, err := NewConfluentSchemaManager(ctx, "http://127.0.0.1:8081", nil)
 	require.NoError(t, err)
 
-	decoder := NewDecoder(codecConfig, schemaM, topic)
+	decoder := NewDecoder(config, schemaM, topic)
 	err = decoder.AddKeyValue(message.Key, message.Value)
 	require.NoError(t, err)
 

@@ -134,16 +134,15 @@ var defaultServerConfig = &ServerConfig{
 			WriterBufferSize:    8388608,
 			Compression:         "snappy",
 			WriteL0PauseTrigger: math.MaxInt32,
-			CompactionL0Trigger: 160,
+			CompactionL0Trigger: 16, // Based on a performance test on 4K tables.
 		},
 		Messages: defaultMessageConfig.Clone(),
 
-		Scheduler: NewDefaultSchedulerConfig(),
-		CDCV2:     &CDCV2{Enable: false},
+		Scheduler:              NewDefaultSchedulerConfig(),
+		EnableKVConnectBackOff: false,
 		Puller: &PullerConfig{
 			EnableResolvedTsStuckDetection: false,
 			ResolvedTsStuckInterval:        TomlDuration(5 * time.Minute),
-			LogRegionDetails:               false,
 		},
 	},
 	ClusterID:              "default",
@@ -169,17 +168,16 @@ type ServerConfig struct {
 	OwnerFlushInterval     TomlDuration `toml:"owner-flush-interval" json:"owner-flush-interval"`
 	ProcessorFlushInterval TomlDuration `toml:"processor-flush-interval" json:"processor-flush-interval"`
 
-	Sorter                 *SorterConfig        `toml:"sorter" json:"sorter"`
-	Security               *security.Credential `toml:"security" json:"security"`
-	KVClient               *KVClientConfig      `toml:"kv-client" json:"kv-client"`
-	Debug                  *DebugConfig         `toml:"debug" json:"debug"`
-	ClusterID              string               `toml:"cluster-id" json:"cluster-id"`
-	GcTunerMemoryThreshold uint64               `toml:"gc-tuner-memory-threshold" json:"gc-tuner-memory-threshold"`
-
+	Sorter   *SorterConfig        `toml:"sorter" json:"sorter"`
+	Security *security.Credential `toml:"security" json:"security"`
 	// Deprecated: we don't use this field anymore.
-	PerTableMemoryQuota uint64 `toml:"per-table-memory-quota" json:"per-table-memory-quota"`
+	PerTableMemoryQuota uint64          `toml:"per-table-memory-quota" json:"per-table-memory-quota"`
+	KVClient            *KVClientConfig `toml:"kv-client" json:"kv-client"`
+	Debug               *DebugConfig    `toml:"debug" json:"debug"`
+	ClusterID           string          `toml:"cluster-id" json:"cluster-id"`
 	// Deprecated: we don't use this field anymore.
-	MaxMemoryPercentage int `toml:"max-memory-percentage" json:"max-memory-percentage"`
+	MaxMemoryPercentage    int    `toml:"max-memory-percentage" json:"max-memory-percentage"`
+	GcTunerMemoryThreshold uint64 `toml:"gc-tuner-memory-threshold" json:"gc-tuner-memory-threshold"`
 }
 
 // Marshal returns the json marshal format of a ServerConfig
@@ -255,27 +253,15 @@ func (c *ServerConfig) ValidateAndAdjust() error {
 		c.CaptureSessionTTL = 10
 	}
 
-	if c.Security != nil {
-		if c.Security.ClientUserRequired {
-			if len(c.Security.ClientAllowedUser) == 0 {
-				log.Error("client-allowed-user should not be empty when client-user-required is true")
-				return cerror.ErrInvalidServerOption.GenWithStack("client-allowed-user should not be empty when client-user-required is true")
-			}
-			if !c.Security.IsTLSEnabled() {
-				log.Warn("client-allowed-user is true, but tls is not enabled." +
-					"It's highly recommended to enable TLS to secure the communication")
-			}
+	if c.Security != nil && c.Security.IsTLSEnabled() {
+		var err error
+		_, err = c.Security.ToTLSConfig()
+		if err != nil {
+			return errors.Annotate(err, "invalidate TLS config")
 		}
-		if c.Security.IsTLSEnabled() {
-			var err error
-			_, err = c.Security.ToTLSConfig()
-			if err != nil {
-				return errors.Annotate(err, "invalidate TLS config")
-			}
-			_, err = c.Security.ToGRPCDialOption()
-			if err != nil {
-				return errors.Annotate(err, "invalidate TLS config")
-			}
+		_, err = c.Security.ToGRPCDialOption()
+		if err != nil {
+			return errors.Annotate(err, "invalidate TLS config")
 		}
 	}
 

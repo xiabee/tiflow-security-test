@@ -1401,7 +1401,7 @@ var doc = `{
                     "type": "string"
                 },
                 "delimiter": {
-                    "description": "delimiter between fields, it can be 1 character or at most 2 characters\nIt can not be CR or LF or contains CR or LF.\nIt should have exclusive characters with quote.",
+                    "description": "delimiter between fields",
                     "type": "string"
                 },
                 "include-commit-ts": {
@@ -1411,14 +1411,6 @@ var doc = `{
                 "null": {
                     "description": "representation of null values",
                     "type": "string"
-                },
-                "output-handle-key": {
-                    "description": "output handle key",
-                    "type": "boolean"
-                },
-                "output-old-value": {
-                    "description": "output old value",
-                    "type": "boolean"
                 },
                 "quote": {
                     "description": "quoting character",
@@ -1467,9 +1459,6 @@ var doc = `{
                 "enable-tidb-extension": {
                     "type": "boolean"
                 },
-                "encoding-format": {
-                    "type": "string"
-                },
                 "max-batch-size": {
                     "type": "integer"
                 }
@@ -1489,14 +1478,6 @@ var doc = `{
                     "items": {
                         "type": "string"
                     }
-                }
-            }
-        },
-        "config.DebeziumConfig": {
-            "type": "object",
-            "properties": {
-                "output-old-value": {
-                    "type": "boolean"
                 }
             }
         },
@@ -1860,10 +1841,6 @@ var doc = `{
                         "$ref": "#/definitions/config.ColumnSelector"
                     }
                 },
-                "content-compatible": {
-                    "description": "ContentCompatible is only available when the downstream is MQ.",
-                    "type": "boolean"
-                },
                 "csv": {
                     "description": "CSVConfig is only available when the downstream is Storage.",
                     "$ref": "#/definitions/config.CSVConfig"
@@ -1871,14 +1848,6 @@ var doc = `{
                 "date-separator": {
                     "description": "DateSeparator is only available when the downstream is Storage.",
                     "type": "string"
-                },
-                "debezium": {
-                    "description": "DebeziumConfig related configurations",
-                    "$ref": "#/definitions/config.DebeziumConfig"
-                },
-                "debezium-disable-schema": {
-                    "description": "Debezium only. Whether schema should be excluded in the output.",
-                    "type": "boolean"
                 },
                 "delete-only-output-handle-key-columns": {
                     "description": "DeleteOnlyOutputHandleKeyColumns is only available when the downstream is MQ.",
@@ -1935,18 +1904,6 @@ var doc = `{
                 "schema-registry": {
                     "description": "SchemaRegistry is only available when the downstream is MQ using avro protocol.",
                     "type": "string"
-                },
-                "send-bootstrap-in-msg-count": {
-                    "description": "SendBootstrapInMsgCount means bootstrap messages are being sent every SendBootstrapInMsgCount row change messages.",
-                    "type": "integer"
-                },
-                "send-bootstrap-interval-in-sec": {
-                    "description": "Simple Protocol only config, use to control the behavior of sending bootstrap message.\nNote: When one of the following conditions is set to negative value,\nbootstrap sending function will be disabled.\nSendBootstrapIntervalInSec is the interval in seconds to send bootstrap message.",
-                    "type": "integer"
-                },
-                "send-bootstrap-to-all-partition": {
-                    "description": "SendBootstrapToAllPartition determines whether to send bootstrap message to all partitions.\nIf set to false, bootstrap message will only be sent to the first partition of each topic.\nDefault value is true.",
-                    "type": "boolean"
                 },
                 "terminator": {
                     "description": "Terminator is NOT available when the downstream is DB.",
@@ -2257,12 +2214,6 @@ var doc = `{
                 "null": {
                     "type": "string"
                 },
-                "output_handle_key": {
-                    "type": "boolean"
-                },
-                "output_old_value": {
-                    "type": "boolean"
-                },
                 "quote": {
                     "type": "string"
                 }
@@ -2472,9 +2423,6 @@ var doc = `{
                 "enable_tidb_extension": {
                     "type": "boolean"
                 },
-                "encoding_format": {
-                    "type": "string"
-                },
                 "max_batch_size": {
                     "type": "integer"
                 }
@@ -2538,16 +2486,11 @@ var doc = `{
         "v2.ConsistentMemoryUsage": {
             "type": "object",
             "properties": {
+                "event_cache_percentage": {
+                    "type": "integer"
+                },
                 "memory_quota_percentage": {
                     "type": "integer"
-                }
-            }
-        },
-        "v2.DebeziumConfig": {
-            "type": "object",
-            "properties": {
-                "output_old_value": {
-                    "type": "boolean"
                 }
             }
         },
@@ -2620,10 +2563,38 @@ var doc = `{
         "v2.FilterConfig": {
             "type": "object",
             "properties": {
+                "do_dbs": {
+                    "description": "DoDBs is an allowlist of schemas.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "do_tables": {
+                    "description": "DoTables is an allowlist of tables.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/v2.Table"
+                    }
+                },
                 "event_filters": {
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/v2.EventFilterRule"
+                    }
+                },
+                "ignore_dbs": {
+                    "description": "IgnoreDBs is a blocklist of schemas.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "ignore_tables": {
+                    "description": "IgnoreTables is a blocklist of tables.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/v2.Table"
                     }
                 },
                 "ignore_txn_start_ts": {
@@ -3008,9 +2979,6 @@ var doc = `{
                 "enable_sync_point": {
                     "type": "boolean"
                 },
-                "enable_table_monitor": {
-                    "type": "boolean"
-                },
                 "filter": {
                     "$ref": "#/definitions/v2.FilterConfig"
                 },
@@ -3036,7 +3004,6 @@ var doc = `{
                     "$ref": "#/definitions/v2.SinkConfig"
                 },
                 "sql_mode": {
-                    "description": "Deprecated: we don't use this field since v8.0.0.",
                     "type": "string"
                 },
                 "sync_point_interval": {
@@ -3137,20 +3104,11 @@ var doc = `{
                         "$ref": "#/definitions/v2.ColumnSelector"
                     }
                 },
-                "content_compatible": {
-                    "type": "boolean"
-                },
                 "csv": {
                     "$ref": "#/definitions/v2.CSVConfig"
                 },
                 "date_separator": {
                     "type": "string"
-                },
-                "debezium": {
-                    "$ref": "#/definitions/v2.DebeziumConfig"
-                },
-                "debezium_disable_schema": {
-                    "type": "boolean"
                 },
                 "delete_only_output_handle_key_columns": {
                     "type": "boolean"
@@ -3197,15 +3155,6 @@ var doc = `{
                 "schema_registry": {
                     "type": "string"
                 },
-                "send_bootstrap_in_msg_count": {
-                    "type": "integer"
-                },
-                "send_bootstrap_interval_in_sec": {
-                    "type": "integer"
-                },
-                "send_bootstrap_to_all_partition": {
-                    "type": "boolean"
-                },
                 "terminator": {
                     "type": "string"
                 },
@@ -3247,6 +3196,19 @@ var doc = `{
                 "synced_check_interval": {
                     "description": "The minimum interval between the latest synced ts and now required to reach synced state",
                     "type": "integer"
+                }
+            }
+        },
+        "v2.Table": {
+            "type": "object",
+            "properties": {
+                "database_name": {
+                    "description": "Schema is the name of the schema (database) containing this table.",
+                    "type": "string"
+                },
+                "table_name": {
+                    "description": "Name is the unqualified table name.",
+                    "type": "string"
                 }
             }
         }

@@ -57,7 +57,7 @@ function run() {
 		"query-status test" \
 		"\"stage\": \"Paused\"" 1 \
 		'"progress": "100.00 %"' 2 \
-		"please check \`dm_meta_test\`.\`conflict_error_v1\` to see the duplication" 1
+		"please check \`dm_meta_test\`.\`conflict_error_v2\` to see the duplication" 1
 	run_dm_ctl $WORK_DIR "127.0.0.1:$MASTER_PORT" \
 		"resume-task test" \
 		"\"result\": true" 3
@@ -87,14 +87,8 @@ function run() {
 		"stop-task test" \
 		"\"result\": true" 3
 	run_sql_tidb "drop database if exists lightning_mode;"
-	run_sql_tidb "drop database if exists dm_meta;"
-	run_sql_tidb "drop database if exists lightning_metadata;"
 
-	task_conf=$(cat $cur/conf/task.json)
-	# create task
-	curl -X POST http://127.0.0.1:8261/api/v1/tasks -H "Content-Type: application/json" -d "$task_conf"
-	# start task
-	curl -X POST http://127.0.0.1:8261/api/v1/tasks/test/start
+	dmctl_start_task "$cur/conf/dm-task.yaml" "--remove-meta"
 
 	# use sync_diff_inspector to check full dump loader
 	check_sync_diff $WORK_DIR $cur/conf/diff_config.toml
@@ -110,6 +104,9 @@ function run() {
 	ls $WORK_DIR/worker2/dumped_data.test && exit 1 || echo "worker2 auto removed dump files"
 
 	echo "check no password in log"
+	check_log_not_contains $WORK_DIR/master/log/dm-master.log "/Q7B9DizNLLTTfiZHv9WoEAKamfpIUs="
+	check_log_not_contains $WORK_DIR/worker1/log/dm-worker.log "/Q7B9DizNLLTTfiZHv9WoEAKamfpIUs="
+	check_log_not_contains $WORK_DIR/worker2/log/dm-worker.log "/Q7B9DizNLLTTfiZHv9WoEAKamfpIUs="
 	check_log_not_contains $WORK_DIR/master/log/dm-master.log "123456"
 	check_log_not_contains $WORK_DIR/worker1/log/dm-worker.log "123456"
 	check_log_not_contains $WORK_DIR/worker2/log/dm-worker.log "123456"
@@ -125,10 +122,10 @@ function run() {
 	export GO_FAILPOINTS=''
 }
 
-#cleanup_data lightning_mode
-## also cleanup dm processes in case of last run failed
-#cleanup_process $*
-#run $*
-#cleanup_process $*
+cleanup_data lightning_mode
+# also cleanup dm processes in case of last run failed
+cleanup_process $*
+run $*
+cleanup_process $*
 
 echo "[$(date)] <<<<<< test case $TEST_NAME success! >>>>>>"

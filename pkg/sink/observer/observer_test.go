@@ -45,7 +45,7 @@ func TestNewObserver(t *testing.T) {
 
 		if dbIndex == 0 {
 			// test db
-			db, err := pmysql.MockTestDB()
+			db, err := pmysql.MockTestDB(true)
 			require.Nil(t, err)
 			return db, nil
 		}

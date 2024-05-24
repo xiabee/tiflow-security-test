@@ -185,109 +185,6 @@ func (z *Column) Msgsize() (s int) {
 }
 
 // DecodeMsg implements msgp.Decodable
-func (z *ColumnData) DecodeMsg(dc *msgp.Reader) (err error) {
-	var field []byte
-	_ = field
-	var zb0001 uint32
-	zb0001, err = dc.ReadMapHeader()
-	if err != nil {
-		err = msgp.WrapError(err)
-		return
-	}
-	for zb0001 > 0 {
-		zb0001--
-		field, err = dc.ReadMapKeyPtr()
-		if err != nil {
-			err = msgp.WrapError(err)
-			return
-		}
-		switch msgp.UnsafeString(field) {
-		case "column_id":
-			z.ColumnID, err = dc.ReadInt64()
-			if err != nil {
-				err = msgp.WrapError(err, "ColumnID")
-				return
-			}
-		default:
-			err = dc.Skip()
-			if err != nil {
-				err = msgp.WrapError(err)
-				return
-			}
-		}
-	}
-	return
-}
-
-// EncodeMsg implements msgp.Encodable
-func (z ColumnData) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 1
-	// write "column_id"
-	err = en.Append(0x81, 0xa9, 0x63, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x5f, 0x69, 0x64)
-	if err != nil {
-		return
-	}
-	err = en.WriteInt64(z.ColumnID)
-	if err != nil {
-		err = msgp.WrapError(err, "ColumnID")
-		return
-	}
-	return
-}
-
-// MarshalMsg implements msgp.Marshaler
-func (z ColumnData) MarshalMsg(b []byte) (o []byte, err error) {
-	o = msgp.Require(b, z.Msgsize())
-	// map header, size 1
-	// string "column_id"
-	o = append(o, 0x81, 0xa9, 0x63, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x5f, 0x69, 0x64)
-	o = msgp.AppendInt64(o, z.ColumnID)
-	return
-}
-
-// UnmarshalMsg implements msgp.Unmarshaler
-func (z *ColumnData) UnmarshalMsg(bts []byte) (o []byte, err error) {
-	var field []byte
-	_ = field
-	var zb0001 uint32
-	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
-	if err != nil {
-		err = msgp.WrapError(err)
-		return
-	}
-	for zb0001 > 0 {
-		zb0001--
-		field, bts, err = msgp.ReadMapKeyZC(bts)
-		if err != nil {
-			err = msgp.WrapError(err)
-			return
-		}
-		switch msgp.UnsafeString(field) {
-		case "column_id":
-			z.ColumnID, bts, err = msgp.ReadInt64Bytes(bts)
-			if err != nil {
-				err = msgp.WrapError(err, "ColumnID")
-				return
-			}
-		default:
-			bts, err = msgp.Skip(bts)
-			if err != nil {
-				err = msgp.WrapError(err)
-				return
-			}
-		}
-	}
-	o = bts
-	return
-}
-
-// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
-func (z ColumnData) Msgsize() (s int) {
-	s = 1 + 10 + msgp.Int64Size
-	return
-}
-
-// DecodeMsg implements msgp.Decodable
 func (z *DDLEvent) DecodeMsg(dc *msgp.Reader) (err error) {
 	var field []byte
 	_ = field
@@ -1200,7 +1097,7 @@ func (z *RedoRowChangedEvent) DecodeMsg(dc *msgp.Reader) (err error) {
 				z.Row = nil
 			} else {
 				if z.Row == nil {
-					z.Row = new(RowChangedEventInRedoLog)
+					z.Row = new(RowChangedEvent)
 				}
 				err = z.Row.DecodeMsg(dc)
 				if err != nil {
@@ -1519,7 +1416,7 @@ func (z *RedoRowChangedEvent) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				z.Row = nil
 			} else {
 				if z.Row == nil {
-					z.Row = new(RowChangedEventInRedoLog)
+					z.Row = new(RowChangedEvent)
 				}
 				bts, err = z.Row.UnmarshalMsg(bts)
 				if err != nil {
@@ -1667,7 +1564,7 @@ func (z *RedoRowChangedEvent) Msgsize() (s int) {
 }
 
 // DecodeMsg implements msgp.Decodable
-func (z *RowChangedEventInRedoLog) DecodeMsg(dc *msgp.Reader) (err error) {
+func (z *RowChangedEvent) DecodeMsg(dc *msgp.Reader) (err error) {
 	var field []byte
 	_ = field
 	var zb0001 uint32
@@ -1820,7 +1717,7 @@ func (z *RowChangedEventInRedoLog) DecodeMsg(dc *msgp.Reader) (err error) {
 }
 
 // EncodeMsg implements msgp.Encodable
-func (z *RowChangedEventInRedoLog) EncodeMsg(en *msgp.Writer) (err error) {
+func (z *RowChangedEvent) EncodeMsg(en *msgp.Writer) (err error) {
 	// map header, size 6
 	// write "start-ts"
 	err = en.Append(0x86, 0xa8, 0x73, 0x74, 0x61, 0x72, 0x74, 0x2d, 0x74, 0x73)
@@ -1935,7 +1832,7 @@ func (z *RowChangedEventInRedoLog) EncodeMsg(en *msgp.Writer) (err error) {
 }
 
 // MarshalMsg implements msgp.Marshaler
-func (z *RowChangedEventInRedoLog) MarshalMsg(b []byte) (o []byte, err error) {
+func (z *RowChangedEvent) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
 	// map header, size 6
 	// string "start-ts"
@@ -1996,7 +1893,7 @@ func (z *RowChangedEventInRedoLog) MarshalMsg(b []byte) (o []byte, err error) {
 }
 
 // UnmarshalMsg implements msgp.Unmarshaler
-func (z *RowChangedEventInRedoLog) UnmarshalMsg(bts []byte) (o []byte, err error) {
+func (z *RowChangedEvent) UnmarshalMsg(bts []byte) (o []byte, err error) {
 	var field []byte
 	_ = field
 	var zb0001 uint32
@@ -2147,7 +2044,7 @@ func (z *RowChangedEventInRedoLog) UnmarshalMsg(bts []byte) (o []byte, err error
 }
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
-func (z *RowChangedEventInRedoLog) Msgsize() (s int) {
+func (z *RowChangedEvent) Msgsize() (s int) {
 	s = 1 + 9 + msgp.Uint64Size + 10 + msgp.Uint64Size + 6
 	if z.Table == nil {
 		s += msgp.NilSize

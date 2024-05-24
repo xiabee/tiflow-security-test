@@ -27,7 +27,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/memquota"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/redo"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/factory"
@@ -50,7 +50,7 @@ const (
 	sinkWorkerNum               = 8
 	redoWorkerNum               = 4
 	defaultGenerateTaskInterval = 100 * time.Millisecond
-	// sorter.CleanByTable can be expensive. So it's necessary to reduce useless calls.
+	// engine.CleanByTable can be expensive. So it's necessary to reduce useless calls.
 	cleanTableInterval  = 5 * time.Second
 	cleanTableMinEvents = 128
 )
@@ -81,6 +81,8 @@ type SinkManager struct {
 	// redoProgressHeap is the heap of the table progress for redo.
 	redoProgressHeap *tableProgresses
 
+	// eventCache caches events fetched from sort engine.
+	eventCache *redoEventCache
 	// redoDMLMgr is used to report the resolved ts of the table if redo log is enabled.
 	redoDMLMgr redo.DMLManager
 	// sourceManager is used by the sink manager to fetch data.
@@ -181,6 +183,11 @@ func New(
 		sinkQuota := totalQuota - redoQuota
 		m.sinkMemQuota = memquota.NewMemQuota(changefeedID, sinkQuota, "sink")
 		m.redoMemQuota = memquota.NewMemQuota(changefeedID, redoQuota, "redo")
+
+		eventCache := redoQuota * consistentMemoryUsage.EventCachePercentage / 100
+		if eventCache > 0 {
+			m.eventCache = newRedoEventCache(changefeedID, eventCache)
+		}
 	} else {
 		m.sinkMemQuota = memquota.NewMemQuota(changefeedID, totalQuota, "sink")
 		m.redoMemQuota = memquota.NewMemQuota(changefeedID, 0, "redo")
@@ -410,7 +417,8 @@ func (m *SinkManager) putSinkFactoryError(err error, version uint64) (success bo
 func (m *SinkManager) startSinkWorkers(ctx context.Context, eg *errgroup.Group, splitTxn bool) {
 	for i := 0; i < sinkWorkerNum; i++ {
 		w := newSinkWorker(m.changefeedID, m.sourceManager,
-			m.sinkMemQuota, splitTxn)
+			m.sinkMemQuota, m.redoMemQuota,
+			m.eventCache, splitTxn)
 		m.sinkWorkers = append(m.sinkWorkers, w)
 		eg.Go(func() error { return w.handleTasks(ctx, m.sinkTaskChan) })
 	}
@@ -419,7 +427,7 @@ func (m *SinkManager) startSinkWorkers(ctx context.Context, eg *errgroup.Group, 
 func (m *SinkManager) startRedoWorkers(ctx context.Context, eg *errgroup.Group) {
 	for i := 0; i < redoWorkerNum; i++ {
 		w := newRedoWorker(m.changefeedID, m.sourceManager, m.redoMemQuota,
-			m.redoDMLMgr)
+			m.redoDMLMgr, m.eventCache)
 		m.redoWorkers = append(m.redoWorkers, w)
 		eg.Go(func() error { return w.handleTasks(ctx, m.redoTaskChan) })
 	}
@@ -457,7 +465,7 @@ func (m *SinkManager) backgroundGC(errors chan<- error) {
 						return true
 					}
 
-					cleanPos := sorter.Position{StartTs: resolvedMark - 1, CommitTs: resolvedMark}
+					cleanPos := engine.Position{StartTs: resolvedMark - 1, CommitTs: resolvedMark}
 					if !sink.cleanRangeEventCounts(cleanPos, cleanTableMinEvents) {
 						return true
 					}
@@ -487,13 +495,13 @@ func (m *SinkManager) backgroundGC(errors chan<- error) {
 	}()
 }
 
-func (m *SinkManager) getUpperBound(tableSinkUpperBoundTs model.Ts) sorter.Position {
+func (m *SinkManager) getUpperBound(tableSinkUpperBoundTs model.Ts) engine.Position {
 	schemaTs := m.schemaStorage.ResolvedTs()
 	if schemaTs != math.MaxUint64 && tableSinkUpperBoundTs > schemaTs+1 {
 		// schemaTs == math.MaxUint64 means it's in tests.
 		tableSinkUpperBoundTs = schemaTs + 1
 	}
-	return sorter.Position{StartTs: tableSinkUpperBoundTs - 1, CommitTs: tableSinkUpperBoundTs}
+	return engine.Position{StartTs: tableSinkUpperBoundTs - 1, CommitTs: tableSinkUpperBoundTs}
 }
 
 // generateSinkTasks generates tasks to fetch data from the source manager.
@@ -560,7 +568,7 @@ func (m *SinkManager) generateSinkTasks(ctx context.Context) error {
 					if restartErr := tableSink.restart(ctx); restartErr == nil {
 						// Restart the table sink based on the checkpoint position.
 						ckpt := tableSink.getCheckpointTs().ResolvedMark()
-						lastWrittenPos := sorter.Position{StartTs: ckpt - 1, CommitTs: ckpt}
+						lastWrittenPos := engine.Position{StartTs: ckpt - 1, CommitTs: ckpt}
 						p := &progress{
 							span:              tableSink.span,
 							nextLowerBoundPos: lastWrittenPos.Next(),
@@ -610,7 +618,7 @@ func (m *SinkManager) generateSinkTasks(ctx context.Context) error {
 				lowerBound:    lowerBound,
 				getUpperBound: m.getUpperBound,
 				tableSink:     tableSink,
-				callback: func(lastWrittenPos sorter.Position) {
+				callback: func(lastWrittenPos engine.Position) {
 					p := &progress{
 						span:              tableSink.span,
 						nextLowerBoundPos: lastWrittenPos.Next(),
@@ -742,7 +750,7 @@ func (m *SinkManager) generateRedoTasks(ctx context.Context) error {
 				lowerBound:    lowerBound,
 				getUpperBound: m.getUpperBound,
 				tableSink:     tableSink,
-				callback: func(lastWrittenPos sorter.Position) {
+				callback: func(lastWrittenPos engine.Position) {
 					p := &progress{
 						span:              tableSink.span,
 						nextLowerBoundPos: lastWrittenPos.Next(),
@@ -894,13 +902,13 @@ func (m *SinkManager) StartTable(span tablepb.Span, startTs model.Ts) error {
 
 	m.sinkProgressHeap.push(&progress{
 		span:              span,
-		nextLowerBoundPos: sorter.Position{StartTs: 0, CommitTs: startTs + 1},
+		nextLowerBoundPos: engine.Position{StartTs: 0, CommitTs: startTs + 1},
 		version:           tableSink.(*tableSinkWrapper).version,
 	})
 	if m.redoDMLMgr != nil {
 		m.redoProgressHeap.push(&progress{
 			span:              span,
-			nextLowerBoundPos: sorter.Position{StartTs: 0, CommitTs: startTs + 1},
+			nextLowerBoundPos: engine.Position{StartTs: 0, CommitTs: startTs + 1},
 			version:           tableSink.(*tableSinkWrapper).version,
 		})
 	}
@@ -949,6 +957,9 @@ func (m *SinkManager) RemoveTable(span tablepb.Span) {
 		zap.String("changefeed", m.changefeedID.ID),
 		zap.Stringer("span", &span),
 		zap.Uint64("checkpointTs", checkpointTs.Ts))
+	if m.eventCache != nil {
+		m.eventCache.removeTable(span)
+	}
 }
 
 // GetAllCurrentTableSpans returns all spans in the sinkManager.
@@ -1087,6 +1098,9 @@ func (m *SinkManager) Close() {
 	m.waitSubroutines()
 	// NOTE: It's unnecceary to close table sinks before clear sink factory.
 	m.clearSinkFactory()
+	if m.eventCache != nil {
+		m.eventCache.clear()
+	}
 
 	log.Info("Closed sink manager",
 		zap.String("namespace", m.changefeedID.Namespace),

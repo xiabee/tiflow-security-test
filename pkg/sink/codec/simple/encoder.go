@@ -69,6 +69,7 @@ func (e *encoder) AppendRowChangedEvent(
 
 	if e.config.LargeMessageHandle.Disabled() {
 		log.Error("Single message is too large for simple",
+			zap.Stringer("changefeedID", e.config.ChangefeedID),
 			zap.Int("maxMessageBytes", e.config.MaxMessageBytes),
 			zap.Int("length", length),
 			zap.Any("table", event.TableInfo.TableName))
@@ -97,6 +98,7 @@ func (e *encoder) AppendRowChangedEvent(
 
 	if result.Length() <= e.config.MaxMessageBytes {
 		log.Warn("Single message is too large for simple, only encode handle key columns",
+			zap.Stringer("changefeedID", e.config.ChangefeedID),
 			zap.Int("maxMessageBytes", e.config.MaxMessageBytes),
 			zap.Int("originLength", length),
 			zap.Int("length", result.Length()),
@@ -106,6 +108,7 @@ func (e *encoder) AppendRowChangedEvent(
 	}
 
 	log.Error("Single message is still too large for simple after only encode handle key columns",
+		zap.Stringer("changefeedID", e.config.ChangefeedID),
 		zap.Int("maxMessageBytes", e.config.MaxMessageBytes),
 		zap.Int("length", result.Length()),
 		zap.Any("table", event.TableInfo.TableName))
@@ -114,11 +117,11 @@ func (e *encoder) AppendRowChangedEvent(
 
 // Build implement the RowEventEncoder interface
 func (e *encoder) Build() []*common.Message {
-	if len(e.messages) == 0 {
-		return nil
+	var result []*common.Message
+	if len(e.messages) != 0 {
+		result = e.messages
+		e.messages = nil
 	}
-	result := e.messages
-	e.messages = nil
 	return result
 }
 
@@ -131,10 +134,7 @@ func (e *encoder) EncodeCheckpointEvent(ts uint64) (*common.Message, error) {
 
 	value, err = common.Compress(e.config.ChangefeedID,
 		e.config.LargeMessageHandle.LargeMessageHandleCompression, value)
-	if err != nil {
-		return nil, err
-	}
-	return common.NewResolvedMsg(config.ProtocolSimple, nil, value, ts), nil
+	return common.NewResolvedMsg(config.ProtocolSimple, nil, value, ts), err
 }
 
 // EncodeDDLEvent implement the DDLEventBatchEncoder interface
@@ -153,6 +153,7 @@ func (e *encoder) EncodeDDLEvent(event *model.DDLEvent) (*common.Message, error)
 
 	if result.Length() > e.config.MaxMessageBytes {
 		log.Error("DDL message is too large for simple",
+			zap.Stringer("changefeedID", e.config.ChangefeedID),
 			zap.Int("maxMessageBytes", e.config.MaxMessageBytes),
 			zap.Int("length", result.Length()),
 			zap.Any("table", event.TableInfo.TableName))
@@ -182,15 +183,11 @@ func NewBuilder(ctx context.Context, config *common.Config) (*builder, error) {
 	}
 
 	m, err := newMarshaller(config)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	return &builder{
 		config:     config,
 		claimCheck: claimCheck,
 		marshaller: m,
-	}, nil
+	}, errors.Trace(err)
 }
 
 // Build implement the RowEventEncoderBuilder interface

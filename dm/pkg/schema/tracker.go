@@ -90,12 +90,12 @@ type executorContext struct {
 
 var _ sqlexec.RestrictedSQLExecutor = executorContext{}
 
-func (se executorContext) GetRestrictedSQLExecutor() sqlexec.RestrictedSQLExecutor {
-	return se
-}
-
 func (se executorContext) ParseWithParams(context.Context, string, ...interface{}) (ast.StmtNode, error) {
 	return nil, nil
+}
+
+func (se executorContext) GetRestrictedSQLExecutor() sqlexec.RestrictedSQLExecutor {
+	return se
 }
 
 func (se executorContext) ExecRestrictedStmt(context.Context, ast.StmtNode, ...sqlexec.OptionFuncAlias) ([]chunk.Row, []*ast.ResultField, error) {
@@ -145,8 +145,7 @@ func (tr *Tracker) Init(
 		tableInfos:     make(map[string]*DownstreamTableInfo),
 	}
 	// TODO: need to use upstream timezone to correctly check literal is in [1970, 2038]
-	sctx := mock.NewContext()
-	se := executorContext{Context: sctx}
+	se := executorContext{Context: mock.NewContext()}
 	tr.Lock()
 	defer tr.Unlock()
 	tr.lowerCaseTableNames = lowerCaseTableNames

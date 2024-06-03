@@ -50,8 +50,6 @@ type StatusProvider interface {
 
 	// IsHealthy return true if the cluster is healthy
 	IsHealthy(ctx context.Context) (bool, error)
-	// IsChangefeedOwner return true if this capture is the owner of the changefeed
-	IsChangefeedOwner(ctx context.Context, id model.ChangeFeedID) (bool, error)
 }
 
 // QueryType is the type of different queries.
@@ -70,8 +68,6 @@ const (
 	QueryCaptures
 	// QueryHealth is the type of query cluster health info.
 	QueryHealth
-	// QueryOwner is the type of query changefeed owner
-	QueryOwner
 	// QueryChangeFeedSyncedStatus is the type of query changefeed synced status
 	QueryChangeFeedSyncedStatus
 )
@@ -197,17 +193,6 @@ func (p *ownerStatusProvider) GetCaptures(ctx context.Context) ([]*model.Capture
 func (p *ownerStatusProvider) IsHealthy(ctx context.Context) (bool, error) {
 	query := &Query{
 		Tp: QueryHealth,
-	}
-	if err := p.sendQueryToOwner(ctx, query); err != nil {
-		return false, errors.Trace(err)
-	}
-	return query.Data.(bool), nil
-}
-
-func (p *ownerStatusProvider) IsChangefeedOwner(ctx context.Context, id model.ChangeFeedID) (bool, error) {
-	query := &Query{
-		Tp:           QueryOwner,
-		ChangeFeedID: id,
 	}
 	if err := p.sendQueryToOwner(ctx, query); err != nil {
 		return false, errors.Trace(err)

@@ -15,20 +15,17 @@ package scheduler
 
 import (
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/member"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/replication"
-	"github.com/pingcap/tiflow/pkg/spanz"
 )
 
 type scheduler interface {
 	Name() string
 	Schedule(
 		checkpointTs model.Ts,
-		currentSpans []tablepb.Span,
+		currentTables []model.TableID,
 		aliveCaptures map[model.CaptureID]*member.CaptureStatus,
-		replications *spanz.BtreeMap[*replication.ReplicationSet],
-	) []*replication.ScheduleTask
+		replications map[model.TableID]*replication.ReplicationSet) []*replication.ScheduleTask
 }
 
 // schedulerPriority is the priority of each scheduler.

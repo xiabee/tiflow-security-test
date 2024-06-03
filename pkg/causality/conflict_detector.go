@@ -55,8 +55,8 @@ func NewConflictDetector[Txn txnEvent](
 		resolvedTxnCaches: make([]txnCache[Txn], opt.Count),
 		slots:             internal.NewSlots[*internal.Node](numSlots),
 		numSlots:          numSlots,
-		notifiedNodes:     chann.NewAutoDrainChann[func()](),
-		garbageNodes:      chann.NewAutoDrainChann[*internal.Node](),
+		notifiedNodes:     chann.NewDrainableChann[func()](),
+		garbageNodes:      chann.NewDrainableChann[*internal.Node](),
 		closeCh:           make(chan struct{}),
 	}
 	for i := 0; i < opt.Count; i++ {

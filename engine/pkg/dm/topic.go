@@ -18,7 +18,6 @@ import (
 	"fmt"
 
 	"github.com/pingcap/tiflow/dm/pb"
-	"github.com/pingcap/tiflow/dm/pkg/shardddl/optimism"
 	frameModel "github.com/pingcap/tiflow/engine/framework/model"
 	"github.com/pingcap/tiflow/engine/jobmaster/dm/metadata"
 	"github.com/pingcap/tiflow/engine/pkg/p2p"
@@ -37,7 +36,6 @@ const (
 	// internal
 	BinlogTask       p2p.Topic = "BinlogTask"
 	BinlogSchemaTask p2p.Topic = "BinlogSchemaTask"
-	CoordinateDDL    p2p.Topic = "CoordinateDDL"
 )
 
 // OperateType represents internal operate type in DM
@@ -163,13 +161,11 @@ func NewProcessResultFromPB(result *pb.ProcessResult) *ProcessResult {
 
 // QueryStatusResponse is query status response
 type QueryStatusResponse struct {
-	ErrorMsg         string                `json:"error_message"`
-	Unit             frameModel.WorkerType `json:"unit"`
-	Stage            metadata.TaskStage    `json:"stage"`
-	Result           *ProcessResult        `json:"result"`
-	Status           json.RawMessage       `json:"status"`
-	IoTotalBytes     uint64                `json:"io_total_bytes"`
-	DumpIoTotalBytes uint64                `json:"dump_io_total_bytes"`
+	ErrorMsg string                `json:"error_message"`
+	Unit     frameModel.WorkerType `json:"unit"`
+	Stage    metadata.TaskStage    `json:"stage"`
+	Result   *ProcessResult        `json:"result"`
+	Status   json.RawMessage       `json:"status"`
 }
 
 // BinlogRequest is binlog request
@@ -202,14 +198,4 @@ type BinlogSchemaTaskRequest pb.OperateWorkerSchemaRequest
 type CommonTaskResponse struct {
 	ErrorMsg string
 	Msg      string
-}
-
-// CoordinateDDLRequest is coordinate DDL request
-type CoordinateDDLRequest metadata.DDLItem
-
-// CoordinateDDLResponse is coordinate DDL response
-type CoordinateDDLResponse struct {
-	ErrorMsg      string
-	DDLs          []string
-	ConflictStage optimism.ConflictStage
 }

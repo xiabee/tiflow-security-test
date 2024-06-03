@@ -14,17 +14,17 @@
 package mysql
 
 import (
+	"context"
 	"fmt"
-	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin/binding"
 	dmysql "github.com/go-sql-driver/mysql"
-	"github.com/imdario/mergo"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
@@ -58,10 +58,12 @@ const (
 	// The upper limit of max multi update row size(8KB).
 	maxMaxMultiUpdateRowSize = 8192
 
-	defaultTiDBTxnMode  = txnModeOptimistic
-	defaultReadTimeout  = "2m"
-	defaultWriteTimeout = "2m"
-	defaultDialTimeout  = "2m"
+	defaultTiDBTxnMode         = txnModeOptimistic
+	defaultBatchReplaceEnabled = true
+	defaultBatchReplaceSize    = 20
+	defaultReadTimeout         = "2m"
+	defaultWriteTimeout        = "2m"
+	defaultDialTimeout         = "2m"
 	// Note(dongmen): defaultSafeMode is set to false since v6.4.0.
 	defaultSafeMode       = false
 	defaultTxnIsolationRC = "READ-COMMITTED"
@@ -74,29 +76,7 @@ const (
 
 	defaultBatchDMLEnable  = true
 	defaultMultiStmtEnable = true
-
-	// defaultcachePrepStmts is the default value of cachePrepStmts
-	defaultCachePrepStmts = true
 )
-
-type urlConfig struct {
-	WorkerCount                  *int    `form:"worker-count"`
-	MaxTxnRow                    *int    `form:"max-txn-row"`
-	MaxMultiUpdateRowSize        *int    `form:"max-multi-update-row-size"`
-	MaxMultiUpdateRowCount       *int    `form:"max-multi-update-row"`
-	TiDBTxnMode                  *string `form:"tidb-txn-mode"`
-	SSLCa                        *string `form:"ssl-ca"`
-	SSLCert                      *string `form:"ssl-cert"`
-	SSLKey                       *string `form:"ssl-key"`
-	SafeMode                     *bool   `form:"safe-mode"`
-	TimeZone                     *string `form:"time-zone"`
-	WriteTimeout                 *string `form:"write-timeout"`
-	ReadTimeout                  *string `form:"read-timeout"`
-	Timeout                      *string `form:"timeout"`
-	EnableBatchDML               *bool   `form:"batch-dml-enable"`
-	EnableMultiStatement         *bool   `form:"multi-stmt-enable"`
-	EnableCachePreparedStatement *bool   `form:"cache-prep-stmts"`
-}
 
 // Config is the configs for MySQL backend.
 type Config struct {
@@ -105,6 +85,8 @@ type Config struct {
 	MaxMultiUpdateRowCount int
 	MaxMultiUpdateRowSize  int
 	tidbTxnMode            string
+	BatchReplaceEnabled    bool
+	BatchReplaceSize       int
 	ReadTimeout            string
 	WriteTimeout           string
 	DialTimeout            string
@@ -112,6 +94,7 @@ type Config struct {
 	Timezone               string
 	TLS                    string
 	ForceReplicate         bool
+	EnableOldValue         bool
 
 	IsTiDB bool // IsTiDB is true if the downstream is TiDB
 	// IsBDRModeSupported is true if the downstream is TiDB and write source is existed.
@@ -121,7 +104,6 @@ type Config struct {
 	SourceID        uint64
 	BatchDMLEnable  bool
 	MultiStmtEnable bool
-	CachePrepStmts  bool
 }
 
 // NewConfig returns the default mysql backend config.
@@ -132,20 +114,20 @@ func NewConfig() *Config {
 		MaxMultiUpdateRowCount: defaultMaxMultiUpdateRowCount,
 		MaxMultiUpdateRowSize:  defaultMaxMultiUpdateRowSize,
 		tidbTxnMode:            defaultTiDBTxnMode,
+		BatchReplaceEnabled:    defaultBatchReplaceEnabled,
+		BatchReplaceSize:       defaultBatchReplaceSize,
 		ReadTimeout:            defaultReadTimeout,
 		WriteTimeout:           defaultWriteTimeout,
 		DialTimeout:            defaultDialTimeout,
 		SafeMode:               defaultSafeMode,
 		BatchDMLEnable:         defaultBatchDMLEnable,
 		MultiStmtEnable:        defaultMultiStmtEnable,
-		CachePrepStmts:         defaultCachePrepStmts,
-		SourceID:               config.DefaultTiDBSourceID,
 	}
 }
 
 // Apply applies the sink URI parameters to the config.
 func (c *Config) Apply(
-	serverTimezone string,
+	ctx context.Context,
 	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
@@ -158,100 +140,66 @@ func (c *Config) Apply(
 	if !sink.IsMySQLCompatibleScheme(scheme) {
 		return cerror.ErrMySQLInvalidConfig.GenWithStack("can't create MySQL sink with unsupported scheme: %s", scheme)
 	}
-	req := &http.Request{URL: sinkURI}
-	urlParameter := &urlConfig{}
-	if err := binding.Query.Bind(req, urlParameter); err != nil {
-		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
-	}
-	if urlParameter, err = mergeConfig(replicaConfig, urlParameter); err != nil {
+	query := sinkURI.Query()
+	if err = getWorkerCount(query, &c.WorkerCount); err != nil {
 		return err
 	}
-	if err = getWorkerCount(urlParameter, &c.WorkerCount); err != nil {
+	if err = getMaxTxnRow(query, &c.MaxTxnRow); err != nil {
 		return err
 	}
-	if err = getMaxTxnRow(urlParameter, &c.MaxTxnRow); err != nil {
+	if err = getMaxMultiUpdateRowCount(query, &c.MaxMultiUpdateRowCount); err != nil {
 		return err
 	}
-	if err = getMaxMultiUpdateRowCount(urlParameter, &c.MaxMultiUpdateRowCount); err != nil {
+	if err = getMaxMultiUpdateRowSize(query, &c.MaxMultiUpdateRowSize); err != nil {
 		return err
 	}
-	if err = getMaxMultiUpdateRowSize(urlParameter, &c.MaxMultiUpdateRowSize); err != nil {
+	if err = getTiDBTxnMode(query, &c.tidbTxnMode); err != nil {
 		return err
 	}
-	getTiDBTxnMode(urlParameter, &c.tidbTxnMode)
-	if err = getSSLCA(urlParameter, changefeedID, &c.TLS); err != nil {
+	if err = getSSLCA(query, changefeedID, &c.TLS); err != nil {
 		return err
 	}
-	getSafeMode(urlParameter, &c.SafeMode)
-	if err = getTimezone(serverTimezone, urlParameter, &c.Timezone); err != nil {
+	if err = getBatchReplaceEnable(query, &c.BatchReplaceEnabled, &c.BatchReplaceSize); err != nil {
 		return err
 	}
-	if err = getDuration(urlParameter.ReadTimeout, &c.ReadTimeout); err != nil {
+	if err = getSafeMode(query, &c.SafeMode); err != nil {
 		return err
 	}
-	if err = getDuration(urlParameter.WriteTimeout, &c.WriteTimeout); err != nil {
+	if err = getTimezone(ctx, query, &c.Timezone); err != nil {
 		return err
 	}
-	if err = getDuration(urlParameter.Timeout, &c.DialTimeout); err != nil {
+	if err = getDuration(query, "read-timeout", &c.ReadTimeout); err != nil {
 		return err
 	}
-	getBatchDMLEnable(urlParameter, &c.BatchDMLEnable)
-	getMultiStmtEnable(urlParameter, &c.MultiStmtEnable)
-	getCachePrepStmts(urlParameter, &c.CachePrepStmts)
+	if err = getDuration(query, "write-timeout", &c.WriteTimeout); err != nil {
+		return err
+	}
+	if err = getDuration(query, "timeout", &c.DialTimeout); err != nil {
+		return err
+	}
+	if err = getBatchDMLEnable(query, &c.BatchDMLEnable); err != nil {
+		return err
+	}
+	if err = getMultiStmtEnable(query, &c.MultiStmtEnable); err != nil {
+		return err
+	}
+	c.EnableOldValue = replicaConfig.EnableOldValue
 	c.ForceReplicate = replicaConfig.ForceReplicate
-
-	// Note(dongmen): The TiDBSourceID should never be 0 here, but we have found that
-	// in some problematic cases, the TiDBSourceID is 0 since something went wrong in the
-	// configuration process. So we need to check it here again.
-	// We do this is because it can cause the data to be inconsistent if the TiDBSourceID is 0
-	// in BDR Mode cluster.
-	if replicaConfig.Sink.TiDBSourceID == 0 {
-		log.Error("The TiDB source ID should never be set to 0. Please report it as a bug. The default value will be used: 1.",
-			zap.Uint64("tidbSourceID", replicaConfig.Sink.TiDBSourceID))
-		c.SourceID = config.DefaultTiDBSourceID
-	} else {
-		c.SourceID = replicaConfig.Sink.TiDBSourceID
-		log.Info("TiDB source ID is set", zap.Uint64("sourceID", c.SourceID))
-	}
+	c.SourceID = replicaConfig.Sink.TiDBSourceID
 
 	return nil
 }
 
-func mergeConfig(
-	replicaConfig *config.ReplicaConfig,
-	urlParameters *urlConfig,
-) (*urlConfig, error) {
-	dest := &urlConfig{}
-	dest.SafeMode = replicaConfig.Sink.SafeMode
-	if replicaConfig.Sink != nil && replicaConfig.Sink.MySQLConfig != nil {
-		mConfig := replicaConfig.Sink.MySQLConfig
-		dest.WorkerCount = mConfig.WorkerCount
-		dest.MaxTxnRow = mConfig.MaxTxnRow
-		dest.MaxMultiUpdateRowCount = mConfig.MaxMultiUpdateRowCount
-		dest.MaxMultiUpdateRowSize = mConfig.MaxMultiUpdateRowSize
-		dest.TiDBTxnMode = mConfig.TiDBTxnMode
-		dest.SSLCa = mConfig.SSLCa
-		dest.SSLCert = mConfig.SSLCert
-		dest.SSLKey = mConfig.SSLKey
-		dest.TimeZone = mConfig.TimeZone
-		dest.WriteTimeout = mConfig.WriteTimeout
-		dest.ReadTimeout = mConfig.ReadTimeout
-		dest.Timeout = mConfig.Timeout
-		dest.EnableBatchDML = mConfig.EnableBatchDML
-		dest.EnableMultiStatement = mConfig.EnableMultiStatement
-		dest.EnableCachePreparedStatement = mConfig.EnableCachePreparedStatement
-	}
-	if err := mergo.Merge(dest, urlParameters, mergo.WithOverride); err != nil {
-		return nil, cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
-	}
-	return dest, nil
-}
-
-func getWorkerCount(values *urlConfig, workerCount *int) error {
-	if values.WorkerCount == nil {
+func getWorkerCount(values url.Values, workerCount *int) error {
+	s := values.Get("worker-count")
+	if len(s) == 0 {
 		return nil
 	}
-	c := *values.WorkerCount
+
+	c, err := strconv.Atoi(s)
+	if err != nil {
+		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+	}
 	if c <= 0 {
 		return cerror.WrapError(cerror.ErrMySQLInvalidConfig,
 			fmt.Errorf("invalid worker-count %d, which must be greater than 0", c))
@@ -266,12 +214,16 @@ func getWorkerCount(values *urlConfig, workerCount *int) error {
 	return nil
 }
 
-func getMaxTxnRow(config *urlConfig, maxTxnRow *int) error {
-	if config.MaxTxnRow == nil {
+func getMaxTxnRow(values url.Values, maxTxnRow *int) error {
+	s := values.Get("max-txn-row")
+	if len(s) == 0 {
 		return nil
 	}
 
-	c := *config.MaxTxnRow
+	c, err := strconv.Atoi(s)
+	if err != nil {
+		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+	}
 	if c <= 0 {
 		return cerror.WrapError(cerror.ErrMySQLInvalidConfig,
 			fmt.Errorf("invalid max-txn-row %d, which must be greater than 0", c))
@@ -285,12 +237,16 @@ func getMaxTxnRow(config *urlConfig, maxTxnRow *int) error {
 	return nil
 }
 
-func getMaxMultiUpdateRowCount(values *urlConfig, maxMultiUpdateRow *int) error {
-	if values.MaxMultiUpdateRowCount == nil {
+func getMaxMultiUpdateRowCount(values url.Values, maxMultiUpdateRow *int) error {
+	s := values.Get("max-multi-update-row")
+	if len(s) == 0 {
 		return nil
 	}
 
-	c := *values.MaxMultiUpdateRowCount
+	c, err := strconv.Atoi(s)
+	if err != nil {
+		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+	}
 	if c <= 0 {
 		return cerror.WrapError(cerror.ErrMySQLInvalidConfig,
 			fmt.Errorf("invalid max-multi-update-row %d, which must be greater than 0", c))
@@ -304,12 +260,16 @@ func getMaxMultiUpdateRowCount(values *urlConfig, maxMultiUpdateRow *int) error 
 	return nil
 }
 
-func getMaxMultiUpdateRowSize(values *urlConfig, maxMultiUpdateRowSize *int) error {
-	if values.MaxMultiUpdateRowSize == nil {
+func getMaxMultiUpdateRowSize(values url.Values, maxMultiUpdateRowSize *int) error {
+	s := values.Get("max-multi-update-row-size")
+	if len(s) == 0 {
 		return nil
 	}
 
-	c := *values.MaxMultiUpdateRowSize
+	c, err := strconv.Atoi(s)
+	if err != nil {
+		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+	}
 	if c < 0 {
 		return cerror.WrapError(cerror.ErrMySQLInvalidConfig,
 			fmt.Errorf("invalid max-multi-update-row-size %d, "+
@@ -324,38 +284,30 @@ func getMaxMultiUpdateRowSize(values *urlConfig, maxMultiUpdateRowSize *int) err
 	return nil
 }
 
-func getTiDBTxnMode(values *urlConfig, mode *string) {
-	if values.TiDBTxnMode == nil || len(*values.TiDBTxnMode) == 0 {
-		return
+func getTiDBTxnMode(values url.Values, mode *string) error {
+	s := values.Get("tidb-txn-mode")
+	if len(s) == 0 {
+		return nil
 	}
-	s := strings.ToLower(*values.TiDBTxnMode)
 	if s == txnModeOptimistic || s == txnModePessimistic {
 		*mode = s
 	} else {
 		log.Warn("invalid tidb-txn-mode, should be pessimistic or optimistic",
 			zap.String("default", defaultTiDBTxnMode))
 	}
+	return nil
 }
 
-func getSSLCA(values *urlConfig, changefeedID model.ChangeFeedID, tls *string) error {
-	if values.SSLCa == nil || len(*values.SSLCa) == 0 {
+func getSSLCA(values url.Values, changefeedID model.ChangeFeedID, tls *string) error {
+	s := values.Get("ssl-ca")
+	if len(s) == 0 {
 		return nil
 	}
 
-	var (
-		sslCert string
-		sslKey  string
-	)
-	if values.SSLCert != nil {
-		sslCert = *values.SSLCert
-	}
-	if values.SSLKey != nil {
-		sslKey = *values.SSLKey
-	}
 	credential := security.Credential{
-		CAPath:   *values.SSLCa,
-		CertPath: sslCert,
-		KeyPath:  sslKey,
+		CAPath:   values.Get("ssl-ca"),
+		CertPath: values.Get("ssl-cert"),
+		KeyPath:  values.Get("ssl-key"),
 	}
 	tlsCfg, err := credential.ToTLSConfig()
 	if err != nil {
@@ -371,25 +323,53 @@ func getSSLCA(values *urlConfig, changefeedID model.ChangeFeedID, tls *string) e
 	return nil
 }
 
-func getSafeMode(values *urlConfig, safeMode *bool) {
-	if values.SafeMode != nil {
-		*safeMode = *values.SafeMode
+func getBatchReplaceEnable(values url.Values, batchReplaceEnabled *bool, batchReplaceSize *int) error {
+	s := values.Get("batch-replace-enable")
+	if len(s) > 0 {
+		enable, err := strconv.ParseBool(s)
+		if err != nil {
+			return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+		}
+		*batchReplaceEnabled = enable
 	}
+
+	if !*batchReplaceEnabled {
+		return nil
+	}
+
+	s = values.Get("batch-replace-size")
+	if len(s) == 0 {
+		return nil
+	}
+	size, err := strconv.Atoi(s)
+	if err != nil {
+		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+	}
+	*batchReplaceSize = size
+	return nil
 }
 
-func getTimezone(serverTimezoneStr string,
-	values *urlConfig, timezone *string,
-) error {
+func getSafeMode(values url.Values, safeMode *bool) error {
+	s := values.Get("safe-mode")
+	if len(s) == 0 {
+		return nil
+	}
+	enabled, err := strconv.ParseBool(s)
+	if err != nil {
+		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+	}
+	*safeMode = enabled
+	return nil
+}
+
+func getTimezone(ctxWithTimezone context.Context, values url.Values, timezone *string) error {
 	const pleaseSpecifyTimezone = "We recommend that you specify the time-zone explicitly. " +
 		"Please make sure that the timezone of the TiCDC server, " +
 		"sink-uri and the downstream database are consistent. " +
 		"If the downstream database does not load the timezone information, " +
 		"you can refer to https://dev.mysql.com/doc/refman/8.0/en/mysql-tzinfo-to-sql.html."
-	serverTimezone, err := util.GetTimezone(serverTimezoneStr)
-	if err != nil {
-		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
-	}
-	if values.TimeZone == nil {
+	serverTimezone := contextutil.TimezoneFromCtx(ctxWithTimezone)
+	if _, ok := values["time-zone"]; !ok {
 		// If time-zone is not specified, use the timezone of the server.
 		log.Warn("Because time-zone is not specified, "+
 			"the timezone of the TiCDC server will be used. "+
@@ -399,7 +379,7 @@ func getTimezone(serverTimezoneStr string,
 		return nil
 	}
 
-	s := *values.TimeZone
+	s := values.Get("time-zone")
 	if len(s) == 0 {
 		*timezone = ""
 		log.Warn("Because time-zone is empty, " +
@@ -427,32 +407,39 @@ func getTimezone(serverTimezoneStr string,
 	return nil
 }
 
-func getDuration(s *string, target *string) error {
-	if s == nil {
+func getDuration(values url.Values, key string, target *string) error {
+	s := values.Get(key)
+	if len(s) == 0 {
 		return nil
 	}
-	_, err := time.ParseDuration(*s)
+	_, err := time.ParseDuration(s)
 	if err != nil {
 		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
 	}
-	*target = *s
+	*target = s
 	return nil
 }
 
-func getBatchDMLEnable(values *urlConfig, batchDMLEnable *bool) {
-	if values.EnableBatchDML != nil {
-		*batchDMLEnable = *values.EnableBatchDML
+func getBatchDMLEnable(values url.Values, batchDMLEnable *bool) error {
+	s := values.Get("batch-dml-enable")
+	if len(s) > 0 {
+		enable, err := strconv.ParseBool(s)
+		if err != nil {
+			return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+		}
+		*batchDMLEnable = enable
 	}
+	return nil
 }
 
-func getMultiStmtEnable(values *urlConfig, multiStmtEnable *bool) {
-	if values.EnableMultiStatement != nil {
-		*multiStmtEnable = *values.EnableMultiStatement
+func getMultiStmtEnable(values url.Values, multiStmtEnable *bool) error {
+	s := values.Get("multi-stmt-enable")
+	if len(s) > 0 {
+		enable, err := strconv.ParseBool(s)
+		if err != nil {
+			return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+		}
+		*multiStmtEnable = enable
 	}
-}
-
-func getCachePrepStmts(values *urlConfig, cachePrepStmts *bool) {
-	if values.EnableCachePreparedStatement != nil {
-		*cachePrepStmts = *values.EnableCachePreparedStatement
-	}
+	return nil
 }

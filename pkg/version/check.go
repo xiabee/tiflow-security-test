@@ -26,7 +26,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/util/engine"
+	"github.com/pingcap/tidb/util/engine"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/httputil"
 	"github.com/pingcap/tiflow/pkg/retry"
@@ -40,13 +40,13 @@ var (
 	minPDVersion = semver.New("5.1.0-alpha")
 	// maxPDVersion is the version of the maximum compatible PD.
 	// Compatible versions are in [minPDVersion, maxPDVersion)
-	maxPDVersion = semver.New("9.0.0")
+	maxPDVersion = semver.New("8.0.0")
 
 	// MinTiKVVersion is the version of the minimal compatible TiKV.
 	MinTiKVVersion = semver.New("5.1.0-alpha")
 	// maxTiKVVersion is the version of the maximum compatible TiKV.
 	// Compatible versions are in [MinTiKVVersion, maxTiKVVersion)
-	maxTiKVVersion = semver.New("9.0.0")
+	maxTiKVVersion = semver.New("8.0.0")
 
 	// CaptureInfo.Version is added since v4.0.11,
 	// we use the minimal release version as default.
@@ -56,7 +56,7 @@ var (
 	MinTiCDCVersion = semver.New("6.3.0-alpha")
 	// MaxTiCDCVersion is the version of the maximum allowed TiCDC version.
 	// for version `x.y.z`, max allowed `x+2.0.0`
-	MaxTiCDCVersion = semver.New("9.0.0-alpha")
+	MaxTiCDCVersion = semver.New("8.0.0-alpha")
 )
 
 var versionHash = regexp.MustCompile("-[0-9]+-g[0-9a-f]{7,}(-dev)?")
@@ -239,8 +239,8 @@ type TiCDCClusterVersion struct {
 	*semver.Version
 }
 
-// LessThan500RC returns true if th cluster version is less than 5.0.0-rc
-func (v *TiCDCClusterVersion) LessThan500RC() bool {
+// ShouldEnableOldValueByDefault returns whether old value should be enabled by default
+func (v *TiCDCClusterVersion) ShouldEnableOldValueByDefault() bool {
 	// we assume the unknown version to be the latest version
 	return v.Version == nil || !v.LessThan(*semver.New("5.0.0-rc"))
 }

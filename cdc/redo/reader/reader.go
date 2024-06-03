@@ -37,7 +37,7 @@ import (
 const (
 	emitBatch             = mysql.DefaultMaxTxnRow
 	defaultReaderChanSize = mysql.DefaultWorkerCount * emitBatch
-	maxTotalMemoryUsage   = 80.0
+	maxTotalMemoryUsage   = 90.0
 	maxWaitDuration       = time.Minute * 2
 )
 
@@ -211,7 +211,7 @@ func (l *LogReader) runReader(egCtx context.Context, cfg *readerConfig) error {
 
 		switch cfg.fileType {
 		case redo.RedoRowLogFileType:
-			row := item.data.RedoRow.Row
+			row := model.LogToRow(item.data.RedoRow)
 			// By design only data (startTs,endTs] is needed,
 			// so filter out data may beyond the boundary.
 			if row != nil && row.CommitTs > cfg.startTs && row.CommitTs <= cfg.endTs {
@@ -221,8 +221,13 @@ func (l *LogReader) runReader(egCtx context.Context, cfg *readerConfig) error {
 				case l.rowCh <- row:
 				}
 			}
+			err := util.WaitMemoryAvailable(maxTotalMemoryUsage, maxWaitDuration)
+			if err != nil {
+				return errors.Trace(err)
+			}
+
 		case redo.RedoDDLLogFileType:
-			ddl := item.data.RedoDDL.DDL
+			ddl := model.LogToDDL(item.data.RedoDDL)
 			if ddl != nil && ddl.CommitTs > cfg.startTs && ddl.CommitTs <= cfg.endTs {
 				select {
 				case <-egCtx.Done():
@@ -361,19 +366,19 @@ func (h logHeap) Len() int {
 func (h logHeap) Less(i, j int) bool {
 	// we separate ddl and dml, so we only need to compare dml with dml, and ddl with ddl.
 	if h[i].data.Type == model.RedoLogTypeDDL {
-		if h[i].data.RedoDDL.DDL == nil {
+		if h[i].data.RedoDDL == nil || h[i].data.RedoDDL.DDL == nil {
 			return true
 		}
-		if h[j].data.RedoDDL.DDL == nil {
+		if h[j].data.RedoDDL == nil || h[j].data.RedoDDL.DDL == nil {
 			return false
 		}
 		return h[i].data.RedoDDL.DDL.CommitTs < h[j].data.RedoDDL.DDL.CommitTs
 	}
 
-	if h[i].data.RedoRow.Row == nil {
+	if h[i].data.RedoRow == nil || h[i].data.RedoRow.Row == nil {
 		return true
 	}
-	if h[j].data.RedoRow.Row == nil {
+	if h[j].data.RedoRow == nil || h[j].data.RedoRow.Row == nil {
 		return false
 	}
 

@@ -42,17 +42,17 @@ const (
 	// DebugConfigurationItem is the name of debug configurations
 	DebugConfigurationItem = "debug"
 
+	// DefaultTableMemoryQuota is the default memory quota for each table.
+	// It is larger than TiDB's txn-entry-size-limit.
+	// We can't set it to a larger value without risking oom in incremental scenarios.
+	DefaultTableMemoryQuota = 10 * 1024 * 1024 // 10 MB
+
 	// DefaultChangefeedMemoryQuota is the default memory quota for each changefeed.
 	DefaultChangefeedMemoryQuota = 1024 * 1024 * 1024 // 1GB.
 
 	// DisableMemoryLimit is the default max memory percentage for TiCDC server.
 	// 0 means no memory limit.
 	DisableMemoryLimit = 0
-
-	// EnablePDForwarding is the value of whether to enable PD client forwarding function.
-	// The PD client will forward the requests throughthe follower
-	// If there is a network partition problem between TiCDC and PD leader.
-	EnablePDForwarding = true
 )
 
 var (
@@ -70,6 +70,9 @@ var (
 func init() {
 	StoreGlobalServerConfig(GetDefaultServerConfig())
 }
+
+// SecurityConfig represents security config for server
+type SecurityConfig = security.Credential
 
 // LogFileConfig represents log file config for server
 type LogFileConfig struct {
@@ -108,38 +111,53 @@ var defaultServerConfig = &ServerConfig{
 	OwnerFlushInterval:     TomlDuration(50 * time.Millisecond),
 	ProcessorFlushInterval: TomlDuration(50 * time.Millisecond),
 	Sorter: &SorterConfig{
-		SortDir:       DefaultSortDir,
-		CacheSizeInMB: 128, // By default, use 128M memory as sorter cache.
+		SortDir:             DefaultSortDir,
+		CacheSizeInMB:       128, // By default use 128M memory as sorter cache.
+		MaxMemoryPercentage: 10,  // Only for unified sorter.
+
+		NumConcurrentWorker:    4,
+		ChunkSizeLimit:         128 * 1024 * 1024,       // 128MB
+		MaxMemoryConsumption:   16 * 1024 * 1024 * 1024, // 16GB
+		NumWorkerPoolGoroutine: 16,
 	},
-	Security: &security.Credential{},
+	Security:            &SecurityConfig{},
+	PerTableMemoryQuota: DefaultTableMemoryQuota,
 	KVClient: &KVClientConfig{
-		EnableMultiplexing:   true,
-		WorkerConcurrent:     8,
-		GrpcStreamConcurrent: 1,
-		AdvanceIntervalInMs:  300,
-		FrontierConcurrent:   8,
-		WorkerPoolSize:       0, // 0 will use NumCPU() * 2
-		RegionScanLimit:      40,
+		WorkerConcurrent: 8,
+		WorkerPoolSize:   0, // 0 will use NumCPU() * 2
+		RegionScanLimit:  40,
 		// The default TiKV region election timeout is [10s, 20s],
 		// Use 1 minute to cover region leader missing.
 		RegionRetryDuration: TomlDuration(time.Minute),
 	},
 	Debug: &DebugConfig{
+		TableActor: &TableActorConfig{
+			EventBatchSize: 32,
+		},
+		EnableNewScheduler: true,
+		// Default db sorter config
+		EnableDBSorter: true,
 		DB: &DBConfig{
 			Count: 8,
 			// Following configs are optimized for write/read throughput.
 			// Users should not change them.
-			MaxOpenFiles:        10000,
-			BlockSize:           65536,
-			WriterBufferSize:    8388608,
-			Compression:         "snappy",
-			WriteL0PauseTrigger: math.MaxInt32,
-			CompactionL0Trigger: 16, // Based on a performance test on 4K tables.
+			Concurrency:                 128,
+			MaxOpenFiles:                10000,
+			BlockSize:                   65536,
+			WriterBufferSize:            8388608,
+			Compression:                 "snappy",
+			WriteL0PauseTrigger:         math.MaxInt32,
+			CompactionL0Trigger:         160,
+			CompactionDeletionThreshold: 10485760,
+			CompactionPeriod:            1800,
+			IteratorMaxAliveDuration:    10000,
+			IteratorSlowReadDuration:    256,
 		},
 		Messages: defaultMessageConfig.Clone(),
 
-		Scheduler:              NewDefaultSchedulerConfig(),
-		EnableKVConnectBackOff: false,
+		Scheduler:           NewDefaultSchedulerConfig(),
+		EnableNewSink:       true,
+		EnablePullBasedSink: true,
 		Puller: &PullerConfig{
 			EnableResolvedTsStuckDetection: false,
 			ResolvedTsStuckInterval:        TomlDuration(5 * time.Minute),
@@ -168,9 +186,8 @@ type ServerConfig struct {
 	OwnerFlushInterval     TomlDuration `toml:"owner-flush-interval" json:"owner-flush-interval"`
 	ProcessorFlushInterval TomlDuration `toml:"processor-flush-interval" json:"processor-flush-interval"`
 
-	Sorter   *SorterConfig        `toml:"sorter" json:"sorter"`
-	Security *security.Credential `toml:"security" json:"security"`
-	// Deprecated: we don't use this field anymore.
+	Sorter              *SorterConfig   `toml:"sorter" json:"sorter"`
+	Security            *SecurityConfig `toml:"security" json:"security"`
 	PerTableMemoryQuota uint64          `toml:"per-table-memory-quota" json:"per-table-memory-quota"`
 	KVClient            *KVClientConfig `toml:"kv-client" json:"kv-client"`
 	Debug               *DebugConfig    `toml:"debug" json:"debug"`
@@ -273,6 +290,10 @@ func (c *ServerConfig) ValidateAndAdjust() error {
 	err := c.Sorter.ValidateAndAdjust()
 	if err != nil {
 		return err
+	}
+
+	if c.PerTableMemoryQuota == 0 {
+		c.PerTableMemoryQuota = defaultCfg.PerTableMemoryQuota
 	}
 
 	if c.KVClient == nil {

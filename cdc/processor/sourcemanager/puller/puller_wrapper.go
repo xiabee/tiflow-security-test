@@ -15,30 +15,22 @@ package puller
 
 import (
 	"context"
+	"sync"
 
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/log"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/puller"
 	"github.com/pingcap/tiflow/pkg/config"
+	cdccontext "github.com/pingcap/tiflow/pkg/context"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/upstream"
-	"golang.org/x/sync/errgroup"
+	"github.com/pingcap/tiflow/pkg/util"
+	"go.uber.org/zap"
 )
-
-// Wrapper is a wrapper of puller used by source manager.
-type Wrapper interface {
-	// Start the puller and send internal errors into `errChan`.
-	Start(
-		ctx context.Context,
-		up *upstream.Upstream,
-		eventSortEngine engine.SortEngine,
-		errChan chan<- error,
-	)
-	GetStats() puller.Stats
-	Close()
-}
 
 // ShouldSplitKVEntry checks whether the raw kv entry should be splitted.
 type ShouldSplitKVEntry func(raw *model.RawKVEntry) bool
@@ -46,37 +38,36 @@ type ShouldSplitKVEntry func(raw *model.RawKVEntry) bool
 // SplitUpdateKVEntry splits the raw kv entry into a delete entry and an insert entry.
 type SplitUpdateKVEntry func(raw *model.RawKVEntry) (*model.RawKVEntry, *model.RawKVEntry, error)
 
-// WrapperImpl is a wrapper of puller used by source manager.
-type WrapperImpl struct {
+// Wrapper is a wrapper of puller used by source manager.
+type Wrapper struct {
 	changefeed model.ChangeFeedID
-	span       tablepb.Span
+	tableID    model.TableID
 	tableName  string // quoted schema and table, used in metircs only
 	p          puller.Puller
 	startTs    model.Ts
-	bdrMode    bool
+	// cancel is used to cancel the puller when remove or close the table.
+	cancel context.CancelFunc
+	// wg is used to wait the puller to exit.
+	wg      sync.WaitGroup
+	bdrMode bool
 
 	shouldSplitKVEntry ShouldSplitKVEntry
 	splitUpdateKVEntry SplitUpdateKVEntry
-
-	// cancel is used to cancel the puller when remove or close the table.
-	cancel context.CancelFunc
-	// eg is used to wait the puller to exit.
-	eg *errgroup.Group
 }
 
 // NewPullerWrapper creates a new puller wrapper.
 func NewPullerWrapper(
 	changefeed model.ChangeFeedID,
-	span tablepb.Span,
+	tableID model.TableID,
 	tableName string,
 	startTs model.Ts,
 	bdrMode bool,
 	shouldSplitKVEntry ShouldSplitKVEntry,
 	splitUpdateKVEntry SplitUpdateKVEntry,
-) Wrapper {
-	return &WrapperImpl{
+) *Wrapper {
+	return &Wrapper{
 		changefeed:         changefeed,
-		span:               span,
+		tableID:            tableID,
 		tableName:          tableName,
 		startTs:            startTs,
 		bdrMode:            bdrMode,
@@ -85,56 +76,71 @@ func NewPullerWrapper(
 	}
 }
 
+// tableSpan returns the table span with the table ID.
+func (n *Wrapper) tableSpan() []regionspan.Span {
+	// start table puller
+	spans := make([]regionspan.Span, 0, 4)
+	spans = append(spans, regionspan.GetTableSpan(n.tableID))
+	return spans
+}
+
 // Start the puller wrapper.
 // We use cdc context to put capture info and role into context.
-func (n *WrapperImpl) Start(
-	ctx context.Context,
+func (n *Wrapper) Start(
+	ctx cdccontext.Context,
 	up *upstream.Upstream,
 	eventSortEngine engine.SortEngine,
 	errChan chan<- error,
 ) {
-	ctx, n.cancel = context.WithCancel(ctx)
-	errorHandler := func(err error) {
-		select {
-		case <-ctx.Done():
-		case errChan <- err:
-		}
-	}
-
 	failpoint.Inject("ProcessorAddTableError", func() {
-		errorHandler(cerrors.New("processor add table injected error"))
+		errChan <- cerrors.New("processor add table injected error")
 	})
-
+	ctxC, cancel := context.WithCancel(ctx)
+	ctxC = contextutil.PutCaptureAddrInCtx(ctxC, ctx.GlobalVars().CaptureInfo.AdvertiseAddr)
+	ctxC = contextutil.PutRoleInCtx(ctxC, util.RoleProcessor)
+	serverConfig := config.GetGlobalServerConfig()
 	// NOTICE: always pull the old value internally
 	// See also: https://github.com/pingcap/tiflow/issues/2301.
 	n.p = puller.New(
-		ctx,
+		ctxC,
 		up.PDClient,
 		up.GrpcPool,
 		up.RegionCache,
 		up.KVStorage,
 		up.PDClock,
 		n.startTs,
-		[]tablepb.Span{n.span},
-		config.GetGlobalServerConfig(),
+		n.tableSpan(),
+		serverConfig,
 		n.changefeed,
-		n.span.TableID,
+		n.tableID,
 		n.tableName,
 		n.bdrMode,
 	)
-
-	// Use errgroup to ensure all sub goroutines can exit without calling Close.
-	n.eg, ctx = errgroup.WithContext(ctx)
-	n.eg.Go(func() error {
-		err := n.p.Run(ctx)
-		errorHandler(err)
-		return err
-	})
-	n.eg.Go(func() error {
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		err := n.p.Run(ctxC)
+		if err != nil && !cerrors.Is(err, context.Canceled) {
+			select {
+			case errChan <- err:
+				// Do not block sending error, because the err channel
+				// might be full and no goroutine receives.
+			default:
+				log.Warn("puller fail to send error",
+					zap.String("namespace", n.changefeed.Namespace),
+					zap.String("changefeed", n.changefeed.ID),
+					zap.String("table", n.tableName),
+					zap.Error(err))
+			}
+		}
+	}()
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
 		for {
 			select {
-			case <-ctx.Done():
-				return nil
+			case <-ctxC.Done():
+				return
 			case rawKV := <-n.p.Output():
 				if rawKV == nil {
 					continue
@@ -142,32 +148,29 @@ func (n *WrapperImpl) Start(
 				if n.shouldSplitKVEntry(rawKV) {
 					deleteKVEntry, insertKVEntry, err := n.splitUpdateKVEntry(rawKV)
 					if err != nil {
-						return err
+						log.Panic("failed to split update kv entry", zap.Error(err))
+						return
 					}
 					deleteEvent := model.NewPolymorphicEvent(deleteKVEntry)
 					insertEvent := model.NewPolymorphicEvent(insertKVEntry)
-					eventSortEngine.Add(n.span, deleteEvent, insertEvent)
+					eventSortEngine.Add(n.tableID, deleteEvent, insertEvent)
 				} else {
 					pEvent := model.NewPolymorphicEvent(rawKV)
-					eventSortEngine.Add(n.span, pEvent)
+					eventSortEngine.Add(n.tableID, pEvent)
 				}
 			}
 		}
-	})
+	}()
+	n.cancel = cancel
 }
 
 // GetStats returns the puller stats.
-func (n *WrapperImpl) GetStats() puller.Stats {
+func (n *Wrapper) GetStats() puller.Stats {
 	return n.p.Stats()
 }
 
 // Close the puller wrapper.
-func (n *WrapperImpl) Close() {
-	if n.cancel == nil {
-		return
-	}
+func (n *Wrapper) Close() {
 	n.cancel()
-	n.cancel = nil
-	// The returned error can be ignored because the table is in removing.
-	_ = n.eg.Wait()
+	n.wg.Wait()
 }

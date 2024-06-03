@@ -9,8 +9,8 @@ CDC_BINARY=cdc.test
 SINK_TYPE=$1
 
 function run() {
-	# No need to test kafka and storage sink.
-	if [ "$SINK_TYPE" != "mysql" ]; then
+	# No need to test kafka.
+	if [ "$SINK_TYPE" == "kafka" ]; then
 		return
 	fi
 
@@ -47,6 +47,6 @@ function run() {
 }
 
 trap stop_tidb_cluster EXIT
-# run $*
+run $*
 check_logs $WORK_DIR
 echo "[$(date)] <<<<<< run test case $TEST_NAME success! >>>>>>"

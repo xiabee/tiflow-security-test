@@ -201,8 +201,6 @@ func (n *Node) Remove() {
 // It must be called if a node is no longer used.
 // We are using sync.Pool to lessen the burden of GC.
 func (n *Node) Free() {
-	n.mu.Lock()
-	defer n.mu.Unlock()
 	if n.id == invalidNodeID {
 		log.Panic("double free")
 	}

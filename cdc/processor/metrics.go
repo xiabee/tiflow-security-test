@@ -15,6 +15,7 @@ package processor
 
 import (
 	"github.com/pingcap/tiflow/cdc/processor/memquota"
+	"github.com/pingcap/tiflow/cdc/processor/pipeline"
 	"github.com/pingcap/tiflow/cdc/processor/sinkmanager"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -57,6 +58,16 @@ var (
 			Help:      "Bucketed histogram of processorManager close processor time (s).",
 			Buckets:   prometheus.ExponentialBuckets(0.01 /* 10 ms */, 2, 18),
 		})
+
+	tableMemoryHistogram = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "ticdc",
+			Subsystem: "processor",
+			Name:      "table_memory_consumption",
+			Help:      "each table's memory consumption after sorter, in bytes",
+			Buckets:   prometheus.ExponentialBuckets(256, 2.0, 20),
+		}, []string{"namespace", "changefeed"})
+
 	processorMemoryGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "ticdc",
@@ -73,7 +84,9 @@ func InitMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(processorSchemaStorageGcTsGauge)
 	registry.MustRegister(processorTickDuration)
 	registry.MustRegister(processorCloseDuration)
+	registry.MustRegister(tableMemoryHistogram)
 	registry.MustRegister(processorMemoryGauge)
+	pipeline.InitMetrics(registry)
 	sinkmanager.InitMetrics(registry)
 	memquota.InitMetrics(registry)
 }

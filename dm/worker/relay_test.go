@@ -21,7 +21,6 @@ import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/dm/config"
-	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/log"
@@ -285,7 +284,7 @@ func (t *testRelay) testPauseAndResume(c *C, holder *realRelayHolder) {
 
 func (t *testRelay) testUpdate(c *C, holder *realRelayHolder) {
 	cfg := &config.SourceConfig{
-		From: dbconfig.DBConfig{
+		From: config.DBConfig{
 			Host:     "127.0.0.1",
 			Port:     3306,
 			User:     "root",

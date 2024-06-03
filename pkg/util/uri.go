@@ -99,7 +99,7 @@ var sensitiveQueryParameterNames = []string{
 func MaskSensitiveDataInURI(uri string) string {
 	uriParsed, err := url.Parse(uri)
 	if err != nil {
-		log.Error("failed to parse sink URI", zap.Error(err))
+		log.Error("failed to parse URI", zap.Error(err))
 		return ""
 	}
 	queries := uriParsed.Query()

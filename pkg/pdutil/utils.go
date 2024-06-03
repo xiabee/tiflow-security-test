@@ -1,4 +1,4 @@
-// Copyright 2022 PingCAP, Inc.
+// Copyright 2021 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,11 +17,8 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	pd "github.com/tikv/pd/client"
-	"go.uber.org/zap"
 )
 
 const sourceIDName = "source_id"
@@ -30,22 +27,18 @@ const sourceIDName = "source_id"
 func GetSourceID(ctx context.Context, pdClient pd.Client) (uint64, error) {
 	// only nil in test case
 	if pdClient == nil {
-		return config.DefaultTiDBSourceID, nil
+		return 1, nil
 	}
-
 	// The default value of sourceID is 1,
 	// which means the sourceID is not changed by user.
-	sourceID := uint64(config.DefaultTiDBSourceID)
-	sourceIDConfig, _, err := pdClient.LoadGlobalConfig(ctx, []string{sourceIDName}, "")
+	sourceID := uint64(1)
+	sourceIDConfig, err := pdClient.LoadGlobalConfig(ctx, []string{sourceIDName})
 	if err != nil {
 		return 0, cerror.WrapError(cerror.ErrPDEtcdAPIError, err)
 	}
 	if len(sourceIDConfig) != 0 && sourceIDConfig[0].Value != "" {
 		sourceID, err = strconv.ParseUint(sourceIDConfig[0].Value, 10, 64)
 		if err != nil {
-			log.Error("fail to parse sourceID from PD",
-				zap.String("sourceID", sourceIDConfig[0].Value),
-				zap.Error(err))
 			return 0, cerror.WrapError(cerror.ErrPDEtcdAPIError, err)
 		}
 	}

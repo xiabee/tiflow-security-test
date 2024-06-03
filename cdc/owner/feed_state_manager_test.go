@@ -28,7 +28,6 @@ import (
 	"github.com/pingcap/tiflow/pkg/orchestrator"
 	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/upstream"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
 )
@@ -429,6 +428,7 @@ func TestChangefeedStatusNotExist(t *testing.T) {
     "sort-engine": "unified",
     "config": {
         "case-sensitive": true,
+        "enable-old-value": true,
         "force-replicate": false,
         "check-gc-safe-point": true,
         "filter": {
@@ -532,13 +532,13 @@ func TestChangefeedNotRetry(t *testing.T) {
 				position = &model.TaskPosition{}
 			}
 			position.Error = &model.RunningError{
-				Time:    time.Now(),
-				Addr:    "test",
-				Code:    "CDC:ErrExpressionColumnNotFound",
-				Message: "what ever",
+				Addr:    "127.0.0.1",
+				Code:    string(cerror.ErrExpressionColumnNotFound.RFCCode()),
+				Message: cerror.ErrExpressionColumnNotFound.Error(),
 			}
 			return position, true, nil
 		})
+
 	tester.MustApplyPatches()
 	manager.Tick(state, 0)
 	require.False(t, manager.ShouldRunning())
@@ -555,6 +555,7 @@ func TestChangefeedNotRetry(t *testing.T) {
 			}
 			return position, true, nil
 		})
+
 	tester.MustApplyPatches()
 	manager.Tick(state, 0)
 	// should be false
@@ -731,7 +732,6 @@ func TestUpdateChangefeedEpoch(t *testing.T) {
 		tester.MustApplyPatches()
 		require.False(t, manager.ShouldRunning())
 		require.Equal(t, model.StatePending, state.Info.State, i)
-
 		require.Equal(t, state.Info.AdminJobType, model.AdminStop)
 		require.Equal(t, state.Status.AdminJobType, model.AdminStop)
 
@@ -986,7 +986,7 @@ func TestHandleWarningWhileAdvanceResolvedTs(t *testing.T) {
 	require.True(t, manager.ShouldRunning())
 
 	// 2. test when the changefeed is in warning state, and the resolvedTs and checkpointTs is not progressing,
-	// the changefeed state will remain warning when a new warning is encountered.
+	// the changefeed state will remain warning whena new warning is encountered.
 	time.Sleep(manager.changefeedErrorStuckDuration + 10)
 	state.PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
 		require.NotNil(t, status)
@@ -1050,105 +1050,4 @@ func TestHandleWarningWhileAdvanceResolvedTs(t *testing.T) {
 	tester.MustApplyPatches()
 	require.Equal(t, model.StateFailed, state.Info.State)
 	require.False(t, manager.ShouldRunning())
-}
-
-func TestUpdateChangefeedWithChangefeedErrorStuckDuration(t *testing.T) {
-	ctx := cdcContext.NewBackendContext4Test(true)
-	manager := newFeedStateManager4Test(200, 1600, 0, 2.0)
-	state := orchestrator.NewChangefeedReactorState(etcd.DefaultCDCClusterID,
-		ctx.ChangefeedVars().ID)
-
-	tester := orchestrator.NewReactorStateTester(t, state, nil)
-	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
-		require.Nil(t, info)
-		return &model.ChangeFeedInfo{SinkURI: "123", Config: &config.ReplicaConfig{}}, true, nil
-	})
-	state.PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		require.Nil(t, status)
-		return &model.ChangeFeedStatus{}, true, nil
-	})
-	tester.MustApplyPatches()
-	manager.state = state
-	manager.Tick(state, 0)
-	tester.MustApplyPatches()
-	require.True(t, manager.ShouldRunning())
-
-	stuckDuration := manager.changefeedErrorStuckDuration + time.Second*3
-	state.PatchTaskPosition(ctx.GlobalVars().CaptureInfo.ID,
-		func(position *model.TaskPosition) (*model.TaskPosition, bool, error) {
-			return &model.TaskPosition{Warning: &model.RunningError{
-				Addr:    ctx.GlobalVars().CaptureInfo.AdvertiseAddr,
-				Code:    "[CDC:ErrSinkManagerRunError]", // it is fake error
-				Message: "fake error for test",
-			}}, true, nil
-		})
-	tester.MustApplyPatches()
-	time.Sleep(stuckDuration - time.Second)
-	manager.Tick(state, 100)
-	tester.MustApplyPatches()
-	require.False(t, manager.ShouldRunning())
-	require.Less(t, manager.changefeedErrorStuckDuration, stuckDuration)
-	require.Equal(t, state.Info.State, model.StateFailed)
-
-	// update ChangefeedErrorStuckDuration
-	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
-		require.NotNil(t, info)
-		info.Config.ChangefeedErrorStuckDuration = util.AddressOf(stuckDuration)
-		return info, true, nil
-	})
-	// update status
-	state.PatchStatus(func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-		require.NotNil(t, status)
-		return &model.ChangeFeedStatus{
-			CheckpointTs: 100,
-		}, true, nil
-	})
-	tester.MustApplyPatches()
-
-	// resume the changefeed in failed state
-	manager.PushAdminJob(&model.AdminJob{
-		CfID:                  ctx.ChangefeedVars().ID,
-		Type:                  model.AdminResume,
-		OverwriteCheckpointTs: 100,
-	})
-	manager.Tick(state, 101)
-	tester.MustApplyPatches()
-	require.True(t, manager.ShouldRunning())
-	require.False(t, manager.ShouldRemoved())
-	require.Equal(t, manager.changefeedErrorStuckDuration, stuckDuration)
-	require.Equal(t, state.Info.State, model.StateNormal)
-	require.Equal(t, state.Info.AdminJobType, model.AdminNone)
-	require.Equal(t, state.Status.AdminJobType, model.AdminNone)
-
-	state.PatchTaskPosition(ctx.GlobalVars().CaptureInfo.ID,
-		func(position *model.TaskPosition) (*model.TaskPosition, bool, error) {
-			return &model.TaskPosition{Warning: &model.RunningError{
-				Addr:    ctx.GlobalVars().CaptureInfo.AdvertiseAddr,
-				Code:    "[CDC:ErrSinkManagerRunError]", // it is fake error
-				Message: "fake error for test",
-			}}, true, nil
-		})
-	tester.MustApplyPatches()
-
-	time.Sleep(stuckDuration - time.Second)
-	manager.Tick(state, 200)
-	tester.MustApplyPatches()
-	require.True(t, manager.ShouldRunning())
-	require.Equal(t, state.Info.State, model.StateWarning)
-
-	state.PatchTaskPosition(ctx.GlobalVars().CaptureInfo.ID,
-		func(position *model.TaskPosition) (*model.TaskPosition, bool, error) {
-			return &model.TaskPosition{Warning: &model.RunningError{
-				Addr:    ctx.GlobalVars().CaptureInfo.AdvertiseAddr,
-				Code:    "[CDC:ErrSinkManagerRunError]", // it is fake error
-				Message: "fake error for test",
-			}}, true, nil
-		})
-	tester.MustApplyPatches()
-
-	time.Sleep(time.Second)
-	manager.Tick(state, 201)
-	tester.MustApplyPatches()
-	require.False(t, manager.ShouldRunning())
-	require.Equal(t, state.Info.State, model.StateFailed)
 }

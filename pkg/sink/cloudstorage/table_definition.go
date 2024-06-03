@@ -19,10 +19,10 @@ import (
 	"strings"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/parser/charset"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tidb/parser/charset"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/errors"
@@ -38,7 +38,6 @@ const (
 
 // TableCol denotes the column info for a table definition.
 type TableCol struct {
-	ID        string      `json:"ColumnId,omitempty"`
 	Name      string      `json:"ColumnName" `
 	Tp        string      `json:"ColumnType"`
 	Default   interface{} `json:"ColumnDefault,omitempty"`
@@ -49,7 +48,7 @@ type TableCol struct {
 }
 
 // FromTiColumnInfo converts from TiDB ColumnInfo to TableCol.
-func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo, outputColumnID bool) {
+func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo) {
 	defaultFlen, defaultDecimal := mysql.GetDefaultFieldLengthAndDecimal(col.GetType())
 	isDecimalNotDefault := col.GetDecimal() != defaultDecimal &&
 		col.GetDecimal() != 0 &&
@@ -63,9 +62,6 @@ func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo, outputColumnID bool
 		displayDecimal = defaultDecimal
 	}
 
-	if outputColumnID {
-		t.ID = strconv.FormatInt(col.ID, 10)
-	}
 	t.Name = col.Name.O
 	t.Tp = strings.ToUpper(types.TypeToStr(col.GetType(), col.GetCharset()))
 	if mysql.HasUnsignedFlag(col.GetFlag()) {
@@ -104,14 +100,6 @@ func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo, outputColumnID bool
 // ToTiColumnInfo converts from TableCol to TiDB ColumnInfo.
 func (t *TableCol) ToTiColumnInfo() (*timodel.ColumnInfo, error) {
 	col := new(timodel.ColumnInfo)
-
-	if t.ID != "" {
-		var err error
-		col.ID, err = strconv.ParseInt(t.ID, 10, 64)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-	}
 
 	col.Name = timodel.NewCIStr(t.Name)
 	tp := types.StrToType(strings.ToLower(strings.TrimSuffix(t.Tp, " UNSIGNED")))
@@ -202,13 +190,13 @@ type tableDefWithoutQuery struct {
 }
 
 // FromDDLEvent converts from DDLEvent to TableDefinition.
-func (t *TableDefinition) FromDDLEvent(event *model.DDLEvent, outputColumnID bool) {
+func (t *TableDefinition) FromDDLEvent(event *model.DDLEvent) {
 	if event.CommitTs != event.TableInfo.Version {
 		log.Panic("commit ts and table info version should be equal",
 			zap.Any("event", event), zap.Any("tableInfo", event.TableInfo),
 		)
 	}
-	t.FromTableInfo(event.TableInfo, event.TableInfo.Version, outputColumnID)
+	t.FromTableInfo(event.TableInfo, event.TableInfo.Version)
 	t.Query = event.Query
 	t.Type = event.Type
 }
@@ -229,9 +217,7 @@ func (t *TableDefinition) ToDDLEvent() (*model.DDLEvent, error) {
 }
 
 // FromTableInfo converts from TableInfo to TableDefinition.
-func (t *TableDefinition) FromTableInfo(
-	info *model.TableInfo, tableInfoVersion model.Ts, outputColumnID bool,
-) {
+func (t *TableDefinition) FromTableInfo(info *model.TableInfo, tableInfoVersion model.Ts) {
 	t.Version = defaultTableDefinitionVersion
 	t.TableVersion = tableInfoVersion
 
@@ -243,7 +229,7 @@ func (t *TableDefinition) FromTableInfo(
 	t.TotalColumns = len(info.Columns)
 	for _, col := range info.Columns {
 		var tableCol TableCol
-		tableCol.FromTiColumnInfo(col, outputColumnID)
+		tableCol.FromTiColumnInfo(col)
 		t.Columns = append(t.Columns, tableCol)
 	}
 }

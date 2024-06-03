@@ -52,7 +52,6 @@ const (
 	CmdGetValidationStatus
 	CmdGetValidationError
 	CmdOperateValidationError
-	CmdUpdateValidation
 )
 
 // Request wraps all dm-worker rpc requests.
@@ -74,7 +73,6 @@ type Request struct {
 	GetValidationStatus    *pb.GetValidationStatusRequest
 	GetValidationError     *pb.GetValidationErrorRequest
 	OperateValidationError *pb.OperateValidationErrorRequest
-	UpdateValidation       *pb.UpdateValidationWorkerRequest
 }
 
 // Response wraps all dm-worker rpc responses.
@@ -96,7 +94,6 @@ type Response struct {
 	GetValidationStatus    *pb.GetValidationStatusResponse
 	GetValidationError     *pb.GetValidationErrorResponse
 	OperateValidationError *pb.OperateValidationErrorResponse
-	UpdateValidation       *pb.CommonWorkerResponse
 }
 
 // Client is a client that sends RPC.

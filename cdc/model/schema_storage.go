@@ -16,14 +16,11 @@ package model
 import (
 	"fmt"
 
-	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
-	"github.com/pingcap/tidb/pkg/table/tables"
-	datumTypes "github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/rowcodec"
-	"go.uber.org/zap"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
+	"github.com/pingcap/tidb/table/tables"
+	"github.com/pingcap/tidb/util/rowcodec"
 )
 
 const (
@@ -52,8 +49,7 @@ type TableInfo struct {
 	Version       uint64
 	columnsOffset map[int64]int
 	indicesOffset map[int64]int
-
-	hasUniqueColumn bool
+	uniqueColumns map[int64]struct{}
 
 	// It's a mapping from ColumnID to the offset of the columns in row changed events.
 	RowColumnsOffset map[int64]int
@@ -87,10 +83,10 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 			TableID:     info.ID,
 			IsPartition: info.GetPartitionInfo() != nil,
 		},
-		hasUniqueColumn:  false,
 		Version:          version,
 		columnsOffset:    make(map[int64]int, len(info.Columns)),
 		indicesOffset:    make(map[int64]int, len(info.Indices)),
+		uniqueColumns:    make(map[int64]struct{}),
 		RowColumnsOffset: make(map[int64]int, len(info.Columns)),
 		ColumnsFlag:      make(map[int64]ColumnFlagType, len(info.Columns)),
 		handleColID:      []int64{-1},
@@ -112,7 +108,7 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 				// pk is handle
 				ti.handleColID = []int64{col.ID}
 				ti.HandleIndexID = HandleIndexPKIsHandle
-				ti.hasUniqueColumn = true
+				ti.uniqueColumns[col.ID] = struct{}{}
 				ti.IndexColumnsOffset = append(ti.IndexColumnsOffset, []int{ti.RowColumnsOffset[col.ID]})
 			} else if ti.IsCommonHandle {
 				ti.HandleIndexID = HandleIndexPKIsHandle
@@ -137,7 +133,9 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 	for i, idx := range ti.Indices {
 		ti.indicesOffset[idx.ID] = i
 		if ti.IsIndexUnique(idx) {
-			ti.hasUniqueColumn = true
+			for _, col := range idx.Columns {
+				ti.uniqueColumns[ti.Columns[col.Offset].ID] = struct{}{}
+			}
 		}
 		if idx.Primary || idx.Unique {
 			indexColOffset := make([]int, 0, len(idx.Columns))
@@ -214,6 +212,9 @@ func (ti *TableInfo) initColumnsFlag() {
 		if mysql.HasUnsignedFlag(colInfo.GetFlag()) {
 			flag.SetIsUnsigned()
 		}
+		if mysql.HasZerofillFlag(colInfo.GetFlag()) {
+			flag.SetZeroFill()
+		}
 		ti.ColumnsFlag[colInfo.ID] = flag
 	}
 
@@ -269,12 +270,12 @@ func IsColCDCVisible(col *model.ColumnInfo) bool {
 	if col.IsGenerated() && !col.GeneratedStored {
 		return false
 	}
-	return true
+	return col.State == model.StatePublic
 }
 
 // ExistTableUniqueColumn returns whether the table has a unique column
 func (ti *TableInfo) ExistTableUniqueColumn() bool {
-	return ti.hasUniqueColumn
+	return len(ti.uniqueColumns) != 0
 }
 
 // IsEligible returns whether the table is a eligible table
@@ -317,125 +318,4 @@ func (ti *TableInfo) IsIndexUnique(indexInfo *model.IndexInfo) bool {
 // Clone clones the TableInfo
 func (ti *TableInfo) Clone() *TableInfo {
 	return WrapTableInfo(ti.SchemaID, ti.TableName.Schema, ti.Version, ti.TableInfo.Clone())
-}
-
-// GetIndex return the corresponding index by the given name.
-func (ti *TableInfo) GetIndex(name string) *model.IndexInfo {
-	for _, index := range ti.Indices {
-		if index != nil && index.Name.O == name {
-			return index
-		}
-	}
-	return nil
-}
-
-// IndexByName returns the index columns and offsets of the corresponding index by name
-func (ti *TableInfo) IndexByName(name string) ([]string, []int, bool) {
-	index := ti.GetIndex(name)
-	if index == nil {
-		return nil, nil, false
-	}
-	names := make([]string, 0, len(index.Columns))
-	offset := make([]int, 0, len(index.Columns))
-	for _, col := range index.Columns {
-		names = append(names, col.Name.O)
-		offset = append(offset, col.Offset)
-	}
-	return names, offset, true
-}
-
-// OffsetsByNames returns the column offsets of the corresponding columns by names
-// If any column does not exist, return false
-func (ti *TableInfo) OffsetsByNames(names []string) ([]int, bool) {
-	// todo: optimize it
-	columnOffsets := make(map[string]int, len(ti.Columns))
-	for _, col := range ti.Columns {
-		if col != nil {
-			columnOffsets[col.Name.O] = col.Offset
-		}
-	}
-
-	result := make([]int, 0, len(names))
-	for _, col := range names {
-		offset, ok := columnOffsets[col]
-		if !ok {
-			return nil, false
-		}
-		result = append(result, offset)
-	}
-
-	return result, true
-}
-
-// GetPrimaryKeyColumnNames returns the primary key column names
-func (ti *TableInfo) GetPrimaryKeyColumnNames() []string {
-	var result []string
-	if ti.PKIsHandle {
-		result = append(result, ti.GetPkColInfo().Name.O)
-		return result
-	}
-
-	indexInfo := ti.GetPrimaryKey()
-	if indexInfo != nil {
-		for _, col := range indexInfo.Columns {
-			result = append(result, col.Name.O)
-		}
-	}
-	return result
-}
-
-// GetSchemaName returns the schema name of the table
-func (ti *TableInfo) GetSchemaName() string {
-	return ti.TableName.Schema
-}
-
-// GetTableName returns the table name of the table
-func (ti *TableInfo) GetTableName() string {
-	return ti.TableName.Table
-}
-
-// GetSchemaNamePtr returns the pointer to the schema name of the table
-func (ti *TableInfo) GetSchemaNamePtr() *string {
-	return &ti.TableName.Schema
-}
-
-// GetTableNamePtr returns the pointer to the table name of the table
-func (ti *TableInfo) GetTableNamePtr() *string {
-	return &ti.TableName.Table
-}
-
-// ForceGetColumnInfo return the column info by ID
-// Caller must ensure `colID` exists
-func (ti *TableInfo) ForceGetColumnInfo(colID int64) *model.ColumnInfo {
-	colInfo, ok := ti.GetColumnInfo(colID)
-	if !ok {
-		log.Panic("invalid column id", zap.Int64("columnID", colID))
-	}
-	return colInfo
-}
-
-// ForceGetColumnFlagType return the column flag type by ID
-// Caller must ensure `colID` exists
-func (ti *TableInfo) ForceGetColumnFlagType(colID int64) *ColumnFlagType {
-	flag, ok := ti.ColumnsFlag[colID]
-	if !ok {
-		log.Panic("invalid column id", zap.Int64("columnID", colID))
-	}
-	return &flag
-}
-
-// ForceGetColumnName return the column name by ID
-// Caller must ensure `colID` exists
-func (ti *TableInfo) ForceGetColumnName(colID int64) string {
-	return ti.ForceGetColumnInfo(colID).Name.O
-}
-
-// GetColumnDefaultValue returns the default definition of a column.
-func GetColumnDefaultValue(col *model.ColumnInfo) interface{} {
-	defaultValue := col.GetDefaultValue()
-	if defaultValue == nil {
-		defaultValue = col.GetOriginDefaultValue()
-	}
-	defaultDatum := datumTypes.NewDatum(defaultValue)
-	return defaultDatum.GetValue()
 }

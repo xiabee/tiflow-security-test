@@ -17,9 +17,9 @@ import (
 	"sort"
 	"testing"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,7 +105,65 @@ func TestRowChangedEventFuncs(t *testing.T) {
 			},
 		},
 	}
+	expectedKeyCols := []*Column{
+		{
+			Name:  "a",
+			Value: 1,
+			Flag:  HandleKeyFlag | PrimaryKeyFlag,
+		},
+	}
 	require.True(t, deleteRow.IsDelete())
+	require.Equal(t, expectedKeyCols, deleteRow.PrimaryKeyColumns())
+	require.Equal(t, expectedKeyCols, deleteRow.HandleKeyColumns())
+
+	insertRow := &RowChangedEvent{
+		Table: &TableName{
+			Schema: "test",
+			Table:  "t1",
+		},
+		Columns: []*Column{
+			{
+				Name:  "a",
+				Value: 1,
+				Flag:  HandleKeyFlag,
+			}, {
+				Name:  "b",
+				Value: 2,
+				Flag:  0,
+			},
+		},
+	}
+	expectedPrimaryKeyCols := []*Column{}
+	expectedHandleKeyCols := []*Column{
+		{
+			Name:  "a",
+			Value: 1,
+			Flag:  HandleKeyFlag,
+		},
+	}
+	require.False(t, insertRow.IsDelete())
+	require.Equal(t, expectedPrimaryKeyCols, insertRow.PrimaryKeyColumns())
+	require.Equal(t, expectedHandleKeyCols, insertRow.HandleKeyColumns())
+
+	forceReplicaRow := &RowChangedEvent{
+		Table: &TableName{
+			Schema: "test",
+			Table:  "t1",
+		},
+		Columns: []*Column{
+			{
+				Name:  "a",
+				Value: 1,
+				Flag:  0,
+			}, {
+				Name:  "b",
+				Value: 2,
+				Flag:  0,
+			},
+		},
+	}
+	require.Empty(t, forceReplicaRow.PrimaryKeyColumns())
+	require.Empty(t, forceReplicaRow.HandleKeyColumns())
 }
 
 func TestColumnValueString(t *testing.T) {
@@ -445,7 +503,7 @@ func TestTrySplitAndSortUpdateEventEmpty(t *testing.T) {
 	require.Equal(t, 0, len(result))
 }
 
-func TestTxnTrySplitAndSortUpdateEvent(t *testing.T) {
+func TestTrySplitAndSortUpdateEvent(t *testing.T) {
 	t.Parallel()
 
 	// Update handle key.

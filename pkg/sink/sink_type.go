@@ -68,16 +68,11 @@ const (
 	AzureScheme = "azure"
 	// CloudStorageNoopScheme indicates the scheme is noop.
 	CloudStorageNoopScheme = "noop"
-	// PulsarScheme  indicates the scheme is pulsar
-	PulsarScheme = "pulsar"
-	// PulsarSSLScheme indicates the scheme is pulsar+ssl
-	PulsarSSLScheme = "pulsar+ssl"
 )
 
 // IsMQScheme returns true if the scheme belong to mq scheme.
 func IsMQScheme(scheme string) bool {
-	return scheme == KafkaScheme || scheme == KafkaSSLScheme ||
-		scheme == PulsarScheme || scheme == PulsarSSLScheme
+	return scheme == KafkaScheme || scheme == KafkaSSLScheme
 }
 
 // IsMySQLCompatibleScheme returns true if the scheme is compatible with MySQL.
@@ -90,16 +85,6 @@ func IsMySQLCompatibleScheme(scheme string) bool {
 func IsStorageScheme(scheme string) bool {
 	return scheme == FileScheme || scheme == S3Scheme || scheme == GCSScheme ||
 		scheme == GSScheme || scheme == AzblobScheme || scheme == AzureScheme || scheme == CloudStorageNoopScheme
-}
-
-// IsPulsarScheme returns true if the scheme belong to pulsar scheme.
-func IsPulsarScheme(scheme string) bool {
-	return scheme == PulsarScheme || scheme == PulsarSSLScheme
-}
-
-// IsBlackHoleScheme returns true if the scheme belong to blackhole scheme.
-func IsBlackHoleScheme(scheme string) bool {
-	return scheme == BlackHoleScheme
 }
 
 // GetScheme returns the scheme of the url.

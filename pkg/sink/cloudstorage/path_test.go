@@ -23,9 +23,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/engine/pkg/clock"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -43,9 +43,9 @@ func testFilePathGenerator(ctx context.Context, t *testing.T, dir string) *FileP
 	sinkURI, err := url.Parse(uri)
 	require.NoError(t, err)
 	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Sink.DateSeparator = util.AddressOf(config.DateSeparatorNone.String())
-	replicaConfig.Sink.Protocol = util.AddressOf(config.ProtocolOpen.String())
-	replicaConfig.Sink.FileIndexWidth = util.AddressOf(6)
+	replicaConfig.Sink.DateSeparator = config.DateSeparatorNone.String()
+	replicaConfig.Sink.Protocol = config.ProtocolOpen.String()
+	replicaConfig.Sink.FileIndexWidth = 6
 	cfg := NewConfig()
 	err = cfg.Apply(ctx, sinkURI, replicaConfig)
 	require.NoError(t, err)
@@ -363,9 +363,9 @@ func TestRemoveExpiredFilesWithoutPartition(t *testing.T) {
 	sinkURI, err := url.Parse(uri)
 	require.NoError(t, err)
 	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Sink.DateSeparator = util.AddressOf(config.DateSeparatorDay.String())
-	replicaConfig.Sink.Protocol = util.AddressOf(config.ProtocolCsv.String())
-	replicaConfig.Sink.FileIndexWidth = util.AddressOf(6)
+	replicaConfig.Sink.DateSeparator = config.DateSeparatorDay.String()
+	replicaConfig.Sink.Protocol = config.ProtocolCsv.String()
+	replicaConfig.Sink.FileIndexWidth = 6
 	replicaConfig.Sink.CloudStorageConfig = &config.CloudStorageConfig{
 		FileExpirationDays:  util.AddressOf(1),
 		FileCleanupCronSpec: util.AddressOf("* * * * * *"),

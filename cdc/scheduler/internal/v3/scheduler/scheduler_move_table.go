@@ -18,10 +18,8 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/member"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/replication"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	"go.uber.org/zap"
 )
 
@@ -29,14 +27,14 @@ var _ scheduler = &moveTableScheduler{}
 
 type moveTableScheduler struct {
 	mu    sync.Mutex
-	tasks *spanz.BtreeMap[*replication.ScheduleTask]
+	tasks map[model.TableID]*replication.ScheduleTask
 
 	changefeedID model.ChangeFeedID
 }
 
 func newMoveTableScheduler(changefeed model.ChangeFeedID) *moveTableScheduler {
 	return &moveTableScheduler{
-		tasks:        spanz.NewBtreeMap[*replication.ScheduleTask](),
+		tasks:        make(map[model.TableID]*replication.ScheduleTask),
 		changefeedID: changefeed,
 	}
 }
@@ -45,42 +43,39 @@ func (m *moveTableScheduler) Name() string {
 	return "move-table-scheduler"
 }
 
-func (m *moveTableScheduler) addTask(span tablepb.Span, target model.CaptureID) bool {
+func (m *moveTableScheduler) addTask(tableID model.TableID, target model.CaptureID) bool {
 	// previous triggered task not accepted yet, decline the new manual move table request.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if ok := m.tasks.Has(span); ok {
+	if _, ok := m.tasks[tableID]; ok {
 		return false
 	}
-	m.tasks.ReplaceOrInsert(span, &replication.ScheduleTask{
+	m.tasks[tableID] = &replication.ScheduleTask{
 		MoveTable: &replication.MoveTable{
-			Span:        span,
+			TableID:     tableID,
 			DestCapture: target,
 		},
 		Accept: func() {
 			m.mu.Lock()
 			defer m.mu.Unlock()
-			m.tasks.Delete(span)
+			delete(m.tasks, tableID)
 		},
-	})
+	}
 	return true
 }
 
 func (m *moveTableScheduler) Schedule(
 	_ model.Ts,
-	currentSpans []tablepb.Span,
+	currentTables []model.TableID,
 	captures map[model.CaptureID]*member.CaptureStatus,
-	replications *spanz.BtreeMap[*replication.ReplicationSet],
+	replications map[model.TableID]*replication.ReplicationSet,
 ) []*replication.ScheduleTask {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// FIXME: moveTableScheduler is broken in the sense of range level replication.
-	// It is impossible for users to pass valid start key and end key.
-
 	result := make([]*replication.ScheduleTask, 0)
 
-	if m.tasks.Len() == 0 {
+	if len(m.tasks) == 0 {
 		return result
 	}
 
@@ -88,23 +83,22 @@ func (m *moveTableScheduler) Schedule(
 		return result
 	}
 
-	allSpans := spanz.NewSet()
-	for _, span := range currentSpans {
-		allSpans.Add(span)
+	allTables := model.NewTableSet()
+	for _, tableID := range currentTables {
+		allTables.Add(tableID)
 	}
 
-	toBeDeleted := []tablepb.Span{}
-	m.tasks.Ascend(func(span tablepb.Span, task *replication.ScheduleTask) bool {
+	for tableID, task := range m.tasks {
 		// table may not in the all current tables
 		// if it was removed after manual move table triggered.
-		if !allSpans.Contain(span) {
+		if !allTables.Contain(tableID) {
 			log.Warn("schedulerv3: move table ignored, since the table cannot found",
 				zap.String("namespace", m.changefeedID.Namespace),
 				zap.String("changefeed", m.changefeedID.ID),
-				zap.String("span", span.String()),
+				zap.Int64("tableID", tableID),
 				zap.String("captureID", task.MoveTable.DestCapture))
-			toBeDeleted = append(toBeDeleted, span)
-			return true
+			delete(m.tasks, tableID)
+			continue
 		}
 
 		// the target capture may offline after manual move table triggered.
@@ -113,52 +107,47 @@ func (m *moveTableScheduler) Schedule(
 			log.Info("schedulerv3: move table ignored, since the target capture cannot found",
 				zap.String("namespace", m.changefeedID.Namespace),
 				zap.String("changefeed", m.changefeedID.ID),
-				zap.String("span", span.String()),
+				zap.Int64("tableID", tableID),
 				zap.String("captureID", task.MoveTable.DestCapture))
-			toBeDeleted = append(toBeDeleted, span)
-			return true
+			delete(m.tasks, tableID)
+			continue
 		}
 		if status.State != member.CaptureStateInitialized {
 			log.Warn("schedulerv3: move table ignored, target capture is not initialized",
 				zap.String("namespace", m.changefeedID.Namespace),
 				zap.String("changefeed", m.changefeedID.ID),
-				zap.String("span", span.String()),
+				zap.Int64("tableID", tableID),
 				zap.String("captureID", task.MoveTable.DestCapture),
 				zap.Any("state", status.State))
-			toBeDeleted = append(toBeDeleted, span)
-			return true
+			delete(m.tasks, tableID)
+			continue
 		}
 
-		rep, ok := replications.Get(span)
+		rep, ok := replications[tableID]
 		if !ok {
 			log.Warn("schedulerv3: move table ignored, table not found in the replication set",
 				zap.String("namespace", m.changefeedID.Namespace),
 				zap.String("changefeed", m.changefeedID.ID),
-				zap.String("span", span.String()),
+				zap.Int64("tableID", tableID),
 				zap.String("captureID", task.MoveTable.DestCapture))
-			toBeDeleted = append(toBeDeleted, span)
-			return true
+			delete(m.tasks, tableID)
+			continue
 		}
 		// only move replicating table.
 		if rep.State != replication.ReplicationSetStateReplicating {
 			log.Info("schedulerv3: move table ignored, since the table is not replicating now",
 				zap.String("namespace", m.changefeedID.Namespace),
 				zap.String("changefeed", m.changefeedID.ID),
-				zap.String("span", span.String()),
+				zap.Int64("tableID", tableID),
 				zap.String("captureID", task.MoveTable.DestCapture),
 				zap.Any("replicationState", rep.State))
-			toBeDeleted = append(toBeDeleted, span)
+			delete(m.tasks, tableID)
 		}
-		return true
-	})
-	for _, span := range toBeDeleted {
-		m.tasks.Delete(span)
 	}
 
-	m.tasks.Ascend(func(span tablepb.Span, value *replication.ScheduleTask) bool {
-		result = append(result, value)
-		return true
-	})
+	for _, task := range m.tasks {
+		result = append(result, task)
+	}
 
 	return result
 }

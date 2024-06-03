@@ -26,14 +26,14 @@ import (
 	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/proto/p2p"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/utils/tempurl"
+	"github.com/tikv/pd/pkg/tempurl"
 	"google.golang.org/grpc"
 )
 
 type messageRouterTestSuite struct {
 	servers       map[NodeID]*MessageServer
 	cancels       map[NodeID]context.CancelFunc
-	messageRouter *messageRouterImpl
+	messageRouter MessageRouter
 	wg            sync.WaitGroup
 }
 
@@ -52,7 +52,7 @@ func newMessageRouterTestSuite() *messageRouterTestSuite {
 	return &messageRouterTestSuite{
 		servers: map[NodeID]*MessageServer{},
 		cancels: map[NodeID]context.CancelFunc{},
-		messageRouter: NewMessageRouterWithLocalClient(
+		messageRouter: NewMessageRouter(
 			"test-client-1",
 			&security.Credential{},
 			clientConfig4TestingMessageRouter),
@@ -89,7 +89,7 @@ func (s *messageRouterTestSuite) addServer(ctx context.Context, t *testing.T, id
 		defer s.wg.Done()
 		defer grpcServer.Stop()
 		defer s.messageRouter.RemovePeer(id)
-		err := newServer.Run(ctx, nil)
+		err := newServer.Run(ctx)
 		if err != nil {
 			require.Regexp(t, ".*context canceled.*", err.Error())
 		}
@@ -100,9 +100,13 @@ func (s *messageRouterTestSuite) close() {
 	for _, cancel := range s.cancels {
 		cancel()
 	}
-	s.wg.Wait()
 
 	s.messageRouter.Close()
+}
+
+func (s *messageRouterTestSuite) wait() {
+	s.wg.Wait()
+	s.messageRouter.Wait()
 }
 
 func TestMessageRouterBasic(t *testing.T) {
@@ -113,11 +117,6 @@ func TestMessageRouterBasic(t *testing.T) {
 	suite.addServer(ctx, t, "server-1")
 	suite.addServer(ctx, t, "server-2")
 	suite.addServer(ctx, t, "server-3")
-
-	selfID := suite.messageRouter.selfID
-	localClient := suite.messageRouter.GetClient(selfID)
-	require.NotNil(t, localClient)
-	require.NotNil(t, suite.messageRouter.GetLocalChannel())
 
 	noClient := suite.messageRouter.GetClient("server-4")
 	require.Nilf(t, noClient, "no client should have been created")
@@ -185,6 +184,7 @@ func TestMessageRouterBasic(t *testing.T) {
 
 	suite.close()
 	suite.close() // double close: should not panic
+	suite.wait()
 	suite.close() // triple close: should not panic
 }
 
@@ -257,6 +257,7 @@ func TestMessageRouterRemovePeer(t *testing.T) {
 
 	wg.Wait()
 	suite.close()
+	suite.wait()
 }
 
 func TestMessageRouterClientFailure(t *testing.T) {
@@ -286,4 +287,5 @@ func TestMessageRouterClientFailure(t *testing.T) {
 	}
 
 	suite.close()
+	suite.wait()
 }

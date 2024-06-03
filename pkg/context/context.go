@@ -19,11 +19,12 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/pipeline/system"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine/factory"
+	ssystem "github.com/pingcap/tiflow/cdc/sorter/db/system"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/p2p"
-	"github.com/pingcap/tiflow/pkg/workerpool"
 	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
 )
@@ -32,10 +33,15 @@ import (
 // the lifecycle of vars in the GlobalVars should be aligned with the ticdc server process.
 // All field in Vars should be READ-ONLY and THREAD-SAFE
 type GlobalVars struct {
-	CaptureInfo *model.CaptureInfo
-	EtcdClient  etcd.CDCEtcdClient
+	CaptureInfo      *model.CaptureInfo
+	EtcdClient       etcd.CDCEtcdClient
+	TableActorSystem *system.System
 
 	// SortEngineManager is introduced for pull-based sinks.
+	//
+	// TODO(qupeng): remove SorterSystem after all sorters are transformed
+	// to adapt pull-based sinks.
+	SorterSystem      *ssystem.System
 	SortEngineFactory *factory.SortEngineFactory
 
 	// OwnerRevision is the Etcd revision when the owner got elected.
@@ -44,9 +50,6 @@ type GlobalVars struct {
 	// MessageServer and MessageRouter are for peer-messaging
 	MessageServer *p2p.MessageServer
 	MessageRouter p2p.MessageRouter
-
-	// ChangefeedThreadPool is the thread pool for changefeed initialization
-	ChangefeedThreadPool workerpool.AsyncPool
 }
 
 // ChangefeedVars contains some vars which can be used anywhere in a pipeline
@@ -198,7 +201,6 @@ func NewContext4Test(baseCtx context.Context, withChangefeedVars bool) Context {
 		EtcdClient: &etcd.CDCEtcdClientImpl{
 			ClusterID: etcd.DefaultCDCClusterID,
 		},
-		ChangefeedThreadPool: &NonAsyncPool{},
 	})
 	if withChangefeedVars {
 		ctx = WithChangefeedVars(ctx, &ChangefeedVars{
@@ -216,19 +218,4 @@ func NewContext4Test(baseCtx context.Context, withChangefeedVars bool) Context {
 // context.Background() as the parent context
 func NewBackendContext4Test(withChangefeedVars bool) Context {
 	return NewContext4Test(context.Background(), withChangefeedVars)
-}
-
-// NonAsyncPool is a dummy implementation of workerpool.AsyncPool, which runs tasks synchronously.
-// It is used in tests to avoid the overhead of asynchronous task scheduling.
-type NonAsyncPool struct{}
-
-// Go runs the task synchronously.
-func (f *NonAsyncPool) Go(_ context.Context, fn func()) error {
-	fn()
-	return nil
-}
-
-// Run does nothing.
-func (f *NonAsyncPool) Run(_ context.Context) error {
-	return nil
 }

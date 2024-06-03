@@ -138,8 +138,6 @@ func (m *ResourceMeta) Map() map[string]interface{} {
 const (
 	ResourceTypeLocalFile = ResourceType("local")
 	ResourceTypeS3        = ResourceType("s3")
-	ResourceTypeGCS       = ResourceType("gs")
-	ResourceTypeNone      = ResourceType("none")
 )
 
 // BuildPrefix returns the prefix of the resource type.
@@ -160,13 +158,11 @@ func ParseResourceID(rpath ResourceID) (ResourceType, ResourceName, error) {
 	}
 
 	var resourceType ResourceType
-	switch ResourceType(segments[0]) {
-	case ResourceTypeLocalFile:
+	switch segments[0] {
+	case "local":
 		resourceType = ResourceTypeLocalFile
-	case ResourceTypeS3:
+	case "s3":
 		resourceType = ResourceTypeS3
-	case ResourceTypeGCS:
-		resourceType = ResourceTypeGCS
 	default:
 		return "", "", errors.ErrIllegalResourcePath.GenWithStackByArgs(rpath)
 	}

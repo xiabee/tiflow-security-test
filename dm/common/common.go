@@ -65,9 +65,7 @@ var (
 	// StageValidatorKeyAdapter is used to store the running stage of the validator.
 	// k/v: Encode(source-id, task-name) -> the running stage of the validator.
 	StageValidatorKeyAdapter KeyAdapter = keyHexEncoderDecoder("/dm-master/stage/validator/")
-	// LightningCoordinationKeyAdapter is used to store the coordination information of lightning.
-	// k/v: Encode(task-name, source-id) -> lightning status.
-	LightningCoordinationKeyAdapter KeyAdapter = keyHexEncoderDecoder("/dm-master/lightning-coord/")
+
 	// ShardDDLPessimismInfoKeyAdapter is used to store shard DDL info in pessimistic model.
 	// k/v: Encode(task-name, source-id) -> shard DDL info.
 	ShardDDLPessimismInfoKeyAdapter KeyAdapter = keyHexEncoderDecoder("/dm-master/shardddl-pessimism/info/")
@@ -121,8 +119,7 @@ func keyAdapterKeysLen(s KeyAdapter) int {
 		return 1
 	case UpstreamSubTaskKeyAdapter, StageSubTaskKeyAdapter, StageValidatorKeyAdapter,
 		ShardDDLPessimismInfoKeyAdapter, ShardDDLPessimismOperationKeyAdapter,
-		ShardDDLOptimismSourceTablesKeyAdapter, LoadTaskKeyAdapter, TaskCliArgsKeyAdapter,
-		LightningCoordinationKeyAdapter:
+		ShardDDLOptimismSourceTablesKeyAdapter, LoadTaskKeyAdapter, TaskCliArgsKeyAdapter:
 		return 2
 	case ShardDDLOptimismInfoKeyAdapter, ShardDDLOptimismOperationKeyAdapter:
 		return 4

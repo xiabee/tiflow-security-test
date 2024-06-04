@@ -30,6 +30,7 @@ import (
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/binlog/event"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	parserpkg "github.com/pingcap/tiflow/dm/pkg/parser"
@@ -68,7 +69,7 @@ type DDLWorker struct {
 	onlineDDL                  onlineddl.OnlinePlugin
 	checkpoint                 CheckPoint
 	tableRouter                *regexprrouter.RouteTable
-	sourceTableNamesFlavor     utils.LowerCaseTableNamesFlavor
+	sourceTableNamesFlavor     conn.LowerCaseTableNamesFlavor
 	collationCompatible        string
 	charsetAndDefaultCollation map[string]string
 	idAndCollationMap          map[int]string
@@ -849,9 +850,6 @@ func (ddl *Optimist) handleDDL(qec *queryEventContext) error {
 			ddl.logger.Info("got a shard DDL lock operation", zap.Stringer("operation", op))
 			if op.ConflictStage != optimism.ConflictDetected {
 				break
-			}
-			if ddl.strict {
-				return terror.ErrSyncerShardDDLConflict.Generate(qec.needHandleDDLs, op.ConflictMsg)
 			}
 			rev = op.Revision
 			ddl.logger.Info("operation conflict detected, waiting for resolve", zap.Stringer("info", info))

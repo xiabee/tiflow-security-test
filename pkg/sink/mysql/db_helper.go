@@ -27,7 +27,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/parser/charset"
 	tmysql "github.com/pingcap/tidb/parser/mysql"
-	dmutils "github.com/pingcap/tiflow/dm/pkg/utils"
+	dmutils "github.com/pingcap/tiflow/dm/pkg/conn"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -320,12 +320,23 @@ func CheckIsTiDB(ctx context.Context, db *sql.DB) (bool, error) {
 		log.Error("check tidb version error", zap.Error(err))
 		// downstream is not TiDB, do nothing
 		if mysqlErr, ok := errors.Cause(err).(*dmysql.MySQLError); ok && (mysqlErr.Number == tmysql.ErrNoDB ||
-			mysqlErr.Number == tmysql.ErrSpDoesNotExist || mysqlErr.Number == tmysql.ErrDBaccessDenied) {
+			mysqlErr.Number == tmysql.ErrSpDoesNotExist) {
 			return false, nil
 		}
 		return false, errors.Trace(err)
 	}
 	return true, nil
+}
+
+// QueryMaxPreparedStmtCount gets the value of max_prepared_stmt_count
+func QueryMaxPreparedStmtCount(ctx context.Context, db *sql.DB) (int, error) {
+	row := db.QueryRowContext(ctx, "select @@global.max_prepared_stmt_count;")
+	var maxPreparedStmtCount sql.NullInt32
+	err := row.Scan(&maxPreparedStmtCount)
+	if err != nil {
+		err = cerror.WrapError(cerror.ErrMySQLQueryError, err)
+	}
+	return int(maxPreparedStmtCount.Int32), err
 }
 
 // QueryMaxAllowedPacket gets the value of max_allowed_packet

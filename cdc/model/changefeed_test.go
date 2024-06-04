@@ -146,9 +146,8 @@ func TestVerifyAndComplete(t *testing.T) {
 		StartTs: 417257993615179777,
 		Config: &config.ReplicaConfig{
 			MemoryQuota:        1073741824,
-			CaseSensitive:      false,
+			CaseSensitive:      true,
 			EnableOldValue:     true,
-			EnableTableMonitor: false,
 			CheckGCSafePoint:   true,
 			SyncPointInterval:  time.Minute * 10,
 			SyncPointRetention: time.Hour * 24,
@@ -728,6 +727,81 @@ func TestFixMemoryQuotaIncompatible(t *testing.T) {
 	for _, tc := range testCases {
 		tc.info.FixIncompatible()
 		require.Equal(t, tc.expectedMemoryQuota, tc.info.Config.MemoryQuota)
+	}
+}
+
+func TestFixSchedulerIncompatible(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		info              *ChangeFeedInfo
+		expectedScheduler *config.ChangefeedSchedulerConfig
+	}{
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Sink: &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: config.GetDefaultReplicaConfig().Clone().Scheduler,
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.5.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Scheduler: &config.ChangefeedSchedulerConfig{},
+					Sink:      &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: &config.ChangefeedSchedulerConfig{},
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.6.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Scheduler: &config.ChangefeedSchedulerConfig{},
+					Sink:      &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: &config.ChangefeedSchedulerConfig{},
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.6.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Scheduler: &config.ChangefeedSchedulerConfig{RegionPerSpan: 1000},
+					Sink:      &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: &config.ChangefeedSchedulerConfig{
+				RegionThreshold: 1000, EnableTableAcrossNodes: true,
+			},
+		},
+		{
+			info: &ChangeFeedInfo{
+				CreatorVersion: "6.7.0",
+				SinkURI:        "mysql://root:test@127.0.0.1:3306/",
+				Config: &config.ReplicaConfig{
+					Scheduler: &config.ChangefeedSchedulerConfig{
+						RegionThreshold: 1000, WriteKeyThreshold: 1000,
+					},
+					Sink: &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
+				},
+			},
+			expectedScheduler: &config.ChangefeedSchedulerConfig{
+				RegionThreshold: 1000, WriteKeyThreshold: 1000,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		tc.info.FixIncompatible()
+		require.EqualValues(t, tc.expectedScheduler, tc.info.Config.Scheduler)
 	}
 }
 

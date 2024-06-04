@@ -211,7 +211,7 @@ func (l *LogReader) runReader(egCtx context.Context, cfg *readerConfig) error {
 
 		switch cfg.fileType {
 		case redo.RedoRowLogFileType:
-			row := model.LogToRow(item.data.RedoRow)
+			row := item.data.RedoRow.Row
 			// By design only data (startTs,endTs] is needed,
 			// so filter out data may beyond the boundary.
 			if row != nil && row.CommitTs > cfg.startTs && row.CommitTs <= cfg.endTs {
@@ -227,7 +227,7 @@ func (l *LogReader) runReader(egCtx context.Context, cfg *readerConfig) error {
 			}
 
 		case redo.RedoDDLLogFileType:
-			ddl := model.LogToDDL(item.data.RedoDDL)
+			ddl := item.data.RedoDDL.DDL
 			if ddl != nil && ddl.CommitTs > cfg.startTs && ddl.CommitTs <= cfg.endTs {
 				select {
 				case <-egCtx.Done():
@@ -364,37 +364,27 @@ func (h logHeap) Len() int {
 }
 
 func (h logHeap) Less(i, j int) bool {
-	// we separate ddl and dml, so we only need to compare dml with dml, and ddl with ddl.
 	if h[i].data.Type == model.RedoLogTypeDDL {
-		if h[i].data.RedoDDL == nil || h[i].data.RedoDDL.DDL == nil {
+		if h[i].data.RedoDDL.DDL == nil {
 			return true
 		}
-		if h[j].data.RedoDDL == nil || h[j].data.RedoDDL.DDL == nil {
+		if h[j].data.RedoDDL.DDL == nil {
 			return false
 		}
 		return h[i].data.RedoDDL.DDL.CommitTs < h[j].data.RedoDDL.DDL.CommitTs
 	}
 
-	if h[i].data.RedoRow == nil || h[i].data.RedoRow.Row == nil {
+	if h[i].data.RedoRow.Row == nil {
 		return true
 	}
-	if h[j].data.RedoRow == nil || h[j].data.RedoRow.Row == nil {
+	if h[j].data.RedoRow.Row == nil {
 		return false
 	}
 
-	if h[i].data.RedoRow.Row.CommitTs == h[j].data.RedoRow.Row.CommitTs {
-		if h[i].data.RedoRow.Row.StartTs != h[j].data.RedoRow.Row.StartTs {
-			return h[i].data.RedoRow.Row.StartTs < h[j].data.RedoRow.Row.StartTs
-		}
-		// in the same txn, we need to sort by delete/update/insert order
-		if h[i].data.RedoRow.Row.IsDelete() {
-			return true
-		} else if h[i].data.RedoRow.Row.IsUpdate() {
-			return !h[j].data.RedoRow.Row.IsDelete()
-		}
-		return false
+	if h[i].data.RedoRow.Row.CommitTs == h[j].data.RedoRow.Row.CommitTs &&
+		h[i].data.RedoRow.Row.StartTs < h[j].data.RedoRow.Row.StartTs {
+		return true
 	}
-
 	return h[i].data.RedoRow.Row.CommitTs < h[j].data.RedoRow.Row.CommitTs
 }
 

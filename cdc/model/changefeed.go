@@ -81,6 +81,8 @@ const (
 type FeedState string
 
 // All FeedStates
+// Only `StateNormal` and `StatePending` changefeed is running,
+// others are stopped.
 const (
 	StateNormal   FeedState = "normal"
 	StatePending  FeedState = "pending"
@@ -205,7 +207,7 @@ func ValidateNamespace(namespace string) error {
 // Note: if the changefeed is failed by GC, it should not block the GC safepoint.
 func (info *ChangeFeedInfo) NeedBlockGC() bool {
 	switch info.State {
-	case StateNormal, StateStopped, StatePending, StateWarning:
+	case StateNormal, StateStopped, StateWarning, StatePending:
 		return true
 	case StateFailed:
 		return !info.isFailedByGC()
@@ -323,14 +325,16 @@ func (info *ChangeFeedInfo) VerifyAndComplete() {
 	if info.Config.Consistent == nil {
 		info.Config.Consistent = defaultConfig.Consistent
 	}
-	if info.Config.ChangefeedErrorStuckDuration == 0 {
+	if info.Config.Scheduler == nil {
+		info.Config.Scheduler = defaultConfig.Scheduler
+	}
+
+	if info.Config.Integrity == nil {
+		info.Config.Integrity = defaultConfig.Integrity
+	}
+
+	if info.Config.ChangefeedErrorStuckDuration == nil {
 		info.Config.ChangefeedErrorStuckDuration = defaultConfig.ChangefeedErrorStuckDuration
-	}
-	if info.Config.SQLMode == "" {
-		info.Config.SQLMode = defaultConfig.SQLMode
-	}
-	if info.Config.SyncedStatus == nil {
-		info.Config.SyncedStatus = defaultConfig.SyncedStatus
 	}
 }
 
@@ -361,17 +365,23 @@ func (info *ChangeFeedInfo) FixIncompatible() {
 		log.Info("Fix incompatible memory quota completed", zap.String("changefeed", info.String()))
 	}
 
+	if info.Config.ChangefeedErrorStuckDuration == nil {
+		log.Info("Start fixing incompatible error stuck duration", zap.String("changefeed", info.String()))
+		info.Config.ChangefeedErrorStuckDuration = config.GetDefaultReplicaConfig().ChangefeedErrorStuckDuration
+		log.Info("Fix incompatible error stuck duration completed", zap.String("changefeed", info.String()))
+	}
+
+	log.Info("Start fixing incompatible scheduler", zap.String("changefeed", info.String()))
+	inheritV66 := creatorVersionGate.ChangefeedInheritSchedulerConfigFromV66()
+	info.fixScheduler(inheritV66)
+	log.Info("Fix incompatible scheduler completed", zap.String("changefeed", info.String()))
+
 	if creatorVersionGate.ChangefeedAdjustEnableOldValueByProtocol() {
 		log.Info("Start fixing incompatible enable old value", zap.String("changefeed", info.String()),
 			zap.Bool("enableOldValue", info.Config.EnableOldValue))
 		info.fixEnableOldValue()
 		log.Info("Fix incompatible enable old value completed", zap.String("changefeed", info.String()),
 			zap.Bool("enableOldValue", info.Config.EnableOldValue))
-	}
-	if info.Config.ChangefeedErrorStuckDuration == 0 {
-		log.Info("Start fixing incompatible changefeed error stuck duration", zap.String("changefeed", info.String()))
-		info.Config.ChangefeedErrorStuckDuration = config.GetDefaultReplicaConfig().ChangefeedErrorStuckDuration
-		log.Info("Fix incompatible changefeed error stuck duration completed", zap.String("changefeed", info.String()))
 	}
 }
 
@@ -507,10 +517,6 @@ func (info *ChangeFeedInfo) updateSinkURIAndConfigProtocol(uri *url.URL, newProt
 	info.Config.Sink.Protocol = newProtocol
 }
 
-func (info *ChangeFeedInfo) fixMemoryQuota() {
-	info.Config.FixMemoryQuota()
-}
-
 // DownstreamType returns the type of the downstream.
 func (info *ChangeFeedInfo) DownstreamType() (DownstreamType, error) {
 	uri, err := url.Parse(info.SinkURI)
@@ -529,24 +535,12 @@ func (info *ChangeFeedInfo) DownstreamType() (DownstreamType, error) {
 	return Unknown, nil
 }
 
-// Barrier is a barrier for changefeed.
-type Barrier struct {
-	GlobalBarrierTs   Ts             `json:"global-barrier-ts"`
-	TableBarrier      []TableBarrier `json:"table-barrier"`
-	MinTableBarrierTs Ts             `json:"min-table-barrier-ts"`
+func (info *ChangeFeedInfo) fixMemoryQuota() {
+	info.Config.FixMemoryQuota()
 }
 
-// TableBarrier is a barrier for a table.
-type TableBarrier struct {
-	ID        TableID `json:"id"`
-	BarrierTs Ts      `json:"barrier-ts"`
-}
-
-// NewBarrier creates a Barrier.
-func NewBarrier(ts Ts) *Barrier {
-	return &Barrier{
-		GlobalBarrierTs: ts,
-	}
+func (info *ChangeFeedInfo) fixScheduler(inheritV66 bool) {
+	info.Config.FixScheduler(inheritV66)
 }
 
 // DownstreamType is the type of downstream.
@@ -584,13 +578,4 @@ type ChangeFeedStatusForAPI struct {
 	// used to check whether there is a pending DDL job at the checkpointTs when
 	// initializing the changefeed.
 	MinTableBarrierTs uint64 `json:"min-table-barrier-ts"`
-}
-
-// ChangeFeedSyncedStatusForAPI uses to transfer the synced status of changefeed for API.
-type ChangeFeedSyncedStatusForAPI struct {
-	CheckpointTs        uint64 `json:"checkpoint-ts"`
-	LastSyncedTs        uint64 `json:"last-sync-time"`
-	PullerResolvedTs    uint64 `json:"puller-resolved-ts"`
-	SyncedCheckInterval int64  `json:"synced-check-interval"`
-	CheckpointInterval  int64  `json:"checkpoint-interval"`
 }

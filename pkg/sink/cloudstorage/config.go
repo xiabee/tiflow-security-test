@@ -16,16 +16,17 @@ package cloudstorage
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin/binding"
+	"github.com/imdario/mergo"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	psink "github.com/pingcap/tiflow/pkg/sink"
-	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -40,25 +41,19 @@ const (
 	minFlushInterval = 2 * time.Second
 	// the upper limit of flush-interval.
 	maxFlushInterval = 10 * time.Minute
-	// defaultFlushConcurrency is the default value of flush-concurrency.
-	defaultFlushConcurrency = 1
-	// the lower limit of flush-concurrency.
-	minFlushConcurrency = 1
-	// the upper limit of flush-concurrency.
-	maxFlushConcurrency = 512
 	// defaultFileSize is the default value of file-size.
 	defaultFileSize = 64 * 1024 * 1024
 	// the lower limit of file size
 	minFileSize = 1024 * 1024
 	// the upper limit of file size
 	maxFileSize = 512 * 1024 * 1024
-
-	// disable file cleanup by default
-	defaultFileExpirationDays = 0
-	// Second | Minute | Hour | Dom | Month | DowOptional
-	// `0 0 2 * * ?` means 2:00:00 AM every day
-	defaultFileCleanupCronSpec = "0 0 2 * * *"
 )
+
+type urlConfig struct {
+	WorkerCount   *int    `form:"worker-count"`
+	FlushInterval *string `form:"flush-interval"`
+	FileSize      *int    `form:"file-size"`
+}
 
 // Config is the configuration for cloud storage sink.
 type Config struct {
@@ -67,21 +62,15 @@ type Config struct {
 	FileSize                 int
 	FileIndexWidth           int
 	DateSeparator            string
-	FileExpirationDays       int
-	FileCleanupCronSpec      string
 	EnablePartitionSeparator bool
-	OutputColumnID           bool
-	FlushConcurrency         int
 }
 
 // NewConfig returns the default cloud storage sink config.
 func NewConfig() *Config {
 	return &Config{
-		WorkerCount:         defaultWorkerCount,
-		FlushInterval:       defaultFlushInterval,
-		FileSize:            defaultFileSize,
-		FileExpirationDays:  defaultFileExpirationDays,
-		FileCleanupCronSpec: defaultFileCleanupCronSpec,
+		WorkerCount:   defaultWorkerCount,
+		FlushInterval: defaultFlushInterval,
+		FileSize:      defaultFileSize,
 	}
 }
 
@@ -101,15 +90,22 @@ func (c *Config) Apply(
 		return cerror.ErrStorageSinkInvalidConfig.GenWithStack(
 			"can't create cloud storage sink with unsupported scheme: %s", scheme)
 	}
-	query := sinkURI.Query()
-	if err = getWorkerCount(query, &c.WorkerCount); err != nil {
+	req := &http.Request{URL: sinkURI}
+	urlParameter := &urlConfig{}
+	if err := binding.Query.Bind(req, urlParameter); err != nil {
+		return cerror.WrapError(cerror.ErrStorageSinkInvalidConfig, err)
+	}
+	if urlParameter, err = mergeConfig(replicaConfig, urlParameter); err != nil {
 		return err
 	}
-	err = getFlushInterval(query, &c.FlushInterval)
+	if err = getWorkerCount(urlParameter, &c.WorkerCount); err != nil {
+		return err
+	}
+	err = getFlushInterval(urlParameter, &c.FlushInterval)
 	if err != nil {
 		return err
 	}
-	err = getFileSize(query, &c.FileSize)
+	err = getFileSize(urlParameter, &c.FileSize)
 	if err != nil {
 		return err
 	}
@@ -117,37 +113,36 @@ func (c *Config) Apply(
 	c.DateSeparator = replicaConfig.Sink.DateSeparator
 	c.EnablePartitionSeparator = replicaConfig.Sink.EnablePartitionSeparator
 	c.FileIndexWidth = replicaConfig.Sink.FileIndexWidth
-	if replicaConfig.Sink.CloudStorageConfig != nil {
-		c.OutputColumnID = util.GetOrZero(replicaConfig.Sink.CloudStorageConfig.OutputColumnID)
-		c.FlushConcurrency = util.GetOrZero(replicaConfig.Sink.CloudStorageConfig.FlushConcurrency)
-		if replicaConfig.Sink.CloudStorageConfig.FileExpirationDays != nil {
-			c.FileExpirationDays = *replicaConfig.Sink.CloudStorageConfig.FileExpirationDays
-		}
-		if replicaConfig.Sink.CloudStorageConfig.FileCleanupCronSpec != nil {
-			c.FileCleanupCronSpec = *replicaConfig.Sink.CloudStorageConfig.FileCleanupCronSpec
-		}
-	}
 
 	if c.FileIndexWidth < config.MinFileIndexWidth || c.FileIndexWidth > config.MaxFileIndexWidth {
 		c.FileIndexWidth = config.DefaultFileIndexWidth
-	}
-	if c.FlushConcurrency < minFlushConcurrency || c.FlushConcurrency > maxFlushConcurrency {
-		c.FlushConcurrency = defaultFlushConcurrency
 	}
 
 	return nil
 }
 
-func getWorkerCount(values url.Values, workerCount *int) error {
-	s := values.Get("worker-count")
-	if len(s) == 0 {
+func mergeConfig(
+	replicaConfig *config.ReplicaConfig,
+	urlParameters *urlConfig,
+) (*urlConfig, error) {
+	dest := &urlConfig{}
+	if replicaConfig.Sink != nil && replicaConfig.Sink.CloudStorageConfig != nil {
+		dest.WorkerCount = replicaConfig.Sink.CloudStorageConfig.WorkerCount
+		dest.FlushInterval = replicaConfig.Sink.CloudStorageConfig.FlushInterval
+		dest.FileSize = replicaConfig.Sink.CloudStorageConfig.FileSize
+	}
+	if err := mergo.Merge(dest, urlParameters, mergo.WithOverride); err != nil {
+		return nil, cerror.WrapError(cerror.ErrStorageSinkInvalidConfig, err)
+	}
+	return dest, nil
+}
+
+func getWorkerCount(values *urlConfig, workerCount *int) error {
+	if values.WorkerCount == nil {
 		return nil
 	}
 
-	c, err := strconv.Atoi(s)
-	if err != nil {
-		return cerror.WrapError(cerror.ErrStorageSinkInvalidConfig, err)
-	}
+	c := *values.WorkerCount
 	if c <= 0 {
 		return cerror.WrapError(cerror.ErrStorageSinkInvalidConfig,
 			fmt.Errorf("invalid worker-count %d, it must be greater than 0", c))
@@ -162,13 +157,12 @@ func getWorkerCount(values url.Values, workerCount *int) error {
 	return nil
 }
 
-func getFlushInterval(values url.Values, flushInterval *time.Duration) error {
-	s := values.Get("flush-interval")
-	if len(s) == 0 {
+func getFlushInterval(values *urlConfig, flushInterval *time.Duration) error {
+	if values.FlushInterval == nil || len(*values.FlushInterval) == 0 {
 		return nil
 	}
 
-	d, err := time.ParseDuration(s)
+	d, err := time.ParseDuration(*values.FlushInterval)
 	if err != nil {
 		return cerror.WrapError(cerror.ErrStorageSinkInvalidConfig, err)
 	}
@@ -188,16 +182,12 @@ func getFlushInterval(values url.Values, flushInterval *time.Duration) error {
 	return nil
 }
 
-func getFileSize(values url.Values, fileSize *int) error {
-	s := values.Get("file-size")
-	if len(s) == 0 {
+func getFileSize(values *urlConfig, fileSize *int) error {
+	if values.FileSize == nil {
 		return nil
 	}
 
-	sz, err := strconv.Atoi(s)
-	if err != nil {
-		return cerror.WrapError(cerror.ErrStorageSinkInvalidConfig, err)
-	}
+	sz := *values.FileSize
 	if sz > maxFileSize {
 		log.Warn("file-size is too large",
 			zap.Int("original", sz), zap.Int("override", maxFileSize))

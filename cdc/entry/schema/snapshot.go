@@ -434,7 +434,7 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-		// If it a rename table job and the schema does not exist,
+		// If the schema of a rename table job does not exist,
 		// there is no need to create the table, since this table
 		// will not be replicated in the future.
 		if _, ok := s.inner.schemaByID(job.SchemaID); !ok {
@@ -467,14 +467,11 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-	case timodel.ActionTruncateTablePartition:
-		err := s.inner.updatePartition(getWrapTableInfo(job), true, job.BinlogInfo.FinishedTS)
-		if err != nil {
-			return errors.Trace(err)
-		}
-	case timodel.ActionAddTablePartition,
-		timodel.ActionDropTablePartition:
-		err := s.inner.updatePartition(getWrapTableInfo(job), false, job.BinlogInfo.FinishedTS)
+	case timodel.ActionTruncateTablePartition,
+		timodel.ActionAddTablePartition,
+		timodel.ActionDropTablePartition,
+		timodel.ActionReorganizePartition:
+		err := s.inner.updatePartition(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -549,7 +546,6 @@ func (s *Snapshot) DumpToString() string {
 		schema, _ := s.inner.schemaByID(schemaID)
 		tableNames = append(tableNames, fmt.Sprintf("%s.%s:%d", schema.Name.O, table, target))
 	})
-
 	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s",
 		strings.Join(schemas, "\t"),
 		strings.Join(tables, "\t"),
@@ -861,7 +857,7 @@ func (s *snapshot) doCreateTable(tbInfo *model.TableInfo, currentTs uint64) {
 }
 
 // updatePartition updates partition info for `tbInfo`.
-func (s *snapshot) updatePartition(tbInfo *model.TableInfo, isTruncate bool, currentTs uint64) error {
+func (s *snapshot) updatePartition(tbInfo *model.TableInfo, currentTs uint64) error {
 	oldTbInfo, ok := s.physicalTableByID(tbInfo.ID)
 	if !ok {
 		return cerror.ErrSnapshotTableNotFound.GenWithStackByArgs(tbInfo.ID)
@@ -886,21 +882,12 @@ func (s *snapshot) updatePartition(tbInfo *model.TableInfo, isTruncate bool, cur
 	for _, partition := range oldPi.Definitions {
 		s.partitions.ReplaceOrInsert(newVersionedID(partition.ID, tag))
 	}
-	newPartitionIDMap := make(map[int64]struct{}, len(newPi.Definitions))
 	for _, partition := range newPi.Definitions {
 		vid := newVersionedID(partition.ID, tag)
 		vid.target = tbInfo
 		s.partitions.ReplaceOrInsert(vid)
 		if ineligible {
 			s.ineligibleTables.ReplaceOrInsert(newVersionedID(partition.ID, tag))
-		}
-		newPartitionIDMap[partition.ID] = struct{}{}
-	}
-	if isTruncate {
-		for _, partition := range oldPi.Definitions {
-			if _, ok := newPartitionIDMap[partition.ID]; !ok {
-				s.truncatedTables.ReplaceOrInsert(newVersionedID(partition.ID, tag))
-			}
 		}
 	}
 	s.currentTs = currentTs
@@ -991,7 +978,7 @@ func (s *snapshot) exchangePartition(targetTable *model.TableInfo, currentTS uin
 	// ref: https://github.com/pingcap/tidb/issues/43819
 	targetTable.SchemaID = oldTable.SchemaID
 	targetTable.TableName = oldTable.TableName
-	err = s.updatePartition(targetTable, false, currentTS)
+	err = s.updatePartition(targetTable, currentTS)
 	if err != nil {
 		return errors.Trace(err)
 	}

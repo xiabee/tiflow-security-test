@@ -25,14 +25,11 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/format"
-	timysql "github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
-	sinkv1 "github.com/pingcap/tiflow/cdc/sink"
-	"github.com/pingcap/tiflow/cdc/sink/mysql"
-	sinkv2 "github.com/pingcap/tiflow/cdc/sinkv2/ddlsink"
-	"github.com/pingcap/tiflow/cdc/sinkv2/ddlsink/factory"
-	"github.com/pingcap/tiflow/pkg/config"
+	"github.com/pingcap/tiflow/cdc/sink/ddlsink"
+	"github.com/pingcap/tiflow/cdc/sink/ddlsink/factory"
+	"github.com/pingcap/tiflow/cdc/syncpointstore"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"github.com/pingcap/tiflow/pkg/util"
@@ -64,7 +61,7 @@ type DDLSink interface {
 
 type ddlSinkImpl struct {
 	lastSyncPoint  model.Ts
-	syncPointStore mysql.SyncPointStore
+	syncPointStore syncpointstore.SyncPointStore
 
 	// It is used to record the checkpointTs and the names of the table at that time.
 	mu struct {
@@ -78,11 +75,7 @@ type ddlSinkImpl struct {
 
 	ddlCh chan *model.DDLEvent
 
-	sinkV1 sinkv1.Sink
-	errCh  chan error
-
-	sinkV2 sinkv2.DDLEventSink
-
+	sink ddlsink.Sink
 	// `sinkInitHandler` can be helpful in unit testing.
 	sinkInitHandler ddlSinkInitHandler
 
@@ -122,33 +115,24 @@ type ddlSinkInitHandler func(ctx context.Context, a *ddlSinkImpl) error
 
 func ddlSinkInitializer(ctx context.Context, a *ddlSinkImpl) error {
 	ctx = contextutil.PutRoleInCtx(ctx, util.RoleOwner)
-	conf := config.GetGlobalServerConfig()
-	if !conf.Debug.EnableNewSink {
-		log.Info("Try to create ddlSink based on sinkV1",
-			zap.String("namespace", a.changefeedID.Namespace),
-			zap.String("changefeed", a.changefeedID.ID))
-		s, err := sinkv1.New(ctx, a.changefeedID, a.info.SinkURI, a.info.Config, a.errCh)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		a.sinkV1 = s
-	} else {
-		log.Info("Try to create ddlSink based on sinkV2",
-			zap.String("namespace", a.changefeedID.Namespace),
-			zap.String("changefeed", a.changefeedID.ID))
-		s, err := factory.New(ctx, a.info.SinkURI, a.info.Config)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		a.sinkV2 = s
+	log.Info("Try to create ddlSink based on sink",
+		zap.String("namespace", a.changefeedID.Namespace),
+		zap.String("changefeed", a.changefeedID.ID))
+	s, err := factory.New(ctx, a.info.SinkURI, a.info.Config)
+	if err != nil {
+		return errors.Trace(err)
 	}
+	a.sink = s
 
+	if !a.info.Config.EnableSyncPoint {
+		return nil
+	}
 	return nil
 }
 
 func (s *ddlSinkImpl) makeSyncPointStoreReady(ctx context.Context) error {
 	if s.info.Config.EnableSyncPoint && s.syncPointStore == nil {
-		syncPointStore, err := mysql.NewSyncPointStore(
+		syncPointStore, err := syncpointstore.NewSyncPointStore(
 			ctx, s.changefeedID, s.info.SinkURI, s.info.Config.SyncPointRetention)
 		if err != nil {
 			return errors.Trace(err)
@@ -166,7 +150,7 @@ func (s *ddlSinkImpl) makeSyncPointStoreReady(ctx context.Context) error {
 }
 
 func (s *ddlSinkImpl) makeSinkReady(ctx context.Context) error {
-	if s.sinkV1 == nil && s.sinkV2 == nil {
+	if s.sink == nil {
 		if err := s.sinkInitHandler(ctx, s); err != nil {
 			log.Warn("ddl sink initialize failed",
 				zap.String("namespace", s.changefeedID.Namespace),
@@ -184,8 +168,6 @@ func (s *ddlSinkImpl) retrySinkAction(ctx context.Context, name string, action f
 		if err = action(); err == nil {
 			return nil
 		}
-		s.sinkV1 = nil
-		s.sinkV2 = nil
 		isRetryable := !cerror.ShouldFailChangefeed(err) && errors.Cause(err) != context.Canceled
 		log.Warn("owner ddl sink fails on action",
 			zap.String("namespace", s.changefeedID.Namespace),
@@ -194,6 +176,7 @@ func (s *ddlSinkImpl) retrySinkAction(ctx context.Context, name string, action f
 			zap.Bool("retryable", isRetryable),
 			zap.Error(err))
 
+		s.sink = nil
 		if isRetryable {
 			s.reportWarning(err)
 		} else {
@@ -243,11 +226,7 @@ func (s *ddlSinkImpl) writeCheckpointTs(ctx context.Context, lastCheckpointTs *m
 		s.mu.Unlock()
 
 		if err = s.makeSinkReady(ctx); err == nil {
-			if s.sinkV1 != nil {
-				err = s.sinkV1.EmitCheckpointTs(ctx, checkpointTs, tables)
-			} else {
-				err = s.sinkV2.WriteCheckpointTs(ctx, checkpointTs, tables)
-			}
+			err = s.sink.WriteCheckpointTs(ctx, checkpointTs, tables)
 		}
 		if err == nil {
 			*lastCheckpointTs = checkpointTs
@@ -266,11 +245,7 @@ func (s *ddlSinkImpl) writeDDLEvent(ctx context.Context, ddl *model.DDLEvent) er
 
 	doWrite := func() (err error) {
 		if err = s.makeSinkReady(ctx); err == nil {
-			if s.sinkV1 != nil {
-				err = s.sinkV1.EmitDDLEvent(ctx, ddl)
-			} else {
-				err = s.sinkV2.WriteDDLEvent(ctx, ddl)
-			}
+			err = s.sink.WriteDDLEvent(ctx, ddl)
 			failpoint.Inject("InjectChangefeedDDLError", func() {
 				err = cerror.ErrExecDDLFailed.GenWithStackByArgs()
 			})
@@ -296,6 +271,7 @@ func (s *ddlSinkImpl) writeDDLEvent(ctx context.Context, ddl *model.DDLEvent) er
 
 func (s *ddlSinkImpl) run(ctx context.Context) {
 	ctx, s.cancel = context.WithCancel(ctx)
+	ctx = contextutil.PutChangefeedIDInCtx(ctx, s.changefeedID)
 
 	s.wg.Add(1)
 	go func() {
@@ -439,10 +415,8 @@ func (s *ddlSinkImpl) close(ctx context.Context) (err error) {
 	s.wg.Wait()
 
 	// they will both be nil if changefeed return an error in initializing
-	if s.sinkV1 != nil {
-		_ = s.sinkV1.Close(ctx)
-	} else if s.sinkV2 != nil {
-		_ = s.sinkV2.Close()
+	if s.sink != nil {
+		s.sink.Close()
 	}
 	if s.syncPointStore != nil {
 		err = s.syncPointStore.Close()
@@ -455,18 +429,7 @@ func (s *ddlSinkImpl) close(ctx context.Context) (err error) {
 
 // addSpecialComment translate tidb feature to comment
 func (s *ddlSinkImpl) addSpecialComment(ddl *model.DDLEvent) (string, error) {
-	p := parser.New()
-	// We need to use the correct SQL mode to parse the DDL query.
-	// Otherwise, the parser may fail to parse the DDL query.
-	// For example, it is needed to parse the following DDL query:
-	//  `alter table "t" add column "c" int default 1;`
-	// by adding `ANSI_QUOTES` to the SQL mode.
-	mode, err := timysql.GetSQLMode(s.info.Config.SQLMode)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	p.SetSQLMode(mode)
-	stms, _, err := p.Parse(ddl.Query, ddl.Charset, ddl.Collate)
+	stms, _, err := parser.New().Parse(ddl.Query, ddl.Charset, ddl.Collate)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -487,6 +450,8 @@ func (s *ddlSinkImpl) addSpecialComment(ddl *model.DDLEvent) (string, error) {
 	restoreFlags |= format.RestoreStringSingleQuotes
 	// remove placement rule
 	restoreFlags |= format.SkipPlacementRuleForRestore
+	// force disable ttl
+	restoreFlags |= format.RestoreWithTTLEnableOff
 	if err = stms[0].Restore(format.NewRestoreCtx(restoreFlags, &sb)); err != nil {
 		return "", errors.Trace(err)
 	}

@@ -14,10 +14,38 @@
 package config
 
 import (
+	"errors"
 	"time"
 
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
+
+// ChangefeedSchedulerConfig is per changefeed scheduler settings.
+type ChangefeedSchedulerConfig struct {
+	// EnableTableAcrossNodes set true to split one table to multiple spans and
+	// distribute to multiple TiCDC nodes.
+	EnableTableAcrossNodes bool `toml:"enable-table-across-nodes" json:"enable-table-across-nodes"`
+	// RegionThreshold is the region count threshold of splitting a table.
+	RegionThreshold int `toml:"region-threshold" json:"region-threshold"`
+	// WriteKeyThreshold is the written keys threshold of splitting a table.
+	WriteKeyThreshold int `toml:"write-key-threshold" json:"write-key-threshold"`
+	// Deprecated.
+	RegionPerSpan int `toml:"region-per-span" json:"region-per-span"`
+}
+
+// Validate validates the config.
+func (c *ChangefeedSchedulerConfig) Validate() error {
+	if !c.EnableTableAcrossNodes {
+		return nil
+	}
+	if c.RegionThreshold < 0 {
+		return errors.New("region-threshold must be larger than 0")
+	}
+	if c.WriteKeyThreshold < 0 {
+		return errors.New("write-key-threshold must be larger than 0")
+	}
+	return nil
+}
 
 // SchedulerConfig configs TiCDC scheduler.
 type SchedulerConfig struct {
@@ -37,6 +65,9 @@ type SchedulerConfig struct {
 	// When there are only 2 captures, and a large number of tables, this can be helpful to prevent
 	// oom caused by all tables dispatched to only one capture.
 	AddTableBatchSize int `toml:"add-table-batch-size" json:"add-table-batch-size"`
+
+	// ChangefeedSettings is setting by changefeed.
+	ChangefeedSettings *ChangefeedSchedulerConfig `toml:"-" json:"-"`
 }
 
 // NewDefaultSchedulerConfig return the default scheduler configuration.
@@ -71,7 +102,6 @@ func (c *SchedulerConfig) ValidateAndAdjust() error {
 		return cerror.ErrInvalidServerOption.GenWithStackByArgs(
 			"check-balance-interval must be larger than 1s")
 	}
-
 	if c.AddTableBatchSize <= 0 {
 		return cerror.ErrInvalidServerOption.GenWithStackByArgs(
 			"add-table-batch-size must be large than 0")

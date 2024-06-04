@@ -14,14 +14,13 @@
 package filter
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/mysql"
+	timodel "github.com/pingcap/tidb/parser/model"
 	tfilter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -108,18 +107,11 @@ type sqlEventFilter struct {
 	rules     []*sqlEventRule
 }
 
-func newSQLEventFilter(cfg *config.FilterConfig, sqlMode string) (*sqlEventFilter, error) {
-	p := parser.New()
-	mode, err := mysql.GetSQLMode(sqlMode)
-	if err != nil {
-		log.Error("failed to get sql mode", zap.Error(err))
-		return nil, cerror.ErrInvalidReplicaConfig.FastGenByArgs(fmt.Sprintf("invalid sqlMode %s", sqlMode))
-	}
-	p.SetSQLMode(mode)
-
+func newSQLEventFilter(cfg *config.FilterConfig) (*sqlEventFilter, error) {
 	res := &sqlEventFilter{
-		ddlParser: p,
+		ddlParser: parser.New(),
 	}
+
 	for _, rule := range cfg.EventFilters {
 		if err := res.addRule(rule); err != nil {
 			return nil, errors.Trace(err)
@@ -154,22 +146,23 @@ func (f *sqlEventFilter) getRules(schema, table string) []*sqlEventRule {
 }
 
 // skipDDLEvent skips ddl event by its type and query.
-func (f *sqlEventFilter) shouldSkipDDL(ddl *model.DDLEvent) (bool, error) {
-	schema := ddl.TableInfo.TableName.Schema
-	table := ddl.TableInfo.TableName.Table
+func (f *sqlEventFilter) shouldSkipDDL(
+	ddlType timodel.ActionType, schema, table, query string,
+) (bool, error) {
 	log.Info("sql event filter handle ddl event",
-		zap.Any("ddlType", ddl.Type), zap.String("schema", schema),
-		zap.String("table", table), zap.String("query", ddl.Query))
+		zap.Any("ddlType", ddlType), zap.String("schema", schema),
+		zap.String("table", table), zap.String("query", query))
 	f.pLock.Lock()
-	evenType, err := ddlToEventType(f.ddlParser, ddl.Query, ddl.Type)
+	evenType, err := ddlToEventType(f.ddlParser, query, ddlType)
 	f.pLock.Unlock()
+
 	if err != nil {
 		return false, err
 	}
 	if evenType == bf.NullEvent {
 		log.Warn("sql event filter unsupported ddl type, do nothing",
-			zap.String("type", ddl.Type.String()),
-			zap.String("query", ddl.Query))
+			zap.String("type", ddlType.String()),
+			zap.String("query", query))
 		return false, nil
 	}
 
@@ -178,7 +171,7 @@ func (f *sqlEventFilter) shouldSkipDDL(ddl *model.DDLEvent) (bool, error) {
 		action, err := rule.bf.Filter(
 			binlogFilterSchemaPlaceholder,
 			binlogFilterTablePlaceholder,
-			evenType, ddl.Query)
+			evenType, query)
 		if err != nil {
 			return false, errors.Trace(err)
 		}

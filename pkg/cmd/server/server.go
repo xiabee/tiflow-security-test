@@ -25,7 +25,6 @@ import (
 	ticonfig "github.com/pingcap/tidb/config"
 	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/server"
-	"github.com/pingcap/tiflow/cdc/sorter/unified"
 	cmdcontext "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -145,7 +144,6 @@ func (o *options) run(cmd *cobra.Command) error {
 		log.Info("cdc server exits normally")
 	}
 	server.Close()
-	unified.CleanUp()
 	return nil
 }
 

@@ -20,6 +20,8 @@ import (
 
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -29,7 +31,7 @@ type redoEventCache struct {
 	allocated uint64 // atomically shared in several goroutines.
 
 	mu     sync.Mutex
-	tables map[model.TableID]*eventAppender
+	tables *spanz.HashMap[*eventAppender]
 
 	metricRedoEventCache prometheus.Gauge
 }
@@ -57,20 +59,11 @@ type popResult struct {
 	events      []*model.RowChangedEvent
 	size        uint64 // size of events.
 	releaseSize uint64 // size of all released events.
-
-	// many RowChangedEvent can come from one same PolymorphicEvent.
-	// pushCount indicates the count of raw PolymorphicEvents.
-	pushCount int
-
-	// success indicates whether there is a gap between cached events and required events.
-	success bool
-
-	// If success, upperBoundIfSuccess is the upperBound of poped events.
-	// The caller should fetch events (upperBoundIfSuccess, upperBound] from engine.
-	upperBoundIfSuccess engine.Position
-	// If fail, lowerBoundIfFail is the lowerBound of cached events.
-	// The caller should fetch events [lowerBound, lowerBoundIfFail) from engine.
-	lowerBoundIfFail engine.Position
+	pushCount   int
+	success     bool
+	// If success, boundary is the upperBound of poped events.
+	// Otherwise, boundary is the lowerBound of cached events.
+	boundary engine.Position
 }
 
 // newRedoEventCache creates a redoEventCache instance.
@@ -78,15 +71,15 @@ func newRedoEventCache(changefeedID model.ChangeFeedID, capacity uint64) *redoEv
 	return &redoEventCache{
 		capacity:  capacity,
 		allocated: 0,
-		tables:    make(map[model.TableID]*eventAppender),
+		tables:    spanz.NewHashMap[*eventAppender](),
 
 		metricRedoEventCache: RedoEventCache.WithLabelValues(changefeedID.Namespace, changefeedID.ID),
 	}
 }
 
-func (r *redoEventCache) removeTable(tableID model.TableID) {
+func (r *redoEventCache) removeTable(span tablepb.Span) {
 	r.mu.Lock()
-	item, exists := r.tables[tableID]
+	item, exists := r.tables.Get(span)
 	defer r.mu.Unlock()
 	if exists {
 		item.mu.Lock()
@@ -99,22 +92,28 @@ func (r *redoEventCache) removeTable(tableID model.TableID) {
 		item.sizes = nil
 		item.pushCounts = nil
 		item.mu.Unlock()
-		delete(r.tables, tableID)
+		r.tables.Delete(span)
 	}
 }
 
-func (r *redoEventCache) maybeCreateAppender(tableID model.TableID, lowerBound engine.Position) *eventAppender {
+func (r *redoEventCache) clear() {
+	r.metricRedoEventCache.Set(0.0)
+}
+
+func (r *redoEventCache) maybeCreateAppender(
+	span tablepb.Span, lowerBound engine.Position,
+) *eventAppender {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	item, exists := r.tables[tableID]
+	item, exists := r.tables.Get(span)
 	if !exists {
 		item = &eventAppender{
 			capacity:   r.capacity,
 			cache:      r,
 			lowerBound: lowerBound,
 		}
-		r.tables[tableID] = item
+		r.tables.ReplaceOrInsert(span, item)
 		return item
 	}
 
@@ -134,10 +133,10 @@ func (r *redoEventCache) maybeCreateAppender(tableID model.TableID, lowerBound e
 	return item
 }
 
-func (r *redoEventCache) getAppender(tableID model.TableID) *eventAppender {
+func (r *redoEventCache) getAppender(span tablepb.Span) *eventAppender {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.tables[tableID]
+	return r.tables.GetV(span)
 }
 
 func (e *eventAppender) pop(lowerBound, upperBound engine.Position) (res popResult) {
@@ -151,28 +150,26 @@ func (e *eventAppender) pop(lowerBound, upperBound engine.Position) (res popResu
 		// NOTE: the caller will fetch events [lowerBound, res.boundary) from engine.
 		res.success = false
 		if e.lowerBound.Compare(upperBound.Next()) <= 0 {
-			res.lowerBoundIfFail = e.lowerBound
+			res.boundary = e.lowerBound
 		} else {
-			res.lowerBoundIfFail = upperBound.Next()
+			res.boundary = upperBound.Next()
 		}
 		return
 	}
-
 	if !e.upperBound.Valid() {
-		// It means there are no resolved cached transactions in the required range.
+		// if e.upperBound is invalid, it means there are no resolved transactions
+		// in the cache.
 		// NOTE: the caller will fetch events [lowerBound, res.boundary) from engine.
 		res.success = false
-		res.lowerBoundIfFail = upperBound.Next()
+		res.boundary = upperBound.Next()
 		return
 	}
 
 	res.success = true
-	if lowerBound.Compare(e.upperBound) > 0 {
-		res.upperBoundIfSuccess = lowerBound.Prev()
-	} else if upperBound.Compare(e.upperBound) > 0 {
-		res.upperBoundIfSuccess = e.upperBound
+	if upperBound.Compare(e.upperBound) > 0 {
+		res.boundary = e.upperBound
 	} else {
-		res.upperBoundIfSuccess = upperBound
+		res.boundary = upperBound
 	}
 
 	startIdx := sort.Search(e.readyCount, func(i int) bool {
@@ -184,23 +181,28 @@ func (e *eventAppender) pop(lowerBound, upperBound engine.Position) (res popResu
 		res.releaseSize += e.sizes[i]
 	}
 
-	endIdx := sort.Search(e.readyCount, func(i int) bool {
-		pos := engine.Position{CommitTs: e.events[i].CommitTs, StartTs: e.events[i].StartTs}
-		return pos.Compare(res.upperBoundIfSuccess) > 0
-	})
-	res.events = e.events[startIdx:endIdx]
-	for i := startIdx; i < endIdx; i++ {
-		res.size += e.sizes[i]
-		res.pushCount += int(e.pushCounts[i])
+	var endIdx int
+	if startIdx == e.readyCount {
+		endIdx = startIdx
+	} else {
+		endIdx = sort.Search(e.readyCount, func(i int) bool {
+			pos := engine.Position{CommitTs: e.events[i].CommitTs, StartTs: e.events[i].StartTs}
+			return pos.Compare(res.boundary) > 0
+		})
+		res.events = e.events[startIdx:endIdx]
+		for i := startIdx; i < endIdx; i++ {
+			res.size += e.sizes[i]
+			res.pushCount += int(e.pushCounts[i])
+		}
+		res.releaseSize += res.size
 	}
-	res.releaseSize += res.size
 
 	e.events = e.events[endIdx:]
 	e.sizes = e.sizes[endIdx:]
 	e.pushCounts = e.pushCounts[endIdx:]
 	e.readyCount -= endIdx
 	// Update boundaries. Set upperBound to invalid if the range has been drained.
-	e.lowerBound = res.upperBoundIfSuccess.Next()
+	e.lowerBound = res.boundary.Next()
 	if e.lowerBound.Compare(e.upperBound) > 0 {
 		e.upperBound = engine.Position{}
 	}
@@ -282,4 +284,12 @@ func (e *eventAppender) onBroken() (pendingSize uint64) {
 		e.cache.metricRedoEventCache.Sub(float64(pendingSize))
 	}
 	return
+}
+
+// getEvents only used for test.
+func (e *eventAppender) getEvents() []*model.RowChangedEvent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return e.events
 }

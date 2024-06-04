@@ -108,8 +108,6 @@ type ddlManager struct {
 	// tableCheckpoint store the tableCheckpoint of each table. We need to wait
 	// for the tableCheckpoint to reach the next ddl commitTs before executing the ddl
 	tableCheckpoint map[model.TableName]model.Ts
-	filter          filter.Filter
-
 	// pendingDDLs store the pending DDL events of all tables
 	// the DDL events in the same table are ordered by commitTs.
 	pendingDDLs map[model.TableName][]*model.DDLEvent
@@ -135,7 +133,6 @@ func newDDLManager(
 	startTs model.Ts,
 	checkpointTs model.Ts,
 	ddlSink DDLSink,
-	filter filter.Filter,
 	ddlPuller puller.DDLPuller,
 	schema *schemaWrap4Owner,
 	redoManager redo.DDLManager,
@@ -154,7 +151,6 @@ func newDDLManager(
 	return &ddlManager{
 		changfeedID:     changefeedID,
 		ddlSink:         ddlSink,
-		filter:          filter,
 		ddlPuller:       ddlPuller,
 		schema:          schema,
 		redoDDLManager:  redoManager,
@@ -224,6 +220,15 @@ func (m *ddlManager) tick(
 			}
 
 			for _, event := range events {
+				// If changefeed is in BDRMode, skip ddl.
+				if m.BDRMode {
+					log.Info("changefeed is in BDRMode, skip a ddl event",
+						zap.String("namespace", m.changfeedID.Namespace),
+						zap.String("ID", m.changfeedID.ID),
+						zap.Any("ddlEvent", event))
+					continue
+				}
+
 				// TODO: find a better place to do this check
 				// check if the ddl event is belong to an ineligible table.
 				// If so, we should ignore it.
@@ -248,14 +253,7 @@ func (m *ddlManager) tick(
 			// Send DDL events to redo log.
 			if m.redoDDLManager.Enabled() {
 				for _, event := range events {
-					skip, _, err := m.shouldSkipDDL(event)
-					if err != nil {
-						return nil, nil, errors.Trace(err)
-					}
-					if skip {
-						continue
-					}
-					err = m.redoDDLManager.EmitDDLEvent(ctx, event)
+					err := m.redoDDLManager.EmitDDLEvent(ctx, event)
 					if err != nil {
 						return nil, nil, err
 					}
@@ -345,37 +343,11 @@ func (m *ddlManager) shouldExecDDL(nextDDL *model.DDLEvent) bool {
 	return checkpointReachBarrier && redoCheckpointReachBarrier && redoDDLResolvedTsExceedBarrier
 }
 
-func (m *ddlManager) shouldSkipDDL(ddl *model.DDLEvent) (bool, string, error) {
-	ignored, err := m.filter.ShouldIgnoreDDLEvent(ddl)
-	if err != nil {
-		return false, "", errors.Trace(err)
-	}
-	if ignored {
-		return true, "ddl is ignored by event filter rule, skip it", nil
-	}
-
-	// In a BDR mode cluster, TiCDC can receive DDLs from all roles of TiDB.
-	// However, CDC only executes the DDLs from the TiDB that has BDRRolePrimary role.
-	if m.BDRMode {
-		return true, "changefeed is in BDRMode, skip all ddl in release 6.5", nil
-	}
-	return false, "", nil
-}
-
 // executeDDL executes ddlManager.executingDDL.
 func (m *ddlManager) executeDDL(ctx context.Context) error {
 	if m.executingDDL == nil {
 		return nil
 	}
-	skip, cleanMsg, err := m.shouldSkipDDL(m.executingDDL)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if skip {
-		m.cleanCache(cleanMsg)
-		return nil
-	}
-
 	failpoint.Inject("ExecuteNotDone", func() {
 		// This ddl will never finish executing.
 		// It is used to test the logic that a ddl only block the related table
@@ -394,10 +366,22 @@ func (m *ddlManager) executeDDL(ctx context.Context) error {
 
 	done, err := m.ddlSink.emitDDLEvent(ctx, m.executingDDL)
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
 	if done {
-		m.cleanCache("execute a ddl event successfully")
+		tableName := m.executingDDL.TableInfo.TableName
+		log.Info("execute a ddl event successfully",
+			zap.String("ddl", m.executingDDL.Query),
+			zap.Uint64("commitTs", m.executingDDL.CommitTs),
+			zap.Stringer("table", tableName),
+		)
+		// Set it to nil first to accelerate GC.
+		m.pendingDDLs[tableName][0] = nil
+		m.pendingDDLs[tableName] = m.pendingDDLs[tableName][1:]
+		m.schema.DoGC(m.executingDDL.CommitTs - 1)
+		m.justSentDDL = m.executingDDL
+		m.executingDDL = nil
+		m.cleanCache()
 	}
 	return nil
 }
@@ -454,6 +438,7 @@ func (m *ddlManager) getAllTableNextDDL() []*model.DDLEvent {
 // barrier returns ddlResolvedTs and tableBarrier
 func (m *ddlManager) barrier() *schedulepb.BarrierWithMinTs {
 	barrier := schedulepb.NewBarrierWithMinTs(m.ddlResolvedTs)
+
 	tableBarrierMap := make(map[model.TableID]model.Ts)
 	ddls := m.getAllTableNextDDL()
 	if m.justSentDDL != nil {
@@ -483,20 +468,7 @@ func (m *ddlManager) barrier() *schedulepb.BarrierWithMinTs {
 			// barrier related physical tables
 			ids := getRelatedPhysicalTableIDs(ddl)
 			for _, id := range ids {
-				// The same physical table may have multiple related ddl events when calculating barrier.
-				// Example cases:
-				// 1. The logical id of the same partition table may change after change partition.
-				//	So the related ddls may be considered for different tables.
-				//  And they may be returned by `getAllTableNextDDL` at the same time.
-				// 2. The result of `getAllTableNextDDL` may influence the same physical tables as `ddlManager.justSentDDL`.
-				// So we always choose the min commitTs of all ddls related to the same physical table as the barrierTs.
-				if ts, ok := tableBarrierMap[id]; ok {
-					if ddl.CommitTs < ts {
-						tableBarrierMap[id] = ddl.CommitTs
-					}
-				} else {
-					tableBarrierMap[id] = ddl.CommitTs
-				}
+				tableBarrierMap[id] = ddl.CommitTs
 			}
 		}
 	}
@@ -607,21 +579,9 @@ func (m *ddlManager) getSnapshotTs() (ts uint64) {
 }
 
 // cleanCache cleans the tableInfoCache and physicalTablesCache.
-// It should be called after a DDL is skipped or sent to downstream successfully.
-func (m *ddlManager) cleanCache(msg string) {
-	tableName := m.executingDDL.TableInfo.TableName
-	log.Info(msg, zap.String("ddl", m.executingDDL.Query),
-		zap.String("namespace", m.changfeedID.Namespace),
-		zap.String("changefeed", m.changfeedID.ID),
-		zap.Any("ddlEvent", m.executingDDL))
-
-	// Set it to nil first to accelerate GC.
-	m.pendingDDLs[tableName][0] = nil
-	m.pendingDDLs[tableName] = m.pendingDDLs[tableName][1:]
-	m.schema.DoGC(m.executingDDL.CommitTs - 1)
-	m.justSentDDL = m.executingDDL
-	m.executingDDL = nil
-
+// It should be called after a DDL is applied to schema or a DDL
+// is sent to downstream successfully.
+func (m *ddlManager) cleanCache() {
 	m.tableInfoCache = nil
 	m.physicalTablesCache = nil
 }

@@ -53,17 +53,17 @@ func (mr *MockCDCEtcdClientMockRecorder) CheckMultipleCDCClusterExist(ctx interf
 }
 
 // CreateChangefeedInfo mocks base method.
-func (m *MockCDCEtcdClient) CreateChangefeedInfo(arg0 context.Context, arg1 *model.UpstreamInfo, arg2 *model.ChangeFeedInfo) error {
+func (m *MockCDCEtcdClient) CreateChangefeedInfo(arg0 context.Context, arg1 *model.UpstreamInfo, arg2 *model.ChangeFeedInfo, arg3 model.ChangeFeedID) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "CreateChangefeedInfo", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "CreateChangefeedInfo", arg0, arg1, arg2, arg3)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // CreateChangefeedInfo indicates an expected call of CreateChangefeedInfo.
-func (mr *MockCDCEtcdClientMockRecorder) CreateChangefeedInfo(arg0, arg1, arg2 interface{}) *gomock.Call {
+func (mr *MockCDCEtcdClientMockRecorder) CreateChangefeedInfo(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateChangefeedInfo", reflect.TypeOf((*MockCDCEtcdClient)(nil).CreateChangefeedInfo), arg0, arg1, arg2)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateChangefeedInfo", reflect.TypeOf((*MockCDCEtcdClient)(nil).CreateChangefeedInfo), arg0, arg1, arg2, arg3)
 }
 
 // DeleteCaptureInfo mocks base method.
@@ -287,15 +287,15 @@ func (mr *MockCDCEtcdClientMockRecorder) SaveChangeFeedInfo(ctx, info, changeFee
 }
 
 // UpdateChangefeedAndUpstream mocks base method.
-func (m *MockCDCEtcdClient) UpdateChangefeedAndUpstream(ctx context.Context, upstreamInfo *model.UpstreamInfo, changeFeedInfo *model.ChangeFeedInfo) error {
+func (m *MockCDCEtcdClient) UpdateChangefeedAndUpstream(ctx context.Context, upstreamInfo *model.UpstreamInfo, changeFeedInfo *model.ChangeFeedInfo, changeFeedID model.ChangeFeedID) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "UpdateChangefeedAndUpstream", ctx, upstreamInfo, changeFeedInfo)
+	ret := m.ctrl.Call(m, "UpdateChangefeedAndUpstream", ctx, upstreamInfo, changeFeedInfo, changeFeedID)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // UpdateChangefeedAndUpstream indicates an expected call of UpdateChangefeedAndUpstream.
-func (mr *MockCDCEtcdClientMockRecorder) UpdateChangefeedAndUpstream(ctx, upstreamInfo, changeFeedInfo interface{}) *gomock.Call {
+func (mr *MockCDCEtcdClientMockRecorder) UpdateChangefeedAndUpstream(ctx, upstreamInfo, changeFeedInfo, changeFeedID interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateChangefeedAndUpstream", reflect.TypeOf((*MockCDCEtcdClient)(nil).UpdateChangefeedAndUpstream), ctx, upstreamInfo, changeFeedInfo)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateChangefeedAndUpstream", reflect.TypeOf((*MockCDCEtcdClient)(nil).UpdateChangefeedAndUpstream), ctx, upstreamInfo, changeFeedInfo, changeFeedID)
 }

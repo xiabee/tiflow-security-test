@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
 
@@ -43,12 +44,20 @@ const (
 	apiOpVarChangefeedState = "state"
 	// apiOpVarChangefeedID is the key of changefeed ID in HTTP API
 	apiOpVarChangefeedID = "changefeed_id"
-	// timeout for pd client
-	timeout = 30 * time.Second
 )
 
 // createChangefeed handles create changefeed request,
 // it returns the changefeed's changefeedInfo that it just created
+// CreateChangefeed creates a changefeed
+// @Summary Create changefeed
+// @Description create a new changefeed
+// @Tags changefeed,v2
+// @Accept json
+// @Produce json
+// @Param changefeed body ChangefeedConfig true "changefeed config"
+// @Success 200 {object} ChangeFeedInfo
+// @Failure 500,400 {object} model.HTTPError
+// @Router	/api/v2/changefeeds [post]
 func (h *OpenAPIV2) createChangefeed(c *gin.Context) {
 	ctx := c.Request.Context()
 	cfg := &ChangefeedConfig{ReplicaConfig: GetDefaultReplicaConfig()}
@@ -120,21 +129,33 @@ func (h *OpenAPIV2) createChangefeed(c *gin.Context) {
 		CAPath:        cfg.CAPath,
 		CertAllowedCN: cfg.CertAllowedCN,
 	}
-	o, err := h.capture.GetOwner()
+
 	// cannot create changefeed if there are running lightning/restore tasks
+	tlsCfg, err := credential.ToTLSConfig()
 	if err != nil {
-		needRemoveGCSafePoint = true
-		_ = c.Error(cerror.WrapError(cerror.ErrAPIInvalidParam, err))
-		return
-	}
-	err = o.ValidateChangefeed(info)
-	if err != nil {
-		needRemoveGCSafePoint = true
-		_ = c.Error(cerror.WrapError(cerror.ErrAPIInvalidParam, err))
+		_ = c.Error(err)
 		return
 	}
 
-	err = h.capture.GetEtcdClient().CreateChangefeedInfo(ctx, upstreamInfo, info)
+	cli, err := h.helpers.getEtcdClient(cfg.PDAddrs, tlsCfg)
+	if err != nil {
+		_ = c.Error(err)
+		return
+	}
+	err = hasRunningImport(ctx, cli)
+	if err != nil {
+		log.Error("failed to create changefeed", zap.Error(err))
+		_ = c.Error(
+			cerror.ErrUpstreamHasRunningImport.Wrap(err).
+				FastGenByArgs(info.UpstreamID),
+		)
+		return
+	}
+
+	err = h.capture.GetEtcdClient().CreateChangefeedInfo(ctx,
+		upstreamInfo,
+		info,
+		model.DefaultChangeFeedID(info.ID))
 	if err != nil {
 		needRemoveGCSafePoint = true
 		_ = c.Error(err)
@@ -147,6 +168,41 @@ func (h *OpenAPIV2) createChangefeed(c *gin.Context) {
 	c.JSON(http.StatusOK, toAPIModel(info,
 		info.StartTs, info.StartTs,
 		nil, true))
+}
+
+// hasRunningImport checks if there is running import tasks on the
+// upstream cluster.
+func hasRunningImport(ctx context.Context, cli *clientv3.Client) error {
+	resp, err := cli.KV.Get(
+		ctx, RegisterImportTaskPrefix, clientv3.WithPrefix(),
+	)
+	if err != nil {
+		return errors.Annotatef(
+			err, "failed to list import task related entries")
+	}
+
+	for _, kv := range resp.Kvs {
+		leaseResp, err := cli.Lease.TimeToLive(ctx, clientv3.LeaseID(kv.Lease))
+		if err != nil {
+			return errors.Annotatef(
+				err, "failed to get time-to-live of lease: %x", kv.Lease,
+			)
+		}
+		// the lease has expired
+		if leaseResp.TTL <= 0 {
+			continue
+		}
+
+		err = errors.New(
+			"There are lightning/restore tasks running" +
+				"please stop or wait for them to finish. " +
+				"If the task is terminated by system, " +
+				"please wait until the task lease ttl(3 mins) decreases to 0.",
+		)
+		return err
+	}
+
+	return nil
 }
 
 // listChangeFeeds lists all changgefeeds in cdc cluster
@@ -214,7 +270,6 @@ func (h *OpenAPIV2) listChangeFeeds(c *gin.Context) {
 		} else {
 			commonInfo.RunningError = cfInfo.Warning
 		}
-		log.Info("List changefeed successfully!", zap.Any("runningError", commonInfo.RunningError))
 
 		// if the state is normal, we shall not return the error info
 		// because changefeed will is retrying. errors will confuse the users
@@ -291,6 +346,17 @@ func (h *OpenAPIV2) verifyTable(c *gin.Context) {
 // Can only update a changefeed's: TargetTs, SinkURI,
 // ReplicaConfig, PDAddrs, CAPath, CertPath, KeyPath,
 // SyncPointEnabled, SyncPointInterval
+// UpdateChangefeed updates a changefeed
+// @Summary Update a changefeed
+// @Description Update a changefeed
+// @Tags changefeed,v2
+// @Accept json
+// @Produce json
+// @Param changefeed_id  path  string  true  "changefeed_id"
+// @Param changefeedConfig body ChangefeedConfig true "changefeed config"
+// @Success 200 {object} ChangeFeedInfo
+// @Failure 500,400 {object} model.HTTPError
+// @Router /api/v2/changefeeds/{changefeed_id} [put]
 func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -306,6 +372,7 @@ func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 		_ = c.Error(err)
 		return
 	}
+
 	switch oldCfInfo.State {
 	case model.StateStopped, model.StateFailed:
 	default:
@@ -316,16 +383,16 @@ func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 		)
 		return
 	}
+
 	cfStatus, err := h.capture.StatusProvider().GetChangeFeedStatus(ctx, changefeedID)
 	if err != nil {
 		_ = c.Error(err)
 		return
 	}
 
-	etcdClient := h.capture.GetEtcdClient()
 	oldCfInfo.Namespace = changefeedID.Namespace
 	oldCfInfo.ID = changefeedID.ID
-	OldUpInfo, err := etcdClient.GetUpstreamInfo(ctx, oldCfInfo.UpstreamID,
+	OldUpInfo, err := h.capture.GetEtcdClient().GetUpstreamInfo(ctx, oldCfInfo.UpstreamID,
 		oldCfInfo.Namespace)
 	if err != nil {
 		_ = c.Error(err)
@@ -384,7 +451,7 @@ func (h *OpenAPIV2) updateChangefeed(c *gin.Context) {
 		zap.Any("upstreamInfo", newUpInfo))
 
 	err = h.capture.GetEtcdClient().
-		UpdateChangefeedAndUpstream(ctx, newUpInfo, newCfInfo)
+		UpdateChangefeedAndUpstream(ctx, newUpInfo, newCfInfo, changefeedID)
 	if err != nil {
 		_ = c.Error(errors.Trace(err))
 		return
@@ -571,7 +638,18 @@ func (h *OpenAPIV2) getChangeFeedMetaInfo(c *gin.Context) {
 		taskStatus, false))
 }
 
-// resumeChangefeed handles update changefeed request.
+// resumeChangefeed handles resume changefeed request.
+// ResumeChangefeed resumes a changefeed
+// @Summary Resume a changefeed
+// @Description Resume a changefeed
+// @Tags changefeed,v2
+// @Accept json
+// @Produce json
+// @Param changefeed_id path string true "changefeed_id"
+// @Param resumeConfig body ResumeChangefeedConfig true "resume config"
+// @Success 200 {object} EmptyResponse
+// @Failure 500,400 {object} model.HTTPError
+// @Router	/api/v2/changefeeds/{changefeed_id}/resume [post]
 func (h *OpenAPIV2) resumeChangefeed(c *gin.Context) {
 	ctx := c.Request.Context()
 	changefeedID := model.DefaultChangeFeedID(c.Param(apiOpVarChangefeedID))
@@ -591,11 +669,6 @@ func (h *OpenAPIV2) resumeChangefeed(c *gin.Context) {
 	cfg := new(ResumeChangefeedConfig)
 	if err := c.BindJSON(&cfg); err != nil {
 		_ = c.Error(cerror.WrapError(cerror.ErrAPIInvalidParam, err))
-		return
-	}
-	status, err := h.capture.StatusProvider().GetChangeFeedStatus(ctx, changefeedID)
-	if err != nil {
-		_ = c.Error(err)
 		return
 	}
 
@@ -619,17 +692,13 @@ func (h *OpenAPIV2) resumeChangefeed(c *gin.Context) {
 		}
 		defer pdClient.Close()
 	}
-	// If there is no overrideCheckpointTs, then check whether the currentCheckpointTs is smaller than gc safepoint or not.
-	newCheckpointTs := status.CheckpointTs
-	if cfg.OverwriteCheckpointTs != 0 {
-		newCheckpointTs = cfg.OverwriteCheckpointTs
-	}
+
 	if err := h.helpers.verifyResumeChangefeedConfig(
 		ctx,
 		pdClient,
 		h.capture.GetEtcdClient().GetEnsureGCServiceID(gc.EnsureGCServiceResuming),
 		changefeedID,
-		newCheckpointTs); err != nil {
+		cfg.OverwriteCheckpointTs); err != nil {
 		_ = c.Error(err)
 		return
 	}
@@ -657,7 +726,9 @@ func (h *OpenAPIV2) resumeChangefeed(c *gin.Context) {
 	}
 
 	if err := api.HandleOwnerJob(ctx, h.capture, job); err != nil {
-		needRemoveGCSafePoint = true
+		if cfg.OverwriteCheckpointTs > 0 {
+			needRemoveGCSafePoint = true
+		}
 		_ = c.Error(err)
 		return
 	}
@@ -752,141 +823,6 @@ func (h *OpenAPIV2) status(c *gin.Context) {
 		ResolvedTs:   status.ResolvedTs,
 		LastError:    lastError,
 		LastWarning:  lastWarning,
-	})
-}
-
-// synced get the synced status of a changefeed
-// @Summary Get synced status
-// @Description get the synced status of a changefeed
-// @Tags changefeed,v2
-// @Accept json
-// @Produce json
-// @Param changefeed_id  path  string  true  "changefeed_id"
-// @Param namespace query string false "default"
-// @Success 200 {object} SyncedStatus
-// @Failure 500,400 {object} model.HTTPError
-// @Router /api/v2/changefeeds/{changefeed_id}/synced [get]
-func (h *OpenAPIV2) synced(c *gin.Context) {
-	ctx := c.Request.Context()
-
-	changefeedID := model.DefaultChangeFeedID(c.Param(apiOpVarChangefeedID))
-	if err := model.ValidateChangefeedID(changefeedID.ID); err != nil {
-		_ = c.Error(cerror.ErrAPIInvalidParam.GenWithStack("invalid changefeed_id: %s",
-			changefeedID.ID))
-		return
-	}
-
-	status, err := h.capture.StatusProvider().GetChangeFeedSyncedStatus(ctx, changefeedID)
-	if err != nil {
-		_ = c.Error(err)
-		return
-	}
-
-	log.Info("Get changefeed synced status:", zap.Any("status", status), zap.Any("changefeedID", changefeedID))
-
-	cfg := &ChangefeedConfig{ReplicaConfig: GetDefaultReplicaConfig()}
-	if (status.SyncedCheckInterval != 0) && (status.CheckpointInterval != 0) {
-		cfg.ReplicaConfig.SyncedStatus.CheckpointInterval = status.CheckpointInterval
-		cfg.ReplicaConfig.SyncedStatus.SyncedCheckInterval = status.SyncedCheckInterval
-	}
-
-	// try to get pd client to get pd time, and determine synced status based on the pd time
-	if len(cfg.PDAddrs) == 0 {
-		up, err := getCaptureDefaultUpstream(h.capture)
-		if err != nil {
-			_ = c.Error(err)
-			return
-		}
-		cfg.PDConfig = getUpstreamPDConfig(up)
-	}
-	credential := cfg.PDConfig.toCredential()
-
-	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	pdClient, err := h.helpers.getPDClient(timeoutCtx, cfg.PDAddrs, credential)
-	if err != nil {
-		// case 1. we can't get pd client, pd may be unavailable.
-		//         if pullerResolvedTs - checkpointTs > checkpointInterval, data is not synced
-		//         otherwise, if pd is unavailable, we decide data whether is synced based on
-		//         the time difference between current time and lastSyncedTs.
-		var message string
-		if (oracle.ExtractPhysical(status.PullerResolvedTs) - oracle.ExtractPhysical(status.CheckpointTs)) >
-			cfg.ReplicaConfig.SyncedStatus.CheckpointInterval*1000 {
-			message = fmt.Sprintf("%s. Besides the data is not finish syncing", err.Error())
-		} else {
-			message = fmt.Sprintf("%s. You should check the pd status first. If pd status is normal, means we don't finish sync data. "+
-				"If pd is offline, please check whether we satisfy the condition that "+
-				"the time difference from lastSyncedTs to the current time from the time zone of pd is greater than %v secs. "+
-				"If it's satisfied, means the data syncing is totally finished", err, cfg.ReplicaConfig.SyncedStatus.SyncedCheckInterval)
-		}
-		c.JSON(http.StatusOK, SyncedStatus{
-			Synced:           false,
-			SinkCheckpointTs: model.JSONTime(oracle.GetTimeFromTS(status.CheckpointTs)),
-			PullerResolvedTs: model.JSONTime(oracle.GetTimeFromTS(status.PullerResolvedTs)),
-			LastSyncedTs:     model.JSONTime(oracle.GetTimeFromTS(status.LastSyncedTs)),
-			NowTs:            model.JSONTime(time.Unix(0, 0)),
-			Info:             message,
-		})
-		return
-	}
-	defer pdClient.Close()
-	// get time from pd
-	physicalNow, _, _ := pdClient.GetTS(ctx)
-
-	// We can normally get pd time. Thus we determine synced status based on physicalNow, lastSyncedTs, checkpointTs and pullerResolvedTs
-	if (physicalNow-oracle.ExtractPhysical(status.LastSyncedTs) > cfg.ReplicaConfig.SyncedStatus.SyncedCheckInterval*1000) &&
-		(physicalNow-oracle.ExtractPhysical(status.CheckpointTs) < cfg.ReplicaConfig.SyncedStatus.CheckpointInterval*1000) {
-		// case 2: If physcialNow - lastSyncedTs > SyncedCheckInterval && physcialNow - CheckpointTs < CheckpointInterval
-		//         --> reach strict synced status
-		c.JSON(http.StatusOK, SyncedStatus{
-			Synced:           true,
-			SinkCheckpointTs: model.JSONTime(oracle.GetTimeFromTS(status.CheckpointTs)),
-			PullerResolvedTs: model.JSONTime(oracle.GetTimeFromTS(status.PullerResolvedTs)),
-			LastSyncedTs:     model.JSONTime(oracle.GetTimeFromTS(status.LastSyncedTs)),
-			NowTs:            model.JSONTime(time.Unix(physicalNow/1e3, 0)),
-			Info:             "Data syncing is finished",
-		})
-		return
-	}
-
-	if physicalNow-oracle.ExtractPhysical(status.LastSyncedTs) > cfg.ReplicaConfig.SyncedStatus.SyncedCheckInterval*1000 {
-		// case 3: If physcialNow - lastSyncedTs > SyncedCheckInterval && physcialNow - CheckpointTs > CheckpointInterval
-		//         we should consider the situation that pd or tikv region is not healthy to block the advancing resolveTs.
-		//         if pullerResolvedTs - checkpointTs > CheckpointInterval-->  data is not synced
-		//         otherwise, if pd & tikv is healthy --> data is not synced
-		//                    if not healthy --> data is synced
-		var message string
-		if (oracle.ExtractPhysical(status.PullerResolvedTs) - oracle.ExtractPhysical(status.CheckpointTs)) <
-			cfg.ReplicaConfig.SyncedStatus.CheckpointInterval*1000 {
-			message = fmt.Sprintf("Please check whether PD is online and TiKV Regions are all available. " +
-				"If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. " +
-				"To check whether TiKV regions are all available, " +
-				"you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. " +
-				"If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. " +
-				"Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait")
-		} else {
-			message = "The data syncing is not finished, please wait"
-		}
-		c.JSON(http.StatusOK, SyncedStatus{
-			Synced:           false,
-			SinkCheckpointTs: model.JSONTime(oracle.GetTimeFromTS(status.CheckpointTs)),
-			PullerResolvedTs: model.JSONTime(oracle.GetTimeFromTS(status.PullerResolvedTs)),
-			LastSyncedTs:     model.JSONTime(oracle.GetTimeFromTS(status.LastSyncedTs)),
-			NowTs:            model.JSONTime(time.Unix(physicalNow/1e3, 0)),
-			Info:             message,
-		})
-		return
-	}
-
-	// case	4: If physcialNow - lastSyncedTs < SyncedCheckInterval --> data is not synced
-	c.JSON(http.StatusOK, SyncedStatus{
-		Synced:           false,
-		SinkCheckpointTs: model.JSONTime(oracle.GetTimeFromTS(status.CheckpointTs)),
-		PullerResolvedTs: model.JSONTime(oracle.GetTimeFromTS(status.PullerResolvedTs)),
-		LastSyncedTs:     model.JSONTime(oracle.GetTimeFromTS(status.LastSyncedTs)),
-		NowTs:            model.JSONTime(time.Unix(physicalNow/1e3, 0)),
-		Info:             "The data syncing is not finished, please wait",
 	})
 }
 

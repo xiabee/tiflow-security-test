@@ -11,6 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build intest
+// +build intest
+
 package puller
 
 import (
@@ -75,10 +78,6 @@ func (m *mockPuller) Run(ctx context.Context) error {
 	}
 }
 
-func (m *mockPuller) GetResolvedTs() uint64 {
-	return atomic.LoadUint64(&m.resolvedTs)
-}
-
 func (m *mockPuller) Output() <-chan *model.RawKVEntry {
 	return m.outCh
 }
@@ -125,8 +124,6 @@ func newMockDDLJobPuller(
 		outputCh: make(
 			chan *model.DDLJobEntry,
 			defaultPullerOutputChanSize),
-		metricDiscardedDDLCounter: discardedDDLCounter.
-			WithLabelValues("ddl", "test"),
 	}
 	var helper *entry.SchemaTestHelper
 	if needSchemaStorage {
@@ -440,7 +437,7 @@ func TestHandleJob(t *testing.T) {
 		job = helper.DDL2Job("alter table test1.t1 add column c1 int")
 		skip, err = ddlJobPullerImpl.handleJob(job)
 		require.NoError(t, err)
-		require.False(t, skip)
+		require.True(t, skip)
 
 		job = helper.DDL2Job("create table test1.testStartTs(id int)")
 		skip, err = ddlJobPullerImpl.handleJob(job)
@@ -451,7 +448,7 @@ func TestHandleJob(t *testing.T) {
 		job.StartTS = 1
 		skip, err = ddlJobPullerImpl.handleJob(job)
 		require.NoError(t, err)
-		require.False(t, skip)
+		require.True(t, skip)
 
 		job = helper.DDL2Job("create table test1.t2(id int)")
 		skip, err = ddlJobPullerImpl.handleJob(job)

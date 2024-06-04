@@ -24,7 +24,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/p2p"
-	"github.com/pingcap/tiflow/pkg/pdutil"
+	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -71,11 +71,11 @@ func NewAgent(
 	executor TableExecutor,
 	changefeedID model.ChangeFeedID,
 	changefeedEpoch uint64,
+	cfg *config.SchedulerConfig,
 ) (Agent, error) {
 	return v3agent.NewAgent(
 		ctx, captureID, liveness, changefeedID,
-		messageServer, messageRouter, etcdClient, executor, changefeedEpoch,
-	)
+		messageServer, messageRouter, etcdClient, executor, changefeedEpoch, cfg)
 }
 
 // NewScheduler returns two-phase scheduler.
@@ -87,13 +87,13 @@ func NewScheduler(
 	messageRouter p2p.MessageRouter,
 	ownerRevision int64,
 	changefeedEpoch uint64,
+	up *upstream.Upstream,
 	cfg *config.SchedulerConfig,
-	pdClock pdutil.Clock,
 	redoMetaManager redo.MetaManager,
 ) (Scheduler, error) {
 	return v3.NewCoordinator(
-		ctx, captureID, changeFeedID,
-		messageServer, messageRouter, ownerRevision, changefeedEpoch, cfg, pdClock, redoMetaManager)
+		ctx, captureID, changeFeedID, messageServer, messageRouter, ownerRevision,
+		changefeedEpoch, up, cfg, redoMetaManager)
 }
 
 // InitMetrics registers all metrics used in scheduler

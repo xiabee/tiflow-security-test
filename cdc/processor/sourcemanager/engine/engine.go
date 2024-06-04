@@ -15,6 +15,7 @@ package engine
 
 import (
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 )
 
 // SortEngine is a storage engine to store and sort CDC events.
@@ -26,26 +27,26 @@ type SortEngine interface {
 	IsTableBased() bool
 
 	// AddTable adds the table into the engine.
-	AddTable(tableID model.TableID)
+	AddTable(span tablepb.Span, startTs model.Ts)
 
 	// RemoveTable removes the table from the engine.
-	RemoveTable(tableID model.TableID)
+	RemoveTable(span tablepb.Span)
 
 	// Add adds the given events into the sort engine.
 	//
 	// NOTE: it's an asynchronous interface. To get the notification of when
 	// events are available for fetching, OnResolve is what you want.
-	Add(tableID model.TableID, events ...*model.PolymorphicEvent)
+	Add(span tablepb.Span, events ...*model.PolymorphicEvent)
 
 	// OnResolve pushes action into SortEngine's hook list, which
 	// will be called after any events are resolved.
-	OnResolve(action func(model.TableID, model.Ts))
+	OnResolve(action func(tablepb.Span, model.Ts))
 
 	// FetchByTable creates an iterator to fetch events from the given table.
 	// lowerBound is inclusive and only resolved events can be retrieved.
 	//
 	// NOTE: FetchByTable is always available even if IsTableBased returns false.
-	FetchByTable(tableID model.TableID, lowerBound, upperBound Position) EventIterator
+	FetchByTable(span tablepb.Span, lowerBound, upperBound Position) EventIterator
 
 	// FetchAllTables creates an iterator to fetch events from all tables.
 	// lowerBound is inclusive and only resolved events can be retrieved.
@@ -58,7 +59,7 @@ type SortEngine interface {
 	// The SortEngine instance can GC them later.
 	//
 	// NOTE: CleanByTable is always available even if IsTableBased returns false.
-	CleanByTable(tableID model.TableID, upperBound Position) error
+	CleanByTable(span tablepb.Span, upperBound Position) error
 
 	// CleanAllTables tells the engine events of all tables in the given range
 	// (unlimited, upperBound] are committed and not necessary any more.
@@ -68,7 +69,7 @@ type SortEngine interface {
 	CleanAllTables(upperBound Position) error
 
 	// GetStatsByTable gets the statistics of the given table.
-	GetStatsByTable(tableID model.TableID) TableStats
+	GetStatsByTable(span tablepb.Span) TableStats
 
 	// Close closes the engine. All data written by this instance can be deleted.
 	//
@@ -98,6 +99,15 @@ type EventIterator interface {
 type Position struct {
 	StartTs  model.Ts
 	CommitTs model.Ts
+}
+
+// GenCommitFence generates a Position which is a commit fence.
+// CommitFence indicates all transactions with same CommitTs are less than the position.
+func GenCommitFence(commitTs model.Ts) Position {
+	return Position{
+		StartTs:  commitTs - 1,
+		CommitTs: commitTs,
+	}
 }
 
 // Valid indicates whether the position is valid or not.

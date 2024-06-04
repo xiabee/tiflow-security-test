@@ -11,9 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build intest
-// +build intest
-
 package owner
 
 import (
@@ -117,7 +114,7 @@ func TestAllTables(t *testing.T) {
 	require.Equal(t, tableName, model.TableName{
 		Schema:  "test",
 		Table:   "t1",
-		TableID: 80,
+		TableID: 88,
 	})
 	// add ineligible table
 	job = helper.DDL2Job("create table test.t2(id int)")
@@ -129,7 +126,7 @@ func TestAllTables(t *testing.T) {
 	require.Equal(t, tableName, model.TableName{
 		Schema:  "test",
 		Table:   "t1",
-		TableID: 80,
+		TableID: 88,
 	})
 }
 

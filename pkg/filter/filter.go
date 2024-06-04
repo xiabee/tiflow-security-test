@@ -20,13 +20,6 @@ import (
 	"github.com/pingcap/tiflow/pkg/config"
 )
 
-const (
-	// SyncPointTable is the tale name use to write ts-map when sync-point is enable.
-	SyncPointTable = "syncpoint_v1"
-	// TiCDCSystemSchema is the schema only use by TiCDC.
-	TiCDCSystemSchema = "tidb_cdc"
-)
-
 // allowDDLList is a list of DDL types that can be applied to cdc's schema storage.
 // It's a white list.
 var allowDDLList = []timodel.ActionType{
@@ -61,21 +54,20 @@ var allowDDLList = []timodel.ActionType{
 	timodel.ActionAlterIndexVisibility,
 	timodel.ActionMultiSchemaChange,
 	timodel.ActionExchangeTablePartition,
+	timodel.ActionReorganizePartition,
+	timodel.ActionAlterTTLInfo,
+	timodel.ActionAlterTTLRemove,
 }
 
 // Filter are safe for concurrent use.
 // TODO: find a better way to abstract this interface.
 type Filter interface {
-	// ShouldIgnoreDMLEvent returns true if the DML event should be ignored.
+	// ShouldIgnoreDMLEvent returns true and nil if the DML event should be ignored.
 	ShouldIgnoreDMLEvent(dml *model.RowChangedEvent, rawRow model.RowChangedDatums, tableInfo *model.TableInfo) (bool, error)
-	// ShouldIgnoreDDLEvent returns true if the DDL event should be ignored.
-	// If a ddl is ignored, it will be applied to cdc's schema storage,
-	// but will not be sent to downstream.
-	ShouldIgnoreDDLEvent(ddl *model.DDLEvent) (bool, error)
 	// ShouldDiscardDDL returns true if this DDL should be discarded.
 	// If a ddl is discarded, it will neither be applied to cdc's schema storage
 	// nor sent to downstream.
-	ShouldDiscardDDL(ddlType timodel.ActionType, schema, table string) bool
+	ShouldDiscardDDL(startTs uint64, ddlType timodel.ActionType, schema, table, query string) (bool, error)
 	// ShouldIgnoreTable returns true if the table should be ignored.
 	ShouldIgnoreTable(schema, table string) bool
 	// ShouldIgnoreSchema returns true if the schema should be ignored.
@@ -108,11 +100,11 @@ func NewFilter(cfg *config.ReplicaConfig, tz string) (Filter, error) {
 		f = tfilter.CaseInsensitive(f)
 	}
 
-	dmlExprFilter, err := newExprFilter(tz, cfg.Filter, cfg.SQLMode)
+	dmlExprFilter, err := newExprFilter(tz, cfg.Filter)
 	if err != nil {
 		return nil, err
 	}
-	sqlEventFilter, err := newSQLEventFilter(cfg.Filter, cfg.SQLMode)
+	sqlEventFilter, err := newSQLEventFilter(cfg.Filter)
 	if err != nil {
 		return nil, err
 	}
@@ -152,41 +144,31 @@ func (f *filter) ShouldIgnoreDMLEvent(
 	return f.dmlExprFilter.shouldSkipDML(dml, rawRow, ti)
 }
 
-// ShouldDiscardDDL checks if a DDL should be discarded by conditions below:
-// 0. By allow list.
-// 1. By schema name.
-// 2. By table name.
-func (f *filter) ShouldDiscardDDL(ddlType timodel.ActionType, schema, table string) bool {
-	if !isAllowedDDL(ddlType) {
-		return true
+// ShouldDiscardDDL returns true if this DDL should be discarded.
+// If a ddl is discarded, it will not be applied to cdc's schema storage
+// and sent to downstream.
+func (f *filter) ShouldDiscardDDL(startTs uint64, ddlType timodel.ActionType, schema, table, query string) (discard bool, err error) {
+	discard = !isAllowedDDL(ddlType)
+	if discard {
+		return
+	}
+
+	discard = f.shouldIgnoreStartTs(startTs)
+	if discard {
+		return
 	}
 
 	if IsSchemaDDL(ddlType) {
-		return f.ShouldIgnoreSchema(schema)
+		discard = !f.tableFilter.MatchSchema(schema)
+	} else {
+		discard = f.ShouldIgnoreTable(schema, table)
 	}
-	return f.ShouldIgnoreTable(schema, table)
-}
 
-// ShouldIgnoreDDLEvent checks if a DDL event should be ignore by conditions below:
-// 0. By startTs.
-// 1. By ddl type.
-// 2. By ddl query.
-//
-// If a ddl is ignored, it will be applied to cdc's schema storage,
-// but will not be sent to downstream.
-// Note that a ignored ddl is different from a discarded ddl. For example, suppose
-// we have a changefeed-test with the following config:
-//   - table filter: rules = ['test.*']
-//   - event-filters: matcher = ["test.worker"] ignore-event = ["create table"]
-//
-// Then, for the following DDLs:
-//  1. `CREATE TABLE test.worker` will be ignored, but the table will be replicated by changefeed-test.
-//  2. `CREATE TABLE other.worker` will be discarded, and the table will not be replicated by changefeed-test.
-func (f *filter) ShouldIgnoreDDLEvent(ddl *model.DDLEvent) (bool, error) {
-	if f.shouldIgnoreStartTs(ddl.StartTs) {
-		return true, nil
+	if discard {
+		return
 	}
-	return f.sqlEventFilter.shouldSkipDDL(ddl)
+
+	return f.sqlEventFilter.shouldSkipDDL(ddlType, schema, table, query)
 }
 
 // ShouldIgnoreTable returns true if the specified table should be ignored by this changefeed.

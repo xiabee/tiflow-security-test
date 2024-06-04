@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"testing"
 
@@ -37,6 +38,8 @@ import (
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/tests/v3/integration"
 )
 
 var (
@@ -55,7 +58,11 @@ func TestCreateChangefeed(t *testing.T) {
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
 	apiV2 := NewOpenAPIV2ForTest(cp, helpers)
 	router := newRouter(apiV2)
-	o := mock_owner.NewMockOwner(gomock.NewController(t))
+	integration.BeforeTestExternal(t)
+	testEtcdCluster := integration.NewClusterV3(
+		t, &integration.ClusterConfig{Size: 2},
+	)
+	defer testEtcdCluster.Terminate(t)
 
 	mockUpManager := upstream.NewManager4Test(pdClient)
 	statusProvider := &mockStatusProvider{}
@@ -67,8 +74,6 @@ func TestCreateChangefeed(t *testing.T) {
 	cp.EXPECT().GetUpstreamManager().Return(mockUpManager, nil).AnyTimes()
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
 	cp.EXPECT().IsOwner().Return(true).AnyTimes()
-	cp.EXPECT().GetOwner().Return(o, nil).AnyTimes()
-	o.EXPECT().ValidateChangefeed(gomock.Any()).Return(nil).AnyTimes()
 
 	// case 1: json format mismatches with the spec.
 	errConfig := struct {
@@ -165,6 +170,9 @@ func TestCreateChangefeed(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 
 	// case 5:
+	helpers.EXPECT().
+		getEtcdClient(gomock.Any(), gomock.Any()).
+		Return(testEtcdCluster.RandClient(), nil)
 	helpers.EXPECT().getVerfiedTables(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil, nil, nil).
 		AnyTimes()
@@ -187,7 +195,7 @@ func TestCreateChangefeed(t *testing.T) {
 			}, nil
 		}).AnyTimes()
 	etcdClient.EXPECT().
-		CreateChangefeedInfo(gomock.Any(), gomock.Any(), gomock.Any()).
+		CreateChangefeedInfo(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(cerrors.ErrPDEtcdAPIError).Times(1)
 
 	cfConfig.SinkURI = mysqlSink
@@ -204,8 +212,11 @@ func TestCreateChangefeed(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 
 	// case 6: success
+	helpers.EXPECT().
+		getEtcdClient(gomock.Any(), gomock.Any()).
+		Return(testEtcdCluster.RandClient(), nil)
 	etcdClient.EXPECT().
-		CreateChangefeedInfo(gomock.Any(), gomock.Any(), gomock.Any()).
+		CreateChangefeedInfo(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).
 		AnyTimes()
 	w = httptest.NewRecorder()
@@ -322,13 +333,12 @@ func TestUpdateChangefeed(t *testing.T) {
 	mockCapture.EXPECT().IsOwner().Return(true).AnyTimes()
 
 	// case 1 invalid id
-	invalidID := "_Invalid_"
+	invalidID := "Invalid_#"
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequestWithContext(context.Background(), update.method,
 		fmt.Sprintf(update.url, invalidID), nil)
 	router.ServeHTTP(w, req)
 	respErr := model.HTTPError{}
-	t.Logf("body: %s", w.Body.String())
 	err := json.NewDecoder(w.Body).Decode(&respErr)
 	require.Nil(t, err)
 	require.Contains(t, respErr.Code, "ErrAPIInvalidParam")
@@ -454,7 +464,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		Return(&model.ChangeFeedInfo{}, &model.UpstreamInfo{}, nil).
 		Times(1)
 	etcdClient.EXPECT().
-		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
+		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(cerrors.ErrEtcdAPIError).Times(1)
 
 	w = httptest.NewRecorder()
@@ -474,7 +484,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		Times(1)
 	mockCapture.EXPECT().GetUpstreamManager().Return(upstream.NewManager4Test(&mockPDClient{}), nil).AnyTimes()
 	etcdClient.EXPECT().
-		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
+		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).Times(1)
 
 	w = httptest.NewRecorder()
@@ -491,7 +501,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		Times(1)
 	mockCapture.EXPECT().GetUpstreamManager().Return(upstream.NewManager4Test(&mockPDClient{}), nil).AnyTimes()
 	etcdClient.EXPECT().
-		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
+		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).Times(1)
 
 	w = httptest.NewRecorder()
@@ -528,6 +538,9 @@ func TestListChangeFeeds(t *testing.T) {
 			},
 			model.DefaultChangeFeedID("cf2"): {
 				State: model.StateWarning,
+				Warning: &model.RunningError{
+					Code: "warning",
+				},
 			},
 			model.DefaultChangeFeedID("cf3"): {
 				State: model.StateStopped,
@@ -566,15 +579,11 @@ func TestListChangeFeeds(t *testing.T) {
 	require.Equal(t, 5, resp.Total)
 	// changefeed info must be sorted by ID
 	require.Equal(t, true, sorted(resp.Items))
-	warningChangefeedCount := 0
-	for _, cf := range resp.Items {
-		if cf.FeedState == model.StateWarning {
-			warningChangefeedCount++
-		}
-		require.NotEqual(t, model.StatePending, cf.FeedState)
-	}
-	require.Equal(t, 2, warningChangefeedCount)
-	// case 2: only list changefeed with state 'normal', 'stopped' and 'failed'
+	// warning changefeed must have warning error message
+	require.Equal(t, model.StateWarning, resp.Items[1].FeedState)
+	require.Contains(t, resp.Items[1].RunningError.Code, "warning")
+
+	// case 2: only list changefeed with state 'normal', 'stopped' and 'failed', "pending", "warning"
 	metaInfo2 := testCase{
 		url:    "/api/v2/changefeeds",
 		method: "GET",
@@ -690,9 +699,7 @@ func TestResumeChangefeed(t *testing.T) {
 	pdClient := &mockPDClient{}
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
 	mockUpManager := upstream.NewManager4Test(pdClient)
-	statusProvider := &mockStatusProvider{
-		changefeedStatus: &model.ChangeFeedStatusForAPI{},
-	}
+	statusProvider := &mockStatusProvider{}
 
 	etcdClient.EXPECT().
 		GetEnsureGCServiceID(gomock.Any()).
@@ -944,209 +951,30 @@ func TestPauseChangefeed(t *testing.T) {
 	require.Equal(t, "{}", w.Body.String())
 }
 
-func TestChangefeedSynced(t *testing.T) {
-	syncedInfo := testCase{url: "/api/v2/changefeeds/%s/synced?namespace=abc", method: "GET"}
-	helpers := NewMockAPIV2Helpers(gomock.NewController(t))
-	cp := mock_capture.NewMockCapture(gomock.NewController(t))
-	owner := mock_owner.NewMockOwner(gomock.NewController(t))
-	apiV2 := NewOpenAPIV2ForTest(cp, helpers)
-	router := newRouter(apiV2)
+func TestHasRunningImport(t *testing.T) {
+	integration.BeforeTestExternal(t)
+	testEtcdCluster := integration.NewClusterV3(
+		t, &integration.ClusterConfig{Size: 1},
+	)
+	defer testEtcdCluster.Terminate(t)
 
-	statusProvider := &mockStatusProvider{}
+	ctx := context.Background()
+	client := testEtcdCluster.RandClient()
+	hasImport := hasRunningImport(ctx, client)
+	require.NoError(t, hasImport)
 
-	cp.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
-	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	cp.EXPECT().GetOwner().Return(owner, nil).AnyTimes()
-	cp.EXPECT().IsOwner().Return(true).AnyTimes()
+	lease, err := client.Lease.Grant(ctx, 3*60)
+	require.NoError(t, err)
 
-	pdClient := &mockPDClient{}
-	mockUpManager := upstream.NewManager4Test(pdClient)
-	cp.EXPECT().GetUpstreamManager().Return(mockUpManager, nil).AnyTimes()
+	_, err = client.KV.Put(
+		ctx, filepath.Join(RegisterImportTaskPrefix, "pitr"),
+		"", clientv3.WithLease(lease.ID),
+	)
+	require.NoError(t, err)
 
-	{
-		// case 1: invalid changefeed id
-		w := httptest.NewRecorder()
-		invalidID := "@^Invalid"
-		req, _ := http.NewRequestWithContext(context.Background(),
-			syncedInfo.method, fmt.Sprintf(syncedInfo.url, invalidID), nil)
-		router.ServeHTTP(w, req)
-		respErr := model.HTTPError{}
-		err := json.NewDecoder(w.Body).Decode(&respErr)
-		require.Nil(t, err)
-		require.Contains(t, respErr.Code, "ErrAPIInvalidParam")
-	}
-
-	{
-		// case 2: not existed changefeed id
-		validID := changeFeedID.ID
-		statusProvider.err = cerrors.ErrChangeFeedNotExists.GenWithStackByArgs(validID)
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequestWithContext(context.Background(), syncedInfo.method,
-			fmt.Sprintf(syncedInfo.url, validID), nil)
-		router.ServeHTTP(w, req)
-		respErr := model.HTTPError{}
-		err := json.NewDecoder(w.Body).Decode(&respErr)
-		require.Nil(t, err)
-		require.Contains(t, respErr.Code, "ErrChangeFeedNotExists")
-		require.Equal(t, http.StatusBadRequest, w.Code)
-	}
-
-	validID := changeFeedID.ID
-	cfInfo := &model.ChangeFeedInfo{
-		ID: validID,
-	}
-	statusProvider.err = nil
-	statusProvider.changefeedInfo = cfInfo
-	{
-		helpers.EXPECT().getPDClient(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, cerrors.ErrAPIGetPDClientFailed).Times(1)
-		// case3: pd is offline，resolvedTs - checkpointTs > 15s
-		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
-			CheckpointTs:     1701153217279 << 18,
-			LastSyncedTs:     1701153217279 << 18,
-			PullerResolvedTs: 1701153247279 << 18,
-		}
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequestWithContext(
-			context.Background(),
-			syncedInfo.method,
-			fmt.Sprintf(syncedInfo.url, validID),
-			nil,
-		)
-		router.ServeHTTP(w, req)
-		require.Equal(t, http.StatusOK, w.Code)
-		resp := SyncedStatus{}
-		err := json.NewDecoder(w.Body).Decode(&resp)
-		require.Nil(t, err)
-		require.Equal(t, false, resp.Synced)
-		require.Equal(t, "[CDC:ErrAPIGetPDClientFailed]failed to get PDClient to connect PD, "+
-			"please recheck. Besides the data is not finish syncing", resp.Info)
-	}
-
-	{
-		helpers.EXPECT().getPDClient(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, cerrors.ErrAPIGetPDClientFailed).Times(1)
-		// case4: pd is offline，resolvedTs - checkpointTs < 15s
-		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
-			CheckpointTs:     1701153217279 << 18,
-			LastSyncedTs:     1701153217279 << 18,
-			PullerResolvedTs: 1701153217479 << 18,
-		}
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequestWithContext(
-			context.Background(),
-			syncedInfo.method,
-			fmt.Sprintf(syncedInfo.url, validID),
-			nil,
-		)
-		router.ServeHTTP(w, req)
-		require.Equal(t, http.StatusOK, w.Code)
-		resp := SyncedStatus{}
-		err := json.NewDecoder(w.Body).Decode(&resp)
-		require.Nil(t, err)
-		require.Equal(t, false, resp.Synced)
-		require.Equal(t, "[CDC:ErrAPIGetPDClientFailed]failed to get PDClient to connect PD, please recheck. "+
-			"You should check the pd status first. If pd status is normal, means we don't finish sync data. "+
-			"If pd is offline, please check whether we satisfy the condition that "+
-			"the time difference from lastSyncedTs to the current time from the time zone of pd is greater than 300 secs. "+
-			"If it's satisfied, means the data syncing is totally finished", resp.Info)
-	}
-
-	helpers.EXPECT().getPDClient(gomock.Any(), gomock.Any(), gomock.Any()).Return(pdClient, nil).AnyTimes()
-	pdClient.logicTime = 1000
-	pdClient.timestamp = 1701153217279
-	{
-		// case5: pdTs - lastSyncedTs > 5min, pdTs - checkpointTs < 15s
-		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
-			CheckpointTs:     1701153217209 << 18,
-			LastSyncedTs:     1701152217279 << 18,
-			PullerResolvedTs: 1701153217229 << 18,
-		}
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequestWithContext(
-			context.Background(),
-			syncedInfo.method,
-			fmt.Sprintf(syncedInfo.url, validID),
-			nil,
-		)
-		router.ServeHTTP(w, req)
-		require.Equal(t, http.StatusOK, w.Code)
-		resp := SyncedStatus{}
-		err := json.NewDecoder(w.Body).Decode(&resp)
-		require.Nil(t, err)
-		require.Equal(t, true, resp.Synced)
-		require.Equal(t, "Data syncing is finished", resp.Info)
-	}
-
-	{
-		// case6: pdTs - lastSyncedTs > 5min, pdTs - checkpointTs > 15s, resolvedTs - checkpointTs < 15s
-		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
-			CheckpointTs:     1701153201279 << 18,
-			LastSyncedTs:     1701152217279 << 18,
-			PullerResolvedTs: 1701153201379 << 18,
-		}
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequestWithContext(
-			context.Background(),
-			syncedInfo.method,
-			fmt.Sprintf(syncedInfo.url, validID),
-			nil,
-		)
-		router.ServeHTTP(w, req)
-		require.Equal(t, http.StatusOK, w.Code)
-		resp := SyncedStatus{}
-		err := json.NewDecoder(w.Body).Decode(&resp)
-		require.Nil(t, err)
-		require.Equal(t, false, resp.Synced)
-		require.Equal(t, "Please check whether PD is online and TiKV Regions are all available. "+
-			"If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. "+
-			"To check whether TiKV regions are all available, "+
-			"you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. "+
-			"If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. "+
-			"Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait", resp.Info)
-	}
-
-	{
-		// case7: pdTs - lastSyncedTs > 5min, pdTs - checkpointTs > 15s, resolvedTs - checkpointTs > 15s
-		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
-			CheckpointTs:     1701153201279 << 18,
-			LastSyncedTs:     1701152207279 << 18,
-			PullerResolvedTs: 1701153218279 << 18,
-		}
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequestWithContext(
-			context.Background(),
-			syncedInfo.method,
-			fmt.Sprintf(syncedInfo.url, validID),
-			nil,
-		)
-		router.ServeHTTP(w, req)
-		require.Equal(t, http.StatusOK, w.Code)
-		resp := SyncedStatus{}
-		err := json.NewDecoder(w.Body).Decode(&resp)
-		require.Nil(t, err)
-		require.Equal(t, false, resp.Synced)
-		require.Equal(t, "The data syncing is not finished, please wait", resp.Info)
-	}
-
-	{
-		// case8: pdTs - lastSyncedTs < 5min
-		statusProvider.changeFeedSyncedStatus = &model.ChangeFeedSyncedStatusForAPI{
-			CheckpointTs:     1701153217279 << 18,
-			LastSyncedTs:     1701153213279 << 18,
-			PullerResolvedTs: 1701153217279 << 18,
-		}
-		w := httptest.NewRecorder()
-		req, _ := http.NewRequestWithContext(
-			context.Background(),
-			syncedInfo.method,
-			fmt.Sprintf(syncedInfo.url, validID),
-			nil,
-		)
-		router.ServeHTTP(w, req)
-		require.Equal(t, http.StatusOK, w.Code)
-		resp := SyncedStatus{}
-		err := json.NewDecoder(w.Body).Decode(&resp)
-		require.Nil(t, err)
-		require.Equal(t, false, resp.Synced)
-		require.Equal(t, "The data syncing is not finished, please wait", resp.Info)
-	}
+	hasImport = hasRunningImport(ctx, client)
+	require.NotNil(t, hasImport)
+	require.Contains(
+		t, hasImport.Error(), "There are lightning/restore tasks running",
+	)
 }

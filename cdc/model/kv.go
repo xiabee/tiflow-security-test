@@ -18,7 +18,7 @@ package model
 import (
 	"fmt"
 
-	"github.com/pingcap/tiflow/pkg/regionspan"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 )
 
 // OpType for the kv, delete or put
@@ -73,7 +73,7 @@ func (rs *ResolvedSpans) String() string {
 //
 //msgp:ignore RegionComparableSpan
 type RegionComparableSpan struct {
-	Span   regionspan.ComparableSpan
+	Span   tablepb.Span
 	Region uint64
 }
 
@@ -91,11 +91,6 @@ type RawKVEntry struct {
 
 	// Additional debug info
 	RegionID uint64 `msg:"region_id"`
-}
-
-// IsUpdate checks if the event is an update event.
-func (v *RawKVEntry) IsUpdate() bool {
-	return v.OpType == OpTypePut && v.OldValue != nil && v.Value != nil
 }
 
 func (v *RawKVEntry) String() string {

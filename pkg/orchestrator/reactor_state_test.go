@@ -25,6 +25,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/orchestrator/util"
+	putil "github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -71,10 +72,6 @@ func TestChangefeedStateUpdate(t *testing.T) {
             "dispatchers": null,
             "protocol": "open-protocol",
             "advance-timeout-in-sec": 150
-        },
-        "consistent": {
-            "level": "normal",
-            "storage": "local"
         }
     },
     "state": "normal",
@@ -124,15 +121,15 @@ func TestChangefeedStateUpdate(t *testing.T) {
 						CheckGCSafePoint: true,
 						Filter:           &config.FilterConfig{Rules: []string{"*.*"}},
 						Mounter:          &config.MounterConfig{WorkerNum: 16},
+						Scheduler:        config.GetDefaultReplicaConfig().Scheduler,
 						Sink: &config.SinkConfig{
 							Protocol:            "open-protocol",
-							AdvanceTimeoutInSec: config.DefaultAdvanceTimeoutInSec,
+							AdvanceTimeoutInSec: putil.AddressOf(uint(150)),
 						},
-						Consistent: &config.ConsistentConfig{Level: "normal", Storage: "local"},
+						Consistent: config.GetDefaultReplicaConfig().Consistent,
+						Integrity:  config.GetDefaultReplicaConfig().Integrity,
 						ChangefeedErrorStuckDuration: config.
 							GetDefaultReplicaConfig().ChangefeedErrorStuckDuration,
-						SQLMode:      config.GetDefaultReplicaConfig().SQLMode,
-						SyncedStatus: config.GetDefaultReplicaConfig().SyncedStatus,
 					},
 				},
 				Status: &model.ChangeFeedStatus{CheckpointTs: 421980719742451713},
@@ -181,13 +178,13 @@ func TestChangefeedStateUpdate(t *testing.T) {
 						Mounter:          &config.MounterConfig{WorkerNum: 16},
 						Sink: &config.SinkConfig{
 							Protocol:            "open-protocol",
-							AdvanceTimeoutInSec: config.DefaultAdvanceTimeoutInSec,
+							AdvanceTimeoutInSec: putil.AddressOf(uint(150)),
 						},
-						Consistent: &config.ConsistentConfig{Level: "normal", Storage: "local"},
+						Consistent: config.GetDefaultReplicaConfig().Consistent,
+						Scheduler:  config.GetDefaultReplicaConfig().Scheduler,
+						Integrity:  config.GetDefaultReplicaConfig().Integrity,
 						ChangefeedErrorStuckDuration: config.
 							GetDefaultReplicaConfig().ChangefeedErrorStuckDuration,
-						SQLMode:      config.GetDefaultReplicaConfig().SQLMode,
-						SyncedStatus: config.GetDefaultReplicaConfig().SyncedStatus,
 					},
 				},
 				Status: &model.ChangeFeedStatus{CheckpointTs: 421980719742451713},
@@ -241,13 +238,13 @@ func TestChangefeedStateUpdate(t *testing.T) {
 						Mounter:          &config.MounterConfig{WorkerNum: 16},
 						Sink: &config.SinkConfig{
 							Protocol:            "open-protocol",
-							AdvanceTimeoutInSec: config.DefaultAdvanceTimeoutInSec,
+							AdvanceTimeoutInSec: putil.AddressOf(uint(150)),
 						},
-						Consistent: &config.ConsistentConfig{Level: "normal", Storage: "local"},
+						Consistent: config.GetDefaultReplicaConfig().Consistent,
+						Scheduler:  config.GetDefaultReplicaConfig().Scheduler,
+						Integrity:  config.GetDefaultReplicaConfig().Integrity,
 						ChangefeedErrorStuckDuration: config.
 							GetDefaultReplicaConfig().ChangefeedErrorStuckDuration,
-						SQLMode:      config.GetDefaultReplicaConfig().SQLMode,
-						SyncedStatus: config.GetDefaultReplicaConfig().SyncedStatus,
 					},
 				},
 				Status: &model.ChangeFeedStatus{CheckpointTs: 421980719742451713},
@@ -332,14 +329,13 @@ func TestPatchInfo(t *testing.T) {
 		SinkURI: "123",
 		Engine:  model.SortUnified,
 		Config: &config.ReplicaConfig{
-			Filter:     defaultConfig.Filter,
-			Mounter:    defaultConfig.Mounter,
-			Sink:       defaultConfig.Sink,
-			Consistent: defaultConfig.Consistent,
-			ChangefeedErrorStuckDuration: config.
-				GetDefaultReplicaConfig().ChangefeedErrorStuckDuration,
-			SQLMode:      config.GetDefaultReplicaConfig().SQLMode,
-			SyncedStatus: config.GetDefaultReplicaConfig().SyncedStatus,
+			Filter:                       defaultConfig.Filter,
+			Mounter:                      defaultConfig.Mounter,
+			Sink:                         defaultConfig.Sink,
+			Consistent:                   defaultConfig.Consistent,
+			Scheduler:                    defaultConfig.Scheduler,
+			Integrity:                    defaultConfig.Integrity,
+			ChangefeedErrorStuckDuration: defaultConfig.ChangefeedErrorStuckDuration,
 		},
 	})
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
@@ -352,14 +348,13 @@ func TestPatchInfo(t *testing.T) {
 		StartTs: 6,
 		Engine:  model.SortUnified,
 		Config: &config.ReplicaConfig{
-			Filter:     defaultConfig.Filter,
-			Mounter:    defaultConfig.Mounter,
-			Sink:       defaultConfig.Sink,
-			Consistent: defaultConfig.Consistent,
-			ChangefeedErrorStuckDuration: config.
-				GetDefaultReplicaConfig().ChangefeedErrorStuckDuration,
-			SQLMode:      config.GetDefaultReplicaConfig().SQLMode,
-			SyncedStatus: config.GetDefaultReplicaConfig().SyncedStatus,
+			Filter:                       defaultConfig.Filter,
+			Mounter:                      defaultConfig.Mounter,
+			Sink:                         defaultConfig.Sink,
+			Consistent:                   defaultConfig.Consistent,
+			Scheduler:                    defaultConfig.Scheduler,
+			Integrity:                    defaultConfig.Integrity,
+			ChangefeedErrorStuckDuration: defaultConfig.ChangefeedErrorStuckDuration,
 		},
 	})
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {

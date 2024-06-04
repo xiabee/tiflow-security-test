@@ -23,7 +23,9 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/integrity"
 	"github.com/pingcap/tiflow/pkg/security"
+	"github.com/pingcap/tiflow/pkg/util"
 )
 
 // EmptyResponse return empty {} to http client
@@ -98,15 +100,6 @@ type ChangefeedCommonInfo struct {
 	CheckpointTSO  uint64              `json:"checkpoint_tso"`
 	CheckpointTime model.JSONTime      `json:"checkpoint_time"`
 	RunningError   *model.RunningError `json:"error"`
-}
-
-// SyncedStatusConfig represents synced check interval config for a changefeed
-type SyncedStatusConfig struct {
-	// The minimum interval between the latest synced ts and now required to reach synced state
-	SyncedCheckInterval int64 `json:"synced_check_interval"`
-	// The maximum interval between latest checkpoint ts and now or
-	// between latest sink's checkpoint ts and puller's checkpoint ts required to reach synced state
-	CheckpointInterval int64 `json:"checkpoint_interval"`
 }
 
 // MarshalJSON marshal changefeed common info to json
@@ -189,20 +182,18 @@ type ReplicaConfig struct {
 	IgnoreIneligibleTable bool   `json:"ignore_ineligible_table"`
 	CheckGCSafePoint      bool   `json:"check_gc_safe_point"`
 	EnableSyncPoint       bool   `json:"enable_sync_point"`
-	EnableTableMonitor    bool   `json:"enable_table_monitor,omitempty"`
 	BDRMode               bool   `json:"bdr_mode"`
 
 	SyncPointInterval  *JSONDuration `json:"sync_point_interval" swaggertype:"string"`
 	SyncPointRetention *JSONDuration `json:"sync_point_retention" swaggertype:"string"`
 
-	Filter     *FilterConfig     `json:"filter"`
-	Mounter    *MounterConfig    `json:"mounter"`
-	Sink       *SinkConfig       `json:"sink"`
-	Consistent *ConsistentConfig `json:"consistent"`
-
-	ChangefeedErrorStuckDuration *JSONDuration       `json:"changefeed_error_stuck_duration,omitempty" swaggertype:"string"`
-	SQLMode                      string              `json:"sql_mode,omitempty"`
-	SyncedStatus                 *SyncedStatusConfig `json:"synced_status,omitempty"`
+	Filter                       *FilterConfig              `json:"filter"`
+	Mounter                      *MounterConfig             `json:"mounter"`
+	Sink                         *SinkConfig                `json:"sink"`
+	Consistent                   *ConsistentConfig          `json:"consistent,omitempty"`
+	Scheduler                    *ChangefeedSchedulerConfig `json:"scheduler"`
+	Integrity                    *IntegrityConfig           `json:"integrity"`
+	ChangefeedErrorStuckDuration *JSONDuration              `json:"changefeed_error_stuck_duration,omitempty" swaggertype:"string"`
 }
 
 // ToInternalReplicaConfig coverts *v2.ReplicaConfig into *config.ReplicaConfig
@@ -220,18 +211,12 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 	res.ForceReplicate = c.ForceReplicate
 	res.CheckGCSafePoint = c.CheckGCSafePoint
 	res.EnableSyncPoint = c.EnableSyncPoint
-	res.EnableTableMonitor = c.EnableTableMonitor
-	res.SQLMode = c.SQLMode
 	if c.SyncPointInterval != nil {
 		res.SyncPointInterval = c.SyncPointInterval.duration
 	}
 	if c.SyncPointRetention != nil {
 		res.SyncPointRetention = c.SyncPointRetention.duration
 	}
-	if c.ChangefeedErrorStuckDuration != nil {
-		res.ChangefeedErrorStuckDuration = c.ChangefeedErrorStuckDuration.duration
-	}
-
 	res.BDRMode = c.BDRMode
 
 	if c.Filter != nil {
@@ -275,22 +260,11 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 	}
 	if c.Consistent != nil {
 		res.Consistent = &config.ConsistentConfig{
-			Level:                 c.Consistent.Level,
-			MaxLogSize:            c.Consistent.MaxLogSize,
-			FlushIntervalInMs:     c.Consistent.FlushIntervalInMs,
-			MetaFlushIntervalInMs: c.Consistent.MetaFlushIntervalInMs,
-			EncodingWorkerNum:     c.Consistent.EncodingWorkerNum,
-			FlushWorkerNum:        c.Consistent.FlushWorkerNum,
-			Storage:               c.Consistent.Storage,
-			UseFileBackend:        c.Consistent.UseFileBackend,
-			Compression:           c.Consistent.Compression,
-			FlushConcurrency:      c.Consistent.FlushConcurrency,
-		}
-		if c.Consistent.MemoryUsage != nil {
-			res.Consistent.MemoryUsage = &config.ConsistentMemoryUsage{
-				MemoryQuotaPercentage: c.Consistent.MemoryUsage.MemoryQuotaPercentage,
-				EventCachePercentage:  c.Consistent.MemoryUsage.EventCachePercentage,
-			}
+			Level:             c.Consistent.Level,
+			MaxLogSize:        c.Consistent.MaxLogSize,
+			FlushIntervalInMs: c.Consistent.FlushIntervalInMs,
+			Storage:           c.Consistent.Storage,
+			UseFileBackend:    c.Consistent.UseFileBackend,
 		}
 	}
 	if c.Sink != nil {
@@ -320,6 +294,94 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 				BinaryEncodingMethod: c.Sink.CSVConfig.BinaryEncodingMethod,
 			}
 		}
+		var kafkaConfig *config.KafkaConfig
+		if c.Sink.KafkaConfig != nil {
+			var codeConfig *config.CodecConfig
+			if c.Sink.KafkaConfig.CodecConfig != nil {
+				oldConfig := c.Sink.KafkaConfig.CodecConfig
+				codeConfig = &config.CodecConfig{
+					EnableTiDBExtension:            oldConfig.EnableTiDBExtension,
+					MaxBatchSize:                   oldConfig.MaxBatchSize,
+					AvroEnableWatermark:            oldConfig.AvroEnableWatermark,
+					AvroDecimalHandlingMode:        oldConfig.AvroDecimalHandlingMode,
+					AvroBigintUnsignedHandlingMode: oldConfig.AvroBigintUnsignedHandlingMode,
+				}
+			}
+
+			var largeMessageHandle *config.LargeMessageHandleConfig
+			if c.Sink.KafkaConfig.LargeMessageHandle != nil {
+				oldConfig := c.Sink.KafkaConfig.LargeMessageHandle
+				largeMessageHandle = &config.LargeMessageHandleConfig{
+					LargeMessageHandleOption: oldConfig.LargeMessageHandleOption,
+				}
+			}
+
+			kafkaConfig = &config.KafkaConfig{
+				PartitionNum:                 c.Sink.KafkaConfig.PartitionNum,
+				ReplicationFactor:            c.Sink.KafkaConfig.ReplicationFactor,
+				KafkaVersion:                 c.Sink.KafkaConfig.KafkaVersion,
+				MaxMessageBytes:              c.Sink.KafkaConfig.MaxMessageBytes,
+				Compression:                  c.Sink.KafkaConfig.Compression,
+				KafkaClientID:                c.Sink.KafkaConfig.KafkaClientID,
+				AutoCreateTopic:              c.Sink.KafkaConfig.AutoCreateTopic,
+				DialTimeout:                  c.Sink.KafkaConfig.DialTimeout,
+				WriteTimeout:                 c.Sink.KafkaConfig.WriteTimeout,
+				ReadTimeout:                  c.Sink.KafkaConfig.ReadTimeout,
+				RequiredAcks:                 c.Sink.KafkaConfig.RequiredAcks,
+				SASLUser:                     c.Sink.KafkaConfig.SASLUser,
+				SASLPassword:                 c.Sink.KafkaConfig.SASLPassword,
+				SASLMechanism:                c.Sink.KafkaConfig.SASLMechanism,
+				SASLGssAPIAuthType:           c.Sink.KafkaConfig.SASLGssAPIAuthType,
+				SASLGssAPIKeytabPath:         c.Sink.KafkaConfig.SASLGssAPIKeytabPath,
+				SASLGssAPIKerberosConfigPath: c.Sink.KafkaConfig.SASLGssAPIKerberosConfigPath,
+				SASLGssAPIServiceName:        c.Sink.KafkaConfig.SASLGssAPIServiceName,
+				SASLGssAPIUser:               c.Sink.KafkaConfig.SASLGssAPIUser,
+				SASLGssAPIPassword:           c.Sink.KafkaConfig.SASLGssAPIPassword,
+				SASLGssAPIRealm:              c.Sink.KafkaConfig.SASLGssAPIRealm,
+				SASLGssAPIDisablePafxfast:    c.Sink.KafkaConfig.SASLGssAPIDisablePafxfast,
+				SASLOAuthClientID:            c.Sink.KafkaConfig.SASLOAuthClientID,
+				SASLOAuthClientSecret:        c.Sink.KafkaConfig.SASLOAuthClientSecret,
+				SASLOAuthTokenURL:            c.Sink.KafkaConfig.SASLOAuthTokenURL,
+				SASLOAuthScopes:              c.Sink.KafkaConfig.SASLOAuthScopes,
+				SASLOAuthGrantType:           c.Sink.KafkaConfig.SASLOAuthGrantType,
+				SASLOAuthAudience:            c.Sink.KafkaConfig.SASLOAuthAudience,
+				EnableTLS:                    c.Sink.KafkaConfig.EnableTLS,
+				CA:                           c.Sink.KafkaConfig.CA,
+				Cert:                         c.Sink.KafkaConfig.Cert,
+				Key:                          c.Sink.KafkaConfig.Key,
+				InsecureSkipVerify:           c.Sink.KafkaConfig.InsecureSkipVerify,
+				CodecConfig:                  codeConfig,
+				LargeMessageHandle:           largeMessageHandle,
+			}
+		}
+		var mysqlConfig *config.MySQLConfig
+		if c.Sink.MySQLConfig != nil {
+			mysqlConfig = &config.MySQLConfig{
+				WorkerCount:                  c.Sink.MySQLConfig.WorkerCount,
+				MaxTxnRow:                    c.Sink.MySQLConfig.MaxTxnRow,
+				MaxMultiUpdateRowSize:        c.Sink.MySQLConfig.MaxMultiUpdateRowSize,
+				MaxMultiUpdateRowCount:       c.Sink.MySQLConfig.MaxMultiUpdateRowCount,
+				TiDBTxnMode:                  c.Sink.MySQLConfig.TiDBTxnMode,
+				SSLCa:                        c.Sink.MySQLConfig.SSLCa,
+				SSLCert:                      c.Sink.MySQLConfig.SSLCert,
+				SSLKey:                       c.Sink.MySQLConfig.SSLKey,
+				TimeZone:                     c.Sink.MySQLConfig.TimeZone,
+				WriteTimeout:                 c.Sink.MySQLConfig.WriteTimeout,
+				ReadTimeout:                  c.Sink.MySQLConfig.ReadTimeout,
+				Timeout:                      c.Sink.MySQLConfig.Timeout,
+				EnableBatchDML:               c.Sink.MySQLConfig.EnableBatchDML,
+				EnableMultiStatement:         c.Sink.MySQLConfig.EnableMultiStatement,
+				EnableCachePreparedStatement: c.Sink.MySQLConfig.EnableCachePreparedStatement,
+			}
+		}
+		var cloudStorageConfig *config.CloudStorageConfig
+		if c.Sink.CloudStorageConfig != nil {
+			cloudStorageConfig = &config.CloudStorageConfig{
+				WorkerCount:   c.Sink.CloudStorageConfig.WorkerCount,
+				FlushInterval: c.Sink.CloudStorageConfig.FlushInterval,
+				FileSize:      c.Sink.CloudStorageConfig.FileSize,
+			}
+		}
 
 		res.Sink = &config.SinkConfig{
 			DispatchRules:            dispatchRules,
@@ -333,40 +395,15 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 			DateSeparator:            c.Sink.DateSeparator,
 			EnablePartitionSeparator: c.Sink.EnablePartitionSeparator,
 			FileIndexWidth:           c.Sink.FileIndexWidth,
-			AdvanceTimeoutInSec:      c.Sink.AdvanceTimeoutInSec,
+			EnableKafkaSinkV2:        c.Sink.EnableKafkaSinkV2,
+			OnlyOutputUpdatedColumns: c.Sink.OnlyOutputUpdatedColumns,
+			KafkaConfig:              kafkaConfig,
+			MySQLConfig:              mysqlConfig,
+			CloudStorageConfig:       cloudStorageConfig,
+			SafeMode:                 c.Sink.SafeMode,
 		}
-
-		if c.Sink.KafkaConfig != nil {
-			var largeMessageHandle *config.LargeMessageHandleConfig
-			if c.Sink.KafkaConfig.LargeMessageHandle != nil {
-				oldConfig := c.Sink.KafkaConfig.LargeMessageHandle
-				largeMessageHandle = &config.LargeMessageHandleConfig{
-					LargeMessageHandleOption: oldConfig.LargeMessageHandleOption,
-				}
-			}
-
-			res.Sink.KafkaConfig = &config.KafkaConfig{
-				SASLMechanism:         c.Sink.KafkaConfig.SASLMechanism,
-				SASLOAuthClientID:     c.Sink.KafkaConfig.SASLOAuthClientID,
-				SASLOAuthClientSecret: c.Sink.KafkaConfig.SASLOAuthClientSecret,
-				SASLOAuthTokenURL:     c.Sink.KafkaConfig.SASLOAuthTokenURL,
-				SASLOAuthScopes:       c.Sink.KafkaConfig.SASLOAuthScopes,
-				SASLOAuthGrantType:    c.Sink.KafkaConfig.SASLOAuthGrantType,
-				SASLOAuthAudience:     c.Sink.KafkaConfig.SASLOAuthAudience,
-				LargeMessageHandle:    largeMessageHandle,
-			}
-		}
-
-		if c.Sink.CloudStorageConfig != nil {
-			res.Sink.CloudStorageConfig = &config.CloudStorageConfig{
-				WorkerCount:         c.Sink.CloudStorageConfig.WorkerCount,
-				FlushInterval:       c.Sink.CloudStorageConfig.FlushInterval,
-				FileSize:            c.Sink.CloudStorageConfig.FileSize,
-				FlushConcurrency:    c.Sink.CloudStorageConfig.FlushConcurrency,
-				OutputColumnID:      c.Sink.CloudStorageConfig.OutputColumnID,
-				FileExpirationDays:  c.Sink.CloudStorageConfig.FileExpirationDays,
-				FileCleanupCronSpec: c.Sink.CloudStorageConfig.FileCleanupCronSpec,
-			}
+		if c.Sink.AdvanceTimeoutInSec != nil {
+			res.Sink.AdvanceTimeoutInSec = util.AddressOf(*c.Sink.AdvanceTimeoutInSec)
 		}
 	}
 	if c.Mounter != nil {
@@ -374,11 +411,21 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 			WorkerNum: c.Mounter.WorkerNum,
 		}
 	}
-	if c.SyncedStatus != nil {
-		res.SyncedStatus = &config.SyncedStatusConfig{
-			SyncedCheckInterval: c.SyncedStatus.SyncedCheckInterval,
-			CheckpointInterval:  c.SyncedStatus.CheckpointInterval,
+	if c.Scheduler != nil {
+		res.Scheduler = &config.ChangefeedSchedulerConfig{
+			EnableTableAcrossNodes: c.Scheduler.EnableTableAcrossNodes,
+			RegionThreshold:        c.Scheduler.RegionThreshold,
+			WriteKeyThreshold:      c.Scheduler.WriteKeyThreshold,
 		}
+	}
+	if c.Integrity != nil {
+		res.Integrity = &integrity.Config{
+			IntegrityCheckLevel:   c.Integrity.IntegrityCheckLevel,
+			CorruptionHandleLevel: c.Integrity.CorruptionHandleLevel,
+		}
+	}
+	if c.ChangefeedErrorStuckDuration != nil {
+		res.ChangefeedErrorStuckDuration = &c.ChangefeedErrorStuckDuration.duration
 	}
 	return res
 }
@@ -387,19 +434,16 @@ func (c *ReplicaConfig) toInternalReplicaConfigWithOriginConfig(
 func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 	cloned := c.Clone()
 	res := &ReplicaConfig{
-		MemoryQuota:                  cloned.MemoryQuota,
-		CaseSensitive:                cloned.CaseSensitive,
-		EnableOldValue:               cloned.EnableOldValue,
-		ForceReplicate:               cloned.ForceReplicate,
-		IgnoreIneligibleTable:        false,
-		CheckGCSafePoint:             cloned.CheckGCSafePoint,
-		EnableSyncPoint:              cloned.EnableSyncPoint,
-		EnableTableMonitor:           cloned.EnableTableMonitor,
-		SyncPointInterval:            &JSONDuration{cloned.SyncPointInterval},
-		SyncPointRetention:           &JSONDuration{cloned.SyncPointRetention},
-		BDRMode:                      cloned.BDRMode,
-		ChangefeedErrorStuckDuration: &JSONDuration{cloned.ChangefeedErrorStuckDuration},
-		SQLMode:                      cloned.SQLMode,
+		MemoryQuota:           cloned.MemoryQuota,
+		CaseSensitive:         cloned.CaseSensitive,
+		EnableOldValue:        cloned.EnableOldValue,
+		ForceReplicate:        cloned.ForceReplicate,
+		IgnoreIneligibleTable: false,
+		CheckGCSafePoint:      cloned.CheckGCSafePoint,
+		EnableSyncPoint:       cloned.EnableSyncPoint,
+		SyncPointInterval:     &JSONDuration{cloned.SyncPointInterval},
+		SyncPointRetention:    &JSONDuration{cloned.SyncPointRetention},
+		BDRMode:               cloned.BDRMode,
 	}
 
 	if cloned.Filter != nil {
@@ -469,6 +513,94 @@ func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 				BinaryEncodingMethod: cloned.Sink.CSVConfig.BinaryEncodingMethod,
 			}
 		}
+		var kafkaConfig *KafkaConfig
+		if cloned.Sink.KafkaConfig != nil {
+			var codeConfig *CodecConfig
+			if cloned.Sink.KafkaConfig.CodecConfig != nil {
+				oldConfig := cloned.Sink.KafkaConfig.CodecConfig
+				codeConfig = &CodecConfig{
+					EnableTiDBExtension:            oldConfig.EnableTiDBExtension,
+					MaxBatchSize:                   oldConfig.MaxBatchSize,
+					AvroEnableWatermark:            oldConfig.AvroEnableWatermark,
+					AvroDecimalHandlingMode:        oldConfig.AvroDecimalHandlingMode,
+					AvroBigintUnsignedHandlingMode: oldConfig.AvroBigintUnsignedHandlingMode,
+				}
+			}
+
+			var largeMessageHandle *LargeMessageHandleConfig
+			if cloned.Sink.KafkaConfig.LargeMessageHandle != nil {
+				oldConfig := cloned.Sink.KafkaConfig.LargeMessageHandle
+				largeMessageHandle = &LargeMessageHandleConfig{
+					LargeMessageHandleOption: oldConfig.LargeMessageHandleOption,
+				}
+			}
+
+			kafkaConfig = &KafkaConfig{
+				PartitionNum:                 cloned.Sink.KafkaConfig.PartitionNum,
+				ReplicationFactor:            cloned.Sink.KafkaConfig.ReplicationFactor,
+				KafkaVersion:                 cloned.Sink.KafkaConfig.KafkaVersion,
+				MaxMessageBytes:              cloned.Sink.KafkaConfig.MaxMessageBytes,
+				Compression:                  cloned.Sink.KafkaConfig.Compression,
+				KafkaClientID:                cloned.Sink.KafkaConfig.KafkaClientID,
+				AutoCreateTopic:              cloned.Sink.KafkaConfig.AutoCreateTopic,
+				DialTimeout:                  cloned.Sink.KafkaConfig.DialTimeout,
+				WriteTimeout:                 cloned.Sink.KafkaConfig.WriteTimeout,
+				ReadTimeout:                  cloned.Sink.KafkaConfig.ReadTimeout,
+				RequiredAcks:                 cloned.Sink.KafkaConfig.RequiredAcks,
+				SASLUser:                     cloned.Sink.KafkaConfig.SASLUser,
+				SASLPassword:                 cloned.Sink.KafkaConfig.SASLPassword,
+				SASLMechanism:                cloned.Sink.KafkaConfig.SASLMechanism,
+				SASLGssAPIAuthType:           cloned.Sink.KafkaConfig.SASLGssAPIAuthType,
+				SASLGssAPIKeytabPath:         cloned.Sink.KafkaConfig.SASLGssAPIKeytabPath,
+				SASLGssAPIKerberosConfigPath: cloned.Sink.KafkaConfig.SASLGssAPIKerberosConfigPath,
+				SASLGssAPIServiceName:        cloned.Sink.KafkaConfig.SASLGssAPIServiceName,
+				SASLGssAPIUser:               cloned.Sink.KafkaConfig.SASLGssAPIUser,
+				SASLGssAPIPassword:           cloned.Sink.KafkaConfig.SASLGssAPIPassword,
+				SASLGssAPIRealm:              cloned.Sink.KafkaConfig.SASLGssAPIRealm,
+				SASLGssAPIDisablePafxfast:    cloned.Sink.KafkaConfig.SASLGssAPIDisablePafxfast,
+				SASLOAuthClientID:            cloned.Sink.KafkaConfig.SASLOAuthClientID,
+				SASLOAuthClientSecret:        cloned.Sink.KafkaConfig.SASLOAuthClientSecret,
+				SASLOAuthTokenURL:            cloned.Sink.KafkaConfig.SASLOAuthTokenURL,
+				SASLOAuthScopes:              cloned.Sink.KafkaConfig.SASLOAuthScopes,
+				SASLOAuthGrantType:           cloned.Sink.KafkaConfig.SASLOAuthGrantType,
+				SASLOAuthAudience:            cloned.Sink.KafkaConfig.SASLOAuthAudience,
+				EnableTLS:                    cloned.Sink.KafkaConfig.EnableTLS,
+				CA:                           cloned.Sink.KafkaConfig.CA,
+				Cert:                         cloned.Sink.KafkaConfig.Cert,
+				Key:                          cloned.Sink.KafkaConfig.Key,
+				InsecureSkipVerify:           cloned.Sink.KafkaConfig.InsecureSkipVerify,
+				CodecConfig:                  codeConfig,
+				LargeMessageHandle:           largeMessageHandle,
+			}
+		}
+		var mysqlConfig *MySQLConfig
+		if cloned.Sink.MySQLConfig != nil {
+			mysqlConfig = &MySQLConfig{
+				WorkerCount:                  cloned.Sink.MySQLConfig.WorkerCount,
+				MaxTxnRow:                    cloned.Sink.MySQLConfig.MaxTxnRow,
+				MaxMultiUpdateRowSize:        cloned.Sink.MySQLConfig.MaxMultiUpdateRowSize,
+				MaxMultiUpdateRowCount:       cloned.Sink.MySQLConfig.MaxMultiUpdateRowCount,
+				TiDBTxnMode:                  cloned.Sink.MySQLConfig.TiDBTxnMode,
+				SSLCa:                        cloned.Sink.MySQLConfig.SSLCa,
+				SSLCert:                      cloned.Sink.MySQLConfig.SSLCert,
+				SSLKey:                       cloned.Sink.MySQLConfig.SSLKey,
+				TimeZone:                     cloned.Sink.MySQLConfig.TimeZone,
+				WriteTimeout:                 cloned.Sink.MySQLConfig.WriteTimeout,
+				ReadTimeout:                  cloned.Sink.MySQLConfig.ReadTimeout,
+				Timeout:                      cloned.Sink.MySQLConfig.Timeout,
+				EnableBatchDML:               cloned.Sink.MySQLConfig.EnableBatchDML,
+				EnableMultiStatement:         cloned.Sink.MySQLConfig.EnableMultiStatement,
+				EnableCachePreparedStatement: cloned.Sink.MySQLConfig.EnableCachePreparedStatement,
+			}
+		}
+		var cloudStorageConfig *CloudStorageConfig
+		if cloned.Sink.CloudStorageConfig != nil {
+			cloudStorageConfig = &CloudStorageConfig{
+				WorkerCount:   cloned.Sink.CloudStorageConfig.WorkerCount,
+				FlushInterval: cloned.Sink.CloudStorageConfig.FlushInterval,
+				FileSize:      cloned.Sink.CloudStorageConfig.FileSize,
+			}
+		}
 
 		res.Sink = &SinkConfig{
 			Protocol:                 cloned.Sink.Protocol,
@@ -482,72 +614,47 @@ func ToAPIReplicaConfig(c *config.ReplicaConfig) *ReplicaConfig {
 			DateSeparator:            cloned.Sink.DateSeparator,
 			EnablePartitionSeparator: cloned.Sink.EnablePartitionSeparator,
 			FileIndexWidth:           cloned.Sink.FileIndexWidth,
-			AdvanceTimeoutInSec:      cloned.Sink.AdvanceTimeoutInSec,
+			EnableKafkaSinkV2:        cloned.Sink.EnableKafkaSinkV2,
+			OnlyOutputUpdatedColumns: cloned.Sink.OnlyOutputUpdatedColumns,
+			KafkaConfig:              kafkaConfig,
+			MySQLConfig:              mysqlConfig,
+			CloudStorageConfig:       cloudStorageConfig,
+			SafeMode:                 cloned.Sink.SafeMode,
 		}
-
-		if cloned.Sink.KafkaConfig != nil {
-			var largeMessageHandle *LargeMessageHandleConfig
-			if cloned.Sink.KafkaConfig.LargeMessageHandle != nil {
-				oldConfig := cloned.Sink.KafkaConfig.LargeMessageHandle
-				largeMessageHandle = &LargeMessageHandleConfig{
-					LargeMessageHandleOption: oldConfig.LargeMessageHandleOption,
-				}
-			}
-			res.Sink.KafkaConfig = &KafkaConfig{
-				SASLMechanism:         cloned.Sink.KafkaConfig.SASLMechanism,
-				SASLOAuthClientID:     cloned.Sink.KafkaConfig.SASLOAuthClientID,
-				SASLOAuthClientSecret: cloned.Sink.KafkaConfig.SASLOAuthClientSecret,
-				SASLOAuthTokenURL:     cloned.Sink.KafkaConfig.SASLOAuthTokenURL,
-				SASLOAuthScopes:       cloned.Sink.KafkaConfig.SASLOAuthScopes,
-				SASLOAuthGrantType:    cloned.Sink.KafkaConfig.SASLOAuthGrantType,
-				SASLOAuthAudience:     cloned.Sink.KafkaConfig.SASLOAuthAudience,
-				LargeMessageHandle:    largeMessageHandle,
-			}
-		}
-
-		if cloned.Sink.CloudStorageConfig != nil {
-			res.Sink.CloudStorageConfig = &CloudStorageConfig{
-				WorkerCount:         cloned.Sink.CloudStorageConfig.WorkerCount,
-				FlushInterval:       cloned.Sink.CloudStorageConfig.FlushInterval,
-				FileSize:            cloned.Sink.CloudStorageConfig.FileSize,
-				FlushConcurrency:    cloned.Sink.CloudStorageConfig.FlushConcurrency,
-				OutputColumnID:      cloned.Sink.CloudStorageConfig.OutputColumnID,
-				FileExpirationDays:  cloned.Sink.CloudStorageConfig.FileExpirationDays,
-				FileCleanupCronSpec: cloned.Sink.CloudStorageConfig.FileCleanupCronSpec,
-			}
+		if cloned.Sink.AdvanceTimeoutInSec != nil {
+			res.Sink.AdvanceTimeoutInSec = util.AddressOf(*cloned.Sink.AdvanceTimeoutInSec)
 		}
 	}
 	if cloned.Consistent != nil {
 		res.Consistent = &ConsistentConfig{
-			Level:                 cloned.Consistent.Level,
-			MaxLogSize:            cloned.Consistent.MaxLogSize,
-			FlushIntervalInMs:     cloned.Consistent.FlushIntervalInMs,
-			MetaFlushIntervalInMs: cloned.Consistent.MetaFlushIntervalInMs,
-			EncodingWorkerNum:     c.Consistent.EncodingWorkerNum,
-			FlushWorkerNum:        c.Consistent.FlushWorkerNum,
-			Storage:               cloned.Consistent.Storage,
-			UseFileBackend:        cloned.Consistent.UseFileBackend,
-			Compression:           cloned.Consistent.Compression,
-			FlushConcurrency:      cloned.Consistent.FlushConcurrency,
-		}
-		if cloned.Consistent.MemoryUsage != nil {
-			res.Consistent.MemoryUsage = &ConsistentMemoryUsage{
-				MemoryQuotaPercentage: cloned.Consistent.MemoryUsage.MemoryQuotaPercentage,
-				EventCachePercentage:  cloned.Consistent.MemoryUsage.EventCachePercentage,
-			}
+			Level:             cloned.Consistent.Level,
+			MaxLogSize:        cloned.Consistent.MaxLogSize,
+			FlushIntervalInMs: cloned.Consistent.FlushIntervalInMs,
+			Storage:           cloned.Consistent.Storage,
+			UseFileBackend:    cloned.Consistent.UseFileBackend,
 		}
 	}
-
 	if cloned.Mounter != nil {
 		res.Mounter = &MounterConfig{
 			WorkerNum: cloned.Mounter.WorkerNum,
 		}
 	}
-	if cloned.SyncedStatus != nil {
-		res.SyncedStatus = &SyncedStatusConfig{
-			SyncedCheckInterval: cloned.SyncedStatus.SyncedCheckInterval,
-			CheckpointInterval:  cloned.SyncedStatus.CheckpointInterval,
+	if cloned.Scheduler != nil {
+		res.Scheduler = &ChangefeedSchedulerConfig{
+			EnableTableAcrossNodes: cloned.Scheduler.EnableTableAcrossNodes,
+			RegionThreshold:        cloned.Scheduler.RegionThreshold,
+			WriteKeyThreshold:      cloned.Scheduler.WriteKeyThreshold,
 		}
+	}
+
+	if cloned.Integrity != nil {
+		res.Integrity = &IntegrityConfig{
+			IntegrityCheckLevel:   cloned.Integrity.IntegrityCheckLevel,
+			CorruptionHandleLevel: cloned.Integrity.CorruptionHandleLevel,
+		}
+	}
+	if cloned.ChangefeedErrorStuckDuration != nil {
+		res.ChangefeedErrorStuckDuration = &JSONDuration{*cloned.ChangefeedErrorStuckDuration}
 	}
 	return res
 }
@@ -662,35 +769,14 @@ type SinkConfig struct {
 	Terminator               string              `json:"terminator"`
 	DateSeparator            string              `json:"date_separator"`
 	EnablePartitionSeparator bool                `json:"enable_partition_separator"`
-	FileIndexWidth           int                 `json:"file_index_width"`
-	KafkaConfig              *KafkaConfig        `json:"kafka_config"`
+	FileIndexWidth           int                 `json:"file_index_digit"`
+	EnableKafkaSinkV2        bool                `json:"enable_kafka_sink_v2"`
+	OnlyOutputUpdatedColumns *bool               `json:"only_output_updated_columns"`
+	SafeMode                 *bool               `json:"safe_mode,omitempty"`
+	KafkaConfig              *KafkaConfig        `json:"kafka_config,omitempty"`
+	MySQLConfig              *MySQLConfig        `json:"mysql_config,omitempty"`
 	CloudStorageConfig       *CloudStorageConfig `json:"cloud_storage_config,omitempty"`
-	AdvanceTimeoutInSec      uint                `json:"advance_timeout,omitempty"`
-}
-
-// KafkaConfig represents kafka config for a changefeed.
-// This is a duplicate of config.KafkaConfig
-type KafkaConfig struct {
-	SASLMechanism         *string  `json:"sasl_mechanism,omitempty"`
-	SASLOAuthClientID     *string  `json:"sasl_oauth_client_id,omitempty"`
-	SASLOAuthClientSecret *string  `json:"sasl_oauth_client_secret,omitempty"`
-	SASLOAuthTokenURL     *string  `json:"sasl_oauth_token_url,omitempty"`
-	SASLOAuthScopes       []string `json:"sasl_oauth_scopes,omitempty"`
-	SASLOAuthGrantType    *string  `json:"sasl_oauth_grant_type,omitempty"`
-	SASLOAuthAudience     *string  `json:"sasl_oauth_audience,omitempty"`
-
-	LargeMessageHandle *LargeMessageHandleConfig `json:"large_message_handle,omitempty"`
-}
-
-// CloudStorageConfig represents a cloud storage sink configuration
-type CloudStorageConfig struct {
-	WorkerCount         *int    `json:"worker_count,omitempty"`
-	FlushInterval       *string `json:"flush_interval,omitempty"`
-	FileSize            *int    `json:"file_size,omitempty"`
-	FlushConcurrency    *int    `json:"flush_concurrency,omitempty"`
-	OutputColumnID      *bool   `json:"output_column_id,omitempty"`
-	FileExpirationDays  *int    `json:"file_expiration_days,omitempty"`
-	FileCleanupCronSpec *string `json:"file_cleanup_cron_spec,omitempty"`
+	AdvanceTimeoutInSec      *uint               `json:"advance_timeout,omitempty"`
 }
 
 // CSVConfig denotes the csv config
@@ -721,24 +807,11 @@ type ColumnSelector struct {
 // ConsistentConfig represents replication consistency config for a changefeed
 // This is a duplicate of config.ConsistentConfig
 type ConsistentConfig struct {
-	Level                 string `json:"level,omitempty"`
-	MaxLogSize            int64  `json:"max_log_size"`
-	FlushIntervalInMs     int64  `json:"flush_interval"`
-	MetaFlushIntervalInMs int64  `json:"meta_flush_interval"`
-	EncodingWorkerNum     int    `json:"encoding_worker_num"`
-	FlushWorkerNum        int    `json:"flush_worker_num"`
-	Storage               string `json:"storage,omitempty"`
-	UseFileBackend        bool   `json:"use_file_backend"`
-	Compression           string `json:"compression,omitempty"`
-	FlushConcurrency      int    `json:"flush_concurrency,omitempty"`
-
-	MemoryUsage *ConsistentMemoryUsage `json:"memory_usage"`
-}
-
-// ConsistentMemoryUsage represents memory usage of Consistent module.
-type ConsistentMemoryUsage struct {
-	MemoryQuotaPercentage uint64 `json:"memory_quota_percentage"`
-	EventCachePercentage  uint64 `json:"event_cache_percentage"`
+	Level             string `json:"level"`
+	MaxLogSize        int64  `json:"max_log_size"`
+	FlushIntervalInMs int64  `json:"flush_interval"`
+	Storage           string `json:"storage"`
+	UseFileBackend    bool   `json:"use_file_backend"`
 }
 
 // ChangefeedSchedulerConfig is per changefeed scheduler settings.
@@ -751,6 +824,13 @@ type ChangefeedSchedulerConfig struct {
 	RegionThreshold int `toml:"region_threshold" json:"region_threshold"`
 	// WriteKeyThreshold is the written keys threshold of splitting a table.
 	WriteKeyThreshold int `toml:"write_key_threshold" json:"write_key_threshold"`
+}
+
+// IntegrityConfig is the config for integrity check
+// This is a duplicate of Integrity.Config
+type IntegrityConfig struct {
+	IntegrityCheckLevel   string `json:"integrity_check_level"`
+	CorruptionHandleLevel string `json:"corruption_handle_level"`
 }
 
 // EtcdData contains key/value pair of etcd data
@@ -788,16 +868,6 @@ type ChangeFeedInfo struct {
 	CheckpointTs   uint64                    `json:"checkpoint_ts"`
 	CheckpointTime model.JSONTime            `json:"checkpoint_time"`
 	TaskStatus     []model.CaptureTaskStatus `json:"task_status,omitempty"`
-}
-
-// SyncedStatus describes the detail of a changefeed's synced status
-type SyncedStatus struct {
-	Synced           bool           `json:"synced"`
-	SinkCheckpointTs model.JSONTime `json:"sink_checkpoint_ts"`
-	PullerResolvedTs model.JSONTime `json:"puller_resolved_ts"`
-	LastSyncedTs     model.JSONTime `json:"last_synced_ts"`
-	NowTs            model.JSONTime `json:"now_ts"`
-	Info             string         `json:"info"`
 }
 
 // RunningError represents some running error from cdc components,
@@ -881,6 +951,81 @@ type Capture struct {
 	IsOwner       bool   `json:"is_owner"`
 	AdvertiseAddr string `json:"address"`
 	ClusterID     string `json:"cluster_id"`
+}
+
+// CodecConfig represents a MQ codec configuration
+type CodecConfig struct {
+	EnableTiDBExtension            *bool   `json:"enable_tidb_extension,omitempty"`
+	MaxBatchSize                   *int    `json:"max_batch_size,omitempty"`
+	AvroEnableWatermark            *bool   `json:"avro_enable_watermark"`
+	AvroDecimalHandlingMode        *string `json:"avro_decimal_handling_mode,omitempty"`
+	AvroBigintUnsignedHandlingMode *string `json:"avro_bigint_unsigned_handling_mode,omitempty"`
+}
+
+// KafkaConfig represents a kafka sink configuration
+type KafkaConfig struct {
+	PartitionNum                 *int32       `json:"partition_num,omitempty"`
+	ReplicationFactor            *int16       `json:"replication_factor,omitempty"`
+	KafkaVersion                 *string      `json:"kafka_version,omitempty"`
+	MaxMessageBytes              *int         `json:"max_message_bytes,omitempty"`
+	Compression                  *string      `json:"compression,omitempty"`
+	KafkaClientID                *string      `json:"kafka_client_id,omitempty"`
+	AutoCreateTopic              *bool        `json:"auto_create_topic,omitempty"`
+	DialTimeout                  *string      `json:"dial_timeout,omitempty"`
+	WriteTimeout                 *string      `json:"write_timeout,omitempty"`
+	ReadTimeout                  *string      `json:"read_timeout,omitempty"`
+	RequiredAcks                 *int         `json:"required_acks,omitempty"`
+	SASLUser                     *string      `json:"sasl_user,omitempty"`
+	SASLPassword                 *string      `json:"sasl_password,omitempty"`
+	SASLMechanism                *string      `json:"sasl_mechanism,omitempty"`
+	SASLGssAPIAuthType           *string      `json:"sasl_gssapi_auth_type,omitempty"`
+	SASLGssAPIKeytabPath         *string      `json:"sasl_gssapi_keytab_path,omitempty"`
+	SASLGssAPIKerberosConfigPath *string      `json:"sasl_gssapi_kerberos_config_path,omitempty"`
+	SASLGssAPIServiceName        *string      `json:"sasl_gssapi_service_name,omitempty"`
+	SASLGssAPIUser               *string      `json:"sasl_gssapi_user,omitempty"`
+	SASLGssAPIPassword           *string      `json:"sasl_gssapi_password,omitempty"`
+	SASLGssAPIRealm              *string      `json:"sasl_gssapi_realm,omitempty"`
+	SASLGssAPIDisablePafxfast    *bool        `json:"sasl_gssapi_disable_pafxfast,omitempty"`
+	SASLOAuthClientID            *string      `json:"sasl_oauth_client_id,omitempty"`
+	SASLOAuthClientSecret        *string      `json:"sasl_oauth_client_secret,omitempty"`
+	SASLOAuthTokenURL            *string      `json:"sasl_oauth_token_url,omitempty"`
+	SASLOAuthScopes              []string     `json:"sasl_oauth_scopes,omitempty"`
+	SASLOAuthGrantType           *string      `json:"sasl_oauth_grant_type,omitempty"`
+	SASLOAuthAudience            *string      `json:"sasl_oauth_audience,omitempty"`
+	EnableTLS                    *bool        `json:"enable_tls,omitempty"`
+	CA                           *string      `json:"ca,omitempty"`
+	Cert                         *string      `json:"cert,omitempty"`
+	Key                          *string      `json:"key,omitempty"`
+	InsecureSkipVerify           *bool        `json:"insecure_skip_verify,omitempty"`
+	CodecConfig                  *CodecConfig `json:"codec_config,omitempty"`
+
+	LargeMessageHandle *LargeMessageHandleConfig `json:"large_message_handle,omitempty"`
+}
+
+// MySQLConfig represents a MySQL sink configuration
+type MySQLConfig struct {
+	WorkerCount                  *int    `json:"worker_count,omitempty"`
+	MaxTxnRow                    *int    `json:"max_txn_row,omitempty"`
+	MaxMultiUpdateRowSize        *int    `json:"max_multi_update_row_size,omitempty"`
+	MaxMultiUpdateRowCount       *int    `json:"max_multi_update_row_count,omitempty"`
+	TiDBTxnMode                  *string `json:"tidb_txn_mode,omitempty"`
+	SSLCa                        *string `json:"ssl_ca,omitempty"`
+	SSLCert                      *string `json:"ssl_cert,omitempty"`
+	SSLKey                       *string `json:"ssl_key,omitempty"`
+	TimeZone                     *string `json:"time_zone,omitempty"`
+	WriteTimeout                 *string `json:"write_timeout,omitempty"`
+	ReadTimeout                  *string `json:"read_timeout,omitempty"`
+	Timeout                      *string `json:"timeout,omitempty"`
+	EnableBatchDML               *bool   `json:"enable_batch_dml,omitempty"`
+	EnableMultiStatement         *bool   `json:"enable_multi_statement,omitempty"`
+	EnableCachePreparedStatement *bool   `json:"enable_cache_prepared_statement,omitempty"`
+}
+
+// CloudStorageConfig represents a cloud storage sink configuration
+type CloudStorageConfig struct {
+	WorkerCount   *int    `json:"worker_count,omitempty"`
+	FlushInterval *string `json:"flush_interval,omitempty"`
+	FileSize      *int    `json:"file_size,omitempty"`
 }
 
 // ChangefeedStatus holds common information of a changefeed in cdc

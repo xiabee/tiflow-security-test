@@ -212,9 +212,6 @@ func (ti *TableInfo) initColumnsFlag() {
 		if mysql.HasUnsignedFlag(colInfo.GetFlag()) {
 			flag.SetIsUnsigned()
 		}
-		if mysql.HasZerofillFlag(colInfo.GetFlag()) {
-			flag.SetZeroFill()
-		}
 		ti.ColumnsFlag[colInfo.ID] = flag
 	}
 
@@ -270,7 +267,7 @@ func IsColCDCVisible(col *model.ColumnInfo) bool {
 	if col.IsGenerated() && !col.GeneratedStored {
 		return false
 	}
-	return col.State == model.StatePublic
+	return true
 }
 
 // ExistTableUniqueColumn returns whether the table has a unique column

@@ -175,10 +175,12 @@ type ReplicaConfig struct {
 	SyncPointInterval  *JSONDuration `json:"sync_point_interval" swaggertype:"string"`
 	SyncPointRetention *JSONDuration `json:"sync_point_retention" swaggertype:"string"`
 
-	Filter     *FilterConfig     `json:"filter"`
-	Mounter    *MounterConfig    `json:"mounter"`
-	Sink       *SinkConfig       `json:"sink"`
-	Consistent *ConsistentConfig `json:"consistent"`
+	Filter     *FilterConfig              `json:"filter"`
+	Mounter    *MounterConfig             `json:"mounter"`
+	Sink       *SinkConfig                `json:"sink"`
+	Consistent *ConsistentConfig          `json:"consistent"`
+	Scheduler  *ChangefeedSchedulerConfig `json:"scheduler"`
+	Integrity  *IntegrityConfig           `json:"integrity"`
 }
 
 // FilterConfig represents filter config for a changefeed
@@ -271,14 +273,11 @@ type ColumnSelector struct {
 // ConsistentConfig represents replication consistency config for a changefeed
 // This is a duplicate of config.ConsistentConfig
 type ConsistentConfig struct {
-	Level                 string `json:"level"`
-	MaxLogSize            int64  `json:"max_log_size"`
-	FlushIntervalInMs     int64  `json:"flush_interval"`
-	MetaFlushIntervalInMs int64  `json:"meta_flush_interval"`
-	EncodingWorkerNum     int    `json:"encoding_worker_num"`
-	FlushWorkerNum        int    `json:"flush_worker_num"`
-	Storage               string `json:"storage"`
-	UseFileBackend        bool   `json:"use_file_backend"`
+	Level             string `json:"level"`
+	MaxLogSize        int64  `json:"max_log_size"`
+	FlushIntervalInMs int64  `json:"flush_interval"`
+	Storage           string `json:"storage"`
+	UseFileBackend    bool   `json:"use_file_backend"`
 }
 
 // ChangefeedSchedulerConfig is per changefeed scheduler settings.
@@ -291,6 +290,13 @@ type ChangefeedSchedulerConfig struct {
 	RegionThreshold int `toml:"region_threshold" json:"region_threshold"`
 	// WriteKeyThreshold is the written keys threshold of splitting a table.
 	WriteKeyThreshold int `toml:"write_key_threshold" json:"write_key_threshold"`
+}
+
+// IntegrityConfig is the config for integrity check
+// This is a duplicate of config.IntegrityConfig
+type IntegrityConfig struct {
+	IntegrityCheckLevel   string `json:"integrity_check_level"`
+	CorruptionHandleLevel string `json:"corruption_handle_level"`
 }
 
 // ChangeFeedInfo describes the detail of a ChangeFeed

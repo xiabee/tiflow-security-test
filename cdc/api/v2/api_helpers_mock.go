@@ -6,6 +6,7 @@ package v2
 
 import (
 	context "context"
+	tls "crypto/tls"
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
@@ -15,6 +16,7 @@ import (
 	config "github.com/pingcap/tiflow/pkg/config"
 	security "github.com/pingcap/tiflow/pkg/security"
 	client "github.com/tikv/pd/client"
+	v3 "go.etcd.io/etcd/client/v3"
 )
 
 // MockAPIV2Helpers is a mock of APIV2Helpers interface.
@@ -53,6 +55,21 @@ func (m *MockAPIV2Helpers) createTiStore(pdAddrs []string, credential *security.
 func (mr *MockAPIV2HelpersMockRecorder) createTiStore(pdAddrs, credential interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "createTiStore", reflect.TypeOf((*MockAPIV2Helpers)(nil).createTiStore), pdAddrs, credential)
+}
+
+// getEtcdClient mocks base method.
+func (m *MockAPIV2Helpers) getEtcdClient(pdAddrs []string, tlsConfig *tls.Config) (*v3.Client, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "getEtcdClient", pdAddrs, tlsConfig)
+	ret0, _ := ret[0].(*v3.Client)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// getEtcdClient indicates an expected call of getEtcdClient.
+func (mr *MockAPIV2HelpersMockRecorder) getEtcdClient(pdAddrs, tlsConfig interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "getEtcdClient", reflect.TypeOf((*MockAPIV2Helpers)(nil).getEtcdClient), pdAddrs, tlsConfig)
 }
 
 // getPDClient mocks base method.
@@ -102,17 +119,17 @@ func (mr *MockAPIV2HelpersMockRecorder) verifyCreateChangefeedConfig(ctx, cfg, p
 }
 
 // verifyResumeChangefeedConfig mocks base method.
-func (m *MockAPIV2Helpers) verifyResumeChangefeedConfig(ctx context.Context, pdClient client.Client, gcServiceID string, changefeedID model.ChangeFeedID, overrideCheckpointTs uint64) error {
+func (m *MockAPIV2Helpers) verifyResumeChangefeedConfig(ctx context.Context, pdClient client.Client, gcServiceID string, changefeedID model.ChangeFeedID, checkpointTs uint64) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "verifyResumeChangefeedConfig", ctx, pdClient, gcServiceID, changefeedID, overrideCheckpointTs)
+	ret := m.ctrl.Call(m, "verifyResumeChangefeedConfig", ctx, pdClient, gcServiceID, changefeedID, checkpointTs)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // verifyResumeChangefeedConfig indicates an expected call of verifyResumeChangefeedConfig.
-func (mr *MockAPIV2HelpersMockRecorder) verifyResumeChangefeedConfig(ctx, pdClient, gcServiceID, changefeedID, overrideCheckpointTs interface{}) *gomock.Call {
+func (mr *MockAPIV2HelpersMockRecorder) verifyResumeChangefeedConfig(ctx, pdClient, gcServiceID, changefeedID, checkpointTs interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "verifyResumeChangefeedConfig", reflect.TypeOf((*MockAPIV2Helpers)(nil).verifyResumeChangefeedConfig), ctx, pdClient, gcServiceID, changefeedID, overrideCheckpointTs)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "verifyResumeChangefeedConfig", reflect.TypeOf((*MockAPIV2Helpers)(nil).verifyResumeChangefeedConfig), ctx, pdClient, gcServiceID, changefeedID, checkpointTs)
 }
 
 // verifyUpdateChangefeedConfig mocks base method.

@@ -265,15 +265,22 @@ func (s *schemaWrap4Owner) filterDDLEvents(ddlEvents []*model.DDLEvent) ([]*mode
 			err     error
 		)
 		if event.Type == timodel.ActionRenameTable {
-			ignored = s.filter.ShouldDiscardDDL(
+			ignored, err = s.filter.ShouldDiscardDDL(
+				event.StartTs,
 				event.Type,
 				event.PreTableInfo.TableName.Schema,
-				event.PreTableInfo.TableName.Table)
+				event.PreTableInfo.TableName.Table,
+				event.Query)
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
 		} else {
-			ignored = s.filter.ShouldDiscardDDL(
+			ignored, err = s.filter.ShouldDiscardDDL(
+				event.StartTs,
 				event.Type,
 				event.TableInfo.TableName.Schema,
-				event.TableInfo.TableName.Table)
+				event.TableInfo.TableName.Table,
+				event.Query)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}

@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink"
+	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/prometheus/client_golang/prometheus"
@@ -51,6 +52,10 @@ func (m *mockSink) WriteEvents(events ...*dmlsink.CallbackableEvent[*model.RowCh
 	return nil
 }
 
+func (m *mockSink) SchemeOption() (string, bool) {
+	return sink.BlackHoleScheme, false
+}
+
 func (m *mockSink) GetEvents() []*dmlsink.CallbackableEvent[*model.RowChangedEvent] {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -67,10 +72,6 @@ func (m *mockSink) Close() {}
 
 func (m *mockSink) Dead() <-chan struct{} {
 	return make(chan struct{})
-}
-
-func (m *mockSink) Scheme() string {
-	return sink.BlackHoleScheme
 }
 
 func (m *mockSink) AckAllEvents() {
@@ -105,7 +106,10 @@ func createTableSinkWrapper(
 	sink := newMockSink()
 	innerTableSink := tablesink.New[*model.RowChangedEvent](
 		changefeedID, span, model.Ts(0),
-		sink, &dmlsink.RowChangeEventAppender{}, prometheus.NewCounter(prometheus.CounterOpts{}))
+		sink, &dmlsink.RowChangeEventAppender{},
+		pdutil.NewClock4Test(),
+		prometheus.NewCounter(prometheus.CounterOpts{}),
+		prometheus.NewHistogram(prometheus.HistogramOpts{}))
 	wrapper := newTableSinkWrapper(
 		changefeedID,
 		span,
@@ -115,7 +119,7 @@ func createTableSinkWrapper(
 		100,
 		func(_ context.Context) (model.Ts, error) { return math.MaxUint64, nil },
 	)
-	wrapper.tableSink.s, wrapper.tableSink.version = wrapper.tableSinkCreater()
+	wrapper.tableSink.s, wrapper.tableSink.version = wrapper.tableSinkCreator()
 	return wrapper, sink
 }
 
@@ -152,7 +156,7 @@ func TestUpdateReceivedSorterResolvedTs(t *testing.T) {
 	require.Equal(t, tablepb.TableStatePrepared, wrapper.getState())
 }
 
-func TestConvertNilRowChangedEvents(t *testing.T) {
+func TestHandleNilRowChangedEvents(t *testing.T) {
 	t.Parallel()
 
 	events := []*model.PolymorphicEvent{nil}
@@ -163,13 +167,14 @@ func TestConvertNilRowChangedEvents(t *testing.T) {
 	require.Equal(t, uint64(0), size)
 }
 
-func TestConvertEmptyRowChangedEvents(t *testing.T) {
+func TestHandleEmptyRowChangedEvents(t *testing.T) {
 	t.Parallel()
 
 	events := []*model.PolymorphicEvent{
 		{
 			StartTs: 1,
 			CRTs:    2,
+			// the row had no columns
 			Row: &model.RowChangedEvent{
 				StartTs:  1,
 				CommitTs: 2,
@@ -178,23 +183,25 @@ func TestConvertEmptyRowChangedEvents(t *testing.T) {
 	}
 	changefeedID := model.DefaultChangeFeedID("1")
 	span := spanz.TableIDToComparableSpan(1)
+
 	result, size := handleRowChangedEvents(changefeedID, span, events...)
 	require.Equal(t, 0, len(result))
 	require.Equal(t, uint64(0), size)
 }
 
-func TestConvertRowChangedEventsWhenEnableOldValue(t *testing.T) {
+func TestHandleRowChangedEventNormalEvent(t *testing.T) {
 	t.Parallel()
 
+	// Update non-unique key.
 	columns := []*model.Column{
 		{
 			Name:  "col1",
 			Flag:  model.BinaryFlag,
-			Value: "col1-value-updated",
+			Value: "col1-value",
 		},
 		{
 			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
+			Flag:  model.HandleKeyFlag | model.UniqueKeyFlag,
 			Value: "col2-value-updated",
 		},
 	}
@@ -206,23 +213,20 @@ func TestConvertRowChangedEventsWhenEnableOldValue(t *testing.T) {
 		},
 		{
 			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
+			Flag:  model.HandleKeyFlag | model.UniqueKeyFlag,
 			Value: "col2-value",
 		},
 	}
-
+	tableInfo := model.BuildTableInfo("test", "test", columns, nil)
 	events := []*model.PolymorphicEvent{
 		{
 			CRTs:  1,
 			RawKV: &model.RawKVEntry{OpType: model.OpTypePut},
 			Row: &model.RowChangedEvent{
 				CommitTs:   1,
-				Columns:    columns,
-				PreColumns: preColumns,
-				Table: &model.TableName{
-					Schema: "test",
-					Table:  "test",
-				},
+				TableInfo:  tableInfo,
+				Columns:    model.Columns2ColumnDatas(columns, tableInfo),
+				PreColumns: model.Columns2ColumnDatas(preColumns, tableInfo),
 			},
 		},
 	}
@@ -230,103 +234,7 @@ func TestConvertRowChangedEventsWhenEnableOldValue(t *testing.T) {
 	span := spanz.TableIDToComparableSpan(1)
 	result, size := handleRowChangedEvents(changefeedID, span, events...)
 	require.Equal(t, 1, len(result))
-	require.Equal(t, uint64(224), size)
-}
-
-func TestConvertRowChangedEventsWhenDisableOldValue(t *testing.T) {
-	t.Parallel()
-
-	// Update handle key.
-	columns := []*model.Column{
-		{
-			Name:  "col1",
-			Flag:  model.BinaryFlag,
-			Value: "col1-value-updated",
-		},
-		{
-			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
-			Value: "col2-value-updated",
-		},
-	}
-	preColumns := []*model.Column{
-		{
-			Name:  "col1",
-			Flag:  model.BinaryFlag,
-			Value: "col1-value",
-		},
-		{
-			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
-			Value: "col2-value",
-		},
-	}
-
-	events := []*model.PolymorphicEvent{
-		{
-			CRTs:  1,
-			RawKV: &model.RawKVEntry{OpType: model.OpTypePut},
-			Row: &model.RowChangedEvent{
-				CommitTs:   1,
-				Columns:    columns,
-				PreColumns: preColumns,
-				Table: &model.TableName{
-					Schema: "test",
-					Table:  "test",
-				},
-			},
-		},
-	}
-	changefeedID := model.DefaultChangeFeedID("1")
-	span := spanz.TableIDToComparableSpan(1)
-	result, size := handleRowChangedEvents(changefeedID, span, events...)
-	require.Equal(t, 1, len(result))
-	require.Equal(t, uint64(224), size)
-
-	// Update non-handle key.
-	columns = []*model.Column{
-		{
-			Name:  "col1",
-			Flag:  model.BinaryFlag,
-			Value: "col1-value-updated",
-		},
-		{
-			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
-			Value: "col2-value",
-		},
-	}
-	preColumns = []*model.Column{
-		{
-			Name:  "col1",
-			Flag:  model.BinaryFlag,
-			Value: "col1-value",
-		},
-		{
-			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
-			Value: "col2-value",
-		},
-	}
-
-	events = []*model.PolymorphicEvent{
-		{
-			CRTs:  1,
-			RawKV: &model.RawKVEntry{OpType: model.OpTypePut},
-			Row: &model.RowChangedEvent{
-				CommitTs:   1,
-				Columns:    columns,
-				PreColumns: preColumns,
-				Table: &model.TableName{
-					Schema: "test",
-					Table:  "test",
-				},
-			},
-		},
-	}
-	result, size = handleRowChangedEvents(changefeedID, span, events...)
-	require.Equal(t, 1, len(result))
-	require.Equal(t, uint64(224), size)
+	require.Equal(t, uint64(testEventSize), size)
 }
 
 func TestGetUpperBoundTs(t *testing.T) {
@@ -366,7 +274,9 @@ func TestTableSinkWrapperSinkVersion(t *testing.T) {
 	innerTableSink := tablesink.New[*model.RowChangedEvent](
 		model.ChangeFeedID{}, tablepb.Span{}, model.Ts(0),
 		newMockSink(), &dmlsink.RowChangeEventAppender{},
+		pdutil.NewClock4Test(),
 		prometheus.NewCounter(prometheus.CounterOpts{}),
+		prometheus.NewHistogram(prometheus.HistogramOpts{}),
 	)
 	version := new(uint64)
 
@@ -382,7 +292,7 @@ func TestTableSinkWrapperSinkVersion(t *testing.T) {
 
 	require.False(t, wrapper.initTableSink())
 
-	wrapper.tableSinkCreater = func() (tablesink.TableSink, uint64) {
+	wrapper.tableSinkCreator = func() (tablesink.TableSink, uint64) {
 		*version += 1
 		return innerTableSink, *version
 	}
@@ -412,7 +322,9 @@ func TestTableSinkWrapperSinkInner(t *testing.T) {
 	innerTableSink := tablesink.New[*model.RowChangedEvent](
 		model.ChangeFeedID{}, tablepb.Span{}, model.Ts(0),
 		newMockSink(), &dmlsink.RowChangeEventAppender{},
+		pdutil.NewClock4Test(),
 		prometheus.NewCounter(prometheus.CounterOpts{}),
+		prometheus.NewHistogram(prometheus.HistogramOpts{}),
 	)
 	version := new(uint64)
 

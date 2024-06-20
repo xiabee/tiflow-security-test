@@ -15,15 +15,13 @@ package parser
 
 import (
 	"bytes"
-	"strings"
 
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/charset"
-	"github.com/pingcap/tidb/parser/format"
-	"github.com/pingcap/tidb/parser/model"
-	_ "github.com/pingcap/tidb/types/parser_driver" // for import parser driver
-	"github.com/pingcap/tidb/util/filter"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/format"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	_ "github.com/pingcap/tidb/pkg/types/parser_driver" // for import parser driver
+	"github.com/pingcap/tidb/pkg/util/filter"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -36,22 +34,6 @@ const (
 	// https://github.com/pingcap/parser/pull/1021
 	SingleRenameTableNameNum = 2
 )
-
-func init() {
-	c := &charset.Charset{
-		Name:             charset.CharsetGBK,
-		DefaultCollation: "gbk_chinese_ci",
-		Collations:       make(map[string]*charset.Collation),
-		Desc:             "Chinese Internal Code Specification",
-		Maxlen:           2,
-	}
-	charset.AddCharset(c)
-	for _, coll := range charset.GetCollations() {
-		if strings.EqualFold(coll.CharsetName, c.Name) {
-			charset.AddCollation(coll)
-		}
-	}
-}
 
 // Parse wraps parser.Parse(), makes `parser` suitable for dm.
 func Parse(p *parser.Parser, sql, charset, collation string) (stmt []ast.StmtNode, err error) {
@@ -215,6 +197,9 @@ func SplitDDL(stmt ast.StmtNode, schema string) (sqls []string, err error) {
 	)
 
 	switch v := stmt.(type) {
+	case *ast.CreateSequenceStmt:
+	case *ast.AlterSequenceStmt:
+	case *ast.DropSequenceStmt:
 	case *ast.AlterDatabaseStmt:
 	case *ast.CreateDatabaseStmt:
 		v.IfNotExists = true

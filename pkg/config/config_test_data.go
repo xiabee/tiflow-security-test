@@ -17,10 +17,12 @@ const (
 	testCfgTestReplicaConfigOutDated = `{
   "memory-quota": 1073741824,
   "case-sensitive": false,
-  "enable-old-value": true,
   "force-replicate": true,
+  "ignore-ineligible-table":false,
   "check-gc-safe-point": true,
   "enable-sync-point": false,
+  "enable-table-monitor": false,
+  "bdr-mode": false,
   "sync-point-interval": 600000000000,
   "sync-point-retention": 86400000000000,
   "filter": {
@@ -33,8 +35,9 @@ const (
     "worker-num": 3
   },
   "sink": {
-    "encoder-concurrency": 16,
+    "encoder-concurrency": 32,
     "terminator": "\r\n",
+	"date-separator": "day",
     "dispatch-rules": [
       {
         "db-name": "a",
@@ -53,15 +56,41 @@ const (
       }
     ],
     "enable-partition-separator": true,
-    "protocol": "open-protocol",
-    "advance-timeout-in-sec": 150
+    "protocol": "canal-json",
+	"enable-kafka-sink-v2": false,
+	"only-output-updated-columns": false,
+	"delete-only-output-handle-key-columns": false,
+    "content-compatible": false,
+    "large-message-handle": {
+      "large-message-handle-option": "none",
+      "large-message-handle-compression": "",
+      "claim-check-storage-uri": ""
+    },
+    "advance-timeout-in-sec": 150,
+    "send-bootstrap-interval-in-sec": 120,
+    "send-bootstrap-in-msg-count": 10000,
+    "send-bootstrap-to-all-partition": true,
+    "debezium-disable-schema": false,
+    "open": {
+      "output-old-value": true
+    },
+    "debezium": {
+      "output-old-value": true
+    }
   },
   "consistent": {
     "level": "none",
     "max-log-size": 64,
     "flush-interval": 2000,
+    "meta-flush-interval": 200,
+    "compression": "",
+    "encoding-worker-num": 16,
+    "flush-worker-num": 8,
     "storage": "",
-    "use-file-backend": false
+    "use-file-backend": false,
+    "memory-usage": {
+        "memory-quota-percentage": 50
+    }
   },
   "scheduler": {
     "enable-table-across-nodes": false,
@@ -71,7 +100,11 @@ const (
     "integrity-check-level": "none",
     "corruption-handle-level": "warn"
  },
-  "changefeed-error-stuck-duration": 1800000000000
+  "changefeed-error-stuck-duration": 1800000000000,
+  "synced-status": {
+    "synced-check-interval": 300,
+    "checkpoint-interval": 15
+  }
 }`
 
 	testCfgTestServerConfigMarshal = `{
@@ -96,7 +129,7 @@ const (
   "sorter": {
     "sort-dir": "/tmp/sorter",
     "cache-size-in-mb": 128,
-    "max-memory-percentage": 10,
+    "max-memory-percentage": 0,
     "max-memory-consumption": 0,
     "num-workerpool-goroutine": 0,
     "num-concurrent-worker": 0,
@@ -106,11 +139,17 @@ const (
     "ca-path": "",
     "cert-path": "",
     "key-path": "",
-    "cert-allowed-cn": null
+    "cert-allowed-cn": null,
+    "mtls": false,
+    "client-user-required": false,
+    "client-allowed-user": null
   },
-  "per-table-memory-quota": 0,
   "kv-client": {
+    "enable-multiplexing": true,
     "worker-concurrent": 8,
+    "grpc-stream-concurrent": 1,
+    "advance-interval-in-ms": 300,
+    "frontier-concurrent": 8,
     "worker-pool-size": 0,
     "region-scan-limit": 40,
     "region-retry-duration": 60000000000
@@ -118,26 +157,21 @@ const (
   "debug": {
     "db": {
       "count": 8,
-      "concurrency": 128,
       "max-open-files": 10000,
       "block-size": 65536,
       "writer-buffer-size": 8388608,
       "compression": "snappy",
       "write-l0-pause-trigger": 2147483647,
-      "compaction-l0-trigger": 160,
-      "compaction-deletion-threshold": 10485760,
-      "compaction-period": 1800,
-      "iterator-max-alive-duration": 10000,
-      "iterator-slow-read-duration": 256
+      "compaction-l0-trigger": 16
     },
     "messages": {
       "client-max-batch-interval": 10000000,
-      "client-max-batch-size": 8388608,
-      "client-max-batch-count": 128,
+      "client-max-batch-size": 67108864,
+      "client-max-batch-count": 1024,
       "client-retry-rate-limit": 1,
       "server-max-pending-message-count": 102400,
       "server-ack-interval": 100000000,
-      "server-worker-pool-size": 4,
+      "server-worker-pool-size": 8,
       "max-recv-msg-size": 268435456,
       "keep-alive-time": 30000000000,
       "keep-alive-timeout": 10000000000
@@ -149,20 +183,35 @@ const (
       "check-balance-interval": 60000000000,
       "add-table-batch-size": 50
     },
-    "enable-kv-connect-backoff": false
+    "cdc-v2": {
+      "enable": false,
+      "meta-store": {
+        "uri": "",
+        "ssl-ca": "",
+        "ssl-cert": "",
+        "ssl-key": ""
+      }
+    },
+    "puller": {
+      "enable-resolved-ts-stuck-detection": false,
+      "resolved-ts-stuck-interval": 300000000000,
+      "log-region-details": false
+    }
   },
   "cluster-id": "default",
-  "max-memory-percentage": 0,
-  "gc-tuner-memory-threshold": 0
+  "gc-tuner-memory-threshold": 0,
+  "per-table-memory-quota": 0,
+  "max-memory-percentage": 0
 }`
 
 	testCfgTestReplicaConfigMarshal1 = `{
   "memory-quota": 1073741824,
   "case-sensitive": false,
-  "enable-old-value": true,
   "force-replicate": true,
+  "ignore-ineligible-table":false,
   "check-gc-safe-point": true,
   "enable-sync-point": false,
+  "enable-table-monitor": false,
   "bdr-mode": false,
   "sync-point-interval": 600000000000,
   "sync-point-retention": 86400000000000,
@@ -177,9 +226,8 @@ const (
     "worker-num": 3
   },
   "sink": {
-  	"encoder-concurrency": 16,
-    "dispatchers": null,
-    "protocol": "open-protocol",
+  	"encoder-concurrency": 32,
+    "protocol": "canal-json",
     "column-selectors": [
       {
         "matcher": [
@@ -191,22 +239,24 @@ const (
         ]
       }
     ],
-    "schema-registry": "",
     "csv": {
       "delimiter": ",",
       "quote": "\"",
       "null": "\\N",
       "include-commit-ts": true,
-      "binary-encoding-method":"base64"
+      "binary-encoding-method":"base64",
+      "output-old-value": false,
+      "output-handle-key": false
     },
-    "transaction-atomicity": "",
-    "terminator": "",
     "date-separator": "month",
     "enable-partition-separator": true,
-    "only-output-updated-columns": false,
     "enable-kafka-sink-v2": true,
     "only-output-updated-columns": true,
+	"delete-only-output-handle-key-columns": true,
+    "content-compatible": true,
     "safe-mode": true,
+	"terminator": "\r\n",
+	"transaction-atomicity": "",
     "kafka-config": {
       "partition-num": 1,
       "replication-factor": 1,
@@ -239,12 +289,27 @@ const (
         "max-batch-size": 100000,
         "avro-enable-watermark": true,
         "avro-decimal-handling-mode": "string",
-        "avro-bigint-unsigned-handling-mode": "string"
+        "avro-bigint-unsigned-handling-mode": "string",
+		"encoding-format": "json"
       },
       "large-message-handle": {
-        "large-message-handle-option": "handle-key-only"
+        "large-message-handle-option": "handle-key-only",
+        "large-message-handle-compression": "",
+        "claim-check-storage-uri": ""
+      },
+      "glue-schema-registry-config": {
+        "region":"region",
+        "registry-name":"registry"
       }
     },
+	"pulsar-config": {
+		"pulsar-version": "v2.10.0",
+		"authentication-token": "token",
+		"tls-trust-certs-file-path": "TLSTrustCertsFilePath_path",
+		"connection-timeout": 18,
+		"operation-timeout": 8,
+		"batching-max-publish-delay": 5000
+	},
     "mysql-config": {
       "worker-count": 8,
       "max-txn-row": 100000,
@@ -265,16 +330,34 @@ const (
     "cloud-storage-config": {
       "worker-count": 8,
       "flush-interval": "1m",
-      "file-size": 1024
+      "file-size": 1024,
+      "output-column-id":false
     },
-    "advance-timeout-in-sec": 150
+    "advance-timeout-in-sec": 150,
+    "send-bootstrap-interval-in-sec": 120,
+    "send-bootstrap-in-msg-count": 10000,
+    "send-bootstrap-to-all-partition": true,
+    "debezium-disable-schema": false,
+    "open": {
+      "output-old-value": true
+    },
+    "debezium": {
+      "output-old-value": true
+    }
   },
   "consistent": {
     "level": "none",
     "max-log-size": 64,
     "flush-interval": 2000,
+    "meta-flush-interval": 200,
+    "compression": "",
+    "encoding-worker-num": 16,
+    "flush-worker-num": 8,
     "storage": "",
-    "use-file-backend": false
+    "use-file-backend": false,
+    "memory-usage": {
+        "memory-quota-percentage": 50
+    }
   },
   "scheduler": {
     "enable-table-across-nodes": true,
@@ -287,16 +370,22 @@ const (
     "integrity-check-level": "none",
     "corruption-handle-level": "warn"
   },
-  "changefeed-error-stuck-duration": 1800000000000
+  "changefeed-error-stuck-duration": 1800000000000,
+  "synced-status": {
+    "synced-check-interval": 300,
+    "checkpoint-interval": 15
+  },
+  "sql-mode":""
 }`
 
 	testCfgTestReplicaConfigMarshal2 = `{
   "memory-quota": 1073741824,
   "case-sensitive": false,
-  "enable-old-value": true,
   "force-replicate": true,
+  "ignore-ineligible-table":false,
   "check-gc-safe-point": true,
   "enable-sync-point": false,
+  "enable-table-monitor": false,
   "bdr-mode": false,
   "sync-point-interval": 600000000000,
   "sync-point-retention": 86400000000000,
@@ -310,9 +399,9 @@ const (
     "worker-num": 3
   },
   "sink": {
-    "encoder-concurrency": 16,
+    "encoder-concurrency": 32,
     "dispatchers": null,
-    "protocol": "open-protocol",
+    "protocol": "canal-json",
     "column-selectors": [
       {
         "matcher": [
@@ -329,19 +418,18 @@ const (
       "quote": "\"",
       "null": "\\N",
       "include-commit-ts": true,
-      "binary-encoding-method":"base64"
+      "binary-encoding-method":"base64",
+      "output-old-value": false,
+      "output-handle-key": false
     },
-    "terminator": "",
+    "terminator": "\r\n",
+	"transaction-atomicity": "",
     "date-separator": "month",
     "enable-partition-separator": true,
-    "kafka-config": {
-      "large-message-handle": {
-        "large-message-handle-option": "handle-key-only"
-      }
-    },
-    "only-output-updated-columns": false,
 	"enable-kafka-sink-v2": true,
     "only-output-updated-columns": true,
+	"delete-only-output-handle-key-columns": true,
+    "content-compatible": true,
     "safe-mode": true,
     "kafka-config": {
       "partition-num": 1,
@@ -375,9 +463,27 @@ const (
         "max-batch-size": 100000,
         "avro-enable-watermark": true,
         "avro-decimal-handling-mode": "string",
-        "avro-bigint-unsigned-handling-mode": "string"
+        "avro-bigint-unsigned-handling-mode": "string",
+        "encoding-format": "json"
+      },
+      "large-message-handle": {
+        "large-message-handle-option": "handle-key-only",
+        "claim-check-storage-uri": "",
+        "claim-check-compression": ""
+      },
+      "glue-schema-registry-config": {
+        "region":"region",
+        "registry-name":"registry"
       }
     },
+	"pulsar-config": {
+		"pulsar-version": "v2.10.0",
+		"authentication-token": "token",
+		"tls-trust-certs-file-path": "TLSTrustCertsFilePath_path",
+		"connection-timeout": 18,
+		"operation-timeout": 8,
+		"batching-max-publish-delay": 5000
+	},
     "mysql-config": {
       "worker-count": 8,
       "max-txn-row": 100000,
@@ -398,16 +504,34 @@ const (
     "cloud-storage-config": {
       "worker-count": 8,
       "flush-interval": "1m",
-      "file-size": 1024
+      "file-size": 1024,
+      "output-column-id":false
     },
-    "advance-timeout-in-sec": 150
+    "advance-timeout-in-sec": 150,
+    "send-bootstrap-interval-in-sec": 120,
+    "send-bootstrap-in-msg-count": 10000,
+    "send-bootstrap-to-all-partition": true,
+    "debezium-disable-schema": false,
+    "open": {
+      "output-old-value": true
+    },
+    "debezium": {
+      "output-old-value": true
+    }
   },
   "consistent": {
     "level": "none",
     "max-log-size": 64,
     "flush-interval": 2000,
+    "meta-flush-interval": 200,
+    "compression": "",
+    "encoding-worker-num": 16,
+    "flush-worker-num": 8,
     "storage": "",
-    "use-file-backend": false
+    "use-file-backend": false,
+    "memory-usage": {
+        "memory-quota-percentage": 50
+    }
   },
   "scheduler": {
     "enable-table-across-nodes": true,
@@ -418,6 +542,11 @@ const (
     "integrity-check-level": "none",
     "corruption-handle-level": "warn"
   },
-  "changefeed-error-stuck-duration": 1800000000000
+  "changefeed-error-stuck-duration": 1800000000000,
+  "synced-status": {
+    "synced-check-interval": 300,
+    "checkpoint-interval": 15
+  },
+  "sql-mode":""
 }`
 )

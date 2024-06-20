@@ -103,7 +103,7 @@ function run() {
 	# wait for above sql done in the up source
 	sleep 2
 
-	check_table_exists test.simple1 ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
+	check_table_exists test.verify_table_eligible ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
 
 	sequential_cases=(
 		"list_changefeed"
@@ -127,6 +127,7 @@ function run() {
 
 	for case in ${sequential_cases[@]}; do
 		python3 $CUR/util/test_case.py "$case" $TLS_DIR
+		sleep 1
 	done
 
 	cleanup_process $CDC_BINARY

@@ -19,11 +19,10 @@ import (
 	"strings"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser/charset"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/types"
-	"github.com/pingcap/tiflow/cdc/entry"
+	"github.com/pingcap/tidb/pkg/parser/charset"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/hash"
@@ -38,6 +37,7 @@ const (
 
 // TableCol denotes the column info for a table definition.
 type TableCol struct {
+	ID        string      `json:"ColumnId,omitempty"`
 	Name      string      `json:"ColumnName" `
 	Tp        string      `json:"ColumnType"`
 	Default   interface{} `json:"ColumnDefault,omitempty"`
@@ -48,7 +48,7 @@ type TableCol struct {
 }
 
 // FromTiColumnInfo converts from TiDB ColumnInfo to TableCol.
-func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo) {
+func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo, outputColumnID bool) {
 	defaultFlen, defaultDecimal := mysql.GetDefaultFieldLengthAndDecimal(col.GetType())
 	isDecimalNotDefault := col.GetDecimal() != defaultDecimal &&
 		col.GetDecimal() != 0 &&
@@ -62,6 +62,9 @@ func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo) {
 		displayDecimal = defaultDecimal
 	}
 
+	if outputColumnID {
+		t.ID = strconv.FormatInt(col.ID, 10)
+	}
 	t.Name = col.Name.O
 	t.Tp = strings.ToUpper(types.TypeToStr(col.GetType(), col.GetCharset()))
 	if mysql.HasUnsignedFlag(col.GetFlag()) {
@@ -73,7 +76,7 @@ func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo) {
 	if mysql.HasNotNullFlag(col.GetFlag()) {
 		t.Nullable = "false"
 	}
-	t.Default = entry.GetDDLDefaultDefinition(col)
+	t.Default = model.GetColumnDefaultValue(col)
 
 	switch col.GetType() {
 	case mysql.TypeTimestamp, mysql.TypeDatetime, mysql.TypeDuration:
@@ -98,9 +101,18 @@ func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo) {
 }
 
 // ToTiColumnInfo converts from TableCol to TiDB ColumnInfo.
-func (t *TableCol) ToTiColumnInfo() (*timodel.ColumnInfo, error) {
+func (t *TableCol) ToTiColumnInfo(colID int64) (*timodel.ColumnInfo, error) {
 	col := new(timodel.ColumnInfo)
 
+	if t.ID != "" {
+		var err error
+		col.ID, err = strconv.ParseInt(t.ID, 10, 64)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+
+	col.ID = colID
 	col.Name = timodel.NewCIStr(t.Name)
 	tp := types.StrToType(strings.ToLower(strings.TrimSuffix(t.Tp, " UNSIGNED")))
 	col.FieldType = *types.NewFieldType(tp)
@@ -190,13 +202,13 @@ type tableDefWithoutQuery struct {
 }
 
 // FromDDLEvent converts from DDLEvent to TableDefinition.
-func (t *TableDefinition) FromDDLEvent(event *model.DDLEvent) {
+func (t *TableDefinition) FromDDLEvent(event *model.DDLEvent, outputColumnID bool) {
 	if event.CommitTs != event.TableInfo.Version {
 		log.Panic("commit ts and table info version should be equal",
 			zap.Any("event", event), zap.Any("tableInfo", event.TableInfo),
 		)
 	}
-	t.FromTableInfo(event.TableInfo, event.TableInfo.Version)
+	t.FromTableInfo(event.TableInfo, event.TableInfo.Version, outputColumnID)
 	t.Query = event.Query
 	t.Type = event.Type
 }
@@ -217,7 +229,9 @@ func (t *TableDefinition) ToDDLEvent() (*model.DDLEvent, error) {
 }
 
 // FromTableInfo converts from TableInfo to TableDefinition.
-func (t *TableDefinition) FromTableInfo(info *model.TableInfo, tableInfoVersion model.Ts) {
+func (t *TableDefinition) FromTableInfo(
+	info *model.TableInfo, tableInfoVersion model.Ts, outputColumnID bool,
+) {
 	t.Version = defaultTableDefinitionVersion
 	t.TableVersion = tableInfoVersion
 
@@ -229,29 +243,30 @@ func (t *TableDefinition) FromTableInfo(info *model.TableInfo, tableInfoVersion 
 	t.TotalColumns = len(info.Columns)
 	for _, col := range info.Columns {
 		var tableCol TableCol
-		tableCol.FromTiColumnInfo(col)
+		tableCol.FromTiColumnInfo(col, outputColumnID)
 		t.Columns = append(t.Columns, tableCol)
 	}
 }
 
 // ToTableInfo converts from TableDefinition to DDLEvent.
 func (t *TableDefinition) ToTableInfo() (*model.TableInfo, error) {
-	info := &model.TableInfo{
-		TableName: model.TableName{
-			Schema: t.Schema,
-			Table:  t.Table,
-		},
-		TableInfo: &timodel.TableInfo{
-			Name: timodel.NewCIStr(t.Table),
-		},
+	tidbTableInfo := &timodel.TableInfo{
+		Name: timodel.NewCIStr(t.Table),
 	}
+	nextMockID := int64(100) // 100 is an arbitrary number
 	for _, col := range t.Columns {
-		tiCol, err := col.ToTiColumnInfo()
+		tiCol, err := col.ToTiColumnInfo(nextMockID)
 		if err != nil {
 			return nil, err
 		}
-		info.Columns = append(info.Columns, tiCol)
+		if mysql.HasPriKeyFlag(tiCol.GetFlag()) {
+			// use PKIsHandle to make sure that the primary keys can be detected by `WrapTableInfo`
+			tidbTableInfo.PKIsHandle = true
+		}
+		tidbTableInfo.Columns = append(tidbTableInfo.Columns, tiCol)
+		nextMockID += 1
 	}
+	info := model.WrapTableInfo(100, t.Schema, 100, tidbTableInfo)
 
 	return info, nil
 }

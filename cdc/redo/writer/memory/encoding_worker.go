@@ -25,6 +25,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
 	"github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/redo"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -97,36 +98,43 @@ func (e *polymorphicRedoEvent) encode() (err error) {
 }
 
 type encodingWorkerGroup struct {
+	changefeed model.ChangeFeedID
 	outputCh   chan *polymorphicRedoEvent
 	inputChs   []chan *polymorphicRedoEvent
 	workerNum  int
 	nextWorker atomic.Uint64
 
-	closed chan struct{}
+	closed chan error
 }
 
-func newEncodingWorkerGroup(workerNum int) *encodingWorkerGroup {
+func newEncodingWorkerGroup(cfg *writer.LogWriterConfig) *encodingWorkerGroup {
+	workerNum := cfg.EncodingWorkerNum
 	if workerNum <= 0 {
-		workerNum = defaultEncodingWorkerNum
+		workerNum = redo.DefaultEncodingWorkerNum
 	}
 	inputChs := make([]chan *polymorphicRedoEvent, workerNum)
 	for i := 0; i < workerNum; i++ {
-		inputChs[i] = make(chan *polymorphicRedoEvent, defaultEncodingInputChanSize)
+		inputChs[i] = make(chan *polymorphicRedoEvent, redo.DefaultEncodingInputChanSize)
 	}
 	return &encodingWorkerGroup{
-		inputChs:  inputChs,
-		outputCh:  make(chan *polymorphicRedoEvent, defaultEncodingOutputChanSize),
-		workerNum: workerNum,
-		closed:    make(chan struct{}),
+		changefeed: cfg.ChangeFeedID,
+		inputChs:   inputChs,
+		outputCh:   make(chan *polymorphicRedoEvent, redo.DefaultEncodingOutputChanSize),
+		workerNum:  workerNum,
+		closed:     make(chan error, 1),
 	}
 }
 
 func (e *encodingWorkerGroup) Run(ctx context.Context) (err error) {
 	defer func() {
-		close(e.closed)
-		if err != nil {
-			log.Warn("redo fileWorkerGroup closed with error", zap.Error(err))
+		log.Warn("redo encoding workers closed",
+			zap.String("namespace", e.changefeed.Namespace),
+			zap.String("changefeed", e.changefeed.ID),
+			zap.Error(err))
+		if err != nil && errors.Cause(err) != context.Canceled {
+			e.closed <- err
 		}
+		close(e.closed)
 	}()
 	eg, egCtx := errgroup.WithContext(ctx)
 	for i := 0; i < e.workerNum; i++ {
@@ -135,7 +143,10 @@ func (e *encodingWorkerGroup) Run(ctx context.Context) (err error) {
 			return e.runWorker(egCtx, idx)
 		})
 	}
-	log.Info("redo log encoding workers started", zap.Int("workerNum", e.workerNum))
+	log.Info("redo log encoding workers started",
+		zap.String("namespace", e.changefeed.Namespace),
+		zap.String("changefeed", e.changefeed.ID),
+		zap.Int("workerNum", e.workerNum))
 	return eg.Wait()
 }
 
@@ -173,8 +184,8 @@ func (e *encodingWorkerGroup) input(
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-e.closed:
-		return errors.ErrRedoWriterStopped.GenWithStackByArgs("encoding worker is closed")
+	case err := <-e.closed:
+		return errors.WrapError(errors.ErrRedoWriterStopped, err, "encoding worker is closed")
 	case e.inputChs[idx] <- event:
 		return nil
 	}
@@ -186,8 +197,8 @@ func (e *encodingWorkerGroup) output(
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-e.closed:
-		return errors.ErrRedoWriterStopped.GenWithStackByArgs("encoding worker is closed")
+	case err := <-e.closed:
+		return errors.WrapError(errors.ErrRedoWriterStopped, err, "encoding worker is closed")
 	case e.outputCh <- event:
 		return nil
 	}
@@ -211,8 +222,8 @@ func (e *encodingWorkerGroup) FlushAll(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-e.closed:
-		return errors.ErrRedoWriterStopped.GenWithStackByArgs("encoding worker is closed")
+	case err := <-e.closed:
+		return errors.WrapError(errors.ErrRedoWriterStopped, err, "encoding worker is closed")
 	case <-flushCh:
 	}
 	return nil
@@ -235,8 +246,8 @@ func (e *encodingWorkerGroup) broadcastAndWaitEncoding(ctx context.Context) erro
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-e.closed:
-			return errors.ErrRedoWriterStopped.GenWithStackByArgs("encoding worker is closed")
+		case err := <-e.closed:
+			return errors.WrapError(errors.ErrRedoWriterStopped, err, "encoding worker is closed")
 		case <-ch:
 		}
 	}

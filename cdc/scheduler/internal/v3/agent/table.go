@@ -272,7 +272,7 @@ func (t *tableSpan) injectDispatchTableTask(task *dispatchTableTask) {
 		t.task = task
 		return
 	}
-	log.Debug("schedulerv3: table inject dispatch table task ignored,"+
+	log.Warn("schedulerv3: table inject dispatch table task ignored,"+
 		"since there is one not finished yet",
 		zap.String("namespace", t.changefeedID.Namespace),
 		zap.String("changefeed", t.changefeedID.ID),
@@ -311,7 +311,7 @@ func newTableSpanManager(
 func (tm *tableSpanManager) poll(ctx context.Context) ([]*schedulepb.Message, error) {
 	result := make([]*schedulepb.Message, 0)
 	var err error
-	toBeDropped := []tablepb.Span{}
+	var toBeDropped []tablepb.Span
 	tm.tables.Ascend(func(span tablepb.Span, table *tableSpan) bool {
 		message, err1 := table.poll(ctx)
 		if err != nil {

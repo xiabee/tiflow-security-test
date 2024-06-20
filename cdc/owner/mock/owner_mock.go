@@ -13,7 +13,6 @@ import (
 	model "github.com/pingcap/tiflow/cdc/model"
 	owner "github.com/pingcap/tiflow/cdc/owner"
 	scheduler "github.com/pingcap/tiflow/cdc/scheduler"
-	orchestrator "github.com/pingcap/tiflow/pkg/orchestrator"
 )
 
 // MockOwner is a mock of Owner interface.
@@ -49,6 +48,20 @@ func (m *MockOwner) AsyncStop() {
 func (mr *MockOwnerMockRecorder) AsyncStop() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AsyncStop", reflect.TypeOf((*MockOwner)(nil).AsyncStop))
+}
+
+// CreateChangefeed mocks base method.
+func (m *MockOwner) CreateChangefeed(arg0 context.Context, arg1 *model.UpstreamInfo, arg2 *model.ChangeFeedInfo) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateChangefeed", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// CreateChangefeed indicates an expected call of CreateChangefeed.
+func (mr *MockOwnerMockRecorder) CreateChangefeed(arg0, arg1, arg2 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateChangefeed", reflect.TypeOf((*MockOwner)(nil).CreateChangefeed), arg0, arg1, arg2)
 }
 
 // DrainCapture mocks base method.
@@ -111,19 +124,32 @@ func (mr *MockOwnerMockRecorder) ScheduleTable(cfID, toCapture, tableID, done in
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ScheduleTable", reflect.TypeOf((*MockOwner)(nil).ScheduleTable), cfID, toCapture, tableID, done)
 }
 
-// Tick mocks base method.
-func (m *MockOwner) Tick(ctx context.Context, state orchestrator.ReactorState) (orchestrator.ReactorState, error) {
+// UpdateChangefeed mocks base method.
+func (m *MockOwner) UpdateChangefeed(ctx context.Context, changeFeedInfo *model.ChangeFeedInfo) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Tick", ctx, state)
-	ret0, _ := ret[0].(orchestrator.ReactorState)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
+	ret := m.ctrl.Call(m, "UpdateChangefeed", ctx, changeFeedInfo)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
-// Tick indicates an expected call of Tick.
-func (mr *MockOwnerMockRecorder) Tick(ctx, state interface{}) *gomock.Call {
+// UpdateChangefeed indicates an expected call of UpdateChangefeed.
+func (mr *MockOwnerMockRecorder) UpdateChangefeed(ctx, changeFeedInfo interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Tick", reflect.TypeOf((*MockOwner)(nil).Tick), ctx, state)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateChangefeed", reflect.TypeOf((*MockOwner)(nil).UpdateChangefeed), ctx, changeFeedInfo)
+}
+
+// UpdateChangefeedAndUpstream mocks base method.
+func (m *MockOwner) UpdateChangefeedAndUpstream(ctx context.Context, upstreamInfo *model.UpstreamInfo, changeFeedInfo *model.ChangeFeedInfo) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UpdateChangefeedAndUpstream", ctx, upstreamInfo, changeFeedInfo)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UpdateChangefeedAndUpstream indicates an expected call of UpdateChangefeedAndUpstream.
+func (mr *MockOwnerMockRecorder) UpdateChangefeedAndUpstream(ctx, upstreamInfo, changeFeedInfo interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateChangefeedAndUpstream", reflect.TypeOf((*MockOwner)(nil).UpdateChangefeedAndUpstream), ctx, upstreamInfo, changeFeedInfo)
 }
 
 // WriteDebugInfo mocks base method.

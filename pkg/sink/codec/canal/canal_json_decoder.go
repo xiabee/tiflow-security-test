@@ -17,16 +17,20 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/goccy/go-json"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
+	"github.com/pingcap/tiflow/pkg/sink/codec/utils"
+	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
@@ -39,14 +43,28 @@ type batchDecoder struct {
 
 	config *common.Config
 
+	storage storage.ExternalStorage
+
 	upstreamTiDB *sql.DB
 	bytesDecoder *encoding.Decoder
 }
 
 // NewBatchDecoder return a decoder for canal-json
 func NewBatchDecoder(
-	_ context.Context, codecConfig *common.Config, db *sql.DB,
+	ctx context.Context, codecConfig *common.Config, db *sql.DB,
 ) (codec.RowEventDecoder, error) {
+	var (
+		externalStorage storage.ExternalStorage
+		err             error
+	)
+	if codecConfig.LargeMessageHandle.EnableClaimCheck() {
+		storageURI := codecConfig.LargeMessageHandle.ClaimCheckStorageURI
+		externalStorage, err = util.GetExternalStorageFromURI(ctx, storageURI)
+		if err != nil {
+			return nil, cerror.WrapError(cerror.ErrKafkaInvalidConfig, err)
+		}
+	}
+
 	if codecConfig.LargeMessageHandle.HandleKeyOnly() && db == nil {
 		return nil, cerror.ErrCodecDecode.
 			GenWithStack("handle-key-only is enabled, but upstream TiDB is not provided")
@@ -54,19 +72,31 @@ func NewBatchDecoder(
 
 	return &batchDecoder{
 		config:       codecConfig,
+		storage:      externalStorage,
 		upstreamTiDB: db,
 		bytesDecoder: charmap.ISO8859_1.NewDecoder(),
 	}, nil
 }
 
-// AddKeyValue implements the EventBatchDecoder interface
+// AddKeyValue implements the RowEventDecoder interface
 func (b *batchDecoder) AddKeyValue(_, value []byte) error {
+	value, err := common.Decompress(b.config.LargeMessageHandle.LargeMessageHandleCompression, value)
+	if err != nil {
+		log.Error("decompress data failed",
+			zap.String("compression", b.config.LargeMessageHandle.LargeMessageHandleCompression),
+			zap.Error(err))
+
+		return errors.Trace(err)
+	}
 	b.data = value
 	return nil
 }
 
 // HasNext implements the RowEventDecoder interface
 func (b *batchDecoder) HasNext() (model.MessageType, bool, error) {
+	if b.data == nil {
+		return model.MessageTypeUnknown, false, nil
+	}
 	var (
 		msg         canalJSONMessageInterface = &JSONMessage{}
 		encodedData []byte
@@ -78,6 +108,7 @@ func (b *batchDecoder) HasNext() (model.MessageType, bool, error) {
 			Extensions:  &tidbExtension{},
 		}
 	}
+
 	if len(b.config.Terminator) > 0 {
 		idx := bytes.IndexAny(b.data, b.config.Terminator)
 		if idx >= 0 {
@@ -102,8 +133,32 @@ func (b *batchDecoder) HasNext() (model.MessageType, bool, error) {
 		return model.MessageTypeUnknown, false, err
 	}
 	b.msg = msg
-
 	return b.msg.messageType(), true, nil
+}
+
+func (b *batchDecoder) assembleClaimCheckRowChangedEvent(ctx context.Context, claimCheckLocation string) (*model.RowChangedEvent, error) {
+	_, claimCheckFileName := filepath.Split(claimCheckLocation)
+	data, err := b.storage.ReadFile(ctx, claimCheckFileName)
+	if err != nil {
+		return nil, err
+	}
+	claimCheckM, err := common.UnmarshalClaimCheckMessage(data)
+	if err != nil {
+		return nil, err
+	}
+
+	value, err := common.Decompress(b.config.LargeMessageHandle.LargeMessageHandleCompression, claimCheckM.Value)
+	if err != nil {
+		return nil, err
+	}
+	message := &canalJSONMessageWithTiDBExtension{}
+	err = json.Unmarshal(value, message)
+	if err != nil {
+		return nil, err
+	}
+
+	b.msg = message
+	return b.NextRowChangedEvent()
 }
 
 func (b *batchDecoder) buildData(holder *common.ColumnsHolder) (map[string]interface{}, map[string]string, error) {
@@ -118,17 +173,14 @@ func (b *batchDecoder) buildData(holder *common.ColumnsHolder) (map[string]inter
 
 		var value string
 		rawValue := holder.Values[i].([]uint8)
-		if isBinaryMySQLType(mysqlType) {
+		if utils.IsBinaryMySQLType(mysqlType) {
 			rawValue, err := b.bytesDecoder.Bytes(rawValue)
 			if err != nil {
 				return nil, nil, errors.Trace(err)
 			}
 			value = string(rawValue)
 		} else if strings.Contains(mysqlType, "bit") || strings.Contains(mysqlType, "set") {
-			bitValue, err := common.BinaryLiteralToInt(rawValue)
-			if err != nil {
-				return nil, nil, errors.Trace(err)
-			}
+			bitValue := common.MustBinaryLiteralToInt(rawValue)
 			value = strconv.FormatUint(bitValue, 10)
 		} else {
 			value = string(rawValue)
@@ -168,13 +220,9 @@ func (b *batchDecoder) assembleHandleKeyOnlyRowChangedEvent(
 			CommitTs: commitTs,
 		},
 	}
-
 	switch eventType {
 	case "INSERT":
-		holder, err := common.SnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, handleKeyData)
-		if err != nil {
-			return nil, err
-		}
+		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, handleKeyData)
 		data, mysqlType, err := b.buildData(holder)
 		if err != nil {
 			return nil, err
@@ -182,10 +230,7 @@ func (b *batchDecoder) assembleHandleKeyOnlyRowChangedEvent(
 		result.MySQLType = mysqlType
 		result.Data = []map[string]interface{}{data}
 	case "UPDATE":
-		holder, err := common.SnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, handleKeyData)
-		if err != nil {
-			return nil, err
-		}
+		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, handleKeyData)
 		data, mysqlType, err := b.buildData(holder)
 		if err != nil {
 			return nil, err
@@ -193,20 +238,14 @@ func (b *batchDecoder) assembleHandleKeyOnlyRowChangedEvent(
 		result.MySQLType = mysqlType
 		result.Data = []map[string]interface{}{data}
 
-		holder, err = common.SnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, message.getOld())
-		if err != nil {
-			return nil, err
-		}
+		holder = common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, message.getOld())
 		old, _, err := b.buildData(holder)
 		if err != nil {
 			return nil, err
 		}
 		result.Old = []map[string]interface{}{old}
 	case "DELETE":
-		holder, err := common.SnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, handleKeyData)
-		if err != nil {
-			return nil, err
-		}
+		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, handleKeyData)
 		data, mysqlType, err := b.buildData(holder)
 		if err != nil {
 			return nil, err
@@ -232,6 +271,9 @@ func (b *batchDecoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 		ctx := context.Background()
 		if message.Extensions.OnlyHandleKey {
 			return b.assembleHandleKeyOnlyRowChangedEvent(ctx, message)
+		}
+		if message.Extensions.ClaimCheckLocation != "" {
+			return b.assembleClaimCheckRowChangedEvent(ctx, message.Extensions.ClaimCheckLocation)
 		}
 	}
 

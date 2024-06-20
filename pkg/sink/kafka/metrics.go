@@ -49,7 +49,7 @@ var (
 			Subsystem: "sink",
 			Name:      "kafka_producer_request_latency",
 			Help:      "The request latency for all brokers.",
-		}, []string{"namespace", "changefeed", "broker"})
+		}, []string{"namespace", "changefeed", "broker", "type"})
 	// Histogram update by `compression-ratio`.
 	compressionRatioGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -57,7 +57,16 @@ var (
 			Subsystem: "sink",
 			Name:      "kafka_producer_compression_ratio",
 			Help:      "The compression ratio times 100 of record batches for all topics.",
-		}, []string{"namespace", "changefeed"})
+		}, []string{"namespace", "changefeed", "type"})
+	// updated by `records-per-request`.
+	recordsPerRequestGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "ticdc",
+			Subsystem: "sink",
+			Name:      "kafka_producer_records_per_request",
+			Help:      "The P99 number of records per request for all topics.",
+		}, []string{"namespace", "changefeed", "type"})
+
 	// Meter mark by 1 once a response received.
 	responseRateGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -116,6 +125,7 @@ var (
 // InitMetrics registers all metrics in this file.
 func InitMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(compressionRatioGauge)
+	registry.MustRegister(recordsPerRequestGauge)
 	registry.MustRegister(OutgoingByteRateGauge)
 	registry.MustRegister(RequestRateGauge)
 	registry.MustRegister(RequestLatencyGauge)

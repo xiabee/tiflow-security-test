@@ -15,14 +15,15 @@ package open
 
 import (
 	"testing"
-	"time"
 
-	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
+	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/codec/internal"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,22 +33,22 @@ func TestFormatCol(t *testing.T) {
 		Type:  mysql.TypeString,
 		Value: "测",
 	}}}
-	rowEncode, err := row.encode(false)
-	require.Nil(t, err)
+	rowEncode, err := row.encode()
+	require.NoError(t, err)
 	row2 := new(messageRow)
 	err = row2.decode(rowEncode)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.Equal(t, row, row2)
-
+	//
 	row = &messageRow{Update: map[string]internal.Column{"test": {
 		Type:  mysql.TypeBlob,
 		Value: []byte("测"),
 	}}}
-	rowEncode, err = row.encode(false)
-	require.Nil(t, err)
+	rowEncode, err = row.encode()
+	require.NoError(t, err)
 	row2 = new(messageRow)
 	err = row2.decode(rowEncode)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.Equal(t, row, row2)
 }
 
@@ -61,11 +62,11 @@ func TestNonBinaryStringCol(t *testing.T) {
 	mqCol := internal.Column{}
 	mqCol.FromRowChangeColumn(col)
 	row := &messageRow{Update: map[string]internal.Column{"test": mqCol}}
-	rowEncode, err := row.encode(false)
-	require.Nil(t, err)
+	rowEncode, err := row.encode()
+	require.NoError(t, err)
 	row2 := new(messageRow)
 	err = row2.decode(rowEncode)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.Equal(t, row, row2)
 	mqCol2 := row2.Update["test"]
 	col2 := mqCol2.ToRowChangeColumn("test")
@@ -84,11 +85,11 @@ func TestVarBinaryCol(t *testing.T) {
 	mqCol := internal.Column{}
 	mqCol.FromRowChangeColumn(col)
 	row := &messageRow{Update: map[string]internal.Column{"test": mqCol}}
-	rowEncode, err := row.encode(false)
-	require.Nil(t, err)
+	rowEncode, err := row.encode()
+	require.NoError(t, err)
 	row2 := new(messageRow)
 	err = row2.decode(rowEncode)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.Equal(t, row, row2)
 	mqCol2 := row2.Update["test"]
 	col2 := mqCol2.ToRowChangeColumn("test")
@@ -96,146 +97,118 @@ func TestVarBinaryCol(t *testing.T) {
 }
 
 func TestOnlyOutputUpdatedColumn(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		pre     interface{}
-		updated interface{}
-		output  bool
-	}{
-		{
-			pre:     []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
-			updated: []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
-			output:  false,
-		},
-		{
-			pre:     uint64(1),
-			updated: uint64(1),
-			output:  false,
-		},
-		{
-			pre:     nil,
-			updated: nil,
-			output:  false,
-		},
-		{
-			pre:     float64(6.2),
-			updated: float32(6.2),
-			output:  true,
-		},
-		{
-			pre:     uint64(1),
-			updated: int64(1),
-			output:  true,
-		},
-		{
-			pre:     time.Time{},
-			updated: time.Time{},
-			output:  false,
-		},
-		{
-			pre:     "time.Time{}",
-			updated: time.Time{},
-			output:  true,
-		},
-		{
-			pre:     "time.Time{}",
-			updated: "time.Time{}",
-			output:  false,
-		},
-	}
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
 
-	for _, cs := range cases {
-		col := internal.Column{
-			Value: cs.pre,
+	_ = helper.DDL2Event(`create table test.t (a int primary key, b int, c int)`)
+	event := helper.DML2Event(`insert into test.t values (1, 1, 1)`, "test", "t")
+	event.PreColumns = make([]*model.ColumnData, len(event.Columns))
+	for idx, col := range event.Columns {
+		event.PreColumns[idx] = &model.ColumnData{
+			ColumnID:         col.ColumnID,
+			Value:            col.Value,
+			ApproximateBytes: 0,
 		}
-		col2 := internal.Column{
-			Value: cs.updated,
-		}
-		row := &messageRow{
-			Update:     map[string]internal.Column{"test": col2},
-			PreColumns: map[string]internal.Column{"test": col},
-		}
-		_, err := row.encode(true)
-		require.Nil(t, err)
-		_, ok := row.PreColumns["test"]
-		assert.Equal(t, cs.output, ok)
 	}
+	codecConfig := common.NewConfig(config.ProtocolOpen)
+	codecConfig.OnlyOutputUpdatedColumns = true
+
+	// column not updated, so ignore it.
+	_, row, err := rowChangeToMsg(event, codecConfig, false)
+	require.NoError(t, err)
+	require.Len(t, row.PreColumns, 0)
+
+	event.TableInfo.Columns[1].FieldType = *types.NewFieldType(mysql.TypeFloat)
+	event.Columns[1].Value = float32(event.Columns[1].Value.(int64))
+	event.PreColumns[1].Value = float64(event.PreColumns[1].Value.(int64))
+	_, row, err = rowChangeToMsg(event, codecConfig, false)
+	require.NoError(t, err)
+	_, ok := row.PreColumns["b"]
+	require.True(t, ok)
+
+	event.TableInfo.Columns[1].FieldType = *types.NewFieldType(mysql.TypeLong)
+	event.Columns[1].Value = int64(event.Columns[1].Value.(float32))
+	event.PreColumns[1].Value = uint64(event.PreColumns[1].Value.(float64))
+	_, row, err = rowChangeToMsg(event, codecConfig, false)
+	require.NoError(t, err)
+	_, ok = row.PreColumns["b"]
+	require.True(t, ok)
 }
 
 func TestRowChanged2MsgOnlyHandleKeyColumns(t *testing.T) {
-	t.Parallel()
+	replicaConfig := config.GetDefaultReplicaConfig()
+	replicaConfig.ForceReplicate = true
 
-	insertEvent := &model.RowChangedEvent{
-		CommitTs: 417318403368288260,
-		Table: &model.TableName{
-			Schema: "schema",
-			Table:  "table",
-		},
-		Columns: []*model.Column{
-			{Name: "id", Flag: model.HandleKeyFlag, Type: mysql.TypeLonglong, Value: 1},
-			{Name: "a", Type: mysql.TypeLonglong, Value: 1},
-		},
-	}
-	codecConfig := common.NewConfig(config.ProtocolOpen)
-	codecConfig.DeleteOnlyHandleKeyColumns = true
+	helper := entry.NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
+	defer helper.Close()
 
-	_, value := rowChangeToMsg(insertEvent, codecConfig, false)
+	_ = helper.DDL2Event(`create table test.t(id int primary key, a int)`)
+	insertEvent := helper.DML2Event(`insert into test.t values (1, 1)`, "test", "t")
+
+	config := common.NewConfig(config.ProtocolOpen)
+	config.DeleteOnlyHandleKeyColumns = true
+
+	_, value, err := rowChangeToMsg(insertEvent, config, false)
+	require.NoError(t, err)
 	require.Contains(t, value.Update, "id")
 	require.Contains(t, value.Update, "a")
 
-	codecConfig.DeleteOnlyHandleKeyColumns = false
-	key, value := rowChangeToMsg(insertEvent, codecConfig, true)
+	config.DeleteOnlyHandleKeyColumns = false
+	key, value, err := rowChangeToMsg(insertEvent, config, true)
+	require.NoError(t, err)
 	require.True(t, key.OnlyHandleKey)
 	require.Contains(t, value.Update, "id")
 	require.NotContains(t, value.Update, "a")
 
-	updateEvent := &model.RowChangedEvent{
-		CommitTs: 417318403368288260,
-		Table: &model.TableName{
-			Schema: "schema",
-			Table:  "table",
-		},
-		Columns: []*model.Column{
-			{Name: "id", Flag: model.HandleKeyFlag, Type: mysql.TypeLonglong, Value: 1},
-			{Name: "a", Type: mysql.TypeLonglong, Value: 2},
-		},
-		PreColumns: []*model.Column{
-			{Name: "id", Flag: model.HandleKeyFlag, Type: mysql.TypeLonglong, Value: 1},
-			{Name: "a", Type: mysql.TypeLonglong, Value: 1},
-		},
-	}
-	codecConfig.DeleteOnlyHandleKeyColumns = true
-	_, value = rowChangeToMsg(updateEvent, codecConfig, false)
+	_ = helper.DDL2Event(`create table test.t1(id varchar(10), a varchar(10))`)
+	insertEventNoHandleKey := helper.DML2Event(`insert into test.t1 values ("1", "1")`, "test", "t1")
+	_, _, err = rowChangeToMsg(insertEventNoHandleKey, config, true)
+	require.Error(t, err, cerror.ErrOpenProtocolCodecInvalidData)
+
+	updateEvent := *insertEvent
+	updateEvent.PreColumns = updateEvent.Columns
+
+	config.DeleteOnlyHandleKeyColumns = true
+	_, value, err = rowChangeToMsg(&updateEvent, config, false)
+	require.NoError(t, err)
 	require.Contains(t, value.PreColumns, "a")
 
-	codecConfig.DeleteOnlyHandleKeyColumns = false
-	key, value = rowChangeToMsg(updateEvent, codecConfig, true)
+	config.DeleteOnlyHandleKeyColumns = false
+	key, value, err = rowChangeToMsg(&updateEvent, config, true)
+	require.NoError(t, err)
 	require.True(t, key.OnlyHandleKey)
 	require.NotContains(t, value.PreColumns, "a")
 	require.NotContains(t, value.Update, "a")
 
-	deleteEvent := &model.RowChangedEvent{
-		CommitTs: 417318403368288260,
-		Table: &model.TableName{
-			Schema: "schema",
-			Table:  "table",
-		},
-		PreColumns: []*model.Column{
-			{Name: "id", Flag: model.HandleKeyFlag, Type: mysql.TypeLonglong, Value: 1},
-			{Name: "a", Type: mysql.TypeLonglong, Value: 2},
-		},
-	}
+	updateEventNoHandleKey := *insertEventNoHandleKey
+	updateEventNoHandleKey.PreColumns = updateEventNoHandleKey.Columns
+	_, _, err = rowChangeToMsg(&updateEventNoHandleKey, config, true)
+	require.Error(t, err, cerror.ErrOpenProtocolCodecInvalidData)
 
-	codecConfig.DeleteOnlyHandleKeyColumns = true
-	_, value = rowChangeToMsg(deleteEvent, codecConfig, false)
+	deleteEvent := *insertEvent
+	deleteEvent.PreColumns = deleteEvent.Columns
+	deleteEvent.Columns = nil
+	config.DeleteOnlyHandleKeyColumns = true
+	_, value, err = rowChangeToMsg(&deleteEvent, config, false)
+	require.NoError(t, err)
+	require.Contains(t, value.Delete, "id")
 	require.NotContains(t, value.Delete, "a")
 
-	codecConfig.DeleteOnlyHandleKeyColumns = false
-	_, value = rowChangeToMsg(deleteEvent, codecConfig, false)
+	config.DeleteOnlyHandleKeyColumns = false
+	_, value, err = rowChangeToMsg(&deleteEvent, config, false)
+	require.NoError(t, err)
+	require.Contains(t, value.Delete, "id")
 	require.Contains(t, value.Delete, "a")
 
-	codecConfig.DeleteOnlyHandleKeyColumns = false
-	key, value = rowChangeToMsg(deleteEvent, codecConfig, true)
+	config.DeleteOnlyHandleKeyColumns = false
+	key, value, err = rowChangeToMsg(&deleteEvent, config, true)
+	require.NoError(t, err)
 	require.True(t, key.OnlyHandleKey)
 	require.NotContains(t, value.Delete, "a")
+
+	deleteEventNoHandleKey := *insertEventNoHandleKey
+	deleteEventNoHandleKey.PreColumns = deleteEvent.Columns
+	deleteEventNoHandleKey.Columns = nil
+	_, _, err = rowChangeToMsg(&deleteEventNoHandleKey, config, true)
+	require.Error(t, err, cerror.ErrOpenProtocolCodecInvalidData)
 }

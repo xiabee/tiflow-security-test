@@ -39,16 +39,16 @@ func (m *MockCapture) EXPECT() *MockCaptureMockRecorder {
 	return m.recorder
 }
 
-// AsyncClose mocks base method.
-func (m *MockCapture) AsyncClose() {
+// Close mocks base method.
+func (m *MockCapture) Close() {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "AsyncClose")
+	m.ctrl.Call(m, "Close")
 }
 
-// AsyncClose indicates an expected call of AsyncClose.
-func (mr *MockCaptureMockRecorder) AsyncClose() *gomock.Call {
+// Close indicates an expected call of Close.
+func (mr *MockCaptureMockRecorder) Close() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AsyncClose", reflect.TypeOf((*MockCapture)(nil).AsyncClose))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockCapture)(nil).Close))
 }
 
 // Drain mocks base method.
@@ -107,6 +107,21 @@ func (m *MockCapture) GetOwnerCaptureInfo(ctx context.Context) (*model.CaptureIn
 func (mr *MockCaptureMockRecorder) GetOwnerCaptureInfo(ctx interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetOwnerCaptureInfo", reflect.TypeOf((*MockCapture)(nil).GetOwnerCaptureInfo), ctx)
+}
+
+// GetUpstreamInfo mocks base method.
+func (m *MockCapture) GetUpstreamInfo(arg0 context.Context, arg1 model.UpstreamID, arg2 string) (*model.UpstreamInfo, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUpstreamInfo", arg0, arg1, arg2)
+	ret0, _ := ret[0].(*model.UpstreamInfo)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetUpstreamInfo indicates an expected call of GetUpstreamInfo.
+func (mr *MockCaptureMockRecorder) GetUpstreamInfo(arg0, arg1, arg2 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUpstreamInfo", reflect.TypeOf((*MockCapture)(nil).GetUpstreamInfo), arg0, arg1, arg2)
 }
 
 // GetUpstreamManager mocks base method.

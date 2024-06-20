@@ -16,12 +16,11 @@ package txn
 import (
 	"encoding/binary"
 	"hash/fnv"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"go.uber.org/zap"
@@ -42,17 +41,16 @@ func (e *txnEvent) OnConflictResolved() {
 }
 
 // ConflictKeys implements causality.txnEvent interface.
-func (e *txnEvent) ConflictKeys(numSlots uint64) []uint64 {
-	keys := genTxnKeys(e.TxnCallbackableEvent.Event)
-	sort.Slice(keys, func(i, j int) bool { return keys[i]%numSlots < keys[j]%numSlots })
-	return keys
+func (e *txnEvent) ConflictKeys() []uint64 {
+	return genTxnKeys(e.TxnCallbackableEvent.Event)
 }
 
-// genTxnKeys returns hash keys for `txn`.
+// genTxnKeys returns deduplicated hash keys of a transaction.
 func genTxnKeys(txn *model.SingleTableTxn) []uint64 {
 	if len(txn.Rows) == 0 {
 		return nil
 	}
+
 	hashRes := make(map[uint64]struct{}, len(txn.Rows))
 	hasher := fnv.New32a()
 	for _, row := range txn.Rows {
@@ -74,8 +72,8 @@ func genTxnKeys(txn *model.SingleTableTxn) []uint64 {
 func genRowKeys(row *model.RowChangedEvent) [][]byte {
 	var keys [][]byte
 	if len(row.Columns) != 0 {
-		for iIdx, idxCol := range row.IndexColumns {
-			key := genKeyList(row.Columns, iIdx, idxCol, row.Table.TableID)
+		for iIdx, idxCol := range row.TableInfo.IndexColumnsOffset {
+			key := genKeyList(row.GetColumns(), iIdx, idxCol, row.GetTableID())
 			if len(key) == 0 {
 				continue
 			}
@@ -83,8 +81,8 @@ func genRowKeys(row *model.RowChangedEvent) [][]byte {
 		}
 	}
 	if len(row.PreColumns) != 0 {
-		for iIdx, idxCol := range row.IndexColumns {
-			key := genKeyList(row.PreColumns, iIdx, idxCol, row.Table.TableID)
+		for iIdx, idxCol := range row.TableInfo.IndexColumnsOffset {
+			key := genKeyList(row.GetPreColumns(), iIdx, idxCol, row.GetTableID())
 			if len(key) == 0 {
 				continue
 			}
@@ -94,9 +92,9 @@ func genRowKeys(row *model.RowChangedEvent) [][]byte {
 	if len(keys) == 0 {
 		// use table ID as key if no key generated (no PK/UK),
 		// no concurrence for rows in the same table.
-		log.Debug("Use table id as the key", zap.Int64("tableID", row.Table.TableID))
+		log.Debug("Use table id as the key", zap.Int64("tableID", row.GetTableID()))
 		tableKey := make([]byte, 8)
-		binary.BigEndian.PutUint64(tableKey, uint64(row.Table.TableID))
+		binary.BigEndian.PutUint64(tableKey, uint64(row.GetTableID()))
 		keys = [][]byte{tableKey}
 	}
 	return keys

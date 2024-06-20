@@ -24,7 +24,6 @@ import (
 
 	"github.com/golang/mock/gomock"
 	. "github.com/pingcap/check"
-	filter "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/master/workerrpc"
 	"github.com/pingcap/tiflow/dm/pb"
@@ -33,6 +32,7 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/ha"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	filter "github.com/pingcap/tiflow/pkg/binlog-filter"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/tests/v3/integration"
 )
@@ -138,7 +138,7 @@ func (t *testMaster) TestCollectSourceConfigFilesV1Import(c *C) {
 	}
 	password := os.Getenv("MYSQL_PSWD")
 
-	cfg1, err := config.ParseYaml(config.SampleSourceConfig)
+	cfg1, err := config.SourceCfgFromYaml(config.SampleSourceConfig)
 	c.Assert(err, IsNil)
 	// fix empty map after marshal/unmarshal becomes nil
 	cfg1.From.Adjust()
@@ -195,7 +195,7 @@ func (t *testMaster) TestWaitWorkersReadyV1Import(c *C) {
 	s.cfg.V1SourcesPath = c.MkDir()
 	c.Assert(s.scheduler.Start(ctx, t.etcdTestCli), IsNil)
 
-	cfg1, err := config.ParseYaml(config.SampleSourceConfig)
+	cfg1, err := config.SourceCfgFromYaml(config.SampleSourceConfig)
 	c.Assert(err, IsNil)
 	cfg2 := cfg1.Clone()
 	cfg2.SourceID = "mysql-replica-02"

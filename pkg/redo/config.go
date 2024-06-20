@@ -36,7 +36,7 @@ var (
 
 const (
 	// DefaultTimeout is the default timeout for writing external storage.
-	DefaultTimeout = 15 * time.Minute
+	DefaultTimeout = 5 * time.Minute
 	// CloseTimeout is the default timeout for close redo writer.
 	CloseTimeout = 15 * time.Second
 
@@ -44,8 +44,21 @@ const (
 	FlushWarnDuration = time.Second * 20
 	// DefaultFlushIntervalInMs is the default flush interval for redo log.
 	DefaultFlushIntervalInMs = 2000
+	// DefaultMetaFlushIntervalInMs is the default flush interval for redo meta.
+	DefaultMetaFlushIntervalInMs = 200
 	// MinFlushIntervalInMs is the minimum flush interval for redo log.
 	MinFlushIntervalInMs = 50
+
+	// DefaultEncodingWorkerNum is the default number of encoding workers.
+	DefaultEncodingWorkerNum = 16
+	// DefaultEncodingInputChanSize is the default size of input channel for encoding worker.
+	DefaultEncodingInputChanSize = 128
+	// DefaultEncodingOutputChanSize is the default size of output channel for encoding worker.
+	DefaultEncodingOutputChanSize = 2048
+	// DefaultFlushWorkerNum is the default number of flush workers.
+	// Maximum allocated memory is flushWorkerNum*maxLogSize, which is
+	// `8*64MB = 512MB` by default.
+	DefaultFlushWorkerNum = 8
 
 	// DefaultFileMode is the default mode when operation files
 	DefaultFileMode = 0o644
@@ -172,14 +185,15 @@ func FixLocalScheme(uri *url.URL) {
 
 // IsBlackholeStorage returns whether a blackhole storage is used.
 func IsBlackholeStorage(scheme string) bool {
-	return ConsistentStorage(scheme) == consistentStorageBlackhole
+	return strings.HasPrefix(scheme, string(consistentStorageBlackhole))
 }
 
 // InitExternalStorage init an external storage.
 var InitExternalStorage = func(ctx context.Context, uri url.URL) (storage.ExternalStorage, error) {
 	s, err := util.GetExternalStorageWithTimeout(ctx, uri.String(), DefaultTimeout)
 	if err != nil {
-		return nil, errors.WrapChangefeedUnretryableErr(errors.ErrStorageInitialize, err)
+		return nil, errors.WrapError(errors.ErrStorageInitialize, err,
+			fmt.Sprintf("can't init external storage for %s", uri.String()))
 	}
 	return s, nil
 }
@@ -188,12 +202,12 @@ func initExternalStorageForTest(ctx context.Context, uri url.URL) (storage.Exter
 	if ConsistentStorage(uri.Scheme) == consistentStorageS3 && len(uri.Host) == 0 {
 		// TODO: this branch is compatible with previous s3 logic and will be removed
 		// in the future.
-		return nil, errors.WrapChangefeedUnretryableErr(errors.ErrStorageInitialize,
+		return nil, errors.WrapError(errors.ErrStorageInitialize,
 			errors.Errorf("please specify the bucket for %+v", uri))
 	}
 	s, err := util.GetExternalStorageFromURI(ctx, uri.String())
 	if err != nil {
-		return nil, errors.WrapChangefeedUnretryableErr(errors.ErrStorageInitialize, err)
+		return nil, errors.WrapError(errors.ErrStorageInitialize, err)
 	}
 	return s, nil
 }
@@ -220,6 +234,18 @@ func ValidateStorage(uri *url.URL) error {
 		return errors.WrapError(errors.ErrStorageInitialize, errors.Annotate(err,
 			fmt.Sprintf("can't make dir for new redo log: %+v", uri)))
 	}
+
+	file := filepath.Join(uri.Path, "file.test")
+	if err := os.WriteFile(file, []byte(""), DefaultFileMode); err != nil {
+		return errors.WrapError(errors.ErrStorageInitialize, errors.Annotate(err,
+			fmt.Sprintf("can't write file for new redo log: %+v", uri)))
+	}
+
+	if _, err := os.ReadFile(file); err != nil {
+		return errors.WrapError(errors.ErrStorageInitialize, errors.Annotate(err,
+			fmt.Sprintf("can't read file for new redo log: %+v", uri)))
+	}
+	_ = os.Remove(file)
 	return nil
 }
 

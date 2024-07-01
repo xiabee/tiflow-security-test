@@ -936,7 +936,7 @@ func getMinLocForSubTask(ctx context.Context, subTaskCfg config.SubTaskConfig) (
 	if !config.HasSync(subTaskCfg.Mode) {
 		return nil, nil
 	}
-	subTaskCfg2, err := subTaskCfg.DecryptedClone()
+	subTaskCfg2, err := subTaskCfg.DecryptPassword()
 	if err != nil {
 		return nil, errors.Annotate(err, "get min position from checkpoint")
 	}

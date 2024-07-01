@@ -307,12 +307,10 @@ func (r *RowChange) genUpdateSQL() (string, []interface{}) {
 	buf.WriteString(r.targetTable.QuoteString())
 	buf.WriteString(" SET ")
 
-	// Build target generated columns lower names set to accelerate following check
-	generatedColumns := generatedColumnsNameSet(r.targetTableInfo.Columns)
 	args := make([]interface{}, 0, len(r.preValues)+len(r.postValues))
 	writtenFirstCol := false
 	for i, col := range r.sourceTableInfo.Columns {
-		if _, ok := generatedColumns[col.Name.L]; ok {
+		if isGenerated(r.targetTableInfo.Columns, col.Name) {
 			continue
 		}
 

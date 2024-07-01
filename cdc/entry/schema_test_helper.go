@@ -41,7 +41,7 @@ import (
 
 // SchemaTestHelper is a test helper for schema which creates an internal tidb instance to generate DDL jobs with meta information
 type SchemaTestHelper struct {
-	t       testing.TB
+	t       *testing.T
 	tk      *testkit.TestKit
 	storage kv.Storage
 	domain  *domain.Domain
@@ -54,7 +54,7 @@ type SchemaTestHelper struct {
 // NewSchemaTestHelperWithReplicaConfig creates a SchemaTestHelper
 // by using the given replica config.
 func NewSchemaTestHelperWithReplicaConfig(
-	t testing.TB, replicaConfig *config.ReplicaConfig,
+	t *testing.T, replicaConfig *config.ReplicaConfig,
 ) *SchemaTestHelper {
 	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func NewSchemaTestHelperWithReplicaConfig(
 		changefeedID, util.RoleTester, filter)
 	require.NoError(t, err)
 
-	mounter := NewMounter(schemaStorage, changefeedID, time.Local,
+	m := NewMounter(schemaStorage, changefeedID, time.Local,
 		filter, replicaConfig.Integrity)
 
 	return &SchemaTestHelper{
@@ -96,12 +96,12 @@ func NewSchemaTestHelperWithReplicaConfig(
 		domain:        domain,
 		filter:        filter,
 		schemaStorage: schemaStorage,
-		mounter:       mounter,
+		mounter:       m,
 	}
 }
 
 // NewSchemaTestHelper creates a SchemaTestHelper
-func NewSchemaTestHelper(t testing.TB) *SchemaTestHelper {
+func NewSchemaTestHelper(t *testing.T) *SchemaTestHelper {
 	return NewSchemaTestHelperWithReplicaConfig(t, config.GetDefaultReplicaConfig())
 }
 

@@ -4,12 +4,15 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+//go:build intest
+// +build intest
 
 package entry
 
@@ -32,6 +35,7 @@ import (
 	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/session"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/types"
@@ -328,19 +332,19 @@ func testMounterDisableOldValue(t *testing.T, tc struct {
 				return
 			}
 			rows++
-			require.Equal(t, row.TableInfo.GetTableName(), tc.tableName)
-			require.Equal(t, row.TableInfo.GetSchemaName(), "test")
+			require.Equal(t, row.Table.Table, tc.tableName)
+			require.Equal(t, row.Table.Schema, "test")
 			// [TODO] check size and reopen this check
 			// require.Equal(t, rowBytes[rows-1], row.ApproximateBytes(), row)
 			t.Log("ApproximateBytes", tc.tableName, rows-1, row.ApproximateBytes())
 			// TODO: test column flag, column type and index columns
 			if len(row.Columns) != 0 {
-				checkSQL, params := prepareCheckSQL(t, tc.tableName, row.GetColumns())
+				checkSQL, params := prepareCheckSQL(t, tc.tableName, row.Columns)
 				result := tk.MustQuery(checkSQL, params...)
 				result.Check([][]interface{}{{"1"}})
 			}
 			if len(row.PreColumns) != 0 {
-				checkSQL, params := prepareCheckSQL(t, tc.tableName, row.GetPreColumns())
+				checkSQL, params := prepareCheckSQL(t, tc.tableName, row.PreColumns)
 				result := tk.MustQuery(checkSQL, params...)
 				result.Check([][]interface{}{{"1"}})
 			}
@@ -891,9 +895,11 @@ func TestGetDefaultZeroValue(t *testing.T) {
 		OriginDefaultValue: "2020-11-19 12:12:12",
 		FieldType:          *ftTypeTimestampNotNull,
 	}
+	sctx := new(stmtctx.StatementContext)
+	sctx.SetTimeZone(tz)
 	_, val, _, _, _ = getDefaultOrZeroValue(&colInfo, tz)
 	expected, err := types.ParseTimeFromFloatString(
-		types.DefaultStmtNoWarningContext,
+		sctx,
 		"2020-11-19 20:12:12", colInfo.FieldType.GetType(), colInfo.FieldType.GetDecimal())
 	require.NoError(t, err)
 	require.Equal(t, expected.String(), val, "mysql.TypeTimestamp + notnull + default")
@@ -904,7 +910,7 @@ func TestGetDefaultZeroValue(t *testing.T) {
 	}
 	_, val, _, _, _ = getDefaultOrZeroValue(&colInfo, tz)
 	expected, err = types.ParseTimeFromFloatString(
-		types.DefaultStmtNoWarningContext,
+		sctx,
 		"2020-11-19 20:12:12", colInfo.FieldType.GetType(), colInfo.FieldType.GetDecimal())
 	require.NoError(t, err)
 	require.Equal(t, expected.String(), val, "mysql.TypeTimestamp + null + default")
@@ -1033,7 +1039,8 @@ func TestE2ERowLevelChecksum(t *testing.T) {
      1, 2, 3, 4, 5,
      2020.0202, 2020.0303, 2020.0404, 2021.1208,
      3.1415, 2.7182, 8000, 179394.233,
-     '2020-02-20', '2020-02-20 02:20:20', '2020-02-20 02:20:20', '02:20:20', '2020',
+     '2020-02-20', '2020-02-20 02:20:20',
+     '2020-02-20 02:20:20', '02:20:20', '2020',
      '89504E470D0A1A0A', '89504E470D0A1A0A', '89504E470D0A1A0A', '89504E470D0A1A0A',
      x'89504E470D0A1A0A', x'89504E470D0A1A0A', x'89504E470D0A1A0A', x'89504E470D0A1A0A',
      '89504E470D0A1A0A', '89504E470D0A1A0A', x'89504E470D0A1A0A', x'89504E470D0A1A0A',
@@ -1099,58 +1106,6 @@ func TestE2ERowLevelChecksum(t *testing.T) {
 	row, err = decoder.NextRowChangedEvent()
 	// no error, checksum verification passed.
 	require.NoError(t, err)
-}
-
-func TestTimezoneDefaultValue(t *testing.T) {
-	helper := NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	_ = helper.DDL2Event(`create table test.t(a int primary key)`)
-	insertEvent := helper.DML2Event(`insert into test.t values (1)`, "test", "t")
-	require.NotNil(t, insertEvent)
-
-	tableInfo, ok := helper.schemaStorage.GetLastSnapshot().TableByName("test", "t")
-	require.True(t, ok)
-
-	key, oldValue := helper.getLastKeyValue(tableInfo.ID)
-
-	_ = helper.DDL2Event(`alter table test.t add column b timestamp default '2023-02-09 13:00:00'`)
-	ts := helper.schemaStorage.GetLastSnapshot().CurrentTs()
-	rawKV := &model.RawKVEntry{
-		OpType:   model.OpTypePut,
-		Key:      key,
-		OldValue: oldValue,
-		StartTs:  ts - 1,
-		CRTs:     ts + 1,
-	}
-	polymorphicEvent := model.NewPolymorphicEvent(rawKV)
-	err := helper.mounter.DecodeEvent(context.Background(), polymorphicEvent)
-	require.NoError(t, err)
-
-	event := polymorphicEvent.Row
-	require.NotNil(t, event)
-	require.Equal(t, "2023-02-09 13:00:00", event.PreColumns[1].Value.(string))
-}
-
-func TestVerifyChecksumTime(t *testing.T) {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-	replicaConfig.Integrity.CorruptionHandleLevel = integrity.CorruptionHandleLevelError
-
-	helper := NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
-	defer helper.Close()
-
-	helper.Tk().MustExec("set global tidb_enable_row_level_checksum = 1")
-	helper.Tk().MustExec("use test")
-
-	helper.Tk().MustExec("set global time_zone = '-5:00'")
-	_ = helper.DDL2Event(`CREATE table TBL2 (a int primary key, b TIMESTAMP)`)
-	event := helper.DML2Event(`INSERT INTO TBL2 VALUES (1, '2023-02-09 13:00:00')`, "test", "TBL2")
-	require.NotNil(t, event)
-
-	_ = helper.DDL2Event("create table t (a timestamp primary key, b int)")
-	event = helper.DML2Event("insert into t values ('2023-02-09 13:00:00', 1)", "test", "t")
-	require.NotNil(t, event)
 }
 
 func TestDecodeRowEnableChecksum(t *testing.T) {
@@ -1452,10 +1407,10 @@ func TestDecodeEventIgnoreRow(t *testing.T) {
 			}
 			row := pEvent.Row
 			rows++
-			require.Equal(t, row.TableInfo.GetSchemaName(), "test")
+			require.Equal(t, row.Table.Schema, "test")
 			// Now we only allow filter dml event by table, so we only check row's table.
-			require.NotContains(t, ignoredTables, row.TableInfo.GetTableName())
-			require.Contains(t, tables, row.TableInfo.GetTableName())
+			require.NotContains(t, ignoredTables, row.Table.Table)
+			require.Contains(t, tables, row.Table.Table)
 		})
 		return rows
 	}
@@ -1485,11 +1440,11 @@ func TestBuildTableInfo(t *testing.T) {
 	}{
 		{
 			"CREATE TABLE t1 (c INT PRIMARY KEY)",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) NOT NULL,\n" +
 				"  PRIMARY KEY (`c`(0)) /*T![clustered_index] CLUSTERED */\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) NOT NULL,\n" +
 				"  PRIMARY KEY (`c`(0)) /*T![clustered_index] CLUSTERED */\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
@@ -1502,13 +1457,13 @@ func TestBuildTableInfo(t *testing.T) {
 				" UNIQUE KEY (c2, c3)" +
 				")",
 			// CDC discards field length.
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) unsigned DEFAULT NULL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
 				"  `c3` bit(0) NOT NULL,\n" +
 				"  UNIQUE KEY `idx_0` (`c2`(0),`c3`(0))\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
 				"  `c3` bit(0) NOT NULL,\n" +
@@ -1525,14 +1480,14 @@ func TestBuildTableInfo(t *testing.T) {
 				" PRIMARY KEY (c, c2)" +
 				")",
 			// CDC discards virtual generated column, and generating expression of stored generated column.
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) unsigned NOT NULL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
 				"  `gen2` int(0) GENERATED ALWAYS AS (pass_generated_check) STORED,\n" +
 				"  `c3` bit(0) NOT NULL,\n" +
 				"  PRIMARY KEY (`c`(0),`c2`(0)) /*T![clustered_index] CLUSTERED */\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) unsigned NOT NULL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
 				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
@@ -1548,92 +1503,45 @@ func TestBuildTableInfo(t *testing.T) {
 				"  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */," +
 				"  UNIQUE KEY `b` (`b`)" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `a` int(0) NOT NULL,\n" +
 				"  `b` int(0) DEFAULT NULL,\n" +
 				"  `c` int(0) DEFAULT NULL,\n" +
 				"  PRIMARY KEY (`a`(0)) /*T![clustered_index] CLUSTERED */,\n" +
 				"  UNIQUE KEY `idx_1` (`b`(0))\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `a` int(0) NOT NULL,\n" +
 				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
 				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
 				"  PRIMARY KEY (`a`(0)) /*T![clustered_index] CLUSTERED */\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 		},
-		{ // This case is to check the primary key is correctly identified by BuildTiDBTableInfo
-			"CREATE TABLE your_table (" +
-				" id INT NOT NULL," +
-				" name VARCHAR(50) NOT NULL," +
-				" email VARCHAR(100) NOT NULL," +
-				" age INT NOT NULL ," +
-				" address VARCHAR(200) NOT NULL," +
-				" PRIMARY KEY (id, name)," +
-				" UNIQUE INDEX idx_unique_1 (id, email, age)," +
-				" UNIQUE INDEX idx_unique_2 (name, email, address)" +
-				" );",
-			"CREATE TABLE `your_table` (\n" +
-				"  `id` int(0) NOT NULL,\n" +
-				"  `name` varchar(0) NOT NULL,\n" +
-				"  `email` varchar(0) NOT NULL,\n" +
-				"  `age` int(0) NOT NULL,\n" +
-				"  `address` varchar(0) NOT NULL,\n" +
-				"  PRIMARY KEY (`id`(0),`name`(0)) /*T![clustered_index] CLUSTERED */,\n" +
-				"  UNIQUE KEY `idx_1` (`id`(0),`email`(0),`age`(0)),\n" +
-				"  UNIQUE KEY `idx_2` (`name`(0),`email`(0),`address`(0))\n" +
-				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `your_table` (\n" +
-				"  `id` int(0) NOT NULL,\n" +
-				"  `name` varchar(0) NOT NULL,\n" +
-				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
-				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
-				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
-				"  PRIMARY KEY (`id`(0),`name`(0)) /*T![clustered_index] CLUSTERED */,\n" +
-				"  UNIQUE KEY `idx_1` (`id`(0),`omitted`(0),`omitted`(0)),\n" +
-				"  UNIQUE KEY `idx_2` (`name`(0),`omitted`(0),`omitted`(0))\n" +
-				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-		},
 	}
+
 	tz, err := util.GetTimezone(config.GetGlobalServerConfig().TZ)
 	require.NoError(t, err)
 	p := parser.New()
-	for i, c := range cases {
+	for _, c := range cases {
 		stmt, err := p.ParseOneStmt(c.origin, "", "")
 		require.NoError(t, err)
 		originTI, err := ddl.BuildTableInfoFromAST(stmt.(*ast.CreateTableStmt))
 		require.NoError(t, err)
 		cdcTableInfo := model.WrapTableInfo(0, "test", 0, originTI)
-		colDatas, _, _, err := datum2Column(cdcTableInfo, map[int64]types.Datum{}, tz)
+		cols, _, _, _, err := datum2Column(cdcTableInfo, map[int64]types.Datum{}, tz)
 		require.NoError(t, err)
-		e := model.RowChangedEvent{
-			TableInfo: cdcTableInfo,
-			Columns:   colDatas,
-		}
-		cols := e.GetColumns()
-		recoveredTI := model.BuildTiDBTableInfo(cdcTableInfo.TableName.Table, cols, cdcTableInfo.IndexColumnsOffset)
+		recoveredTI := model.BuildTiDBTableInfo(cols, cdcTableInfo.IndexColumnsOffset)
 		handle := sqlmodel.GetWhereHandle(recoveredTI, recoveredTI)
 		require.NotNil(t, handle.UniqueNotNullIdx)
 		require.Equal(t, c.recovered, showCreateTable(t, recoveredTI))
-		// make sure BuildTiDBTableInfo indentify the correct primary key
-		if i == 5 {
-			inexes := recoveredTI.Indices
-			primaryCount := 0
-			for i := range inexes {
-				if inexes[i].Primary {
-					primaryCount++
-				}
-			}
-			require.Equal(t, 1, primaryCount)
-			require.Equal(t, 2, len(handle.UniqueNotNullIdx.Columns))
-		}
+
 		// mimic the columns are set to nil when old value feature is disabled
 		for i := range cols {
 			if !cols[i].Flag.IsHandleKey() {
 				cols[i] = nil
 			}
 		}
-		recoveredTI = model.BuildTiDBTableInfo(cdcTableInfo.TableName.Table, cols, cdcTableInfo.IndexColumnsOffset)
+		recoveredTI = model.BuildTiDBTableInfo(cols, cdcTableInfo.IndexColumnsOffset)
 		handle = sqlmodel.GetWhereHandle(recoveredTI, recoveredTI)
 		require.NotNil(t, handle.UniqueNotNullIdx)
 		require.Equal(t, c.recoveredWithNilCol, showCreateTable(t, recoveredTI))
@@ -1659,7 +1567,7 @@ func TestNewDMRowChange(t *testing.T) {
 				" a1 INT NOT NULL," +
 				" a3 INT NOT NULL," +
 				" UNIQUE KEY dex1(a1, a3));",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `id` int(0) DEFAULT NULL,\n" +
 				"  `a1` int(0) NOT NULL,\n" +
 				"  `a3` int(0) NOT NULL,\n" +
@@ -1685,7 +1593,7 @@ func TestNewDMRowChange(t *testing.T) {
 				Name: "a3", Type: 3, Charset: "binary", Flag: 51, Value: 2, Default: nil,
 			},
 		}
-		recoveredTI := model.BuildTiDBTableInfo(cdcTableInfo.TableName.Table, cols, cdcTableInfo.IndexColumnsOffset)
+		recoveredTI := model.BuildTiDBTableInfo(cols, cdcTableInfo.IndexColumnsOffset)
 		require.Equal(t, c.recovered, showCreateTable(t, recoveredTI))
 		tableName := &model.TableName{Schema: "db", Table: "t1"}
 		rowChange := sqlmodel.NewRowChange(tableName, nil, []interface{}{1, 1, 2}, nil, recoveredTI, nil, nil)

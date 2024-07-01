@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/pingcap/log"
+	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/workerpool"
 	"go.uber.org/atomic"
@@ -51,15 +52,15 @@ func NewInitializer() *Initializer {
 // returns error if the module failed to initialize.
 // It will only initialize the module once.
 // It's not thread-safe.
-func (initializer *Initializer) TryInitialize(ctx context.Context,
-	initFunc func(ctx context.Context) error,
+func (initializer *Initializer) TryInitialize(ctx cdcContext.Context,
+	initFunc func(ctx cdcContext.Context) error,
 	pool workerpool.AsyncPool,
 ) (bool, error) {
 	if initializer.initialized.Load() {
 		return true, nil
 	}
 	if initializer.initializing.CompareAndSwap(false, true) {
-		initialCtx, cancelInitialize := context.WithCancel(ctx)
+		initialCtx, cancelInitialize := cdcContext.WithCancel(ctx)
 		initializer.initialWaitGroup.Add(1)
 		initializer.cancelInitialize = cancelInitialize
 		log.Info("submit async initializer task to the worker pool")

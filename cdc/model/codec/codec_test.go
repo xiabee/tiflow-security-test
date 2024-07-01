@@ -68,7 +68,7 @@ func TestV1toV2(t *testing.T) {
 
 	rv2 = &model.RedoLog{
 		RedoRow: model.RedoRowChangedEvent{
-			Row: &model.RowChangedEventInRedoLog{
+			Row: &model.RowChangedEvent{
 				StartTs:  1,
 				CommitTs: 2,
 				Table: &model.TableName{
@@ -77,6 +77,7 @@ func TestV1toV2(t *testing.T) {
 					TableID:     1,
 					IsPartition: false,
 				},
+				TableInfo: nil,
 				Columns: []*model.Column{
 					{
 						Name: "column",
@@ -135,7 +136,7 @@ func TestV1toV2(t *testing.T) {
 func TestRowRedoConvert(t *testing.T) {
 	t.Parallel()
 
-	row := &model.RowChangedEventInRedoLog{
+	row := &model.RowChangedEvent{
 		StartTs:  100,
 		CommitTs: 120,
 		Table:    &model.TableName{Schema: "test", Table: "table1", TableID: 57},
@@ -195,7 +196,7 @@ func TestRowRedoConvert(t *testing.T) {
 func TestRowRedoConvertWithEmptySlice(t *testing.T) {
 	t.Parallel()
 
-	row := &model.RowChangedEventInRedoLog{
+	row := &model.RowChangedEvent{
 		StartTs:  100,
 		CommitTs: 120,
 		Table:    &model.TableName{Schema: "test", Table: "table1", TableID: 57},

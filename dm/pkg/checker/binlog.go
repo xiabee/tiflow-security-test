@@ -105,7 +105,7 @@ func (pc *MySQLBinlogFormatChecker) Check(ctx context.Context) *Result {
 	}
 	if strings.ToUpper(value) != "ROW" {
 		result.Errors = append(result.Errors, NewError("binlog_format is %s, and should be ROW", value))
-		result.Instruction = "MySQL as source: please execute 'set global binlog_format=ROW;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_format=row: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html. Then modify the instance to use the new DB parameter group and restart the instance to take effect."
+		result.Instruction = "MySQL as source: please execute 'set global binlog_format=ROW;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_format=row: https://docs.aws.amazon.com/zh_cn/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html. Then modify the instance to use the new DB parameter group and restart the instance to take effect."
 		return result
 	}
 	result.State = StateSuccess
@@ -183,7 +183,7 @@ func (pc *MySQLBinlogRowImageChecker) Check(ctx context.Context) *Result {
 	}
 	if strings.ToUpper(value) != "FULL" {
 		result.Errors = append(result.Errors, NewError("binlog_row_image is %s, and should be FULL", value))
-		result.Instruction = "MySQL as source: please execute 'set global binlog_row_image = FULL;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_row_image = FULL: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html Then modify the instance to use the new DB parameter group and restart the instance to take effect."
+		result.Instruction = "MySQL as source: please execute 'set global binlog_row_image = FULL;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_row_image = FULL: https://docs.aws.amazon.com/zh_cn/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html Then modify the instance to use the new DB parameter group and restart the instance to take effect."
 		return result
 	}
 	result.State = StateSuccess
@@ -301,18 +301,15 @@ func (c *MetaPositionChecker) Check(ctx context.Context) *Result {
 	if c.sourceCfg.Security != nil {
 		if loadErr := c.sourceCfg.Security.LoadTLSContent(); loadErr != nil {
 			markCheckError(result, loadErr)
-			result.Instruction = "please check upstream tls config"
 			return result
 		}
 		tlsConfig, err = util.NewTLSConfig(
 			util.WithCAContent(c.sourceCfg.Security.SSLCABytes),
 			util.WithCertAndKeyContent(c.sourceCfg.Security.SSLCertBytes, c.sourceCfg.Security.SSLKeyBytes),
 			util.WithVerifyCommonName(c.sourceCfg.Security.CertAllowedCN),
-			util.WithMinTLSVersion(tls.VersionTLS10),
 		)
 		if err != nil {
 			markCheckError(result, err)
-			result.Instruction = "please check upstream tls config"
 			return result
 		}
 	}
@@ -320,7 +317,6 @@ func (c *MetaPositionChecker) Check(ctx context.Context) *Result {
 	flavor, err := conn.GetFlavor(ctx, c.db)
 	if err != nil {
 		markCheckError(result, err)
-		result.Instruction = "please check upstream database config"
 		return result
 	}
 
@@ -357,12 +353,6 @@ func (c *MetaPositionChecker) Check(ctx context.Context) *Result {
 		gtidSet, err2 := gtid.ParserGTID(flavor, c.meta.BinLogGTID)
 		if err2 != nil {
 			markCheckError(result, err2)
-			result.Instruction = "you should check your BinlogGTID's format, "
-			if flavor == mysql.MariaDBFlavor {
-				result.Instruction += "it should consist of three numbers separated with dashes '-', see https://mariadb.com/kb/en/gtid/"
-			} else {
-				result.Instruction += "it should be any combination of single GTIDs and ranges of GTID, see https://dev.mysql.com/doc/refman/8.0/en/replication-gtids-concepts.html"
-			}
 			return result
 		}
 		streamer, err = syncer.StartSyncGTID(gtidSet)
@@ -371,7 +361,6 @@ func (c *MetaPositionChecker) Check(ctx context.Context) *Result {
 	}
 	if err != nil {
 		markCheckError(result, err)
-		result.Instruction = "you should make sure your meta's binlog position is valid and not purged, and the user has REPLICATION SLAVE privilege"
 		return result
 	}
 	// if we don't get a new event after 15s, it means there is no new event in the binlog
@@ -380,7 +369,6 @@ func (c *MetaPositionChecker) Check(ctx context.Context) *Result {
 	_, err = streamer.GetEvent(ctx2)
 	if err != nil && errors.Cause(err) != context.DeadlineExceeded {
 		markCheckError(result, err)
-		result.Instruction = "you should make sure your meta's binlog position is valid and not purged, and the user has REPLICATION SLAVE privilege"
 		return result
 	}
 

@@ -142,12 +142,7 @@ func TestShouldIgnoreDMLEvent(t *testing.T) {
 		require.Nil(t, err)
 		for _, tc := range ftc.cases {
 			dml := &model.RowChangedEvent{
-				TableInfo: &model.TableInfo{
-					TableName: model.TableName{
-						Schema: tc.schema,
-						Table:  tc.table,
-					},
-				},
+				Table:   &model.TableName{Table: tc.table, Schema: tc.schema},
 				StartTs: tc.ts,
 			}
 			ignoreDML, err := filter.ShouldIgnoreDMLEvent(dml, model.RowChangedDatums{}, nil)
@@ -371,14 +366,13 @@ func TestShouldDiscardDDL(t *testing.T) {
 }
 
 func TestIsAllowedDDL(t *testing.T) {
-	require.Len(t, ddlWhiteListMap, 37)
 	type testCase struct {
 		timodel.ActionType
 		allowed bool
 	}
-	testCases := make([]testCase, 0, len(ddlWhiteListMap))
-	for ddlType := range ddlWhiteListMap {
-		testCases = append(testCases, testCase{ddlType, true})
+	testCases := make([]testCase, 0, len(allowDDLList))
+	for _, action := range allowDDLList {
+		testCases = append(testCases, testCase{action, true})
 	}
 	testCases = append(testCases, testCase{timodel.ActionAddForeignKey, false})
 	testCases = append(testCases, testCase{timodel.ActionDropForeignKey, false})

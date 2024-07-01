@@ -16,7 +16,6 @@ package entry
 import (
 	"context"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,7 +24,7 @@ import (
 	"github.com/pingcap/log"
 	tidbkv "github.com/pingcap/tidb/pkg/kv"
 	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tiflow/cdc/entry/schema"
+	schema "github.com/pingcap/tiflow/cdc/entry/schema"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
@@ -407,20 +406,6 @@ func (s *schemaStorage) BuildDDLEvents(
 		ddlEvents, err = s.buildRenameEvents(ctx, job)
 		if err != nil {
 			return nil, errors.Trace(err)
-		}
-	case timodel.ActionCreateTables:
-		if job.BinlogInfo != nil && job.BinlogInfo.MultipleTableInfos != nil {
-			querys := strings.Split(job.Query, ";")
-			multiTableInfos := job.BinlogInfo.MultipleTableInfos
-			for index, tableInfo := range multiTableInfos {
-				newTableInfo := model.WrapTableInfo(job.SchemaID, job.SchemaName, job.BinlogInfo.FinishedTS, tableInfo)
-				job.Query = querys[index]
-				event := new(model.DDLEvent)
-				event.FromJob(job, nil, newTableInfo)
-				ddlEvents = append(ddlEvents, event)
-			}
-		} else {
-			return nil, errors.Errorf("there is no multiple table infos in the create tables job: %s", job)
 		}
 	default:
 		// parse preTableInfo

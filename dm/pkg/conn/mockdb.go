@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	check "github.com/pingcap/check"
+	"github.com/pingcap/check"
 	tidbConfig "github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/kv"

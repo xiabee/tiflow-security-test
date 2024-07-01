@@ -52,8 +52,8 @@ func (m *mockSink) WriteEvents(events ...*dmlsink.CallbackableEvent[*model.RowCh
 	return nil
 }
 
-func (m *mockSink) SchemeOption() (string, bool) {
-	return sink.BlackHoleScheme, false
+func (m *mockSink) Scheme() string {
+	return sink.BlackHoleScheme
 }
 
 func (m *mockSink) GetEvents() []*dmlsink.CallbackableEvent[*model.RowChangedEvent] {
@@ -217,16 +217,19 @@ func TestHandleRowChangedEventNormalEvent(t *testing.T) {
 			Value: "col2-value",
 		},
 	}
-	tableInfo := model.BuildTableInfo("test", "test", columns, nil)
+
 	events := []*model.PolymorphicEvent{
 		{
 			CRTs:  1,
 			RawKV: &model.RawKVEntry{OpType: model.OpTypePut},
 			Row: &model.RowChangedEvent{
 				CommitTs:   1,
-				TableInfo:  tableInfo,
-				Columns:    model.Columns2ColumnDatas(columns, tableInfo),
-				PreColumns: model.Columns2ColumnDatas(preColumns, tableInfo),
+				Columns:    columns,
+				PreColumns: preColumns,
+				Table: &model.TableName{
+					Schema: "test",
+					Table:  "test",
+				},
 			},
 		},
 	}
@@ -234,7 +237,7 @@ func TestHandleRowChangedEventNormalEvent(t *testing.T) {
 	span := spanz.TableIDToComparableSpan(1)
 	result, size := handleRowChangedEvents(changefeedID, span, events...)
 	require.Equal(t, 1, len(result))
-	require.Equal(t, uint64(testEventSize), size)
+	require.Equal(t, uint64(224), size)
 }
 
 func TestGetUpperBoundTs(t *testing.T) {

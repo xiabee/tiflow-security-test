@@ -38,7 +38,6 @@ const (
 	ProtocolCraft
 	ProtocolOpen
 	ProtocolCsv
-	ProtocolDebezium
 	ProtocolSimple
 )
 
@@ -68,8 +67,6 @@ func ParseSinkProtocolFromString(protocol string) (Protocol, error) {
 		return ProtocolOpen, nil
 	case "csv":
 		return ProtocolCsv, nil
-	case "debezium":
-		return ProtocolDebezium, nil
 	case "simple":
 		return ProtocolSimple, nil
 	default:
@@ -96,8 +93,6 @@ func (p Protocol) String() string {
 		return "open-protocol"
 	case ProtocolCsv:
 		return "csv"
-	case ProtocolDebezium:
-		return "debezium"
 	case ProtocolSimple:
 		return "simple"
 	default:

@@ -334,6 +334,9 @@ func (info *ChangeFeedInfo) VerifyAndComplete() {
 	if info.Config.ChangefeedErrorStuckDuration == nil {
 		info.Config.ChangefeedErrorStuckDuration = defaultConfig.ChangefeedErrorStuckDuration
 	}
+	if info.Config.SQLMode == "" {
+		info.Config.SQLMode = defaultConfig.SQLMode
+	}
 	if info.Config.SyncedStatus == nil {
 		info.Config.SyncedStatus = defaultConfig.SyncedStatus
 	}
@@ -390,7 +393,6 @@ func (info *ChangeFeedInfo) rmMQOnlyFields() {
 	info.Config.Sink.EnableKafkaSinkV2 = nil
 	info.Config.Sink.OnlyOutputUpdatedColumns = nil
 	info.Config.Sink.DeleteOnlyOutputHandleKeyColumns = nil
-	info.Config.Sink.ContentCompatible = nil
 	info.Config.Sink.KafkaConfig = nil
 }
 
@@ -571,12 +573,57 @@ func (info *ChangeFeedInfo) updateSinkURIAndConfigProtocol(uri *url.URL, newProt
 	info.Config.Sink.Protocol = util.AddressOf(newProtocol)
 }
 
+// DownstreamType returns the type of the downstream.
+func (info *ChangeFeedInfo) DownstreamType() (DownstreamType, error) {
+	uri, err := url.Parse(info.SinkURI)
+	if err != nil {
+		return Unknown, errors.Trace(err)
+	}
+	if sink.IsMySQLCompatibleScheme(uri.Scheme) {
+		return DB, nil
+	}
+	if sink.IsMQScheme(uri.Scheme) {
+		return MQ, nil
+	}
+	if sink.IsStorageScheme(uri.Scheme) {
+		return Storage, nil
+	}
+	return Unknown, nil
+}
+
 func (info *ChangeFeedInfo) fixMemoryQuota() {
 	info.Config.FixMemoryQuota()
 }
 
 func (info *ChangeFeedInfo) fixScheduler(inheritV66 bool) {
 	info.Config.FixScheduler(inheritV66)
+}
+
+// DownstreamType is the type of downstream.
+type DownstreamType int
+
+const (
+	// DB is the type of Database.
+	DB DownstreamType = iota
+	// MQ is the type of MQ or Cloud Storage.
+	MQ
+	// Storage is the type of Cloud Storage.
+	Storage
+	// Unknown is the type of Unknown.
+	Unknown
+)
+
+// String implements fmt.Stringer interface.
+func (t DownstreamType) String() string {
+	switch t {
+	case DB:
+		return "DB"
+	case MQ:
+		return "MQ"
+	case Storage:
+		return "Storage"
+	}
+	return "Unknown"
 }
 
 // ChangeFeedStatusForAPI uses to transfer the status of changefeed for API.

@@ -106,6 +106,7 @@ func (d *Decoder) HasNext() (model.MessageType, bool, error) {
 	d.value = nil
 
 	if d.msg.Data != nil || d.msg.Old != nil {
+		log.Debug("row changed event message found", zap.Any("message", d.msg))
 		return model.MessageTypeRow, true, nil
 	}
 
@@ -271,10 +272,12 @@ func (d *Decoder) NextDDLEvent() (*model.DDLEvent, error) {
 		if err != nil {
 			return nil, err
 		}
-		d.CachedRowChangedEvents = append(d.CachedRowChangedEvents, event)
 
 		next := ele.Next()
-		d.cachedMessages.Remove(ele)
+		if event != nil {
+			d.CachedRowChangedEvents = append(d.CachedRowChangedEvents, event)
+			d.cachedMessages.Remove(ele)
+		}
 		ele = next
 	}
 	return ddl, nil

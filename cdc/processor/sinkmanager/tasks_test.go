@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
@@ -27,13 +27,13 @@ import (
 func TestValidateAndAdjustBound(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
-		lowerBound    sorter.Position
+		lowerBound    engine.Position
 		taskTimeRange time.Duration
 		expectAdjust  bool
 	}{
 		{
 			name: "bigger than maxTaskTimeRange",
-			lowerBound: sorter.Position{
+			lowerBound: engine.Position{
 				StartTs:  439333515018895365,
 				CommitTs: 439333515018895366,
 			},
@@ -42,7 +42,7 @@ func TestValidateAndAdjustBound(t *testing.T) {
 		},
 		{
 			name: "smaller than maxTaskTimeRange",
-			lowerBound: sorter.Position{
+			lowerBound: engine.Position{
 				StartTs:  439333515018895365,
 				CommitTs: 439333515018895366,
 			},
@@ -55,7 +55,7 @@ func TestValidateAndAdjustBound(t *testing.T) {
 			span := spanz.TableIDToComparableSpan(1)
 			lowerPhs := oracle.GetTimeFromTS(tc.lowerBound.CommitTs)
 			newUpperCommitTs := oracle.GoTimeToTS(lowerPhs.Add(tc.taskTimeRange))
-			upperBound := sorter.GenCommitFence(newUpperCommitTs)
+			upperBound := engine.GenCommitFence(newUpperCommitTs)
 			newLowerBound, newUpperBound := validateAndAdjustBound(changefeedID,
 				&span, tc.lowerBound, upperBound)
 			if tc.expectAdjust {

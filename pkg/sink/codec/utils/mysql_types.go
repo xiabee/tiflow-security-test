@@ -16,7 +16,7 @@ package utils
 import (
 	"strings"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/types"
 )
@@ -41,7 +41,7 @@ func WithZerofill4MySQLType(mysqlType string, zerofill bool) string {
 }
 
 // GetMySQLType get the mysql type from column info
-func GetMySQLType(columnInfo *timodel.ColumnInfo, fullType bool) string {
+func GetMySQLType(columnInfo *model.ColumnInfo, fullType bool) string {
 	if !fullType {
 		result := types.TypeToStr(columnInfo.GetType(), columnInfo.GetCharset())
 		result = withUnsigned4MySQLType(result, mysql.HasUnsignedFlag(columnInfo.GetFlag()))

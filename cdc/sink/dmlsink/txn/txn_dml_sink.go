@@ -117,7 +117,7 @@ func newSink(ctx context.Context,
 	for i, backend := range backends {
 		w := newWorker(ctx1, changefeedID, i, backend, len(backends))
 		txnCh := sink.alive.conflictDetector.GetOutChByCacheID(int64(i))
-		g.Go(func() error { return w.runLoop(txnCh) })
+		g.Go(func() error { return w.run(txnCh) })
 		sink.workers = append(sink.workers, w)
 	}
 
@@ -180,6 +180,6 @@ func (s *dmlSink) Dead() <-chan struct{} {
 	return s.dead
 }
 
-func (s *dmlSink) SchemeOption() (string, bool) {
-	return s.scheme, false
+func (s *dmlSink) Scheme() string {
+	return s.scheme
 }

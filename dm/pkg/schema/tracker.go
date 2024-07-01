@@ -90,10 +90,6 @@ type executorContext struct {
 
 var _ sqlexec.RestrictedSQLExecutor = executorContext{}
 
-func (se executorContext) GetRestrictedSQLExecutor() sqlexec.RestrictedSQLExecutor {
-	return se
-}
-
 func (se executorContext) ParseWithParams(context.Context, string, ...interface{}) (ast.StmtNode, error) {
 	return nil, nil
 }
@@ -138,15 +134,14 @@ func (tr *Tracker) Init(
 
 	upTracker := schematracker.NewSchemaTracker(lowerCaseTableNames)
 	dsSession := mock.NewContext()
-	dsSession.SetValue(ddl.SuppressErrorTooLongKeyKey, true)
+	dsSession.GetSessionVars().StrictSQLMode = false
 	downTracker := &downstreamTracker{
 		downstreamConn: downstreamConn,
 		se:             dsSession,
 		tableInfos:     make(map[string]*DownstreamTableInfo),
 	}
 	// TODO: need to use upstream timezone to correctly check literal is in [1970, 2038]
-	sctx := mock.NewContext()
-	se := executorContext{Context: sctx}
+	se := executorContext{Context: mock.NewContext()}
 	tr.Lock()
 	defer tr.Unlock()
 	tr.lowerCaseTableNames = lowerCaseTableNames
@@ -472,12 +467,12 @@ func (dt *downstreamTracker) getTableInfoByCreateStmt(tctx *tcontext.Context, ta
 	}
 
 	// suppress ErrTooLongKey
-	dt.se.SetValue(ddl.SuppressErrorTooLongKeyKey, true)
+	strictSQLModeBackup := dt.se.GetSessionVars().StrictSQLMode
 	// support drop PK
 	enableClusteredIndexBackup := dt.se.GetSessionVars().EnableClusteredIndex
 	dt.se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOff
 	defer func() {
-		dt.se.ClearValue(ddl.SuppressErrorTooLongKeyKey)
+		dt.se.GetSessionVars().StrictSQLMode = strictSQLModeBackup
 		dt.se.GetSessionVars().EnableClusteredIndex = enableClusteredIndexBackup
 	}()
 

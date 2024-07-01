@@ -16,7 +16,7 @@ package canal
 import (
 	"testing"
 
-	"github.com/pingcap/tiflow/cdc/entry"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
@@ -34,17 +34,21 @@ func TestBuildCanalJSONTxnEventEncoder(t *testing.T) {
 }
 
 func TestCanalJSONTxnEventEncoderMaxMessageBytes(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
+	t.Parallel()
 
-	sql := `create table test.t(a varchar(255) primary key)`
-	_ = helper.DDL2Event(sql)
-	testEvent := helper.DML2Event(`insert into test.t values("aa")`, "test", "t")
 	// the size of `testEvent` after being encoded by canal-json is 200
-	txn := &model.SingleTableTxn{
-		TableInfo: testEvent.TableInfo,
+	testEvent := &model.SingleTableTxn{
+		Table: &model.TableName{Schema: "a", Table: "b"},
 		Rows: []*model.RowChangedEvent{
-			testEvent,
+			{
+				CommitTs: 1,
+				Table:    &model.TableName{Schema: "a", Table: "b"},
+				Columns: []*model.Column{{
+					Name:  "col1",
+					Type:  mysql.TypeVarchar,
+					Value: []byte("aa"),
+				}},
+			},
 		},
 	}
 
@@ -52,35 +56,47 @@ func TestCanalJSONTxnEventEncoderMaxMessageBytes(t *testing.T) {
 	maxMessageBytes := 300
 	cfg := common.NewConfig(config.ProtocolCanalJSON).WithMaxMessageBytes(maxMessageBytes)
 	encoder := NewJSONTxnEventEncoderBuilder(cfg).Build()
-	err := encoder.AppendTxnEvent(txn, nil)
+	err := encoder.AppendTxnEvent(testEvent, nil)
 	require.Nil(t, err)
 
 	// the test message length is larger than max-message-bytes
 	cfg = cfg.WithMaxMessageBytes(100)
 	encoder = NewJSONTxnEventEncoderBuilder(cfg).Build()
-	err = encoder.AppendTxnEvent(txn, nil)
+	err = encoder.AppendTxnEvent(testEvent, nil)
 	require.NotNil(t, err)
 }
 
 func TestCanalJSONAppendTxnEventEncoderWithCallback(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(a varchar(255) primary key)`
-	_ = helper.DDL2Event(sql)
+	t.Parallel()
 
 	cfg := common.NewConfig(config.ProtocolCanalJSON)
 	encoder := NewJSONTxnEventEncoderBuilder(cfg).Build()
 	require.NotNil(t, encoder)
 
-	event1 := helper.DML2Event(`insert into test.t values("aa")`, "test", "t")
-	event2 := helper.DML2Event(`insert into test.t values("bb")`, "test", "t")
-
 	count := 0
 
 	txn := &model.SingleTableTxn{
-		TableInfo: event1.TableInfo,
-		Rows:      []*model.RowChangedEvent{event1, event2},
+		Table: &model.TableName{Schema: "a", Table: "b"},
+		Rows: []*model.RowChangedEvent{
+			{
+				CommitTs: 1,
+				Table:    &model.TableName{Schema: "a", Table: "b"},
+				Columns: []*model.Column{{
+					Name:  "col1",
+					Type:  mysql.TypeVarchar,
+					Value: []byte("aa"),
+				}},
+			},
+			{
+				CommitTs: 2,
+				Table:    &model.TableName{Schema: "a", Table: "b"},
+				Columns: []*model.Column{{
+					Name:  "col1",
+					Type:  mysql.TypeVarchar,
+					Value: []byte("bb"),
+				}},
+			},
+		},
 	}
 
 	// Empty build makes sure that the callback build logic not broken.

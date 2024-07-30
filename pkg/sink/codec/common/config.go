@@ -61,6 +61,9 @@ type Config struct {
 	// exposed to the outside users.
 	AvroEnableWatermark bool
 
+	// canal-json only
+	ContentCompatible bool
+
 	// for sinking to cloud storage
 	Delimiter            string
 	Quote                string
@@ -68,15 +71,24 @@ type Config struct {
 	IncludeCommitTs      bool
 	Terminator           string
 	BinaryEncodingMethod string
+	OutputOldValue       bool
+	OutputHandleKey      bool
 
 	// for open protocol
 	OnlyOutputUpdatedColumns bool
-
-	TimeZone *time.Location
-	// for the simple protocol, can be "json" and "avro", default to "json"
-	EncodingFormat EncodingFormatType
 	// Whether old value should be excluded in the output.
 	OpenOutputOldValue bool
+
+	// for the simple protocol, can be "json" and "avro", default to "json"
+	EncodingFormat EncodingFormatType
+
+	// Currently only Debezium protocol is aware of the time zone
+	TimeZone *time.Location
+
+	// Debezium only. Whether schema should be excluded in the output.
+	DebeziumDisableSchema bool
+	// Debezium only. Whether before value should be included in the output.
+	DebeziumOutputOldValue bool
 }
 
 // EncodingFormatType is the type of encoding format
@@ -110,10 +122,13 @@ func NewConfig(protocol config.Protocol) *Config {
 		LargeMessageHandle:         config.NewDefaultLargeMessageHandleConfig(),
 
 		EncodingFormat: EncodingFormatJSON,
-		TimeZone:       time.Local,
+
+		TimeZone: time.Local,
 
 		// default value is true
-		OpenOutputOldValue: true,
+		DebeziumOutputOldValue: true,
+		OpenOutputOldValue:     true,
+		DebeziumDisableSchema:  false,
 	}
 }
 
@@ -150,6 +165,9 @@ type urlConfig struct {
 
 	AvroSchemaRegistry       string `form:"schema-registry"`
 	OnlyOutputUpdatedColumns *bool  `form:"only-output-updated-columns"`
+	ContentCompatible        *bool  `form:"content-compatible"`
+
+	DebeziumDisableSchema *bool `form:"debezium-disable-schema"`
 	// EncodingFormatType is only works for the simple protocol,
 	// can be `json` and `avro`, default to `json`.
 	EncodingFormatType *string `form:"encoding-format"`
@@ -213,6 +231,8 @@ func (c *Config) Apply(sinkURI *url.URL, replicaConfig *config.ReplicaConfig) er
 			c.NullString = replicaConfig.Sink.CSVConfig.NullString
 			c.IncludeCommitTs = replicaConfig.Sink.CSVConfig.IncludeCommitTs
 			c.BinaryEncodingMethod = replicaConfig.Sink.CSVConfig.BinaryEncodingMethod
+			c.OutputOldValue = replicaConfig.Sink.CSVConfig.OutputOldValue
+			c.OutputHandleKey = replicaConfig.Sink.CSVConfig.OutputHandleKey
 		}
 		if replicaConfig.Sink.KafkaConfig != nil && replicaConfig.Sink.KafkaConfig.LargeMessageHandle != nil {
 			c.LargeMessageHandle = replicaConfig.Sink.KafkaConfig.LargeMessageHandle
@@ -224,6 +244,9 @@ func (c *Config) Apply(sinkURI *url.URL, replicaConfig *config.ReplicaConfig) er
 		}
 		if replicaConfig.Sink.OpenProtocol != nil {
 			c.OpenOutputOldValue = replicaConfig.Sink.OpenProtocol.OutputOldValue
+		}
+		if replicaConfig.Sink.Debezium != nil {
+			c.DebeziumOutputOldValue = replicaConfig.Sink.Debezium.OutputOldValue
 		}
 	}
 	if urlParameter.OnlyOutputUpdatedColumns != nil {
@@ -240,20 +263,28 @@ func (c *Config) Apply(sinkURI *url.URL, replicaConfig *config.ReplicaConfig) er
 			`force-replicate must be disabled when configuration "delete-only-output-handle-key-columns" is true.`)
 	}
 
+	if c.Protocol == config.ProtocolCanalJSON {
+		c.ContentCompatible = util.GetOrZero(urlParameter.ContentCompatible)
+		if c.ContentCompatible {
+			c.OnlyOutputUpdatedColumns = true
+		}
+	}
+
 	if c.Protocol == config.ProtocolSimple {
-		if urlParameter.EncodingFormatType != nil {
-			s := *urlParameter.EncodingFormatType
-			if s != "" {
-				encodingFormat := EncodingFormatType(s)
-				switch encodingFormat {
-				case EncodingFormatJSON, EncodingFormatAvro:
-					c.EncodingFormat = encodingFormat
-				default:
-					return cerror.ErrCodecInvalidConfig.GenWithStack(
-						"unsupported encoding format type: %s for the simple protocol", encodingFormat)
-				}
+		s := util.GetOrZero(urlParameter.EncodingFormatType)
+		if s != "" {
+			encodingFormat := EncodingFormatType(s)
+			switch encodingFormat {
+			case EncodingFormatJSON, EncodingFormatAvro:
+				c.EncodingFormat = encodingFormat
+			default:
+				return cerror.ErrCodecInvalidConfig.GenWithStack(
+					"unsupported encoding format type: %s for the simple protocol", encodingFormat)
 			}
 		}
+	}
+	if urlParameter.DebeziumDisableSchema != nil {
+		c.DebeziumDisableSchema = *urlParameter.DebeziumDisableSchema
 	}
 
 	return nil
@@ -267,6 +298,10 @@ func mergeConfig(
 	if replicaConfig.Sink != nil {
 		dest.AvroSchemaRegistry = util.GetOrZero(replicaConfig.Sink.SchemaRegistry)
 		dest.OnlyOutputUpdatedColumns = replicaConfig.Sink.OnlyOutputUpdatedColumns
+		dest.ContentCompatible = replicaConfig.Sink.ContentCompatible
+		if util.GetOrZero(dest.ContentCompatible) {
+			dest.OnlyOutputUpdatedColumns = util.AddressOf(true)
+		}
 		if replicaConfig.Sink.KafkaConfig != nil {
 			dest.MaxMessageBytes = replicaConfig.Sink.KafkaConfig.MaxMessageBytes
 			if replicaConfig.Sink.KafkaConfig.CodecConfig != nil {
@@ -278,6 +313,9 @@ func mergeConfig(
 				dest.AvroBigintUnsignedHandlingMode = codecConfig.AvroBigintUnsignedHandlingMode
 				dest.EncodingFormatType = codecConfig.EncodingFormat
 			}
+		}
+		if replicaConfig.Sink.DebeziumDisableSchema != nil {
+			dest.DebeziumDisableSchema = replicaConfig.Sink.DebeziumDisableSchema
 		}
 	}
 	if err := mergo.Merge(dest, urlParameters, mergo.WithOverride); err != nil {

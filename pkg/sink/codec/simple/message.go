@@ -158,7 +158,7 @@ func newColumnSchema(col *timodel.ColumnInfo) *columnSchema {
 // newTiColumnInfo uses columnSchema and IndexSchema to construct a tidb column info.
 func newTiColumnInfo(
 	column *columnSchema, colID int64, indexes []*IndexSchema,
-) *timodel.ColumnInfo {
+) (*timodel.ColumnInfo, error) {
 	col := new(timodel.ColumnInfo)
 	col.ID = colID
 	col.Name = timodel.NewCIStr(column.Name)
@@ -194,26 +194,24 @@ func newTiColumnInfo(
 		default:
 		}
 	}
+	err := col.SetDefaultValue(defaultValue)
+	if err != nil {
+		return nil, cerror.WrapError(cerror.ErrDecodeFailed, err)
+	}
 
 	for _, index := range indexes {
-		for _, name := range index.Columns {
-			if name == column.Name {
-				if index.Primary {
+		if index.Primary {
+			for _, name := range index.Columns {
+				if name == column.Name {
 					col.AddFlag(mysql.PriKeyFlag)
-				} else if index.Unique {
-					col.AddFlag(mysql.UniqueKeyFlag)
-				} else {
-					col.AddFlag(mysql.MultipleKeyFlag)
+					break
 				}
 			}
+			break
 		}
 	}
 
-	err := col.SetDefaultValue(defaultValue)
-	if err != nil {
-		log.Panic("set default value failed", zap.Any("column", col), zap.Any("default", defaultValue))
-	}
-	return col
+	return col, nil
 }
 
 // IndexSchema is the schema of the index.
@@ -235,7 +233,7 @@ func newIndexSchema(index *timodel.IndexInfo, columns []*timodel.ColumnInfo) *In
 	for _, col := range index.Columns {
 		indexSchema.Columns = append(indexSchema.Columns, col.Name.O)
 		colInfo := columns[col.Offset]
-		// An index is not null when all columns of are not null
+		// An index is not null when all columns of aer not null
 		if !mysql.HasNotNullFlag(colInfo.GetFlag()) {
 			indexSchema.Nullable = true
 		}
@@ -244,24 +242,16 @@ func newIndexSchema(index *timodel.IndexInfo, columns []*timodel.ColumnInfo) *In
 }
 
 // newTiIndexInfo convert IndexSchema to a tidb index info.
-func newTiIndexInfo(indexSchema *IndexSchema, columns []*timodel.ColumnInfo, indexID int64) *timodel.IndexInfo {
+func newTiIndexInfo(indexSchema *IndexSchema) *timodel.IndexInfo {
 	indexColumns := make([]*timodel.IndexColumn, len(indexSchema.Columns))
 	for i, col := range indexSchema.Columns {
-		var offset int
-		for idx, column := range columns {
-			if column.Name.O == col {
-				offset = idx
-				break
-			}
-		}
 		indexColumns[i] = &timodel.IndexColumn{
 			Name:   timodel.NewCIStr(col),
-			Offset: offset,
+			Offset: i,
 		}
 	}
 
 	return &timodel.IndexInfo{
-		ID:      indexID,
 		Name:    timodel.NewCIStr(indexSchema.Name),
 		Columns: indexColumns,
 		Unique:  indexSchema.Unique,
@@ -326,48 +316,72 @@ func newTableSchema(tableInfo *model.TableInfo) *TableSchema {
 }
 
 // newTableInfo converts from TableSchema to TableInfo.
-func newTableInfo(m *TableSchema) *model.TableInfo {
+func newTableInfo(m *TableSchema) (*model.TableInfo, error) {
 	var (
 		database      string
+		table         string
+		tableID       int64
 		schemaVersion uint64
 	)
-
-	tidbTableInfo := &timodel.TableInfo{}
 	if m != nil {
 		database = m.Schema
+		table = m.Table
+		tableID = m.TableID
 		schemaVersion = m.Version
-
-		tidbTableInfo.ID = m.TableID
-		tidbTableInfo.Name = timodel.NewCIStr(m.Table)
-		tidbTableInfo.UpdateTS = m.Version
-
-		nextMockID := int64(100)
-		for _, col := range m.Columns {
-			tiCol := newTiColumnInfo(col, nextMockID, m.Indexes)
-			nextMockID += 100
-			tidbTableInfo.Columns = append(tidbTableInfo.Columns, tiCol)
-		}
-
-		mockIndexID := int64(1)
-		for _, idx := range m.Indexes {
-			index := newTiIndexInfo(idx, tidbTableInfo.Columns, mockIndexID)
-			tidbTableInfo.Indices = append(tidbTableInfo.Indices, index)
-			mockIndexID += 1
-		}
 	}
-	return model.WrapTableInfo(100, database, schemaVersion, tidbTableInfo)
+	tidbTableInfo := &timodel.TableInfo{
+		ID:       tableID,
+		Name:     timodel.NewCIStr(table),
+		UpdateTS: schemaVersion,
+	}
+
+	if m == nil {
+		return &model.TableInfo{
+			TableName: model.TableName{
+				Schema:  database,
+				Table:   table,
+				TableID: tableID,
+			},
+			TableInfo: tidbTableInfo,
+		}, nil
+	}
+
+	nextMockID := int64(100)
+	for _, col := range m.Columns {
+		tiCol, err := newTiColumnInfo(col, nextMockID, m.Indexes)
+		nextMockID += 100
+		if err != nil {
+			return nil, err
+		}
+		tidbTableInfo.Columns = append(tidbTableInfo.Columns, tiCol)
+	}
+	for _, idx := range m.Indexes {
+		index := newTiIndexInfo(idx)
+		tidbTableInfo.Indices = append(tidbTableInfo.Indices, index)
+	}
+	info := model.WrapTableInfo(100, database, schemaVersion, tidbTableInfo)
+
+	return info, nil
 }
 
 // newDDLEvent converts from message to DDLEvent.
-func newDDLEvent(msg *message) *model.DDLEvent {
+func newDDLEvent(msg *message) (*model.DDLEvent, error) {
 	var (
 		tableInfo    *model.TableInfo
 		preTableInfo *model.TableInfo
+		err          error
 	)
 
-	tableInfo = newTableInfo(msg.TableSchema)
+	tableInfo, err = newTableInfo(msg.TableSchema)
+	if err != nil {
+		return nil, err
+	}
+
 	if msg.PreTableSchema != nil {
-		preTableInfo = newTableInfo(msg.PreTableSchema)
+		preTableInfo, err = newTableInfo(msg.PreTableSchema)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &model.DDLEvent{
 		StartTs:      msg.CommitTs,
@@ -375,7 +389,7 @@ func newDDLEvent(msg *message) *model.DDLEvent {
 		TableInfo:    tableInfo,
 		PreTableInfo: preTableInfo,
 		Query:        msg.SQL,
-	}
+	}, nil
 }
 
 // buildRowChangedEvent converts from message to RowChangedEvent.
@@ -383,9 +397,9 @@ func buildRowChangedEvent(
 	msg *message, tableInfo *model.TableInfo, enableRowChecksum bool,
 ) (*model.RowChangedEvent, error) {
 	result := &model.RowChangedEvent{
-		CommitTs:  msg.CommitTs,
-		TableInfo: tableInfo,
-		Table:     &tableInfo.TableName,
+		CommitTs:        msg.CommitTs,
+		PhysicalTableID: msg.TableID,
+		TableInfo:       tableInfo,
 	}
 
 	result.Columns = decodeColumns(msg.Data, tableInfo)
@@ -419,8 +433,8 @@ func buildRowChangedEvent(
 			log.Warn("consumer detect checksum corrupted",
 				zap.String("schema", msg.Schema),
 				zap.String("table", msg.Table))
-			for idx, col := range result.PreColumns {
-				colInfo := tableInfo.Columns[idx]
+			for _, col := range result.PreColumns {
+				colInfo := tableInfo.ForceGetColumnInfo(col.ColumnID)
 				log.Info("data corrupted, print each previous column for debugging",
 					zap.String("name", colInfo.Name.O),
 					zap.Any("type", colInfo.GetType()),
@@ -429,8 +443,8 @@ func buildRowChangedEvent(
 					zap.Any("value", col.Value),
 					zap.Any("default", colInfo.GetDefaultValue()))
 			}
-			for idx, col := range result.Columns {
-				colInfo := tableInfo.Columns[idx]
+			for _, col := range result.Columns {
+				colInfo := tableInfo.ForceGetColumnInfo(col.ColumnID)
 				log.Info("data corrupted, print each column for debugging",
 					zap.String("name", colInfo.Name.O),
 					zap.Any("type", colInfo.GetType()),
@@ -443,39 +457,40 @@ func buildRowChangedEvent(
 		}
 	}
 
-	for idx, col := range result.Columns {
-		adjustTimestampValue(col, tableInfo.Columns[idx].FieldType)
+	for _, col := range result.Columns {
+		adjustTimestampValue(col, tableInfo.ForceGetColumnInfo(col.ColumnID).FieldType)
 	}
-	for idx, col := range result.PreColumns {
-		adjustTimestampValue(col, tableInfo.Columns[idx].FieldType)
+	for _, col := range result.PreColumns {
+		adjustTimestampValue(col, tableInfo.ForceGetColumnInfo(col.ColumnID).FieldType)
 	}
 
 	return result, nil
 }
 
-func adjustTimestampValue(column *model.Column, flag types.FieldType) {
+func adjustTimestampValue(column *model.ColumnData, flag types.FieldType) {
 	if flag.GetType() != mysql.TypeTimestamp {
 		return
 	}
-	if column.Value != nil {
-		var ts string
-		switch v := column.Value.(type) {
-		case map[string]string:
-			ts = v["value"]
-		case map[string]interface{}:
-			ts = v["value"].(string)
-		}
-		column.Value = ts
+	if column.Value == nil {
+		return
 	}
+	var ts string
+	switch v := column.Value.(type) {
+	case map[string]string:
+		ts = v["value"]
+	case map[string]interface{}:
+		ts = v["value"].(string)
+	}
+	column.Value = ts
 }
 
 func decodeColumns(
 	rawData map[string]interface{}, tableInfo *model.TableInfo,
-) []*model.Column {
+) []*model.ColumnData {
 	if rawData == nil {
 		return nil
 	}
-	var result []*model.Column
+	var result []*model.ColumnData
 	for _, info := range tableInfo.Columns {
 		value, ok := rawData[info.Name.O]
 		if !ok {
@@ -484,12 +499,13 @@ func decodeColumns(
 				zap.String("column", info.Name.O))
 			continue
 		}
-		col := decodeColumn(value, &info.FieldType)
+		columnID := tableInfo.ForceGetColumnIDByName(info.Name.O)
+		col := decodeColumn(value, columnID, &info.FieldType)
 		if col == nil {
 			log.Panic("cannot decode column",
 				zap.String("name", info.Name.O), zap.Any("data", value))
 		}
-		col.Name = info.Name.O
+
 		result = append(result, col)
 	}
 	return result
@@ -596,15 +612,18 @@ func (a *jsonMarshaller) newDMLMessage(
 	}
 	if event.IsInsert() {
 		m.Type = DMLTypeInsert
-		m.Data = a.formatColumns(event.Columns, event.TableInfo.Columns, onlyHandleKey)
+		m.Data = a.formatColumns(event.Columns, event.TableInfo, onlyHandleKey)
 	} else if event.IsDelete() {
 		m.Type = DMLTypeDelete
-		m.Old = a.formatColumns(event.PreColumns, event.TableInfo.Columns, onlyHandleKey)
+		m.Old = a.formatColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
 	} else if event.IsUpdate() {
 		m.Type = DMLTypeUpdate
-		m.Data = a.formatColumns(event.Columns, event.TableInfo.Columns, onlyHandleKey)
-		m.Old = a.formatColumns(event.PreColumns, event.TableInfo.Columns, onlyHandleKey)
+		m.Data = a.formatColumns(event.Columns, event.TableInfo, onlyHandleKey)
+		m.Old = a.formatColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
+	} else {
+		log.Panic("invalid event type, this should not hit", zap.Any("event", event))
 	}
+
 	if a.config.EnableRowChecksum && event.Checksum != nil {
 		m.Checksum = &checksum{
 			Version:   event.Checksum.Version,
@@ -618,17 +637,20 @@ func (a *jsonMarshaller) newDMLMessage(
 }
 
 func (a *jsonMarshaller) formatColumns(
-	columns []*model.Column, colInfos []*timodel.ColumnInfo, onlyHandleKey bool,
+	columns []*model.ColumnData, tableInfo *model.TableInfo, onlyHandleKey bool,
 ) map[string]interface{} {
 	result := make(map[string]interface{}, len(columns))
-	for idx, col := range columns {
-		if col != nil {
-			if onlyHandleKey && !col.Flag.IsHandleKey() {
-				continue
-			}
-			value := encodeValue(col.Value, &colInfos[idx].FieldType, a.config.TimeZone.String())
-			result[col.Name] = value
+	colInfos := tableInfo.GetColInfosForRowChangedEvent()
+	for i, col := range columns {
+		if col == nil {
+			continue
 		}
+		flag := tableInfo.ForceGetColumnFlagType(col.ColumnID)
+		if onlyHandleKey && !flag.IsHandleKey() {
+			continue
+		}
+		value := encodeValue(col.Value, colInfos[i].Ft, a.config.TimeZone.String())
+		result[tableInfo.ForceGetColumnName(col.ColumnID)] = value
 	}
 	return result
 }
@@ -673,6 +695,7 @@ func (a *avroMarshaller) encodeValue4Avro(
 	default:
 		log.Panic("unexpected type for avro value", zap.Any("value", value))
 	}
+
 	return value, ""
 }
 
@@ -683,7 +706,6 @@ func encodeValue(
 		return nil
 	}
 
-	var err error
 	switch ft.GetType() {
 	case mysql.TypeBit:
 		switch v := value.(type) {
@@ -708,24 +730,25 @@ func encodeValue(
 		switch v := value.(type) {
 		case []uint8:
 			data := string(v)
-			var enum tiTypes.Enum
-			enum, err = tiTypes.ParseEnumName(ft.GetElems(), data, ft.GetCollate())
-			value = enum.Value
+			enum, err := tiTypes.ParseEnumName(ft.GetElems(), data, ft.GetCollate())
+			if err != nil {
+				log.Panic("parse enum name failed",
+					zap.Any("elems", ft.GetElems()), zap.String("name", data), zap.Error(err))
+			}
+			return enum.Value
 		}
 	case mysql.TypeSet:
 		switch v := value.(type) {
 		case []uint8:
 			data := string(v)
-			var set tiTypes.Set
-			set, err = tiTypes.ParseSetName(ft.GetElems(), data, ft.GetCollate())
-			value = set.Value
+			set, err := tiTypes.ParseSetName(ft.GetElems(), data, ft.GetCollate())
+			if err != nil {
+				log.Panic("parse set name failed",
+					zap.Any("elems", ft.GetElems()), zap.String("name", data), zap.Error(err))
+			}
+			return set.Value
 		}
 	default:
-	}
-
-	if err != nil {
-		log.Panic("parse enum / set name failed",
-			zap.Any("elems", ft.GetElems()), zap.Any("name", value), zap.Error(err))
 	}
 
 	var result string
@@ -753,16 +776,13 @@ func encodeValue(
 	return result
 }
 
-func decodeColumn(value interface{}, fieldType *types.FieldType) *model.Column {
-	result := &model.Column{
-		Value: value,
+func decodeColumn(value interface{}, id int64, fieldType *types.FieldType) *model.ColumnData {
+	result := &model.ColumnData{
+		ColumnID: id,
+		Value:    value,
 	}
 	if value == nil {
 		return result
-	}
-
-	if mysql.HasPriKeyFlag(fieldType.GetFlag()) {
-		result.Flag.SetIsHandleKey()
 	}
 
 	var err error
@@ -786,6 +806,13 @@ func decodeColumn(value interface{}, fieldType *types.FieldType) *model.Column {
 		// json encoding, set is encoded as `string`, bit encoded as `string`
 		case string:
 			value, err = strconv.ParseUint(v, 10, 64)
+			if err != nil {
+				return nil
+			}
+		case []uint8:
+			value = common.MustBinaryLiteralToInt(v)
+		case uint64:
+			value = v
 		case int64:
 			value = uint64(v)
 		}
@@ -793,6 +820,9 @@ func decodeColumn(value interface{}, fieldType *types.FieldType) *model.Column {
 		switch v := value.(type) {
 		case string:
 			value, err = strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return nil
+			}
 		default:
 			value = v
 		}
@@ -802,6 +832,9 @@ func decodeColumn(value interface{}, fieldType *types.FieldType) *model.Column {
 			value, err = strconv.ParseInt(v, 10, 64)
 			if err != nil {
 				value, err = strconv.ParseUint(v, 10, 64)
+				if err != nil {
+					return nil
+				}
 			}
 		case map[string]interface{}:
 			value = uint64(v["value"].(int64))
@@ -812,6 +845,9 @@ func decodeColumn(value interface{}, fieldType *types.FieldType) *model.Column {
 		switch v := value.(type) {
 		case string:
 			value, err = strconv.ParseFloat(v, 32)
+			if err != nil {
+				return nil
+			}
 		default:
 			value = v
 		}
@@ -819,6 +855,9 @@ func decodeColumn(value interface{}, fieldType *types.FieldType) *model.Column {
 		switch v := value.(type) {
 		case string:
 			value, err = strconv.ParseFloat(v, 64)
+			if err != nil {
+				return nil
+			}
 		default:
 			value = v
 		}
@@ -828,12 +867,11 @@ func decodeColumn(value interface{}, fieldType *types.FieldType) *model.Column {
 		switch v := value.(type) {
 		case string:
 			value, err = strconv.ParseUint(v, 10, 64)
+			if err != nil {
+				return nil
+			}
 		}
 	default:
-	}
-
-	if err != nil {
-		return nil
 	}
 
 	result.Value = value

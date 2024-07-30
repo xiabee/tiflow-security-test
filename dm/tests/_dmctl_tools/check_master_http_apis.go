@@ -19,7 +19,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/pingcap/tidb/br/pkg/lightning/common"
+	toolutils "github.com/pingcap/tidb-tools/pkg/utils"
 	"github.com/pingcap/tiflow/dm/tests/utils"
 )
 
@@ -36,7 +36,7 @@ func main() {
 		sslCert = os.Args[3]
 		sslKey = os.Args[4]
 
-		tls, err := common.NewTLS(sslCA, sslCert, sslKey, "", nil, nil, nil)
+		tls, err := toolutils.NewTLS(sslCA, sslCert, sslKey, "", nil)
 		if err != nil {
 			utils.ExitWithError(err)
 		}

@@ -29,7 +29,7 @@ import (
 )
 
 // VerifyChecksum calculate the checksum value, and compare it with the expected one, return error if not identical.
-func VerifyChecksum(columns []*model.Column, columnInfo []*timodel.ColumnInfo, expected uint32) error {
+func VerifyChecksum(columns []*model.ColumnData, columnInfo []*timodel.ColumnInfo, expected uint32) error {
 	// if expected is 0, it means the checksum is not enabled, so we don't need to verify it.
 	// the data maybe restored by br, and the checksum is not enabled, so no expected here.
 	if expected == 0 {
@@ -51,7 +51,7 @@ func VerifyChecksum(columns []*model.Column, columnInfo []*timodel.ColumnInfo, e
 
 // calculate the checksum, caller should make sure all columns is ordered by the column's id.
 // by follow: https://github.com/pingcap/tidb/blob/e3417913f58cdd5a136259b902bf177eaf3aa637/util/rowcodec/common.go#L294
-func calculateChecksum(columns []*model.Column, columnInfo []*timodel.ColumnInfo) (uint32, error) {
+func calculateChecksum(columns []*model.ColumnData, columnInfo []*timodel.ColumnInfo) (uint32, error) {
 	var (
 		checksum uint32
 		err      error
@@ -145,9 +145,7 @@ func buildChecksumBytes(buf []byte, value interface{}, mysqlType byte) ([]byte, 
 		}
 		buf = binary.LittleEndian.AppendUint64(buf, number)
 	// encoded as bytes if binary flag set to true, else string
-	case mysql.TypeVarchar, mysql.TypeVarString, mysql.TypeString,
-		mysql.TypeTinyBlob, mysql.TypeMediumBlob,
-		mysql.TypeLongBlob, mysql.TypeBlob:
+	case mysql.TypeVarchar, mysql.TypeVarString, mysql.TypeString, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob:
 		switch a := value.(type) {
 		case string:
 			buf = appendLengthValue(buf, []byte(a))

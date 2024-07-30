@@ -135,7 +135,8 @@ type SinkConfig struct {
 	// DispatchRules is only available when the downstream is MQ.
 	DispatchRules []*DispatchRule `toml:"dispatchers" json:"dispatchers,omitempty"`
 	// CSVConfig is only available when the downstream is Storage.
-	CSVConfig       *CSVConfig        `toml:"csv" json:"csv,omitempty"`
+	CSVConfig *CSVConfig `toml:"csv" json:"csv,omitempty"`
+
 	ColumnSelectors []*ColumnSelector `toml:"column-selectors" json:"column-selectors,omitempty"`
 	// SchemaRegistry is only available when the downstream is MQ using avro protocol.
 	SchemaRegistry *string `toml:"schema-registry" json:"schema-registry,omitempty"`
@@ -160,11 +161,13 @@ type SinkConfig struct {
 	// DeleteOnlyOutputHandleKeyColumns is only available when the downstream is MQ.
 	DeleteOnlyOutputHandleKeyColumns *bool `toml:"delete-only-output-handle-key-columns" json:"delete-only-output-handle-key-columns,omitempty"`
 
+	// ContentCompatible is only available when the downstream is MQ.
+	ContentCompatible *bool `toml:"content-compatible" json:"content-compatible,omitempty"`
+
 	// TiDBSourceID is the source ID of the upstream TiDB,
 	// which is used to set the `tidb_cdc_write_source` session variable.
 	// Note: This field is only used internally and only used in the MySQL sink.
 	TiDBSourceID uint64 `toml:"-" json:"-"`
-
 	// SafeMode is only available when the downstream is DB.
 	SafeMode           *bool               `toml:"safe-mode" json:"safe-mode,omitempty"`
 	KafkaConfig        *KafkaConfig        `toml:"kafka-config" json:"kafka-config,omitempty"`
@@ -174,7 +177,6 @@ type SinkConfig struct {
 
 	// AdvanceTimeoutInSec is a duration in second. If a table sink progress hasn't been
 	// advanced for this given duration, the sink will be canceled and re-established.
-	// Deprecated since v8.1.1
 	AdvanceTimeoutInSec *uint `toml:"advance-timeout-in-sec" json:"advance-timeout-in-sec,omitempty"`
 
 	// Simple Protocol only config, use to control the behavior of sending bootstrap message.
@@ -189,8 +191,14 @@ type SinkConfig struct {
 	// Default value is true.
 	SendBootstrapToAllPartition *bool `toml:"send-bootstrap-to-all-partition" json:"send-bootstrap-to-all-partition,omitempty"`
 
+	// Debezium only. Whether schema should be excluded in the output.
+	DebeziumDisableSchema *bool `toml:"debezium-disable-schema" json:"debezium-disable-schema,omitempty"`
+
 	// OpenProtocol related configurations
 	OpenProtocol *OpenProtocolConfig `toml:"open" json:"open,omitempty"`
+
+	// DebeziumConfig related configurations
+	Debezium *DebeziumConfig `toml:"debezium" json:"debezium,omitempty"`
 }
 
 // MaskSensitiveData masks sensitive data in SinkConfig
@@ -222,7 +230,9 @@ func (s *SinkConfig) ShouldSendBootstrapMsg() bool {
 
 // CSVConfig defines a series of configuration items for csv codec.
 type CSVConfig struct {
-	// delimiter between fields
+	// delimiter between fields, it can be 1 character or at most 2 characters
+	// It can not be CR or LF or contains CR or LF.
+	// It should have exclusive characters with quote.
 	Delimiter string `toml:"delimiter" json:"delimiter"`
 	// quoting character
 	Quote string `toml:"quote" json:"quote"`
@@ -232,6 +242,10 @@ type CSVConfig struct {
 	IncludeCommitTs bool `toml:"include-commit-ts" json:"include-commit-ts"`
 	// encoding method of binary type
 	BinaryEncodingMethod string `toml:"binary-encoding-method" json:"binary-encoding-method"`
+	// output old value
+	OutputOldValue bool `toml:"output-old-value" json:"output-old-value"`
+	// output handle key
+	OutputHandleKey bool `toml:"output-handle-key" json:"output-handle-key"`
 }
 
 func (c *CSVConfig) validateAndAdjust() error {
@@ -257,19 +271,24 @@ func (c *CSVConfig) validateAndAdjust() error {
 	case 0:
 		return cerror.WrapError(cerror.ErrSinkInvalidConfig,
 			errors.New("csv config delimiter cannot be empty"))
-	case 1:
+	case 1, 2, 3:
 		if strings.ContainsRune(c.Delimiter, CR) || strings.ContainsRune(c.Delimiter, LF) {
 			return cerror.WrapError(cerror.ErrSinkInvalidConfig,
 				errors.New("csv config delimiter contains line break characters"))
 		}
 	default:
 		return cerror.WrapError(cerror.ErrSinkInvalidConfig,
-			errors.New("csv config delimiter contains more than one character"))
+			errors.New("csv config delimiter contains more than three characters, note that escape "+
+				"sequences can only be used in double quotes in toml configuration items."))
 	}
 
-	if len(c.Quote) > 0 && strings.Contains(c.Delimiter, c.Quote) {
-		return cerror.WrapError(cerror.ErrSinkInvalidConfig,
-			errors.New("csv config quote and delimiter cannot be the same"))
+	if len(c.Quote) > 0 {
+		for _, r := range c.Delimiter {
+			if strings.ContainsRune(c.Quote, r) {
+				return cerror.WrapError(cerror.ErrSinkInvalidConfig,
+					errors.New("csv config quote and delimiter has common characters which is not allowed"))
+			}
+		}
 	}
 
 	// validate binary encoding method
@@ -415,17 +434,6 @@ type KafkaConfig struct {
 	CodecConfig                  *CodecConfig              `toml:"codec-config" json:"codec-config,omitempty"`
 	LargeMessageHandle           *LargeMessageHandleConfig `toml:"large-message-handle" json:"large-message-handle,omitempty"`
 	GlueSchemaRegistryConfig     *GlueSchemaRegistryConfig `toml:"glue-schema-registry-config" json:"glue-schema-registry-config"`
-
-	// OutputRawChangeEvent controls whether to split the update pk/uk events.
-	OutputRawChangeEvent *bool `toml:"output-raw-change-event" json:"output-raw-change-event,omitempty"`
-}
-
-// GetOutputRawChangeEvent returns the value of OutputRawChangeEvent
-func (k *KafkaConfig) GetOutputRawChangeEvent() bool {
-	if k == nil || k.OutputRawChangeEvent == nil {
-		return false
-	}
-	return *k.OutputRawChangeEvent
 }
 
 // MaskSensitiveData masks sensitive data in KafkaConfig
@@ -580,22 +588,11 @@ type PulsarConfig struct {
 	// and 'type' always use 'client_credentials'
 	OAuth2 *OAuth2 `toml:"oauth2" json:"oauth2,omitempty"`
 
-	// OutputRawChangeEvent controls whether to split the update pk/uk events.
-	OutputRawChangeEvent *bool `toml:"output-raw-change-event" json:"output-raw-change-event,omitempty"`
-
 	// BrokerURL is used to configure service brokerUrl for the Pulsar service.
 	// This parameter is a part of the `sink-uri`. Internal use only.
 	BrokerURL string `toml:"-" json:"-"`
 	// SinkURI is the parsed sinkURI. Internal use only.
 	SinkURI *url.URL `toml:"-" json:"-"`
-}
-
-// GetOutputRawChangeEvent returns the value of OutputRawChangeEvent
-func (c *PulsarConfig) GetOutputRawChangeEvent() bool {
-	if c == nil || c.OutputRawChangeEvent == nil {
-		return false
-	}
-	return *c.OutputRawChangeEvent
 }
 
 // MaskSensitiveData masks sensitive data in PulsarConfig
@@ -656,17 +653,6 @@ type CloudStorageConfig struct {
 	FileExpirationDays  *int    `toml:"file-expiration-days" json:"file-expiration-days,omitempty"`
 	FileCleanupCronSpec *string `toml:"file-cleanup-cron-spec" json:"file-cleanup-cron-spec,omitempty"`
 	FlushConcurrency    *int    `toml:"flush-concurrency" json:"flush-concurrency,omitempty"`
-
-	// OutputRawChangeEvent controls whether to split the update pk/uk events.
-	OutputRawChangeEvent *bool `toml:"output-raw-change-event" json:"output-raw-change-event,omitempty"`
-}
-
-// GetOutputRawChangeEvent returns the value of OutputRawChangeEvent
-func (c *CloudStorageConfig) GetOutputRawChangeEvent() bool {
-	if c == nil || c.OutputRawChangeEvent == nil {
-		return false
-	}
-	return *c.OutputRawChangeEvent
 }
 
 func (s *SinkConfig) validateAndAdjust(sinkURI *url.URL) error {
@@ -810,56 +796,21 @@ func (s *SinkConfig) validateAndAdjustSinkURI(sinkURI *url.URL) error {
 		return err
 	}
 
-	log.Info("succeed to parse parameter from sink uri",
-		zap.String("protocol", util.GetOrZero(s.Protocol)),
-		zap.String("txnAtomicity", string(util.GetOrZero(s.TxnAtomicity))))
-
-	// Check that protocol config is compatible with the scheme.
-	if sink.IsMySQLCompatibleScheme(sinkURI.Scheme) && s.Protocol != nil {
+	// Adjust that protocol is compatible with the scheme. For testing purposes,
+	// any protocol should be legal for blackhole.
+	if sink.IsMQScheme(sinkURI.Scheme) || sink.IsStorageScheme(sinkURI.Scheme) {
+		_, err := ParseSinkProtocolFromString(util.GetOrZero(s.Protocol))
+		if err != nil {
+			return err
+		}
+	} else if sink.IsMySQLCompatibleScheme(sinkURI.Scheme) && s.Protocol != nil {
 		return cerror.ErrSinkURIInvalid.GenWithStackByArgs(fmt.Sprintf("protocol %s "+
 			"is incompatible with %s scheme", util.GetOrZero(s.Protocol), sinkURI.Scheme))
 	}
-	// For testing purposes, any protocol should be legal for blackhole.
-	if sink.IsMQScheme(sinkURI.Scheme) || sink.IsStorageScheme(sinkURI.Scheme) {
-		return s.ValidateProtocol(sinkURI.Scheme)
-	}
-	return nil
-}
 
-// ValidateProtocol validates the protocol configuration.
-func (s *SinkConfig) ValidateProtocol(scheme string) error {
-	protocol, err := ParseSinkProtocolFromString(util.GetOrZero(s.Protocol))
-	if err != nil {
-		return err
-	}
-	outputOldValue := false
-	switch protocol {
-	case ProtocolOpen:
-		if s.OpenProtocol != nil {
-			outputOldValue = s.OpenProtocol.OutputOldValue
-		}
-	case ProtocolAvro:
-		outputOldValue = false
-	default:
-		return nil
-	}
-
-	outputRawChangeEvent := false
-	switch scheme {
-	case sink.KafkaScheme, sink.KafkaSSLScheme:
-		outputRawChangeEvent = s.KafkaConfig.GetOutputRawChangeEvent()
-	case sink.PulsarScheme, sink.PulsarSSLScheme:
-		outputRawChangeEvent = s.PulsarConfig.GetOutputRawChangeEvent()
-	default:
-		outputRawChangeEvent = s.CloudStorageConfig.GetOutputRawChangeEvent()
-	}
-
-	if outputRawChangeEvent && !outputOldValue {
-		// TODO: return error if we do not need to keep backward compatibility.
-		log.Warn(fmt.Sprintf("TiCDC will not split the update pk/uk events if output-raw-change-event is true(scheme: %s).", scheme) +
-			fmt.Sprintf("It is not recommended to set output-old-value to false(protocol: %s) in this case.", protocol) +
-			"Otherwise, there may be data consistency issues in update pk/uk scenarios due to lack of old value information.")
-	}
+	log.Info("succeed to parse parameter from sink uri",
+		zap.String("protocol", util.GetOrZero(s.Protocol)),
+		zap.String("txnAtomicity", string(util.GetOrZero(s.TxnAtomicity))))
 	return nil
 }
 
@@ -981,5 +932,10 @@ func (g *GlueSchemaRegistryConfig) NoCredentials() bool {
 
 // OpenProtocolConfig represents the configurations for open protocol encoding
 type OpenProtocolConfig struct {
+	OutputOldValue bool `toml:"output-old-value" json:"output-old-value"`
+}
+
+// DebeziumConfig represents the configurations for debezium protocol encoding
+type DebeziumConfig struct {
 	OutputOldValue bool `toml:"output-old-value" json:"output-old-value"`
 }

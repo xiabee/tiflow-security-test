@@ -33,7 +33,7 @@ import (
 	tmysql "github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/util/dbutil"
 	"github.com/pingcap/tidb/pkg/util/filter"
-	"github.com/pingcap/tidb/pkg/util/regexpr-router"
+	regexprrouter "github.com/pingcap/tidb/pkg/util/regexpr-router"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -469,6 +469,7 @@ func FetchAllDoTables(ctx context.Context, db *BaseDB, bw *filter.Filter) (map[s
 	schemaToTables := make(map[string][]string)
 	for _, ftSchema := range ftSchemas {
 		schema := ftSchema.Schema
+		// use `GetTables` from tidb-tools, no view included
 		tables, err := dbutil.GetTables(ctx, db.DB, schema)
 		if err != nil {
 			return nil, terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)

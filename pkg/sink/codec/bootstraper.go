@@ -75,7 +75,6 @@ func newBootstrapWorker(
 }
 
 func (b *bootstrapWorker) run(ctx context.Context) error {
-	log.Info("Bootstrap worker is started", zap.Stringer("changefeed", b.changefeedID))
 	sendTicker := time.NewTicker(bootstrapWorkerTickerInterval)
 	gcTicker := time.NewTicker(bootstrapWorkerGCInterval)
 	defer func() {
@@ -108,7 +107,7 @@ func (b *bootstrapWorker) addEvent(
 	key model.TopicPartitionKey,
 	row *model.RowChangedEvent,
 ) error {
-	table, ok := b.activeTables.Load(row.TableInfo.TableName.TableID)
+	table, ok := b.activeTables.Load(row.PhysicalTableID)
 	if !ok {
 		tb := newTableStatistic(key, row)
 		b.activeTables.Store(tb.id, tb)
@@ -221,7 +220,7 @@ type tableStatistic struct {
 
 func newTableStatistic(key model.TopicPartitionKey, row *model.RowChangedEvent) *tableStatistic {
 	res := &tableStatistic{
-		id:    row.TableInfo.TableName.TableID,
+		id:    row.PhysicalTableID,
 		topic: key.Topic,
 	}
 	res.totalPartition.Store(key.TotalPartition)

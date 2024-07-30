@@ -1401,7 +1401,7 @@ var doc = `{
                     "type": "string"
                 },
                 "delimiter": {
-                    "description": "delimiter between fields",
+                    "description": "delimiter between fields, it can be 1 character or at most 2 characters\nIt can not be CR or LF or contains CR or LF.\nIt should have exclusive characters with quote.",
                     "type": "string"
                 },
                 "include-commit-ts": {
@@ -1411,6 +1411,14 @@ var doc = `{
                 "null": {
                     "description": "representation of null values",
                     "type": "string"
+                },
+                "output-handle-key": {
+                    "description": "output handle key",
+                    "type": "boolean"
+                },
+                "output-old-value": {
+                    "description": "output old value",
+                    "type": "boolean"
                 },
                 "quote": {
                     "description": "quoting character",
@@ -1437,10 +1445,6 @@ var doc = `{
                     "type": "string"
                 },
                 "output-column-id": {
-                    "type": "boolean"
-                },
-                "output-raw-change-event": {
-                    "description": "OutputRawChangeEvent controls whether to split the update pk/uk events.",
                     "type": "boolean"
                 },
                 "worker-count": {
@@ -1485,6 +1489,14 @@ var doc = `{
                     "items": {
                         "type": "string"
                     }
+                }
+            }
+        },
+        "config.DebeziumConfig": {
+            "type": "object",
+            "properties": {
+                "output-old-value": {
+                    "type": "boolean"
                 }
             }
         },
@@ -1589,10 +1601,6 @@ var doc = `{
                 },
                 "max-message-bytes": {
                     "type": "integer"
-                },
-                "output-raw-change-event": {
-                    "description": "OutputRawChangeEvent controls whether to split the update pk/uk events.",
-                    "type": "boolean"
                 },
                 "partition-num": {
                     "type": "integer"
@@ -1809,10 +1817,6 @@ var doc = `{
                     "description": "Set the operation timeout (default: 30 seconds)\nProducer-create, subscribe and unsubscribe operations will be retried until this interval, after which the\noperation will be marked as failed",
                     "type": "integer"
                 },
-                "output-raw-change-event": {
-                    "description": "OutputRawChangeEvent controls whether to split the update pk/uk events.",
-                    "type": "boolean"
-                },
                 "pulsar-producer-cache-size": {
                     "description": "PulsarProducerCacheSize is the size of the cache of pulsar producers",
                     "type": "integer"
@@ -1856,6 +1860,10 @@ var doc = `{
                         "$ref": "#/definitions/config.ColumnSelector"
                     }
                 },
+                "content-compatible": {
+                    "description": "ContentCompatible is only available when the downstream is MQ.",
+                    "type": "boolean"
+                },
                 "csv": {
                     "description": "CSVConfig is only available when the downstream is Storage.",
                     "$ref": "#/definitions/config.CSVConfig"
@@ -1863,6 +1871,14 @@ var doc = `{
                 "date-separator": {
                     "description": "DateSeparator is only available when the downstream is Storage.",
                     "type": "string"
+                },
+                "debezium": {
+                    "description": "DebeziumConfig related configurations",
+                    "$ref": "#/definitions/config.DebeziumConfig"
+                },
+                "debezium-disable-schema": {
+                    "description": "Debezium only. Whether schema should be excluded in the output.",
+                    "type": "boolean"
                 },
                 "delete-only-output-handle-key-columns": {
                     "description": "DeleteOnlyOutputHandleKeyColumns is only available when the downstream is MQ.",
@@ -2241,6 +2257,12 @@ var doc = `{
                 "null": {
                     "type": "string"
                 },
+                "output_handle_key": {
+                    "type": "boolean"
+                },
+                "output_old_value": {
+                    "type": "boolean"
+                },
                 "quote": {
                     "type": "string"
                 }
@@ -2430,9 +2452,6 @@ var doc = `{
                 "output_column_id": {
                     "type": "boolean"
                 },
-                "output_raw_change_event": {
-                    "type": "boolean"
-                },
                 "worker_count": {
                     "type": "integer"
                 }
@@ -2519,11 +2538,16 @@ var doc = `{
         "v2.ConsistentMemoryUsage": {
             "type": "object",
             "properties": {
-                "event_cache_percentage": {
-                    "type": "integer"
-                },
                 "memory_quota_percentage": {
                     "type": "integer"
+                }
+            }
+        },
+        "v2.DebeziumConfig": {
+            "type": "object",
+            "properties": {
+                "output_old_value": {
+                    "type": "boolean"
                 }
             }
         },
@@ -2596,38 +2620,10 @@ var doc = `{
         "v2.FilterConfig": {
             "type": "object",
             "properties": {
-                "do_dbs": {
-                    "description": "DoDBs is an allowlist of schemas.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "do_tables": {
-                    "description": "DoTables is an allowlist of tables.",
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/v2.Table"
-                    }
-                },
                 "event_filters": {
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/v2.EventFilterRule"
-                    }
-                },
-                "ignore_dbs": {
-                    "description": "IgnoreDBs is a blocklist of schemas.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "ignore_tables": {
-                    "description": "IgnoreTables is a blocklist of tables.",
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/v2.Table"
                     }
                 },
                 "ignore_txn_start_ts": {
@@ -2726,9 +2722,6 @@ var doc = `{
                 },
                 "max_message_bytes": {
                     "type": "integer"
-                },
-                "output_raw_change_event": {
-                    "type": "boolean"
                 },
                 "partition_num": {
                     "type": "integer"
@@ -2951,9 +2944,6 @@ var doc = `{
                 "operation-timeout": {
                     "type": "integer"
                 },
-                "output-raw-change-event": {
-                    "type": "boolean"
-                },
                 "pulsar-producer-cache-size": {
                     "type": "integer"
                 },
@@ -3018,6 +3008,9 @@ var doc = `{
                 "enable_sync_point": {
                     "type": "boolean"
                 },
+                "enable_table_monitor": {
+                    "type": "boolean"
+                },
                 "filter": {
                     "$ref": "#/definitions/v2.FilterConfig"
                 },
@@ -3043,6 +3036,7 @@ var doc = `{
                     "$ref": "#/definitions/v2.SinkConfig"
                 },
                 "sql_mode": {
+                    "description": "Deprecated: we don't use this field since v8.0.0.",
                     "type": "string"
                 },
                 "sync_point_interval": {
@@ -3143,11 +3137,20 @@ var doc = `{
                         "$ref": "#/definitions/v2.ColumnSelector"
                     }
                 },
+                "content_compatible": {
+                    "type": "boolean"
+                },
                 "csv": {
                     "$ref": "#/definitions/v2.CSVConfig"
                 },
                 "date_separator": {
                     "type": "string"
+                },
+                "debezium": {
+                    "$ref": "#/definitions/v2.DebeziumConfig"
+                },
+                "debezium_disable_schema": {
+                    "type": "boolean"
                 },
                 "delete_only_output_handle_key_columns": {
                     "type": "boolean"
@@ -3244,19 +3247,6 @@ var doc = `{
                 "synced_check_interval": {
                     "description": "The minimum interval between the latest synced ts and now required to reach synced state",
                     "type": "integer"
-                }
-            }
-        },
-        "v2.Table": {
-            "type": "object",
-            "properties": {
-                "database_name": {
-                    "description": "Schema is the name of the schema (database) containing this table.",
-                    "type": "string"
-                },
-                "table_name": {
-                    "description": "Name is the unqualified table name.",
-                    "type": "string"
                 }
             }
         }

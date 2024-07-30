@@ -42,7 +42,7 @@ func TestReplicaConfigMarshal(t *testing.T) {
 	conf.ForceReplicate = true
 	conf.Filter.Rules = []string{"1.1"}
 	conf.Mounter.WorkerNum = 3
-	conf.Sink.Protocol = util.AddressOf("open-protocol")
+	conf.Sink.Protocol = util.AddressOf("canal-json")
 	conf.Sink.ColumnSelectors = []*ColumnSelector{
 		{
 			Matcher: []string{"1.1"},
@@ -66,8 +66,10 @@ func TestReplicaConfigMarshal(t *testing.T) {
 
 	conf.Sink.OnlyOutputUpdatedColumns = aws.Bool(true)
 	conf.Sink.DeleteOnlyOutputHandleKeyColumns = aws.Bool(true)
+	conf.Sink.ContentCompatible = aws.Bool(true)
 	conf.Sink.SafeMode = aws.Bool(true)
 	conf.Sink.AdvanceTimeoutInSec = util.AddressOf(uint(150))
+	conf.Sink.DebeziumDisableSchema = util.AddressOf(false)
 	conf.Sink.KafkaConfig = &KafkaConfig{
 		PartitionNum:                 aws.Int32(1),
 		ReplicationFactor:            aws.Int16(1),
@@ -101,6 +103,7 @@ func TestReplicaConfigMarshal(t *testing.T) {
 			AvroEnableWatermark:            aws.Bool(true),
 			AvroDecimalHandlingMode:        aws.String("string"),
 			AvroBigintUnsignedHandlingMode: aws.String("string"),
+			EncodingFormat:                 aws.String("json"),
 		},
 		LargeMessageHandle: &LargeMessageHandleConfig{
 			LargeMessageHandleOption: LargeMessageHandleOptionHandleKeyOnly,
@@ -141,6 +144,9 @@ func TestReplicaConfigMarshal(t *testing.T) {
 		FileSize:       aws.Int(1024),
 		OutputColumnID: aws.Bool(false),
 	}
+	conf.Sink.Debezium = &DebeziumConfig{
+		OutputOldValue: true,
+	}
 	conf.Sink.OpenProtocol = &OpenProtocolConfig{
 		OutputOldValue: true,
 	}
@@ -180,7 +186,7 @@ func TestReplicaConfigOutDated(t *testing.T) {
 	conf.ForceReplicate = true
 	conf.Filter.Rules = []string{"1.1"}
 	conf.Mounter.WorkerNum = 3
-	conf.Sink.Protocol = util.AddressOf("open-protocol")
+	conf.Sink.Protocol = util.AddressOf("canal-json")
 	conf.Sink.DispatchRules = []*DispatchRule{
 		{Matcher: []string{"a.b"}, DispatcherRule: "r1"},
 		{Matcher: []string{"a.c"}, DispatcherRule: "r2"},

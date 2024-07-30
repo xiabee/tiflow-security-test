@@ -14,6 +14,7 @@
 package owner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -24,7 +25,6 @@ import (
 	"github.com/pingcap/tiflow/cdc/redo"
 	"github.com/pingcap/tiflow/cdc/scheduler/schedulepb"
 	config2 "github.com/pingcap/tiflow/pkg/config"
-	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
@@ -50,7 +50,7 @@ func createDDLManagerForTest(t *testing.T) *ddlManager {
 		schema,
 		redo.NewDisabledDDLManager(),
 		redo.NewDisabledMetaManager(),
-		model.DB, false)
+		false)
 	return res
 }
 
@@ -146,24 +146,24 @@ func TestGetSnapshotTs(t *testing.T) {
 	dm := createDDLManagerForTest(t)
 	dm.startTs = 0
 	dm.checkpointTs = 1
-	require.Equal(t, dm.getSnapshotTs(), dm.startTs)
+	require.Equal(t, dm.startTs, dm.getSnapshotTs())
 
 	dm.startTs = 1
 	dm.checkpointTs = 10
 	dm.BDRMode = true
 	dm.ddlResolvedTs = 15
-	require.Equal(t, dm.getSnapshotTs(), dm.ddlResolvedTs)
+	require.Equal(t, dm.checkpointTs, dm.getSnapshotTs())
 
 	dm.startTs = 1
 	dm.checkpointTs = 10
 	dm.BDRMode = false
-	require.Equal(t, dm.getSnapshotTs(), dm.checkpointTs)
+	require.Equal(t, dm.checkpointTs, dm.getSnapshotTs())
 }
 
 func TestExecRenameTablesDDL(t *testing.T) {
 	helper := entry.NewSchemaTestHelper(t)
 	defer helper.Close()
-	ctx := cdcContext.NewBackendContext4Test(true)
+	ctx := context.Background()
 	dm := createDDLManagerForTest(t)
 	mockDDLSink := dm.ddlSink.(*mockDDLSink)
 
@@ -263,7 +263,8 @@ func TestExecRenameTablesDDL(t *testing.T) {
 func TestExecDropTablesDDL(t *testing.T) {
 	helper := entry.NewSchemaTestHelper(t)
 	defer helper.Close()
-	ctx := cdcContext.NewBackendContext4Test(true)
+
+	ctx := context.Background()
 	dm := createDDLManagerForTest(t)
 	mockDDLSink := dm.ddlSink.(*mockDDLSink)
 
@@ -327,7 +328,8 @@ func TestExecDropTablesDDL(t *testing.T) {
 func TestExecDropViewsDDL(t *testing.T) {
 	helper := entry.NewSchemaTestHelper(t)
 	defer helper.Close()
-	ctx := cdcContext.NewBackendContext4Test(true)
+
+	ctx := context.Background()
 	dm := createDDLManagerForTest(t)
 	mockDDLSink := dm.ddlSink.(*mockDDLSink)
 

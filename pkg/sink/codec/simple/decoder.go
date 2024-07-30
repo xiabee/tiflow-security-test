@@ -69,6 +69,10 @@ func NewDecoder(ctx context.Context, config *common.Config, db *sql.DB) (*Decode
 	}
 
 	m, err := newMarshaller(config)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	return &Decoder{
 		config:     config,
 		marshaller: m,
@@ -78,17 +82,21 @@ func NewDecoder(ctx context.Context, config *common.Config, db *sql.DB) (*Decode
 
 		memo:           newMemoryTableInfoProvider(),
 		cachedMessages: list.New(),
-	}, errors.Trace(err)
+	}, nil
 }
 
 // AddKeyValue add the received key and values to the Decoder,
-func (d *Decoder) AddKeyValue(_, value []byte) (err error) {
+func (d *Decoder) AddKeyValue(_, value []byte) error {
 	if d.value != nil {
 		return cerror.ErrCodecDecode.GenWithStack(
 			"Decoder value already exists, not consumed yet")
 	}
-	d.value, err = common.Decompress(d.config.LargeMessageHandle.LargeMessageHandleCompression, value)
-	return err
+	value, err := common.Decompress(d.config.LargeMessageHandle.LargeMessageHandleCompression, value)
+	if err != nil {
+		return err
+	}
+	d.value = value
+	return nil
 }
 
 // HasNext returns whether there is any event need to be consumed
@@ -106,7 +114,6 @@ func (d *Decoder) HasNext() (model.MessageType, bool, error) {
 	d.value = nil
 
 	if d.msg.Data != nil || d.msg.Old != nil {
-		log.Debug("row changed event message found", zap.Any("message", d.msg))
 		return model.MessageTypeRow, true, nil
 	}
 
@@ -158,10 +165,12 @@ func (d *Decoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 	}
 
 	event, err := buildRowChangedEvent(d.msg, tableInfo, d.config.EnableRowChecksum)
-	d.msg = nil
+	if err != nil {
+		return nil, err
+	}
 
-	log.Debug("row changed event assembled", zap.Any("event", event))
-	return event, err
+	d.msg = nil
+	return event, nil
 }
 
 func (d *Decoder) assembleClaimCheckRowChangedEvent(claimCheckLocation string) (*model.RowChangedEvent, error) {
@@ -192,14 +201,9 @@ func (d *Decoder) assembleClaimCheckRowChangedEvent(claimCheckLocation string) (
 func (d *Decoder) assembleHandleKeyOnlyRowChangedEvent(m *message) (*model.RowChangedEvent, error) {
 	tableInfo := d.memo.Read(m.Schema, m.Table, m.SchemaVersion)
 	if tableInfo == nil {
-		log.Debug("table info not found for the event, "+
-			"the consumer should cache this event temporarily, and update the tableInfo after it's received",
-			zap.String("schema", d.msg.Schema),
-			zap.String("table", d.msg.Table),
-			zap.Uint64("version", d.msg.SchemaVersion))
-		d.cachedMessages.PushBack(d.msg)
-		d.msg = nil
-		return nil, nil
+		return nil, cerror.ErrCodecDecode.GenWithStack(
+			"cannot found the table info, schema: %s, table: %s, version: %d",
+			m.Schema, m.Table, m.SchemaVersion)
 	}
 
 	fieldTypeMap := make(map[string]*types.FieldType, len(tableInfo.Columns))
@@ -211,7 +215,6 @@ func (d *Decoder) assembleHandleKeyOnlyRowChangedEvent(m *message) (*model.RowCh
 		Version:       defaultVersion,
 		Schema:        m.Schema,
 		Table:         m.Table,
-		TableID:       m.TableID,
 		Type:          m.Type,
 		CommitTs:      m.CommitTs,
 		SchemaVersion: m.SchemaVersion,
@@ -248,7 +251,13 @@ func (d *Decoder) buildData(
 		col := holder.Types[i]
 		value := holder.Values[i]
 
-		fieldType := fieldTypeMap[col.Name()]
+		fieldType, ok := fieldTypeMap[col.Name()]
+		if !ok {
+			log.Panic("cannot found the field type",
+				zap.String("schema", d.msg.Schema),
+				zap.String("table", d.msg.Table),
+				zap.String("column", col.Name()))
+		}
 		result[col.Name()] = encodeValue(value, fieldType, timezone)
 	}
 	return result
@@ -260,7 +269,10 @@ func (d *Decoder) NextDDLEvent() (*model.DDLEvent, error) {
 		return nil, cerror.ErrCodecDecode.GenWithStack(
 			"no message found when decode DDL event")
 	}
-	ddl := newDDLEvent(d.msg)
+	ddl, err := newDDLEvent(d.msg)
+	if err != nil {
+		return nil, err
+	}
 	d.msg = nil
 
 	d.memo.Write(ddl.TableInfo)
@@ -272,12 +284,14 @@ func (d *Decoder) NextDDLEvent() (*model.DDLEvent, error) {
 		if err != nil {
 			return nil, err
 		}
+		if event == nil {
+			ele = ele.Next()
+			continue
+		}
+		d.CachedRowChangedEvents = append(d.CachedRowChangedEvents, event)
 
 		next := ele.Next()
-		if event != nil {
-			d.CachedRowChangedEvents = append(d.CachedRowChangedEvents, event)
-			d.cachedMessages.Remove(ele)
-		}
+		d.cachedMessages.Remove(ele)
 		ele = next
 	}
 	return ddl, nil

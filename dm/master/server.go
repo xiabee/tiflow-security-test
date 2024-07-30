@@ -30,7 +30,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/util"
+	toolutils "github.com/pingcap/tidb-tools/pkg/utils"
 	"github.com/pingcap/tidb/pkg/util/dbutil"
 	"github.com/pingcap/tiflow/dm/checker"
 	dmcommon "github.com/pingcap/tiflow/dm/common"
@@ -61,7 +61,7 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 const (
@@ -175,20 +175,18 @@ func (s *Server) Start(ctx context.Context) (err error) {
 		return
 	}
 
-	tlsConfig, err := util.NewTLSConfig(
-		util.WithCAPath(s.cfg.SSLCA),
-		util.WithCertAndKeyPath(s.cfg.SSLCert, s.cfg.SSLKey),
-		util.WithVerifyCommonName(s.cfg.CertAllowedCN),
-	)
+	tls, err := toolutils.NewTLS(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.AdvertiseAddr, s.cfg.CertAllowedCN)
 	if err != nil {
 		return terror.ErrMasterTLSConfigNotValid.Delegate(err)
 	}
 
-	grpcTLS := grpc.WithInsecure()
-	if tlsConfig != nil {
-		grpcTLS = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
+	// tls2 is used for grpc client in grpc gateway
+	tls2, err := toolutils.NewTLS(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.AdvertiseAddr, s.cfg.CertAllowedCN)
+	if err != nil {
+		return terror.ErrMasterTLSConfigNotValid.Delegate(err)
 	}
-	apiHandler, err := getHTTPAPIHandler(ctx, s.cfg.AdvertiseAddr, grpcTLS)
+
+	apiHandler, err := getHTTPAPIHandler(ctx, s.cfg.AdvertiseAddr, tls2.ToGRPCDialOption())
 	if err != nil {
 		return
 	}
@@ -209,13 +207,18 @@ func (s *Server) Start(ctx context.Context) (err error) {
 		"/debug/": getDebugHandler(),
 	}
 	if s.cfg.OpenAPI {
-		if initOpenAPIErr := s.InitOpenAPIHandles(tlsConfig); initOpenAPIErr != nil {
+		// tls3 is used to openapi reverse proxy
+		tls3, err1 := toolutils.NewTLS(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.AdvertiseAddr, s.cfg.CertAllowedCN)
+		if err1 != nil {
+			return terror.ErrMasterTLSConfigNotValid.Delegate(err1)
+		}
+		if initOpenAPIErr := s.InitOpenAPIHandles(tls3.TLSConfig()); initOpenAPIErr != nil {
 			return terror.ErrOpenAPICommonError.Delegate(initOpenAPIErr)
 		}
 
 		const dashboardPrefix = "/dashboard/"
 		scheme := "http://"
-		if tlsConfig != nil {
+		if tls3.TLSConfig() != nil {
 			scheme = "https://"
 		}
 		log.L().Info("Web UI enabled", zap.String("dashboard", scheme+s.cfg.AdvertiseAddr+dashboardPrefix))
@@ -236,7 +239,7 @@ func (s *Server) Start(ctx context.Context) (err error) {
 
 	// create an etcd client used in the whole server instance.
 	// NOTE: we only use the local member's address now, but we can use all endpoints of the cluster if needed.
-	s.etcdClient, err = etcdutil.CreateClient([]string{withHost(s.cfg.AdvertiseAddr)}, tlsConfig)
+	s.etcdClient, err = etcdutil.CreateClient([]string{withHost(s.cfg.AdvertiseAddr)}, tls.TLSConfig())
 	if err != nil {
 		return
 	}
@@ -345,7 +348,8 @@ func (s *Server) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerReque
 	}
 	log.L().Info("register worker successfully", zap.String("name", req.Name), zap.String("address", req.Address))
 	return &pb.RegisterWorkerResponse{
-		Result: true,
+		Result:    true,
+		SecretKey: s.cfg.SecretKey,
 	}, nil
 }
 
@@ -1286,8 +1290,6 @@ func (s *Server) getSourceConfigs(sources []string) map[string]*config.SourceCon
 	cfgs := make(map[string]*config.SourceConfig)
 	for _, source := range sources {
 		if cfg := s.scheduler.GetSourceCfgByID(source); cfg != nil {
-			// check the password
-			cfg.DecryptPassword()
 			cfgs[source] = cfg
 		}
 	}
@@ -1343,7 +1345,7 @@ func (s *Server) CheckTask(ctx context.Context, req *pb.CheckTaskRequest) (*pb.C
 func parseAndAdjustSourceConfig(ctx context.Context, contents []string) ([]*config.SourceConfig, error) {
 	cfgs := make([]*config.SourceConfig, len(contents))
 	for i, content := range contents {
-		cfg, err := config.ParseYaml(content)
+		cfg, err := config.SourceCfgFromYaml(content)
 		if err != nil {
 			return cfgs, err
 		}
@@ -1391,7 +1393,7 @@ func checkAndAdjustSourceConfigForDMCtl(ctx context.Context, cfg *config.SourceC
 func parseSourceConfig(contents []string) ([]*config.SourceConfig, error) {
 	cfgs := make([]*config.SourceConfig, len(contents))
 	for i, content := range contents {
-		cfg, err := config.ParseYaml(content)
+		cfg, err := config.SourceCfgFromYaml(content)
 		if err != nil {
 			return cfgs, err
 		}
@@ -1425,7 +1427,7 @@ func GetLatestMeta(ctx context.Context, flavor string, dbConfig *dbconfig.DBConf
 	return &config.Meta{BinLogName: pos.Name, BinLogPos: pos.Pos, BinLogGTID: gSet}, nil
 }
 
-func AdjustTargetDB(ctx context.Context, dbConfig *dbconfig.DBConfig) error {
+func AdjustTargetDBSessionCfg(ctx context.Context, dbConfig *dbconfig.DBConfig) error {
 	cfg := *dbConfig
 	if len(cfg.Password) > 0 {
 		cfg.Password = utils.DecryptOrPlaintext(cfg.Password)
@@ -1649,13 +1651,13 @@ func (s *Server) generateSubTask(
 		}
 		err = cfg.Adjust()
 	} else {
-		err = cfg.Decode(task)
+		err = cfg.FromYaml(task)
 	}
 	if err != nil {
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
 
-	err = AdjustTargetDB(ctx, cfg.TargetDB)
+	err = AdjustTargetDBSessionCfg(ctx, cfg.TargetDB)
 	if err != nil {
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
@@ -2151,15 +2153,11 @@ func (s *Server) listMemberMaster(ctx context.Context, names []string) (*pb.Memb
 
 	client := &http.Client{}
 	if len(s.cfg.SSLCA) != 0 {
-		tlsConfig, err := util.NewTLSConfig(
-			util.WithCAPath(s.cfg.SSLCA),
-			util.WithCertAndKeyPath(s.cfg.SSLCert, s.cfg.SSLKey),
-			util.WithVerifyCommonName(s.cfg.CertAllowedCN),
-		)
+		inner, err := toolutils.ToTLSConfigWithVerify(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.CertAllowedCN)
 		if err != nil {
 			return resp, err
 		}
-		client = util.ClientWithTLS(tlsConfig)
+		client = toolutils.ClientWithTLS(inner)
 	}
 	client.Timeout = 1 * time.Second
 
@@ -2404,25 +2402,15 @@ func (s *Server) createMasterClientByName(ctx context.Context, name string) (pb.
 	if len(clientURLs) == 0 {
 		return nil, nil, errors.New("master not found")
 	}
-
-	tlsConfig, err := util.NewTLSConfig(
-		util.WithCAPath(s.cfg.SSLCA),
-		util.WithCertAndKeyPath(s.cfg.SSLCert, s.cfg.SSLKey),
-		util.WithVerifyCommonName(s.cfg.CertAllowedCN),
-	)
+	tls, err := toolutils.NewTLS(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.AdvertiseAddr, s.cfg.CertAllowedCN)
 	if err != nil {
 		return nil, nil, err
-	}
-
-	grpcTLS := grpc.WithInsecure()
-	if tlsConfig != nil {
-		grpcTLS = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
 
 	var conn *grpc.ClientConn
 	for _, clientURL := range clientURLs {
 		//nolint:staticcheck
-		conn, err = grpc.Dial(clientURL, grpcTLS, grpc.WithBackoffMaxDelay(3*time.Second))
+		conn, err = grpc.Dial(clientURL, tls.ToGRPCDialOption(), grpc.WithBackoffMaxDelay(3*time.Second))
 		if err == nil {
 			masterClient := pb.NewMasterClient(conn)
 			return masterClient, conn, nil
@@ -2482,7 +2470,7 @@ func (s *Server) GetCfg(ctx context.Context, req *pb.GetCfgRequest) (*pb.GetCfgR
 			return resp2, nil
 		}
 		toDBCfg := config.GetTargetDBCfgFromOpenAPITask(task)
-		if adjustDBErr := AdjustTargetDB(ctx, toDBCfg); adjustDBErr != nil {
+		if adjustDBErr := AdjustTargetDBSessionCfg(ctx, toDBCfg); adjustDBErr != nil {
 			if adjustDBErr != nil {
 				resp2.Msg = adjustDBErr.Error()
 				// nolint:nilerr
@@ -3317,5 +3305,95 @@ func (s *Server) UpdateValidation(ctx context.Context, req *pb.UpdateValidationR
 	return &pb.UpdateValidationResponse{
 		Result:  true,
 		Sources: workerResps,
+	}, nil
+}
+
+func (s *Server) Encrypt(ctx context.Context, req *pb.EncryptRequest) (*pb.EncryptResponse, error) {
+	var (
+		resp2 *pb.EncryptResponse
+		err   error
+	)
+	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
+	if shouldRet {
+		return resp2, err
+	}
+	ciphertext, err := utils.Encrypt(req.Plaintext)
+	if err != nil {
+		// nolint:nilerr
+		return &pb.EncryptResponse{
+			Result: false,
+			Msg:    err.Error(),
+		}, nil
+	}
+	return &pb.EncryptResponse{
+		Result:     true,
+		Ciphertext: ciphertext,
+	}, nil
+}
+
+func (s *Server) ListTaskConfigs(ctx context.Context, req *emptypb.Empty) (*pb.ListTaskConfigsResponse, error) {
+	var (
+		resp2 *pb.ListTaskConfigsResponse
+		err   error
+	)
+	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
+	if shouldRet {
+		return resp2, err
+	}
+
+	subtaskCfgsOfTasks := s.scheduler.GetSubTaskCfgs()
+	contents := make(map[string]string, len(subtaskCfgsOfTasks))
+	for taskName, subtaskCfgMap := range subtaskCfgsOfTasks {
+		subtaskCfgs := make([]*config.SubTaskConfig, 0, len(subtaskCfgMap))
+		for sourceID := range subtaskCfgMap {
+			subTaskConfig := subtaskCfgMap[sourceID]
+			subtaskCfgs = append(subtaskCfgs, &subTaskConfig)
+		}
+		sort.Slice(subtaskCfgs, func(i, j int) bool {
+			return subtaskCfgs[i].SourceID < subtaskCfgs[j].SourceID
+		})
+		taskCfg := config.SubTaskConfigsToTaskConfig(subtaskCfgs...)
+		content, err := taskCfg.YamlForDowngrade()
+		if err != nil {
+			// nolint:nilerr
+			return &pb.ListTaskConfigsResponse{
+				Result: false,
+				Msg:    fmt.Sprintf("failed to marshal task config of %s: %s", taskName, err.Error()),
+			}, nil
+		}
+		contents[taskName] = content
+	}
+	return &pb.ListTaskConfigsResponse{
+		Result:      true,
+		TaskConfigs: contents,
+	}, nil
+}
+
+func (s *Server) ListSourceConfigs(ctx context.Context, req *emptypb.Empty) (*pb.ListSourceConfigsResponse, error) {
+	var (
+		resp2 *pb.ListSourceConfigsResponse
+		err   error
+	)
+	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
+	if shouldRet {
+		return resp2, err
+	}
+
+	sourceCfgs := s.scheduler.GetSourceCfgs()
+	contents := make(map[string]string, len(sourceCfgs))
+	for sourceID, cfg := range sourceCfgs {
+		yamlContent, err := cfg.YamlForDowngrade()
+		if err != nil {
+			// nolint:nilerr
+			return &pb.ListSourceConfigsResponse{
+				Result: false,
+				Msg:    fmt.Sprintf("fail to marshal source config of %s: %s", sourceID, err.Error()),
+			}, nil
+		}
+		contents[sourceID] = yamlContent
+	}
+	return &pb.ListSourceConfigsResponse{
+		Result:        true,
+		SourceConfigs: contents,
 	}, nil
 }

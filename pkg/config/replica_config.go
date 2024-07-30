@@ -23,7 +23,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tiflow/pkg/config/outdated"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/integrity"
@@ -39,13 +38,6 @@ const (
 	// minSyncPointRetention is the minimum of SyncPointRetention can be set.
 	minSyncPointRetention           = time.Hour * 1
 	minChangeFeedErrorStuckDuration = time.Minute * 30
-	// The default SQL Mode of TiDB: "ONLY_FULL_GROUP_BY,
-	// STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,
-	// NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"
-	// Note: The SQL Mode of TiDB is not the same as ORACLE.
-	// If you want to use the same SQL Mode as ORACLE, you need to add "ORACLE" to the SQL Mode.
-	defaultSQLMode = mysql.DefaultSQLMode
-
 	// DefaultTiDBSourceID is the default source ID of TiDB cluster.
 	DefaultTiDBSourceID = 1
 )
@@ -55,6 +47,7 @@ var defaultReplicaConfig = &ReplicaConfig{
 	CaseSensitive:      false,
 	CheckGCSafePoint:   true,
 	EnableSyncPoint:    util.AddressOf(false),
+	EnableTableMonitor: util.AddressOf(false),
 	SyncPointInterval:  util.AddressOf(10 * time.Minute),
 	SyncPointRetention: util.AddressOf(24 * time.Hour),
 	BDRMode:            util.AddressOf(false),
@@ -78,12 +71,15 @@ var defaultReplicaConfig = &ReplicaConfig{
 		EnableKafkaSinkV2:                util.AddressOf(false),
 		OnlyOutputUpdatedColumns:         util.AddressOf(false),
 		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
+		ContentCompatible:                util.AddressOf(false),
 		TiDBSourceID:                     DefaultTiDBSourceID,
 		AdvanceTimeoutInSec:              util.AddressOf(DefaultAdvanceTimeoutInSec),
 		SendBootstrapIntervalInSec:       util.AddressOf(DefaultSendBootstrapIntervalInSec),
 		SendBootstrapInMsgCount:          util.AddressOf(DefaultSendBootstrapInMsgCount),
 		SendBootstrapToAllPartition:      util.AddressOf(DefaultSendBootstrapToAllPartition),
+		DebeziumDisableSchema:            util.AddressOf(false),
 		OpenProtocol:                     &OpenProtocolConfig{OutputOldValue: true},
+		Debezium:                         &DebeziumConfig{OutputOldValue: true},
 	},
 	Consistent: &ConsistentConfig{
 		Level:                 "none",
@@ -97,7 +93,6 @@ var defaultReplicaConfig = &ReplicaConfig{
 		Compression:           "",
 		MemoryUsage: &ConsistentMemoryUsage{
 			MemoryQuotaPercentage: 50,
-			EventCachePercentage:  0,
 		},
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
@@ -110,7 +105,6 @@ var defaultReplicaConfig = &ReplicaConfig{
 		CorruptionHandleLevel: integrity.CorruptionHandleLevelWarn,
 	},
 	ChangefeedErrorStuckDuration: util.AddressOf(time.Minute * 30),
-	SQLMode:                      defaultSQLMode,
 	SyncedStatus:                 &SyncedStatusConfig{SyncedCheckInterval: 5 * 60, CheckpointInterval: 15},
 }
 
@@ -140,7 +134,8 @@ type replicaConfig struct {
 	ForceReplicate   bool   `toml:"force-replicate" json:"force-replicate"`
 	CheckGCSafePoint bool   `toml:"check-gc-safe-point" json:"check-gc-safe-point"`
 	// EnableSyncPoint is only available when the downstream is a Database.
-	EnableSyncPoint *bool `toml:"enable-sync-point" json:"enable-sync-point,omitempty"`
+	EnableSyncPoint    *bool `toml:"enable-sync-point" json:"enable-sync-point,omitempty"`
+	EnableTableMonitor *bool `toml:"enable-table-monitor" json:"enable-table-monitor"`
 	// IgnoreIneligibleTable is used to store the user's config when creating a changefeed.
 	// not used in the changefeed's lifecycle.
 	IgnoreIneligibleTable bool `toml:"ignore-ineligible-table" json:"ignore-ineligible-table"`
@@ -163,13 +158,21 @@ type replicaConfig struct {
 	// Integrity is only available when the downstream is MQ.
 	Integrity                    *integrity.Config   `toml:"integrity" json:"integrity"`
 	ChangefeedErrorStuckDuration *time.Duration      `toml:"changefeed-error-stuck-duration" json:"changefeed-error-stuck-duration,omitempty"`
-	SQLMode                      string              `toml:"sql-mode" json:"sql-mode"`
 	SyncedStatus                 *SyncedStatusConfig `toml:"synced-status" json:"synced-status,omitempty"`
+
+	// Deprecated: we don't use this field since v8.0.0.
+	SQLMode string `toml:"sql-mode" json:"sql-mode"`
 }
 
 // Value implements the driver.Valuer interface
 func (c ReplicaConfig) Value() (driver.Value, error) {
-	return c.Marshal()
+	cfg, err := c.Marshal()
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: refactor the meaningless type conversion.
+	return []byte(cfg), nil
 }
 
 // Scan implements the sql.Scanner interface
@@ -209,7 +212,7 @@ func (c *ReplicaConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Clone clones a replication
+// Clone clones a replica config
 func (c *ReplicaConfig) Clone() *ReplicaConfig {
 	str, err := c.Marshal()
 	if err != nil {

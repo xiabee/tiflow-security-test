@@ -73,8 +73,8 @@ func newWorker(ctx context.Context, changefeedID model.ChangeFeedID,
 	}
 }
 
-// Continuously get events from txnCh and call backend flush based on conditions.
-func (w *worker) run(txnCh <-chan causality.TxnWithNotifier[*txnEvent]) error {
+// Run a loop.
+func (w *worker) runLoop(txnCh <-chan causality.TxnWithNotifier[*txnEvent]) error {
 	defer func() {
 		if err := w.backend.Close(); err != nil {
 			log.Info("Transaction dmlSink backend close fail",
@@ -96,8 +96,8 @@ func (w *worker) run(txnCh <-chan causality.TxnWithNotifier[*txnEvent]) error {
 				zap.Int("workerID", w.ID))
 			return nil
 		case txn := <-txnCh:
-			// we get the data from txnCh.out until no more data here or reach the state that can be flushed.
-			// If no more data in txnCh.out, and also not reach the state that can be flushed,
+			// we get the data from txnCh until no more data here or reach the state that can be flushed.
+			// If no more data in txnCh, and also not reach the state that can be flushed,
 			// we will wait for 10ms and then do flush to avoid too much flush with small amount of txns.
 			if txn.TxnEvent != nil {
 				needFlush := w.onEvent(txn.TxnEvent, txn.PostTxnExecuted)

@@ -122,8 +122,9 @@ func NewPulsarDMLSink(
 	}
 
 	encoderGroup := codec.NewEncoderGroup(replicaConfig.Sink, encoderBuilder, changefeedID)
+
 	s := newDMLSink(ctx, changefeedID, p, nil, topicManager,
-		eventRouter, trans, encoderGroup, protocol, scheme, pConfig.GetOutputRawChangeEvent(), errCh)
+		eventRouter, trans, encoderGroup, protocol, scheme, errCh)
 
 	return s, nil
 }

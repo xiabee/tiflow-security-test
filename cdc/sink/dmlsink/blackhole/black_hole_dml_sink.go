@@ -47,9 +47,9 @@ func (s *DMLSink) WriteEvents(rows ...*dmlsink.CallbackableEvent[*model.RowChang
 	return
 }
 
-// SchemeOption returns the scheme and the option.
-func (s *DMLSink) SchemeOption() (string, bool) {
-	return sink.BlackHoleScheme, true
+// Scheme return the scheme of the sink.
+func (s *DMLSink) Scheme() string {
+	return sink.BlackHoleScheme
 }
 
 // Close do nothing.

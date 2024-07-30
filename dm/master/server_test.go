@@ -39,7 +39,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/util"
+	toolutils "github.com/pingcap/tidb/pkg/util"
 	tidbmock "github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/pingcap/tiflow/dm/checker"
 	common2 "github.com/pingcap/tiflow/dm/common"
@@ -947,7 +947,7 @@ func (t *testMasterSuite) TestStartTaskWithRemoveMeta() {
 	var wg sync.WaitGroup
 	// taskName is relative to taskConfig
 	cfg := config.NewTaskConfig()
-	err := cfg.Decode(taskConfig)
+	err := cfg.FromYaml(taskConfig)
 	require.NoError(t.T(), err)
 	taskName := cfg.Name
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1635,12 +1635,12 @@ func (t *testMasterSuite) testNormalServerLifecycle(cfg *Config, checkLogic func
 
 func (t *testMasterSuite) testHTTPInterface(url string, contain []byte) {
 	// we use HTTPS in some test cases.
-	tlsConfig, err := util.NewTLSConfig(
-		util.WithCAPath(pwd+"/tls_for_test/ca.pem"),
-		util.WithCertAndKeyPath(pwd+"/tls_for_test/dm.pem", pwd+"/tls_for_test/dm.key"),
+	tlsConfig, err := toolutils.NewTLSConfig(
+		toolutils.WithCAPath(pwd+"/tls_for_test/ca.pem"),
+		toolutils.WithCertAndKeyPath(pwd+"/tls_for_test/dm.pem", pwd+"/tls_for_test/dm.key"),
 	)
 	require.NoError(t.T(), err)
-	cli := util.ClientWithTLS(tlsConfig)
+	cli := toolutils.ClientWithTLS(tlsConfig)
 
 	// nolint:noctx
 	resp, err := cli.Get(url)
@@ -1769,7 +1769,7 @@ func (t *testMasterSuite) TestOperateSource() {
 	s1.leader.Store(oneselfLeader)
 	require.NoError(t.T(), s1.Start(ctx))
 	defer s1.Close()
-	mysqlCfg, err := config.ParseYamlAndVerify(config.SampleSourceConfig)
+	mysqlCfg, err := config.SourceCfgFromYamlAndVerify(config.SampleSourceConfig)
 	require.NoError(t.T(), err)
 	mysqlCfg.From.Password = os.Getenv("MYSQL_PSWD")
 	task, err := mysqlCfg.Yaml()

@@ -266,6 +266,10 @@ func TestCompareVersion(t *testing.T) {
 	dirtyVersion := semver.New(SanitizeVersion("v6.3.0-dirty"))
 	require.Equal(t, 1, dirtyVersion.Compare(*MinTiCDCVersion))
 	require.Equal(t, 0, dirtyVersion.Compare(*semver.New("6.3.0")))
+
+	dirtyVersionWithFIPS := semver.New(SanitizeVersion("v6.3.0-dirty-fips"))
+	require.Equal(t, 1, dirtyVersionWithFIPS.Compare(*MinTiCDCVersion))
+	require.Equal(t, 0, dirtyVersionWithFIPS.Compare(*semver.New("6.3.0")))
 }
 
 func TestReleaseSemver(t *testing.T) {
@@ -449,21 +453,21 @@ func TestCheckTiCDCVersion(t *testing.T) {
 
 	versions = map[string]struct{}{
 		"v6.3.0":       {},
-		"v9.0.0-alpha": {},
+		"v8.0.0-alpha": {},
 	}
 	err = CheckTiCDCVersion(versions)
-	require.Regexp(t, "TiCDC .* not supported, only support version less than.*", err)
+	require.NoError(t, err)
 
 	versions = map[string]struct{}{
 		"v6.3.0":        {},
-		"v9.0.0-master": {},
+		"v10.0.0-alpha": {},
 	}
 	err = CheckTiCDCVersion(versions)
 	require.Regexp(t, "TiCDC .* not supported, only support version less than.*", err)
 
 	versions = map[string]struct{}{
-		"v6.3.0": {},
-		"v9.0.0": {},
+		"v6.3.0":  {},
+		"v10.0.0": {},
 	}
 	err = CheckTiCDCVersion(versions)
 	require.Regexp(t, "TiCDC .* not supported, only support version less than.*", err)

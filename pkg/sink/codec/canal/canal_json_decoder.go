@@ -29,6 +29,7 @@ import (
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
+	"github.com/pingcap/tiflow/pkg/sink/codec/utils"
 	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 	"golang.org/x/text/encoding"
@@ -132,7 +133,6 @@ func (b *batchDecoder) HasNext() (model.MessageType, bool, error) {
 		return model.MessageTypeUnknown, false, err
 	}
 	b.msg = msg
-
 	return b.msg.messageType(), true, nil
 }
 
@@ -173,7 +173,7 @@ func (b *batchDecoder) buildData(holder *common.ColumnsHolder) (map[string]inter
 
 		var value string
 		rawValue := holder.Values[i].([]uint8)
-		if isBinaryMySQLType(mysqlType) {
+		if utils.IsBinaryMySQLType(mysqlType) {
 			rawValue, err := b.bytesDecoder.Bytes(rawValue)
 			if err != nil {
 				return nil, nil, errors.Trace(err)
@@ -220,11 +220,9 @@ func (b *batchDecoder) assembleHandleKeyOnlyRowChangedEvent(
 			CommitTs: commitTs,
 		},
 	}
-
 	switch eventType {
 	case "INSERT":
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, handleKeyData)
-
 		data, mysqlType, err := b.buildData(holder)
 		if err != nil {
 			return nil, err
@@ -233,7 +231,6 @@ func (b *batchDecoder) assembleHandleKeyOnlyRowChangedEvent(
 		result.Data = []map[string]interface{}{data}
 	case "UPDATE":
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, handleKeyData)
-
 		data, mysqlType, err := b.buildData(holder)
 		if err != nil {
 			return nil, err
@@ -249,7 +246,6 @@ func (b *batchDecoder) assembleHandleKeyOnlyRowChangedEvent(
 		result.Old = []map[string]interface{}{old}
 	case "DELETE":
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, handleKeyData)
-
 		data, mysqlType, err := b.buildData(holder)
 		if err != nil {
 			return nil, err

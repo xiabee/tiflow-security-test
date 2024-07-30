@@ -23,18 +23,13 @@ import (
 )
 
 // NewLargeEvent4Test creates large events for test
-func NewLargeEvent4Test(
-	t *testing.T,
-	replicaConfig *config.ReplicaConfig,
-) (*model.DDLEvent, *model.RowChangedEvent,
-	*model.RowChangedEvent, *model.RowChangedEvent,
-) {
+func NewLargeEvent4Test(t *testing.T, replicaConfig *config.ReplicaConfig) (*model.DDLEvent, *model.RowChangedEvent, *model.RowChangedEvent, *model.RowChangedEvent) {
 	helper := entry.NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
 	defer helper.Close()
 
 	sql := `create table test.t(
-    	t tinyint,
-		tu1 tinyint unsigned default 1 primary key,
+    	t tinyint primary key,
+		tu1 tinyint unsigned default 1,
 		tu2 tinyint unsigned default 2,
 		tu3 tinyint unsigned default 3,
 		tu4 tinyint unsigned default 4,

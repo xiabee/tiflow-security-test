@@ -45,7 +45,6 @@ const versionInconsistentLogRate = 1
 
 // Controller is a manager to schedule changefeeds
 type Controller interface {
-	orchestrator.Reactor
 	AsyncStop()
 	GetChangefeedOwnerCaptureInfo(id model.ChangeFeedID) *model.CaptureInfo
 	GetAllChangeFeedInfo(ctx context.Context) (
@@ -63,7 +62,10 @@ type Controller interface {
 	) error
 }
 
-var _ Controller = &controllerImpl{}
+var (
+	_ orchestrator.Reactor = &controllerImpl{}
+	_ Controller           = &controllerImpl{}
+)
 
 type controllerImpl struct {
 	changefeeds     map[model.ChangeFeedID]*orchestrator.ChangefeedReactorState
@@ -137,7 +139,6 @@ func (o *controllerImpl) Tick(stdCtx context.Context, rawState orchestrator.Reac
 	}
 
 	// Tick all changefeeds.
-	// ctx := stdCtx.(cdcContext.Context)
 	for _, changefeed := range state.Changefeeds {
 		o.changefeeds[changefeed.ID] = changefeed
 	}

@@ -112,9 +112,11 @@ func TestAllTables(t *testing.T) {
 	require.Nil(t, err)
 	require.Len(t, tableInfos, 1)
 	tableName := tableInfos[0].TableName
-	require.Equal(t, "test", tableName.Schema)
-	require.Equal(t, "t1", tableName.Table)
-
+	require.Equal(t, model.TableName{
+		Schema:  "test",
+		Table:   "t1",
+		TableID: 104,
+	}, tableName)
 	// add ineligible table
 	job = helper.DDL2Job("create table test.t2(id int)")
 	require.Nil(t, schema.HandleDDLJob(job))
@@ -122,8 +124,11 @@ func TestAllTables(t *testing.T) {
 	require.Nil(t, err)
 	require.Len(t, tableInfos, 1)
 	tableName = tableInfos[0].TableName
-	require.Equal(t, "test", tableName.Schema)
-	require.Equal(t, "t1", tableName.Table)
+	require.Equal(t, model.TableName{
+		Schema:  "test",
+		Table:   "t1",
+		TableID: 104,
+	}, tableName)
 }
 
 func TestIsIneligibleTableID(t *testing.T) {
@@ -609,27 +614,4 @@ func TestBuildDDLEventsFromDropViewsDDL(t *testing.T) {
 			},
 		},
 	})
-}
-
-func TestNewSchemaStorage(t *testing.T) {
-	helper := NewSchemaTestHelper(t)
-	defer helper.Close()
-	cfg := config.GetDefaultReplicaConfig()
-	cfg.Filter.Rules = []string{"test.t1"}
-	f, err := filter.NewFilter(cfg, "")
-	require.Nil(t, err)
-
-	// add table before create schema storage
-	job1 := helper.DDL2Job("create table test.t1 (id int primary key)")
-	helper.DDL2Job("create table test.t2 (id int primary key)")
-	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
-	require.Nil(t, err)
-	schema, err := NewSchemaStorage(helper.Storage(), ver.Ver,
-		false, dummyChangeFeedID, util.RoleTester, f)
-	require.Nil(t, err)
-	require.NotNil(t, schema)
-	tableInfos, err := schema.AllTables(context.Background(), ver.Ver)
-	require.Nil(t, err)
-	require.Len(t, tableInfos, 1)
-	require.Equal(t, job1.BinlogInfo.TableInfo.Name.O, tableInfos[0].TableName.Table)
 }

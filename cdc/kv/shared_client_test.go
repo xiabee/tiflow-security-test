@@ -15,11 +15,13 @@ package kv
 
 import (
 	"context"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/cdcpb"
+	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/pkg/store/mockstore/mockcopr"
 	"github.com/pingcap/tiflow/cdc/kv/regionlock"
 	"github.com/pingcap/tiflow/cdc/kv/sharedconn"
@@ -35,7 +37,54 @@ import (
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/testutils"
 	"github.com/tikv/client-go/v2/tikv"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
+
+func newMockService(
+	ctx context.Context,
+	t *testing.T,
+	srv cdcpb.ChangeDataServer,
+	wg *sync.WaitGroup,
+) (grpcServer *grpc.Server, addr string) {
+	return newMockServiceSpecificAddr(ctx, t, srv, "127.0.0.1:0", wg)
+}
+
+func newMockServiceSpecificAddr(
+	ctx context.Context,
+	t *testing.T,
+	srv cdcpb.ChangeDataServer,
+	listenAddr string,
+	wg *sync.WaitGroup,
+) (grpcServer *grpc.Server, addr string) {
+	lc := &net.ListenConfig{}
+	lis, err := lc.Listen(ctx, "tcp", listenAddr)
+	require.Nil(t, err)
+	addr = lis.Addr().String()
+	kaep := keepalive.EnforcementPolicy{
+		// force minimum ping interval
+		MinTime:             3 * time.Second,
+		PermitWithoutStream: true,
+	}
+	// Some tests rely on connect timeout and ping test, so we use a smaller num
+	kasp := keepalive.ServerParameters{
+		MaxConnectionIdle:     10 * time.Second, // If a client is idle for 20 seconds, send a GOAWAY
+		MaxConnectionAge:      10 * time.Second, // If any connection is alive for more than 20 seconds, send a GOAWAY
+		MaxConnectionAgeGrace: 5 * time.Second,  // Allow 5 seconds for pending RPCs to complete before forcibly closing connections
+		Time:                  3 * time.Second,  // Ping the client if it is idle for 5 seconds to ensure the connection is still active
+		Timeout:               1 * time.Second,  // Wait 1 second for the ping ack before assuming the connection is dead
+	}
+	grpcServer = grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep), grpc.KeepaliveParams(kasp))
+	// grpcServer is the server, srv is the service
+	cdcpb.RegisterChangeDataServer(grpcServer, srv)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err := grpcServer.Serve(lis)
+		require.Nil(t, err)
+	}()
+	return
+}
 
 func TestRequestedStreamRequestedRegions(t *testing.T) {
 	stream := newRequestedStream(100)
@@ -56,12 +105,12 @@ func TestRequestedStreamRequestedRegions(t *testing.T) {
 	require.Equal(t, 0, len(stream.requestedRegions.m))
 }
 
-func TestRequestedTable(t *testing.T) {
+func TestSubscribedTable(t *testing.T) {
 	s := &SharedClient{resolveLockCh: chann.NewAutoDrainChann[resolveLockTask]()}
-
+	s.logRegionDetails = log.Info
 	span := tablepb.Span{TableID: 1, StartKey: []byte{'a'}, EndKey: []byte{'z'}}
-	table := s.newRequestedTable(SubscriptionID(1), span, 100, nil)
-	s.totalSpans.v = make(map[SubscriptionID]*requestedTable)
+	table := s.newSubscribedTable(SubscriptionID(1), span, 100, nil)
+	s.totalSpans.v = make(map[SubscriptionID]*subscribedTable)
 	s.totalSpans.v[SubscriptionID(1)] = table
 	s.pdClock = pdutil.NewClock4Test()
 
@@ -80,7 +129,7 @@ func TestRequestedTable(t *testing.T) {
 	// Lock another range, no task will be triggered before initialized.
 	res = table.rangeLock.LockRange(context.Background(), []byte{'c'}, []byte{'d'}, 2, 100)
 	require.Equal(t, regionlock.LockRangeStatusSuccess, res.Status)
-	state := newRegionFeedState(singleRegionInfo{lockedRange: res.LockedRange, requestedTable: table}, 1)
+	state := newRegionFeedState(regionInfo{lockedRange: res.LockedRange, subscribedTable: table}, 1)
 	select {
 	case <-s.resolveLockCh.Out():
 		require.True(t, false, "shouldn't get a resolve lock task")
@@ -138,7 +187,7 @@ func TestConnectToOfflineOrFailedTiKV(t *testing.T) {
 				GrpcStreamConcurrent: 1,
 				AdvanceIntervalInMs:  10,
 			},
-			Debug: &config.DebugConfig{Puller: &config.PullerConfig{}},
+			Debug: &config.DebugConfig{Puller: &config.PullerConfig{LogRegionDetails: false}},
 		},
 		false, pdClient, grpcPool, regionCache, pdClock, lockResolver,
 	)

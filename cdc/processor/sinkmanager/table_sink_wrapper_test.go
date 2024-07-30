@@ -18,6 +18,7 @@ import (
 	"math"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
@@ -28,6 +29,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	"github.com/tikv/client-go/v2/oracle"
 )
 
 type mockSink struct {
@@ -50,8 +52,8 @@ func (m *mockSink) WriteEvents(events ...*dmlsink.CallbackableEvent[*model.RowCh
 	return nil
 }
 
-func (m *mockSink) SchemeOption() (string, bool) {
-	return sink.BlackHoleScheme, false
+func (m *mockSink) Scheme() string {
+	return sink.BlackHoleScheme
 }
 
 func (m *mockSink) GetEvents() []*dmlsink.CallbackableEvent[*model.RowChangedEvent] {
@@ -215,19 +217,16 @@ func TestHandleRowChangedEventNormalEvent(t *testing.T) {
 			Value: "col2-value",
 		},
 	}
-
+	tableInfo := model.BuildTableInfo("test", "test", columns, nil)
 	events := []*model.PolymorphicEvent{
 		{
 			CRTs:  1,
 			RawKV: &model.RawKVEntry{OpType: model.OpTypePut},
 			Row: &model.RowChangedEvent{
 				CommitTs:   1,
-				Columns:    columns,
-				PreColumns: preColumns,
-				Table: &model.TableName{
-					Schema: "test",
-					Table:  "test",
-				},
+				TableInfo:  tableInfo,
+				Columns:    model.Columns2ColumnDatas(columns, tableInfo),
+				PreColumns: model.Columns2ColumnDatas(preColumns, tableInfo),
 			},
 		},
 	}
@@ -235,7 +234,7 @@ func TestHandleRowChangedEventNormalEvent(t *testing.T) {
 	span := spanz.TableIDToComparableSpan(1)
 	result, size := handleRowChangedEvents(changefeedID, span, events...)
 	require.Equal(t, 1, len(result))
-	require.Equal(t, uint64(224), size)
+	require.Equal(t, uint64(testEventSize), size)
 }
 
 func TestGetUpperBoundTs(t *testing.T) {
@@ -315,4 +314,64 @@ func TestTableSinkWrapperSinkVersion(t *testing.T) {
 	wrapper.doTableSinkClear()
 	require.Nil(t, wrapper.tableSink.s)
 	require.Equal(t, wrapper.tableSink.version, uint64(0))
+}
+
+func TestTableSinkWrapperSinkInner(t *testing.T) {
+	t.Parallel()
+
+	innerTableSink := tablesink.New[*model.RowChangedEvent](
+		model.ChangeFeedID{}, tablepb.Span{}, model.Ts(0),
+		newMockSink(), &dmlsink.RowChangeEventAppender{},
+		pdutil.NewClock4Test(),
+		prometheus.NewCounter(prometheus.CounterOpts{}),
+		prometheus.NewHistogram(prometheus.HistogramOpts{}),
+	)
+	version := new(uint64)
+
+	wrapper := newTableSinkWrapper(
+		model.DefaultChangeFeedID("1"),
+		spanz.TableIDToComparableSpan(1),
+		func() (tablesink.TableSink, uint64) {
+			*version += 1
+			return innerTableSink, *version
+		},
+		tablepb.TableStatePrepared,
+		oracle.GoTimeToTS(time.Now()),
+		oracle.GoTimeToTS(time.Now().Add(10000*time.Second)),
+		func(_ context.Context) (model.Ts, error) { return math.MaxUint64, nil },
+	)
+
+	require.True(t, wrapper.initTableSink())
+
+	wrapper.closeAndClearTableSink()
+
+	// Shouldn't be stuck because version is 0.
+	require.Equal(t, wrapper.tableSink.version, uint64(0))
+	isStuck, _ := wrapper.sinkMaybeStuck(100 * time.Millisecond)
+	require.False(t, isStuck)
+
+	// Shouldn't be stuck because tableSink.advanced is just updated.
+	require.True(t, wrapper.initTableSink())
+	isStuck, _ = wrapper.sinkMaybeStuck(100 * time.Millisecond)
+	require.False(t, isStuck)
+
+	// Shouldn't be stuck because upperbound hasn't been advanced.
+	time.Sleep(200 * time.Millisecond)
+	isStuck, _ = wrapper.sinkMaybeStuck(100 * time.Millisecond)
+	require.False(t, isStuck)
+
+	// Shouldn't be stuck because `getCheckpointTs` will update tableSink.advanced.
+	nowTs := oracle.GoTimeToTS(time.Now())
+	wrapper.updateReceivedSorterResolvedTs(nowTs)
+	wrapper.barrierTs.Store(nowTs)
+	isStuck, _ = wrapper.sinkMaybeStuck(100 * time.Millisecond)
+	require.False(t, isStuck)
+
+	time.Sleep(200 * time.Millisecond)
+	nowTs = oracle.GoTimeToTS(time.Now())
+	wrapper.updateReceivedSorterResolvedTs(nowTs)
+	wrapper.barrierTs.Store(nowTs)
+	wrapper.updateResolvedTs(model.NewResolvedTs(nowTs))
+	isStuck, _ = wrapper.sinkMaybeStuck(100 * time.Millisecond)
+	require.True(t, isStuck)
 }

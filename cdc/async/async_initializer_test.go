@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	cdcContext "github.com/pingcap/tiflow/pkg/context"
+	"github.com/pingcap/tiflow/cdc/vars"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/atomic"
 )
@@ -43,34 +43,31 @@ func (f *fakePool) Run(_ context.Context) error {
 
 func TestTryInitialize(t *testing.T) {
 	initializer := NewInitializer()
-	pool := &cdcContext.NonAsyncPool{}
-	initialized, err := initializer.TryInitialize(cdcContext.NewContext4Test(context.Background(), false),
-		func(ctx cdcContext.Context) error {
+	pool := &vars.NonAsyncPool{}
+	initialized, err := initializer.TryInitialize(context.Background(),
+		func(ctx context.Context) error {
 			return nil
 		}, pool)
 	require.Nil(t, err)
 	require.True(t, initialized)
 	// Try to initialize again
-	initialized, err = initializer.TryInitialize(cdcContext.NewContext4Test(context.Background(),
-		false), func(ctx cdcContext.Context) error {
+	initialized, err = initializer.TryInitialize(context.Background(), func(ctx context.Context) error {
 		return nil
 	}, pool)
 	require.Nil(t, err)
 	require.True(t, initialized)
 	// init failed
 	initializer = NewInitializer()
-	initialized, err = initializer.TryInitialize(cdcContext.NewContext4Test(context.Background(), false),
-		func(ctx cdcContext.Context) error {
-			return errors.New("failed to init")
-		}, pool)
+	initialized, err = initializer.TryInitialize(context.Background(), func(ctx context.Context) error {
+		return errors.New("failed to init")
+	}, pool)
 	require.NotNil(t, err)
 	require.False(t, initializer.initialized.Load())
 	require.True(t, initializer.initializing.Load())
 	require.False(t, initialized)
-	initialized, err = initializer.TryInitialize(cdcContext.NewContext4Test(context.Background(), false),
-		func(ctx cdcContext.Context) error {
-			return errors.New("failed to init")
-		}, pool)
+	initialized, err = initializer.TryInitialize(context.Background(), func(ctx context.Context) error {
+		return errors.New("failed to init")
+	}, pool)
 	require.NotNil(t, err)
 	require.False(t, initializer.initialized.Load())
 	require.True(t, initializer.initializing.Load())
@@ -78,10 +75,9 @@ func TestTryInitialize(t *testing.T) {
 
 	// test submit error
 	initializer = NewInitializer()
-	initialized, err = initializer.TryInitialize(cdcContext.NewContext4Test(context.Background(), false),
-		func(ctx cdcContext.Context) error {
-			return nil
-		}, &fakePool{submitErr: errors.New("submit error")})
+	initialized, err = initializer.TryInitialize(context.Background(), func(ctx context.Context) error {
+		return nil
+	}, &fakePool{submitErr: errors.New("submit error")})
 	require.NotNil(t, err)
 	require.False(t, initialized)
 	require.False(t, initializer.initialized.Load())
@@ -90,12 +86,10 @@ func TestTryInitialize(t *testing.T) {
 
 func TestTerminate(t *testing.T) {
 	initializer := NewInitializer()
-	pool := &cdcContext.NonAsyncPool{}
-	initialized, err := initializer.TryInitialize(cdcContext.NewContext4Test(context.Background(), false),
-
-		func(ctx cdcContext.Context) error {
-			return nil
-		}, pool)
+	pool := &vars.NonAsyncPool{}
+	initialized, err := initializer.TryInitialize(context.Background(), func(ctx context.Context) error {
+		return nil
+	}, pool)
 	require.Nil(t, err)
 	require.True(t, initialized)
 	initializer.Terminate()
@@ -105,19 +99,17 @@ func TestTerminate(t *testing.T) {
 	// test submit error
 	initializer = NewInitializer()
 	fpool := &fakePool{}
-	initialized, err = initializer.TryInitialize(cdcContext.NewContext4Test(context.Background(), false),
-		func(ctx cdcContext.Context) error {
-			return nil
-		}, fpool)
+	initialized, err = initializer.TryInitialize(context.Background(), func(ctx context.Context) error {
+		return nil
+	}, fpool)
 	require.Nil(t, err)
 	require.False(t, initialized)
 	require.True(t, initializer.initializing.Load())
 	require.Equal(t, 1, fpool.submitTimes)
 
-	initialized, err = initializer.TryInitialize(cdcContext.NewContext4Test(context.Background(), false),
-		func(ctx cdcContext.Context) error {
-			return nil
-		}, fpool)
+	initialized, err = initializer.TryInitialize(context.Background(), func(ctx context.Context) error {
+		return nil
+	}, fpool)
 	require.Nil(t, err)
 	require.False(t, initialized)
 	require.True(t, initializer.initializing.Load())

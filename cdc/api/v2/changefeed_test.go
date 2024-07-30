@@ -134,7 +134,7 @@ func TestCreateChangefeed(t *testing.T) {
 		getPDClient(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(pdClient, nil).AnyTimes()
 	helpers.EXPECT().
-		createTiStore(gomock.Any(), gomock.Any(), gomock.Any()).
+		createTiStore(gomock.Any(), gomock.Any()).
 		Return(nil, cerrors.ErrNewStore).
 		Times(1)
 	cfConfig.PDAddrs = []string{"http://127.0.0.1:2379", "http://127.0.0.1:2382"}
@@ -152,7 +152,7 @@ func TestCreateChangefeed(t *testing.T) {
 
 	// case 4: failed to verify tables
 	helpers.EXPECT().
-		createTiStore(gomock.Any(), gomock.Any(), gomock.Any()).
+		createTiStore(gomock.Any(), gomock.Any()).
 		Return(nil, nil).
 		AnyTimes()
 	helpers.EXPECT().
@@ -176,9 +176,9 @@ func TestCreateChangefeed(t *testing.T) {
 
 	// case 5:
 	helpers.EXPECT().
-		getEtcdClient(gomock.Any(), gomock.Any(), gomock.Any()).
+		getEtcdClient(gomock.Any(), gomock.Any()).
 		Return(testEtcdCluster.RandClient(), nil)
-	helpers.EXPECT().getVerifiedTables(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+	helpers.EXPECT().getVerifiedTables(gomock.Any(), gomock.Any(), gomock.Any(),
 		gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil, nil, nil).
 		AnyTimes()
@@ -221,7 +221,7 @@ func TestCreateChangefeed(t *testing.T) {
 
 	// case 6: success
 	helpers.EXPECT().
-		getEtcdClient(gomock.Any(), gomock.Any(), gomock.Any()).
+		getEtcdClient(gomock.Any(), gomock.Any()).
 		Return(testEtcdCluster.RandClient(), nil)
 	ctrl.EXPECT().
 		CreateChangefeed(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -334,6 +334,7 @@ func TestUpdateChangefeed(t *testing.T) {
 	t.Parallel()
 	update := testCase{url: "/api/v2/changefeeds/%s", method: "PUT"}
 	helpers := NewMockAPIV2Helpers(gomock.NewController(t))
+	mockOwner := mock_owner.NewMockOwner(gomock.NewController(t))
 	mockCapture := mock_capture.NewMockCapture(gomock.NewController(t))
 	apiV2 := NewOpenAPIV2ForTest(mockCapture, helpers)
 	router := newRouter(apiV2)
@@ -342,6 +343,7 @@ func TestUpdateChangefeed(t *testing.T) {
 	mockCapture.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
 	mockCapture.EXPECT().IsReady().Return(true).AnyTimes()
 	mockCapture.EXPECT().IsController().Return(true).AnyTimes()
+	mockCapture.EXPECT().GetOwner().Return(mockOwner, nil).AnyTimes()
 
 	// case 1 invalid id
 	invalidID := "Invalid_#"
@@ -391,11 +393,9 @@ func TestUpdateChangefeed(t *testing.T) {
 	// case 4: changefeed stopped, but get upstream failed: not found
 	oldCfInfo.UpstreamID = 100
 	oldCfInfo.State = "stopped"
-	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
-	etcdClient.EXPECT().
+	mockCapture.EXPECT().
 		GetUpstreamInfo(gomock.Any(), gomock.Eq(uint64(100)), gomock.Any()).
 		Return(nil, cerrors.ErrUpstreamNotFound).Times(1)
-	mockCapture.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), update.method,
@@ -409,10 +409,9 @@ func TestUpdateChangefeed(t *testing.T) {
 
 	// case 5: json failed
 	oldCfInfo.UpstreamID = 1
-	etcdClient.EXPECT().
+	mockCapture.EXPECT().
 		GetUpstreamInfo(gomock.Any(), gomock.Eq(uint64(1)), gomock.Any()).
 		Return(nil, nil).AnyTimes()
-	mockCapture.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), update.method,
@@ -446,7 +445,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		verifyUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).AnyTimes()
 	helpers.EXPECT().
-		createTiStore(gomock.Any(), gomock.Any(), gomock.Any()).
+		createTiStore(gomock.Any(), gomock.Any()).
 		Return(nil, nil).
 		AnyTimes()
 	mockCapture.EXPECT().GetUpstreamManager().Return(nil, nil).AnyTimes()
@@ -474,7 +473,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		verifyUpdateChangefeedConfig(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(&model.ChangeFeedInfo{}, &model.UpstreamInfo{}, nil).
 		Times(1)
-	etcdClient.EXPECT().
+	mockOwner.EXPECT().
 		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(cerrors.ErrEtcdAPIError).Times(1)
 
@@ -494,7 +493,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		Return(oldCfInfo, &model.UpstreamInfo{}, nil).
 		Times(1)
 	mockCapture.EXPECT().GetUpstreamManager().Return(upstream.NewManager4Test(&mockPDClient{}), nil).AnyTimes()
-	etcdClient.EXPECT().
+	mockOwner.EXPECT().
 		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).Times(1)
 
@@ -511,7 +510,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		Return(oldCfInfo, &model.UpstreamInfo{}, nil).
 		Times(1)
 	mockCapture.EXPECT().GetUpstreamManager().Return(upstream.NewManager4Test(&mockPDClient{}), nil).AnyTimes()
-	etcdClient.EXPECT().
+	mockOwner.EXPECT().
 		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).Times(1)
 
@@ -650,7 +649,7 @@ func TestVerifyTable(t *testing.T) {
 	body, err := json.Marshal(&updateCfg)
 	require.Nil(t, err)
 	helpers.EXPECT().
-		createTiStore(gomock.Any(), gomock.Any(), gomock.Any()).
+		createTiStore(gomock.Any(), gomock.Any()).
 		Return(nil, cerrors.ErrNewStore).
 		Times(1)
 
@@ -665,10 +664,10 @@ func TestVerifyTable(t *testing.T) {
 
 	// case 3: getVerifiedTables failed
 	helpers.EXPECT().
-		createTiStore(gomock.Any(), gomock.Any(), gomock.Any()).
+		createTiStore(gomock.Any(), gomock.Any()).
 		Return(nil, nil).
 		AnyTimes()
-	helpers.EXPECT().getVerifiedTables(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+	helpers.EXPECT().getVerifiedTables(gomock.Any(), gomock.Any(), gomock.Any(),
 		gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil, nil, cerrors.ErrFilterRuleInvalid).
 		Times(1)
@@ -690,7 +689,7 @@ func TestVerifyTable(t *testing.T) {
 	ineligible := []model.TableName{
 		{Schema: "test", Table: "invalidTable"},
 	}
-	helpers.EXPECT().getVerifiedTables(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
+	helpers.EXPECT().getVerifiedTables(gomock.Any(), gomock.Any(), gomock.Any(),
 		gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(eligible, ineligible, nil)
 
@@ -702,21 +701,6 @@ func TestVerifyTable(t *testing.T) {
 	err = json.NewDecoder(w.Body).Decode(&resp)
 	require.Nil(t, err)
 	require.Equal(t, http.StatusOK, w.Code)
-
-	// case 5: context canceled
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	helpers.EXPECT().getVerifiedTables(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(),
-		gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(nil, nil, ctx.Err()).
-		Times(1)
-	w = httptest.NewRecorder()
-	req, _ = http.NewRequestWithContext(ctx, verify.method, verify.url, bytes.NewReader(body))
-	router.ServeHTTP(w, req)
-	respErr = model.HTTPError{}
-	err = json.NewDecoder(w.Body).Decode(&respErr)
-	require.Nil(t, err)
-	require.Contains(t, respErr.Error, "context canceled")
 }
 
 func TestResumeChangefeed(t *testing.T) {
@@ -730,7 +714,9 @@ func TestResumeChangefeed(t *testing.T) {
 	pdClient := &mockPDClient{}
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
 	mockUpManager := upstream.NewManager4Test(pdClient)
-	statusProvider := &mockStatusProvider{}
+	statusProvider := &mockStatusProvider{
+		changefeedStatus: &model.ChangeFeedStatusForAPI{},
+	}
 
 	etcdClient.EXPECT().
 		GetEnsureGCServiceID(gomock.Any()).
@@ -1133,8 +1119,8 @@ func TestChangefeedSynced(t *testing.T) {
 		require.Equal(t, false, resp.Synced)
 		require.Equal(t, "Please check whether PD is online and TiKV Regions are all available. "+
 			"If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. "+
-			"To check whether TiKV regions are all available, "+
-			"you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. "+
+			"To check whether TiKV regions are all available, you can view "+
+			"'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. "+
 			"If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. "+
 			"Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait", resp.Info)
 	}

@@ -72,6 +72,7 @@ type tableProgress struct {
 	}
 
 	scheduled atomic.Bool
+	start     time.Time
 }
 
 func (p *tableProgress) handleResolvedSpans(ctx context.Context, e *model.ResolvedSpans) (err error) {
@@ -95,7 +96,10 @@ func (p *tableProgress) handleResolvedSpans(ctx context.Context, e *model.Resolv
 			zap.String("namespace", p.changefeed.Namespace),
 			zap.String("changefeed", p.changefeed.ID),
 			zap.String("tableName", p.tableName),
-			zap.Uint64("resolvedTs", resolvedTs))
+			zap.Any("tableID", p.spans),
+			zap.Uint64("resolvedTs", resolvedTs),
+			zap.Duration("duration", time.Since(p.start)),
+		)
 	}
 	if resolvedTs > p.resolvedTs.Load() {
 		p.resolvedTs.Store(resolvedTs)
@@ -118,9 +122,9 @@ func (p *tableProgress) resolveLock(currentTime time.Time) {
 		return
 	}
 
-	maxVersion := oracle.GoTimeToTS(resolvedTime.Add(resolveLockFence))
+	targetTs := oracle.GoTimeToTS(resolvedTime.Add(resolveLockFence))
 	for _, subID := range p.subscriptionIDs {
-		p.client.ResolveLock(subID, maxVersion)
+		p.client.ResolveLock(subID, targetTs)
 	}
 }
 
@@ -236,6 +240,7 @@ func (p *MultiplexingPuller) subscribe(
 
 		resolvedEventsCache: make(chan kv.MultiplexingEvent, tableResolvedTsBufferSize),
 		tsTracker:           frontier.NewFrontier(0, spans...),
+		start:               time.Now(),
 	}
 
 	progress.consume.f = func(

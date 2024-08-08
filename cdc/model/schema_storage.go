@@ -52,8 +52,6 @@ type TableInfo struct {
 	Version uint64
 	// ColumnID -> offset in model.TableInfo.Columns
 	columnsOffset map[int64]int
-	// ColumnID -> offset in model.TableInfo.Indices
-	indicesOffset map[int64]int
 	// Column name -> ColumnID
 	nameToColID map[string]int64
 
@@ -62,7 +60,7 @@ type TableInfo struct {
 	// ColumnID -> offset in RowChangedEvents.Columns.
 	RowColumnsOffset map[int64]int
 
-	ColumnsFlag map[int64]ColumnFlagType
+	ColumnsFlag map[int64]*ColumnFlagType
 
 	// the mounter will choose this index to output delete events
 	// special value:
@@ -112,10 +110,9 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 		hasUniqueColumn:  false,
 		Version:          version,
 		columnsOffset:    make(map[int64]int, len(info.Columns)),
-		indicesOffset:    make(map[int64]int, len(info.Indices)),
 		nameToColID:      make(map[string]int64, len(info.Columns)),
 		RowColumnsOffset: make(map[int64]int, len(info.Columns)),
-		ColumnsFlag:      make(map[int64]ColumnFlagType, len(info.Columns)),
+		ColumnsFlag:      make(map[int64]*ColumnFlagType, len(info.Columns)),
 		handleColID:      []int64{-1},
 		HandleIndexID:    HandleIndexTableIneligible,
 		rowColInfos:      make([]rowcodec.ColInfo, len(info.Columns)),
@@ -160,8 +157,7 @@ func WrapTableInfo(schemaID int64, schemaName string, version uint64, info *mode
 		ti.rowColFieldTps[col.ID] = ti.rowColInfos[i].Ft
 	}
 
-	for i, idx := range ti.Indices {
-		ti.indicesOffset[idx.ID] = i
+	for _, idx := range ti.Indices {
 		if ti.IsIndexUnique(idx) {
 			ti.hasUniqueColumn = true
 		}
@@ -261,7 +257,7 @@ func (ti *TableInfo) initColumnsFlag() {
 		if mysql.HasUnsignedFlag(colInfo.GetFlag()) {
 			flag.SetIsUnsigned()
 		}
-		ti.ColumnsFlag[colInfo.ID] = flag
+		ti.ColumnsFlag[colInfo.ID] = &flag
 	}
 
 	// In TiDB, just as in MySQL, only the first column of an index can be marked as "multiple key" or "unique key",
@@ -317,7 +313,7 @@ func (ti *TableInfo) ForceGetColumnFlagType(colID int64) *ColumnFlagType {
 	if !ok {
 		log.Panic("invalid column id", zap.Int64("columnID", colID))
 	}
-	return &flag
+	return flag
 }
 
 // ForceGetColumnName return the column name by ID

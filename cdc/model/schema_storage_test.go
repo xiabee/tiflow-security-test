@@ -370,7 +370,7 @@ func TestBuildTiDBTableInfoWithIntPrimaryKey(t *testing.T) {
 	}, {
 		Name:      "a2",
 		Type:      mysql.TypeVarchar,
-		Collation: mysql.UTF8MB4DefaultCollation,
+		Collation: charset.CollationUTF8,
 	}, {
 		Name:    "a4",
 		Type:    mysql.TypeTinyBlob,
@@ -381,7 +381,6 @@ func TestBuildTiDBTableInfoWithIntPrimaryKey(t *testing.T) {
 	require.Equal(t, "test", tableInfo.TableName.Schema)
 	require.Equal(t, "t", tableInfo.TableName.Table)
 	require.Equal(t, 3, len(tableInfo.columnsOffset))
-	require.Equal(t, 1, len(tableInfo.indicesOffset))
 	require.Equal(t, 3, len(tableInfo.Columns))
 
 	require.Equal(t, tableInfo.Columns[0].ID, tableInfo.ForceGetColumnIDByName("a1"))
@@ -394,7 +393,7 @@ func TestBuildTiDBTableInfoWithIntPrimaryKey(t *testing.T) {
 	require.Equal(t, columns[1].Name, tableInfo.ForceGetColumnName(tableInfo.Columns[1].ID))
 	require.Equal(t, columns[1].Type, tableInfo.ForceGetColumnInfo(tableInfo.Columns[1].ID).GetType())
 	require.Equal(t, mysql.UTF8MB4Charset, tableInfo.ForceGetColumnInfo(tableInfo.Columns[1].ID).GetCharset())
-	require.Equal(t, mysql.UTF8MB4DefaultCollation, tableInfo.ForceGetColumnInfo(tableInfo.Columns[1].ID).GetCollate())
+	require.Equal(t, charset.CollationUTF8, tableInfo.ForceGetColumnInfo(tableInfo.Columns[1].ID).GetCollate())
 	require.Equal(t, columns[1].Flag, *tableInfo.ForceGetColumnFlagType(tableInfo.Columns[1].ID))
 
 	require.Equal(t, columns[2].Name, tableInfo.ForceGetColumnName(tableInfo.Columns[2].ID))
@@ -428,7 +427,6 @@ func TestBuildTiDBTableInfoWithCommonPrimaryKey(t *testing.T) {
 	require.Equal(t, "test", tableInfo.TableName.Schema)
 	require.Equal(t, "t", tableInfo.TableName.Table)
 	require.Equal(t, 4, len(tableInfo.columnsOffset))
-	require.Equal(t, 3, len(tableInfo.indicesOffset))
 	require.Equal(t, 4, len(tableInfo.Columns))
 
 	require.Equal(t, tableInfo.Columns[0].ID, tableInfo.ForceGetColumnIDByName("a1"))
@@ -481,7 +479,6 @@ func TestBuildTiDBTableInfoWithUniqueKey(t *testing.T) {
 	require.Equal(t, "test", tableInfo.TableName.Schema)
 	require.Equal(t, "t", tableInfo.TableName.Table)
 	require.Equal(t, 4, len(tableInfo.columnsOffset))
-	require.Equal(t, 2, len(tableInfo.indicesOffset))
 	require.Equal(t, 4, len(tableInfo.Columns))
 
 	require.Equal(t, tableInfo.Columns[0].ID, tableInfo.ForceGetColumnIDByName("a1"))

@@ -19,7 +19,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 )
 
 // OpType for the kv, delete or put
@@ -74,7 +74,7 @@ func (rs *ResolvedSpans) String() string {
 //
 //msgp:ignore RegionComparableSpan
 type RegionComparableSpan struct {
-	Span   tablepb.Span
+	Span   regionspan.ComparableSpan
 	Region uint64
 }
 

@@ -718,7 +718,7 @@ func GenXIDEvent(header *replication.EventHeader, latestPos uint32, xid uint64) 
 // GenMariaDBGTIDListEvent generates a MariadbGTIDListEvent.
 // ref: https://mariadb.com/kb/en/library/gtid_list_event/
 func GenMariaDBGTIDListEvent(header *replication.EventHeader, latestPos uint32, gSet gmysql.GTIDSet) (*replication.BinlogEvent, error) {
-	if gtid.CheckGTIDSetEmpty(gSet) {
+	if gtid.IsZeroGTIDSet(gSet) {
 		return nil, terror.ErrBinlogEmptyGTID.Generate()
 	}
 
@@ -730,10 +730,7 @@ func GenMariaDBGTIDListEvent(header *replication.EventHeader, latestPos uint32, 
 	payload := new(bytes.Buffer)
 
 	// Number of GTIDs, 4 bytes
-	numOfGTIDs := uint32(0)
-	for _, set := range mariaDBGSet.Sets {
-		numOfGTIDs += uint32(len(set))
-	}
+	numOfGTIDs := uint32(len(mariaDBGSet.Sets))
 	err := binary.Write(payload, binary.LittleEndian, numOfGTIDs)
 	if err != nil {
 		return nil, terror.ErrBinlogWriteBinaryData.AnnotateDelegate(err, "write Number of GTIDs %d", numOfGTIDs)

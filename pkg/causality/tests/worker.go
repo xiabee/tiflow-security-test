@@ -28,7 +28,7 @@ type txnForTest struct {
 
 func (t *txnForTest) OnConflictResolved() {}
 
-func (t *txnForTest) ConflictKeys() []uint64 {
+func (t *txnForTest) GenSortedDedupKeysHash(numSlots uint64) []uint64 {
 	return t.keys
 }
 
@@ -38,6 +38,7 @@ func (t *txnForTest) Finish(err error) {
 	}
 }
 
+//nolint:unused
 type txnWithUnlock struct {
 	*txnForTest
 }

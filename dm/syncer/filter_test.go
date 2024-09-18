@@ -21,8 +21,9 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	. "github.com/pingcap/check"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/util/filter"
+	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/util/filter"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
@@ -31,7 +32,6 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/schema"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
-	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 )
 
 type testFilterSuite struct {
@@ -48,7 +48,7 @@ func (s *testFilterSuite) SetUpSuite(c *C) {
 	mock.ExpectClose()
 	con, err := db.Conn(context.Background())
 	c.Assert(err, IsNil)
-	s.baseConn = conn.NewBaseConnForTest(con, nil)
+	s.baseConn = conn.NewBaseConn(con, nil)
 }
 
 func (s *testFilterSuite) TearDownSuite(c *C) {

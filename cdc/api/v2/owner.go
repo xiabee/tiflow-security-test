@@ -19,9 +19,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ResignController makes the current controller resign
-// @Summary Notify the controller to resign
-// @Description Notify the current controller to resign
+// ResignOwner makes the current owner resign
+// @Summary Notify the owner to resign
+// @Description Notify the current owner to resign
 // @Tags owner,v2
 // @Accept json
 // @Produce json

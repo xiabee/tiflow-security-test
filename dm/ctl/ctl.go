@@ -14,7 +14,6 @@
 package ctl
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -24,8 +23,8 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/dm/ctl/common"
 	"github.com/pingcap/tiflow/dm/ctl/master"
-	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/log"
+	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/pkg/version"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap/zapcore"
@@ -85,6 +84,7 @@ func NewRootCmd() *cobra.Command {
 		master.NewSourceTableSchemaCmd(),
 		master.NewConfigCmd(),
 		master.NewValidationCmd(),
+		newDecryptCmd(),
 		newEncryptCmd(),
 	)
 	// copied from (*cobra.Command).InitDefaultHelpCmd
@@ -191,6 +191,32 @@ func MainStart(args []string) {
 			os.Exit(0)
 		}
 
+		// Make it compatible to flags encrypt/decrypt
+		if encrypt, err := cmd.Flags().GetString(common.EncryptCmdName); err != nil {
+			return errors.Trace(err)
+		} else if encrypt != "" {
+			ciphertext, err := utils.Encrypt(encrypt)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			fmt.Println(ciphertext)
+			os.Exit(0)
+		}
+		if decrypt, err := cmd.Flags().GetString(common.DecryptCmdName); err != nil {
+			return errors.Trace(err)
+		} else if decrypt != "" {
+			plaintext, err := utils.Decrypt(decrypt)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			fmt.Println(plaintext)
+			os.Exit(0)
+		}
+
+		if cmd.Name() == common.DecryptCmdName || cmd.Name() == common.EncryptCmdName {
+			return nil
+		}
+
 		cfg := common.NewConfig(cmd.Flags())
 		err := cfg.Adjust()
 		if err != nil {
@@ -223,24 +249,29 @@ func newEncryptCmd() *cobra.Command {
 			if len(args) != 1 {
 				return cmd.Help()
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			resp := &pb.EncryptResponse{}
-			err := common.SendRequest(
-				ctx,
-				"Encrypt",
-				&pb.EncryptRequest{
-					Plaintext: args[0],
-				},
-				&resp,
-			)
+			ciphertext, err := utils.Encrypt(args[0])
 			if err != nil {
-				return err
+				return errors.Trace(err)
 			}
-			if !resp.Result {
-				return errors.New(resp.Msg)
+			fmt.Println(ciphertext)
+			return nil
+		},
+	}
+}
+
+func newDecryptCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "decrypt <cipher-text>",
+		Short: "Decrypts cipher text to plain text",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return cmd.Help()
 			}
-			fmt.Println(resp.Ciphertext)
+			plaintext, err := utils.Decrypt(args[0])
+			if err != nil {
+				return errors.Trace(err)
+			}
+			fmt.Println(plaintext)
 			return nil
 		},
 	}

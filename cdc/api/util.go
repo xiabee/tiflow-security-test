@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -42,34 +41,8 @@ var httpBadRequestError = []*errors.Error{
 }
 
 const (
-	// OpVarAdminJob is the key of admin job in HTTP API
-	OpVarAdminJob = "admin-job"
-	// OpVarChangefeedID is the key of changefeed ID in HTTP API
-	OpVarChangefeedID = "cf-id"
-	// OpVarTargetCaptureID is the key of to-capture ID in HTTP API
-	OpVarTargetCaptureID = "target-cp-id"
-	// OpVarTableID is the key of table ID in HTTP API
-	OpVarTableID = "table-id"
-
-	// APIOpVarChangefeedState is the key of changefeed state in HTTP API.
-	APIOpVarChangefeedState = "state"
-	// APIOpVarChangefeedID is the key of changefeed ID in HTTP API.
-	APIOpVarChangefeedID = "changefeed_id"
-	// APIOpVarCaptureID is the key of capture ID in HTTP API.
-	APIOpVarCaptureID = "capture_id"
-	// APIOpVarNamespace is the key of changefeed namespace in HTTP API.
-	APIOpVarNamespace = "namespace"
-	// APIOpVarTiCDCUser is the key of ticdc user in HTTP API.
-	APIOpVarTiCDCUser = "user"
-	// APIOpVarTiCDCPassword is the key of ticdc password in HTTP API.
-	APIOpVarTiCDCPassword = "password"
-
 	// forwardFromCapture is a header to be set when forwarding requests to owner
 	forwardFromCapture = "TiCDC-ForwardFromCapture"
-	// forwardTimes is a header to identify how many times the request has been forwarded
-	forwardTimes = "TiCDC-ForwardTimes"
-	// maxForwardTimes is the max time a request can be forwarded,  non-controller->controller->changefeed owner
-	maxForwardTimes = 2
 )
 
 // IsHTTPBadRequestError check if a error is a http bad request error
@@ -177,45 +150,30 @@ func HandleOwnerScheduleTable(
 	}
 }
 
-// ForwardToOwner forwards a request to the controller
+// ForwardToOwner forwards an request to the owner
 func ForwardToOwner(c *gin.Context, p capture.Capture) {
 	ctx := c.Request.Context()
+	// every request can only forward to owner one time
+	if len(c.GetHeader(forwardFromCapture)) != 0 {
+		_ = c.Error(cerror.ErrRequestForwardErr.FastGenByArgs())
+		return
+	}
+
 	info, err := p.Info()
 	if err != nil {
 		_ = c.Error(err)
 		return
 	}
 
+	c.Header(forwardFromCapture, info.ID)
+
 	var owner *model.CaptureInfo
-	// get owner info
+	// get owner
 	owner, err = p.GetOwnerCaptureInfo(ctx)
 	if err != nil {
 		log.Info("get owner failed", zap.Error(err))
 		_ = c.Error(err)
 		return
-	}
-	ForwardToCapture(c, info.ID, owner.AdvertiseAddr)
-}
-
-// ForwardToCapture forward request to another
-func ForwardToCapture(c *gin.Context, fromID, toAddr string) {
-	ctx := c.Request.Context()
-
-	timeStr := c.GetHeader(forwardTimes)
-	var (
-		err              error
-		lastForwardTimes uint64
-	)
-	if len(timeStr) != 0 {
-		lastForwardTimes, err = strconv.ParseUint(timeStr, 10, 64)
-		if err != nil {
-			_ = c.Error(cerror.ErrRequestForwardErr.FastGenByArgs())
-			return
-		}
-		if lastForwardTimes > maxForwardTimes {
-			_ = c.Error(cerror.ErrRequestForwardErr.FastGenByArgs())
-			return
-		}
 	}
 
 	security := config.GetGlobalServerConfig().Security
@@ -228,7 +186,7 @@ func ForwardToCapture(c *gin.Context, fromID, toAddr string) {
 		return
 	}
 
-	req.URL.Host = toAddr
+	req.URL.Host = owner.AdvertiseAddr
 	// we should check tls config instead of security here because
 	// security will never be nil
 	if tls, _ := security.ToTLSConfigWithVerify(); tls != nil {
@@ -241,17 +199,8 @@ func ForwardToCapture(c *gin.Context, fromID, toAddr string) {
 			req.Header.Add(k, vv)
 		}
 	}
-	log.Info("forwarding request to capture",
-		zap.String("url", c.Request.RequestURI),
-		zap.String("method", c.Request.Method),
-		zap.String("fromID", fromID),
-		zap.String("toAddr", toAddr),
-		zap.String("forwardTimes", timeStr))
 
-	req.Header.Add(forwardFromCapture, fromID)
-	lastForwardTimes++
-	req.Header.Add(forwardTimes, strconv.Itoa(int(lastForwardTimes)))
-	// forward toAddr owner
+	// forward to owner
 	cli, err := httputil.NewClient(security)
 	if err != nil {
 		_ = c.Error(err)

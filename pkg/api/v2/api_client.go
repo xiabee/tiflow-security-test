@@ -14,8 +14,6 @@
 package v2
 
 import (
-	"net/url"
-
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/pkg/api/internal/rest"
 	"github.com/pingcap/tiflow/pkg/security"
@@ -28,9 +26,6 @@ type APIV2Interface interface {
 	ChangefeedsGetter
 	TsoGetter
 	UnsafeGetter
-	StatusGetter
-	CapturesGetter
-	ProcessorsGetter
 }
 
 // APIV2Client implements APIV1Interface and it is used to interact with cdc owner http api.
@@ -71,35 +66,13 @@ func (c *APIV2Client) Changefeeds() ChangefeedInterface {
 	return newChangefeeds(c)
 }
 
-// Status returns a StatusInterface to communicate with cdc api
-func (c *APIV2Client) Status() StatusInterface {
-	if c == nil {
-		return nil
-	}
-	return newStatus(c)
-}
-
-// Captures returns a CaptureInterface which abstracts capture operations.
-func (c *APIV2Client) Captures() CaptureInterface {
-	return newCaptures(c)
-}
-
-// Processors returns a ProcessorInterface abstracting processor operations.
-func (c *APIV2Client) Processors() ProcessorInterface {
-	if c == nil {
-		return nil
-	}
-	return newProcessors(c)
-}
-
 // NewAPIClient creates a new APIV1Client.
-func NewAPIClient(serverAddr string, credential *security.Credential, values url.Values) (*APIV2Client, error) {
+func NewAPIClient(serverAddr string, credential *security.Credential) (*APIV2Client, error) {
 	c := &rest.Config{}
 	c.APIPath = "/api"
 	c.Version = "v2"
 	c.Host = serverAddr
 	c.Credential = credential
-	c.Values = values
 	client, err := rest.CDCRESTClientFromConfig(c)
 	if err != nil {
 		return nil, errors.Trace(err)

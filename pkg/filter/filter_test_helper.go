@@ -16,15 +16,15 @@ package filter
 import (
 	"testing"
 
-	ticonfig "github.com/pingcap/tidb/pkg/config"
-	tiddl "github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/kv"
-	timeta "github.com/pingcap/tidb/pkg/meta"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/store/mockstore"
-	"github.com/pingcap/tidb/pkg/testkit"
+	ticonfig "github.com/pingcap/tidb/config"
+	tiddl "github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/kv"
+	timeta "github.com/pingcap/tidb/meta"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/store/mockstore"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
@@ -66,10 +66,6 @@ func (s *testHelper) ddlToJob(ddl string) *timodel.Job {
 	jobs, err := tiddl.GetLastNHistoryDDLJobs(s.getCurrentMeta(), 1)
 	require.Nil(s.t, err)
 	require.Len(s.t, jobs, 1)
-	// Set State from Synced to Done.
-	// Because jobs are put to history queue after TiDB alter its state from
-	// Done to Synced.
-	jobs[0].State = timodel.JobStateDone
 	return jobs[0]
 }
 

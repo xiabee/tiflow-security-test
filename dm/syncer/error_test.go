@@ -20,7 +20,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/errno"
+	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
@@ -165,7 +165,7 @@ func TestHandleSpecialDDLError(t *testing.T) {
 	conn1, err := db.Conn(context.Background())
 	require.NoError(t, err)
 	conn2.ResetBaseConnFn = func(_ *tcontext.Context, _ *conn.BaseConn) (*conn.BaseConn, error) {
-		return conn.NewBaseConnForTest(conn1, nil), nil
+		return conn.NewBaseConn(conn1, nil), nil
 	}
 	err = conn2.ResetConn(tctx)
 	require.NoError(t, err)

@@ -14,7 +14,6 @@
 package jobop
 
 import (
-	"context"
 	"testing"
 
 	frameModel "github.com/pingcap/tiflow/engine/framework/model"
@@ -22,6 +21,7 @@ import (
 	ormModel "github.com/pingcap/tiflow/engine/pkg/orm/model"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/context"
 )
 
 type mockOperatorRouter struct {

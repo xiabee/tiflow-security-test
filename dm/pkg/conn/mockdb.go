@@ -23,38 +23,30 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	check "github.com/pingcap/check"
-	tidbConfig "github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/server"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/store/mockstore"
+	tidbConfig "github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/server"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/store/mockstore"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/tikv/client-go/v2/testutils"
 )
 
 type mockDBProvider struct {
 	verDB *sql.DB // verDB user for show version.
 	db    *sql.DB
-	// customDB defines a db that will never be close
-	// TODO: we should use customDB for all mock.
-	customDB *sql.DB
 }
 
 // Apply will build BaseDB with DBConfig.
-func (d *mockDBProvider) Apply(config ScopedDBConfig) (*BaseDB, error) {
+func (d *mockDBProvider) Apply(config *config.DBConfig) (*BaseDB, error) {
 	if d.verDB != nil {
 		if err := d.verDB.Ping(); err == nil {
 			// nolint:nilerr
-			return NewBaseDBForTest(d.verDB), nil
+			return NewBaseDB(d.verDB), nil
 		}
 	}
-	if d.customDB != nil {
-		if err := d.customDB.Ping(); err == nil {
-			// nolint:nilerr
-			return NewMockDB(d.customDB), nil
-		}
-	}
-	return NewBaseDBForTest(d.db), nil
+	return NewBaseDB(d.db), nil
 }
 
 // InitMockDB return a mocked db for unit test.
@@ -104,19 +96,6 @@ func InitMockDBFull() (*sql.DB, sqlmock.Sqlmock, error) {
 		mdbp.db = db
 	} else {
 		DefaultDBProvider = &mockDBProvider{db: db}
-	}
-	return db, mock, err
-}
-
-func InitMockDBNotClose() (*sql.DB, sqlmock.Sqlmock, error) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		return nil, nil, err
-	}
-	if mdbp, ok := DefaultDBProvider.(*mockDBProvider); ok {
-		mdbp.customDB = db
-	} else {
-		DefaultDBProvider = &mockDBProvider{customDB: db}
 	}
 	return db, mock, err
 }
@@ -184,9 +163,8 @@ func (mock *Cluster) Start() error {
 		return err
 	}
 	mock.Server = svr
-	mock.Server.SetDomain(mock.Domain)
 	go func() {
-		if err1 := svr.Run(nil); err1 != nil {
+		if err1 := svr.Run(mock.Domain); err1 != nil {
 			panic(err1)
 		}
 	}()

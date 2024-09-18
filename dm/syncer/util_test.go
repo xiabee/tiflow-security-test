@@ -19,11 +19,11 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	_ "github.com/pingcap/tidb/pkg/types/parser_driver"
-	"github.com/pingcap/tidb/pkg/util/filter"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/model"
+	_ "github.com/pingcap/tidb/types/parser_driver"
+	"github.com/pingcap/tidb/util/filter"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
@@ -146,7 +146,7 @@ func TestGetDDLStatusFromTiDB(t *testing.T) {
 	require.NoError(t, err)
 	conn1, err := db.Conn(context.Background())
 	require.NoError(t, err)
-	dbConn := dbconn.NewDBConn(cfg, conn.NewBaseConnForTest(conn1, nil))
+	dbConn := dbconn.NewDBConn(cfg, conn.NewBaseConn(conn1, nil))
 
 	// test 1
 	mock.ExpectQuery(adminShowDDLJobsSQL1).WillReturnRows(sqlmock.NewRows([]string{"JOB_ID", "DB_NAME", "TABLE_NAME", "JOB_TYPE", "SCHEMA_STATE", "SCHEMA_ID", "TABLE_ID", "ROW_COUNT", "CREATE_TIME", "START_TIME", "END_TIME", "STATE"}).

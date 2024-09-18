@@ -25,13 +25,13 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
@@ -40,7 +40,7 @@ import (
 
 const cycylicChangefeedInfo = `{"upstream-id":0,"sink-uri":"blackhole://","opts":{"a":"b"},
 "create-time":"0001-01-01T00:00:00Z","start-ts":1,"target-ts":2,"admin-job-type":0,"sort-engine":
-"memory","sort-dir":"/tmp/","config":{"case-sensitive":true,
+"memory","sort-dir":"/tmp/","config":{"case-sensitive":true,"enable-old-value":true,
 "force-replicate":false,"check-gc-safe-point":true,"filter":{"rules":["*.*"],
 "ignore-txn-start-ts":null},"mounter":{"worker-num":16},"sink":{"dispatchers":null,"protocol":"",
 "column-selectors":null,"schema-registry":""},"cyclic-replication":{"enable":true,"replica-id":0,
@@ -84,6 +84,7 @@ func TestMigration(t *testing.T) {
 	}
 	status2 := model.ChangeFeedStatus{CheckpointTs: 2}
 	cfg := config.GetDefaultReplicaConfig()
+	cfg.EnableOldValue = false
 	cfg.CheckGCSafePoint = false
 	cfg.Sink = &config.SinkConfig{
 		DispatchRules: []*config.DispatchRule{
@@ -94,15 +95,15 @@ func TestMigration(t *testing.T) {
 				TopicRule:      "topic",
 			},
 		},
-		Protocol: util.AddressOf("aaa"),
+		Protocol: "aaa",
 		ColumnSelectors: []*config.ColumnSelector{
 			{
 				Matcher: []string{"a", "b", "c"},
 				Columns: []string{"a", "b"},
 			},
 		},
-		SchemaRegistry: util.AddressOf("bbb"),
-		TxnAtomicity:   util.AddressOf(config.AtomicityLevel("aa")),
+		SchemaRegistry: "bbb",
+		TxnAtomicity:   "aa",
 	}
 	cfg.Consistent = &config.ConsistentConfig{
 		Level:             "1",
@@ -111,7 +112,21 @@ func TestMigration(t *testing.T) {
 		Storage:           "s3",
 	}
 	cfg.Filter = &config.FilterConfig{
-		Rules:            []string{"a", "b", "c"},
+		Rules: []string{"a", "b", "c"},
+		MySQLReplicationRules: &filter.MySQLReplicationRules{
+			DoTables: []*filter.Table{{
+				Schema: "testdo",
+				Name:   "testgotable",
+			}},
+			DoDBs: []string{"ad", "bdo"},
+			IgnoreTables: []*filter.Table{
+				{
+					Schema: "testignore",
+					Name:   "testaaaingore",
+				},
+			},
+			IgnoreDBs: []string{"aa", "b2"},
+		},
 		IgnoreTxnStartTs: []uint64{1, 2, 3},
 	}
 	info3 := model.ChangeFeedInfo{
@@ -457,7 +472,7 @@ type mockPDClient struct {
 	check func(serviceID string, ttl int64, safePoint uint64) (uint64, error)
 }
 
-func (m *mockPDClient) GetLeaderURL() string {
+func (m *mockPDClient) GetLeaderAddr() string {
 	return m.url
 }
 

@@ -17,7 +17,7 @@ import (
 	"context"
 
 	"github.com/pingcap/tiflow/cdc/model"
-	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
+	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
 	cmdcontext "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
@@ -31,10 +31,9 @@ type processorMeta struct {
 
 // queryProcessorOptions defines flags for the `cli processor query` command.
 type queryProcessorOptions struct {
-	apiClient apiv2client.APIV2Interface
+	apiClient apiv1client.APIV1Interface
 
 	changefeedID string
-	namespace    string
 	captureID    string
 }
 
@@ -45,7 +44,7 @@ func newQueryProcessorOptions() *queryProcessorOptions {
 
 // complete adapts from the command line args to the data and client required.
 func (o *queryProcessorOptions) complete(f factory.Factory) error {
-	apiClient, err := f.APIV2Client()
+	apiClient, err := f.APIV1Client()
 	if err != nil {
 		return err
 	}
@@ -56,7 +55,6 @@ func (o *queryProcessorOptions) complete(f factory.Factory) error {
 // addFlags receives a *cobra.Command reference and binds
 // flags related to template printing to it.
 func (o *queryProcessorOptions) addFlags(cmd *cobra.Command) {
-	cmd.PersistentFlags().StringVarP(&o.namespace, "namespace", "n", "default", "Replication task (changefeed) Namespace")
 	cmd.PersistentFlags().StringVarP(&o.changefeedID, "changefeed-id", "c", "", "Replication task (changefeed) ID")
 	cmd.PersistentFlags().StringVarP(&o.captureID, "capture-id", "p", "", "capture ID")
 	_ = cmd.MarkPersistentFlagRequired("changefeed-id")
@@ -65,7 +63,7 @@ func (o *queryProcessorOptions) addFlags(cmd *cobra.Command) {
 
 // run cli cmd with api client
 func (o *queryProcessorOptions) runCliWithAPIClient(ctx context.Context, cmd *cobra.Command) error {
-	processor, err := o.apiClient.Processors().Get(ctx, o.namespace, o.changefeedID, o.captureID)
+	processor, err := o.apiClient.Processors().Get(ctx, o.changefeedID, o.captureID)
 	if err != nil {
 		return err
 	}

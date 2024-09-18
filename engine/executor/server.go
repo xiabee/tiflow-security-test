@@ -22,8 +22,8 @@ import (
 
 	grpcprometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/util/gctuner"
-	"github.com/pingcap/tidb/pkg/util/memory"
+	"github.com/pingcap/tidb/util/gctuner"
+	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tiflow/dm/common"
 	pb "github.com/pingcap/tiflow/engine/enginepb"
 	"github.com/pingcap/tiflow/engine/executor/server"
@@ -48,7 +48,6 @@ import (
 	"github.com/pingcap/tiflow/engine/pkg/tenant"
 	"github.com/pingcap/tiflow/engine/test/mock"
 	"github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/errorutil"
 	"github.com/pingcap/tiflow/pkg/logutil"
 	p2pImpl "github.com/pingcap/tiflow/pkg/p2p"
 	"github.com/pingcap/tiflow/pkg/security"
@@ -287,7 +286,11 @@ func convertMakeTaskErrorToRPCError(
 func checkBusinessErrorIsRetryable(
 	register registry.Registry, err error, tp frameModel.WorkerType,
 ) (retryable bool, retErr error) {
-	err = errorutil.ConvertErr(tp, err)
+	switch tp {
+	case frameModel.DMJobMaster:
+		err = errors.ToDMError(err)
+	default:
+	}
 	return register.IsRetryableError(err, tp)
 }
 

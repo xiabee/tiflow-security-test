@@ -16,7 +16,6 @@ package master
 import (
 	"bytes"
 	_ "embed"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,7 +26,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/pingcap/tiflow/dm/config/security"
+	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
@@ -89,7 +88,6 @@ func NewConfig() *Config {
 	fs.Var(&cfg.CertAllowedCN, "cert-allowed-cn", "the trusted common name that allowed to visit")
 
 	fs.StringVar(&cfg.V1SourcesPath, "v1-sources-path", "", "directory path used to store source config files when upgrading from v1.0.x")
-	fs.StringVar(&cfg.SecretKeyPath, "secret-key-path", "", "path of file that contains secret key for encrypting and decrypting password, the secret key should be a hex AES-256 key of length 64")
 
 	return cfg
 }
@@ -139,9 +137,7 @@ type Config struct {
 	V1SourcesPath string `toml:"v1-sources-path" json:"v1-sources-path"`
 
 	// tls config
-	security.Security
-	SecretKeyPath string `toml:"secret-key-path" json:"secret-key-path"  yaml:"secret-key-path"`
-	SecretKey     []byte `toml:"-" json:"-" yaml:"-"`
+	config.Security
 
 	printVersion      bool
 	printSampleConfig bool
@@ -342,29 +338,7 @@ func (c *Config) adjust() error {
 		c.ExperimentalFeatures.OpenAPI = false
 		log.L().Warn("openapi is a GA feature and removed from experimental features, so this configuration may have no affect in feature release, please set openapi=true in dm-master config file")
 	}
-
-	return c.adjustSecretKeyPath()
-}
-
-func (c *Config) adjustSecretKeyPath() error {
-	if c.SecretKeyPath == "" {
-		return nil
-	}
-
-	content, err := os.ReadFile(c.SecretKeyPath)
-	if err != nil {
-		return terror.ErrConfigSecretKeyPath.Generate(err)
-	}
-	contentStr := strings.TrimSpace(string(content))
-	decodeContent, err := hex.DecodeString(contentStr)
-	if err != nil {
-		return terror.ErrConfigSecretKeyPath.Generate(err)
-	}
-	if len(decodeContent) != 32 {
-		return terror.ErrConfigSecretKeyPath.Generate("the secret key must be a hex AES-256 key of length 64")
-	}
-	c.SecretKey = decodeContent
-	return nil
+	return err
 }
 
 // Reload load config from local file.
@@ -387,21 +361,21 @@ func (c *Config) genEmbedEtcdConfig(cfg *embed.Config) (*embed.Config, error) {
 
 	// reuse the previous master-addr as the client listening URL.
 	var err error
-	cfg.ListenClientUrls, err = parseURLs(c.MasterAddr)
+	cfg.LCUrls, err = parseURLs(c.MasterAddr)
 	if err != nil {
 		return nil, terror.ErrMasterGenEmbedEtcdConfigFail.Delegate(err, "invalid master-addr")
 	}
-	cfg.AdvertiseClientUrls, err = parseURLs(c.AdvertiseAddr)
+	cfg.ACUrls, err = parseURLs(c.AdvertiseAddr)
 	if err != nil {
 		return nil, terror.ErrMasterGenEmbedEtcdConfigFail.Delegate(err, "invalid advertise-addr")
 	}
 
-	cfg.ListenPeerUrls, err = parseURLs(c.PeerUrls)
+	cfg.LPUrls, err = parseURLs(c.PeerUrls)
 	if err != nil {
 		return nil, terror.ErrMasterGenEmbedEtcdConfigFail.Delegate(err, "invalid peer-urls")
 	}
 
-	cfg.AdvertisePeerUrls, err = parseURLs(c.AdvertisePeerUrls)
+	cfg.APUrls, err = parseURLs(c.AdvertisePeerUrls)
 	if err != nil {
 		return nil, terror.ErrMasterGenEmbedEtcdConfigFail.Delegate(err, "invalid advertise-peer-urls")
 	}
@@ -476,7 +450,7 @@ func genEmbedEtcdConfigWithLogger(logLevel string) *embed.Config {
 	cfg := embed.NewConfig()
 	// disable grpc gateway because https://github.com/etcd-io/etcd/issues/12713
 	// TODO: wait above issue fixed
-	cfg.EnableGRPCGateway = false // enable gRPC gateway for the internal etcd.
+	// cfg.EnableGRPCGateway = true // enable gRPC gateway for the internal etcd.
 
 	// use zap as the logger for embed etcd
 	// NOTE: `genEmbedEtcdConfig` can only be called after logger initialized.

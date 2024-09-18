@@ -27,7 +27,7 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
-	"github.com/tikv/pd/pkg/utils/tempurl"
+	"github.com/tikv/pd/pkg/tempurl"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 )
@@ -59,13 +59,13 @@ func (t *testElectionSuite) SetUpTest(c *C) {
 	t.endPoint = tempurl.Alloc()
 	url2, err := url.Parse(t.endPoint)
 	c.Assert(err, IsNil)
-	cfg.ListenClientUrls = []url.URL{*url2}
-	cfg.AdvertiseClientUrls = cfg.ListenClientUrls
+	cfg.LCUrls = []url.URL{*url2}
+	cfg.ACUrls = cfg.LCUrls
 
 	url2, err = url.Parse(tempurl.Alloc())
 	c.Assert(err, IsNil)
-	cfg.ListenPeerUrls = []url.URL{*url2}
-	cfg.AdvertisePeerUrls = cfg.ListenPeerUrls
+	cfg.LPUrls = []url.URL{*url2}
+	cfg.APUrls = cfg.LPUrls
 
 	cfg.InitialCluster = fmt.Sprintf("%s=%s", cfg.Name, url2)
 	cfg.ClusterState = embed.ClusterStateFlagNew
@@ -209,7 +209,7 @@ func testElection2After1(t *testElectionSuite, c *C, normalExit bool) {
 	defer cancel5()
 	_, err = NewElection(ctx5, cli, sessionTTL, key, ID3, addr3, t.notifyBlockTime)
 	c.Assert(terror.ErrElectionCampaignFail.Equal(err), IsTrue)
-	c.Assert(err, ErrorMatches, ".*Message: fail to campaign leader: create the initial session, RawCause: context canceled.*")
+	c.Assert(err, ErrorMatches, ".*, Message: fail to campaign leader: create the initial session, RawCause: context canceled.*")
 	cancel0()
 }
 

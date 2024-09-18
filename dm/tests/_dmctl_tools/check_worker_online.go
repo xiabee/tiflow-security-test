@@ -18,7 +18,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/pingcap/tidb/pkg/lightning/common"
+	toolutils "github.com/pingcap/tidb-tools/pkg/utils"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/tests/utils"
 	"google.golang.org/grpc"
@@ -33,7 +33,7 @@ func main() {
 		sslCA := os.Args[2]
 		sslCert := os.Args[3]
 		sslKey := os.Args[4]
-		tls, err := common.NewTLS(sslCA, sslCert, sslKey, "", nil, nil, nil)
+		tls, err := toolutils.NewTLS(sslCA, sslCert, sslKey, "", nil)
 		if err != nil {
 			utils.ExitWithError(err)
 		}

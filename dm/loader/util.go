@@ -15,11 +15,12 @@ package loader
 
 import (
 	"context"
+	"crypto/sha1"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tiflow/dm/config"
@@ -33,6 +34,36 @@ import (
 	"go.uber.org/zap"
 )
 
+// SQLReplace works like strings.Replace but only supports one replacement.
+// It uses backquote pairs to quote the old and new word.
+func SQLReplace(s, oldStr, newStr string, ansiquote bool) string {
+	var quote string
+	if ansiquote {
+		quote = "\""
+	} else {
+		quote = "`"
+	}
+	quoteF := func(s string) string {
+		var b strings.Builder
+		b.WriteString(quote)
+		b.WriteString(s)
+		b.WriteString(quote)
+		return b.String()
+	}
+
+	oldStr = quoteF(oldStr)
+	newStr = quoteF(newStr)
+	return strings.Replace(s, oldStr, newStr, 1)
+}
+
+// shortSha1 returns the first 6 characters of sha1 value.
+func shortSha1(s string) string {
+	h := sha1.New()
+
+	h.Write([]byte(s))
+	return fmt.Sprintf("%x", h.Sum(nil))[:6]
+}
+
 // percent calculates percentage of a/b.
 func percent(a int64, b int64, finish bool) string {
 	if b == 0 {
@@ -44,6 +75,45 @@ func percent(a int64, b int64, finish bool) string {
 	return fmt.Sprintf("%.2f %%", float64(a)/float64(b)*100)
 }
 
+// progress calculates progress of a/b.
+func progress(a int64, b int64, finish bool) float64 {
+	if b == 0 {
+		if finish {
+			return 1
+		}
+		return 0
+	}
+	return float64(a) / float64(b)
+}
+
+func generateSchemaCreateFile(dir string, schema string) error {
+	file, err := os.Create(path.Join(dir, fmt.Sprintf("%s-schema-create.sql", schema)))
+	if err != nil {
+		return terror.ErrLoadUnitCreateSchemaFile.Delegate(err)
+	}
+	defer file.Close()
+
+	_, err = fmt.Fprintf(file, "CREATE DATABASE `%s`;\n", escapeName(schema))
+	return terror.ErrLoadUnitCreateSchemaFile.Delegate(err)
+}
+
+func escapeName(name string) string {
+	return strings.ReplaceAll(name, "`", "``")
+}
+
+// input filename is like `all_mode.t1.0.sql` or `all_mode.t1.sql`.
+func getDBAndTableFromFilename(filename string) (string, string, error) {
+	idx := strings.LastIndex(filename, ".sql")
+	if idx < 0 {
+		return "", "", fmt.Errorf("%s doesn't have a `.sql` suffix", filename)
+	}
+	fields := strings.Split(filename[:idx], ".")
+	if len(fields) != 2 && len(fields) != 3 {
+		return "", "", fmt.Errorf("%s doesn't have correct `.` separator", filename)
+	}
+	return fields[0], fields[1], nil
+}
+
 func getMydumpMetadata(ctx context.Context, cli *clientv3.Client, cfg *config.SubTaskConfig, workerName string) (string, string, error) {
 	metafile := "metadata"
 	failpoint.Inject("TestRemoveMetaFile", func() {
@@ -52,7 +122,7 @@ func getMydumpMetadata(ctx context.Context, cli *clientv3.Client, cfg *config.Su
 			log.L().Warn("TestRemoveMetaFile Error", log.ShortError(err))
 		}
 	})
-	loc, _, err := dumpling.ParseMetaData(ctx, cfg.LoaderConfig.Dir, metafile, cfg.ExtStorage)
+	loc, _, err := dumpling.ParseMetaData(ctx, cfg.LoaderConfig.Dir, metafile, cfg.Flavor, cfg.ExtStorage)
 	if err == nil {
 		return loc.Position.String(), loc.GTIDSetStr(), nil
 	}
@@ -154,59 +224,4 @@ func getLoadTask(cli *clientv3.Client, task, sourceID string) (string, error) {
 	}
 	name, _, err := ha.GetLoadTask(cli, task, sourceID)
 	return name, err
-}
-
-// readyAndWait updates the lightning status of this worker to LightningReady and
-// waits for all workers' status not LightningNotReady.
-// Only works for physical import.
-func readyAndWait(ctx context.Context, cli *clientv3.Client, cfg *config.SubTaskConfig) error {
-	return putAndWait(ctx, cli, cfg, ha.LightningReady, func(s string) bool {
-		return s == ha.LightningNotReady
-	})
-}
-
-// finishAndWait updates the lightning status of this worker to LightningFinished
-// and waits for all workers' status LightningFinished.
-// Only works for physical import.
-func finishAndWait(ctx context.Context, cli *clientv3.Client, cfg *config.SubTaskConfig) error {
-	return putAndWait(ctx, cli, cfg, ha.LightningFinished, func(s string) bool {
-		return s != ha.LightningFinished
-	})
-}
-
-func putAndWait(
-	ctx context.Context,
-	cli *clientv3.Client,
-	cfg *config.SubTaskConfig,
-	putStatus string,
-	failFn func(string) bool,
-) error {
-	if cli == nil || cfg.LoaderConfig.ImportMode != config.LoadModePhysical {
-		return nil
-	}
-	_, err := ha.PutLightningStatus(cli, cfg.Name, cfg.SourceID, putStatus)
-	if err != nil {
-		return err
-	}
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-WaitLoop:
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			status, err := ha.GetAllLightningStatus(cli, cfg.Name)
-			if err != nil {
-				return err
-			}
-			for _, s := range status {
-				if failFn(s) {
-					continue WaitLoop
-				}
-			}
-			return nil
-		}
-	}
 }

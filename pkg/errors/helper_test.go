@@ -41,6 +41,10 @@ func TestWrapError(t *testing.T) {
 				"[CDC:ErrDecodeFailed]decode failed: args data: cause error",
 				[]interface{}{"args data"},
 			},
+			{
+				ErrWriteTsConflict, err, false,
+				"[CDC:ErrWriteTsConflict]write ts conflict: cause error", nil,
+			},
 		}
 	)
 	for _, tc := range testCases {
@@ -222,17 +226,4 @@ func TestGRPCStatusCode(t *testing.T) {
 		err := errors.Normalize(string(rfcCode), errors.RFCCodeText(string(rfcCode)))
 		require.Equal(t, gRPCCode, GRPCStatusCode(err))
 	}
-}
-
-func TestOriginError(t *testing.T) {
-	require.NoError(t, OriginError(nil))
-
-	err1 := errors.New("err1")
-	require.Equal(t, err1, OriginError(err1))
-
-	err2 := errors.Trace(err1)
-	require.Equal(t, err1, OriginError(err2))
-
-	err3 := errors.Trace(err2)
-	require.Equal(t, err1, OriginError(err3))
 }

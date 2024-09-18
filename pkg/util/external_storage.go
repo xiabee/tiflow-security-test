@@ -16,14 +16,13 @@ package util
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	gcsStorage "cloud.google.com/go/storage"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/request"
@@ -140,17 +139,6 @@ func DefaultS3Retryer() request.Retryer {
 	}
 }
 
-// NewS3Retryer creates a new s3 retryer.
-func NewS3Retryer(maxRetries int, minRetryDelay, minThrottleDelay time.Duration) request.Retryer {
-	return retryerWithLog{
-		DefaultRetryer: client.DefaultRetryer{
-			NumMaxRetries:    maxRetries,
-			MinRetryDelay:    minRetryDelay,
-			MinThrottleDelay: minThrottleDelay,
-		},
-	}
-}
-
 type extStorageWithTimeout struct {
 	storage.ExternalStorage
 	timeout time.Duration
@@ -187,11 +175,11 @@ func (s *extStorageWithTimeout) DeleteFile(ctx context.Context, name string) err
 
 // Open a Reader by file path. path is relative path to storage base path
 func (s *extStorageWithTimeout) Open(
-	ctx context.Context, path string, _ *storage.ReaderOption,
+	ctx context.Context, path string,
 ) (storage.ExternalFileReader, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	return s.ExternalStorage.Open(ctx, path, nil)
+	return s.ExternalStorage.Open(ctx, path)
 }
 
 // WalkDir traverse all the files in a dir.
@@ -246,9 +234,9 @@ func IsNotExistInExtStorage(err error) bool {
 		return true
 	}
 
-	var respErr *azcore.ResponseError
-	if errors.As(err, &respErr) {
-		if respErr.StatusCode == http.StatusNotFound {
+	var errResp *azblob.StorageError
+	if internalErr, ok := err.(*azblob.InternalError); ok && internalErr.As(&errResp) {
+		if errResp.ErrorCode == azblob.StorageErrorCodeBlobNotFound {
 			return true
 		}
 	}
@@ -299,10 +287,12 @@ func DeleteFilesInExtStorage(
 		files := toRemoveFiles[:batch]
 		eg.Go(func() error {
 			defer func() { <-limit }()
-			err := extStorage.DeleteFiles(egCtx, files)
-			if err != nil && !IsNotExistInExtStorage(err) {
-				// if fail then retry, may end up with notExit err, ignore the error
-				return errors.ErrExternalStorageAPI.Wrap(err)
+			for _, file := range files {
+				err := extStorage.DeleteFile(egCtx, file)
+				if err != nil && !IsNotExistInExtStorage(err) {
+					// if fail then retry, may end up with notExit err, ignore the error
+					return errors.ErrExternalStorageAPI.Wrap(err)
+				}
 			}
 			return nil
 		})

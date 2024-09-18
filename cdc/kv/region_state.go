@@ -14,74 +14,48 @@
 package kv
 
 import (
+	"runtime"
 	"sync"
 
-	"github.com/pingcap/tiflow/cdc/kv/regionlock"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/tikv/client-go/v2/tikv"
 )
 
 const (
+	minRegionStateBucket = 4
+	maxRegionStateBucket = 16
+
 	stateNormal  uint32 = 0
 	stateStopped uint32 = 1
 	stateRemoved uint32 = 2
 )
 
-type regionInfo struct {
-	verID tikv.RegionVerID
-	// The span of the region.
-	// Note(dongmen): The span doesn't always represent the whole span of a region.
-	// Instead, it is the portion of the region that belongs the subcribed table.
-	// Multiple tables can belong to the same region.
-	// For instance, consider region-1 with a span of [a, d).
-	// It contains 3 tables: t1[a, b), t2[b,c), and t3[c,d).
-	// If only table t1 is subscribed to, then the span of interest is [a,b).
-	span   tablepb.Span
+type singleRegionInfo struct {
+	verID  tikv.RegionVerID
+	span   regionspan.ComparableSpan
 	rpcCtx *tikv.RPCContext
 
-	// The table that the region belongs to.
-	subscribedTable *subscribedTable
-	// The state of the locked range of the region.
-	lockedRangeState *regionlock.LockedRangeState
+	lockedRange *regionspan.LockedRange
 }
 
-func (s regionInfo) isStoped() bool {
-	// lockedRange only nil when the region's subscribedTable is stopped.
-	return s.lockedRangeState == nil
-}
-
-func newRegionInfo(
+func newSingleRegionInfo(
 	verID tikv.RegionVerID,
-	span tablepb.Span,
+	span regionspan.ComparableSpan,
 	rpcCtx *tikv.RPCContext,
-	subscribedTable *subscribedTable,
-) regionInfo {
-	return regionInfo{
-		verID:           verID,
-		span:            span,
-		rpcCtx:          rpcCtx,
-		subscribedTable: subscribedTable,
+) singleRegionInfo {
+	return singleRegionInfo{
+		verID:  verID,
+		span:   span,
+		rpcCtx: rpcCtx,
 	}
 }
 
-func (s regionInfo) resolvedTs() uint64 {
-	return s.lockedRangeState.ResolvedTs.Load()
-}
-
-type regionErrorInfo struct {
-	regionInfo
-	err error
-}
-
-func newRegionErrorInfo(info regionInfo, err error) regionErrorInfo {
-	return regionErrorInfo{
-		regionInfo: info,
-		err:        err,
-	}
+func (s singleRegionInfo) resolvedTs() uint64 {
+	return s.lockedRange.CheckpointTs.Load()
 }
 
 type regionFeedState struct {
-	region    regionInfo
+	sri       singleRegionInfo
 	requestID uint64
 	matcher   *matcher
 
@@ -93,15 +67,12 @@ type regionFeedState struct {
 	state struct {
 		sync.RWMutex
 		v uint32
-		// All region errors should be handled in region workers.
-		// `err` is used to retrieve errors generated outside.
-		err error
 	}
 }
 
-func newRegionFeedState(region regionInfo, requestID uint64) *regionFeedState {
+func newRegionFeedState(sri singleRegionInfo, requestID uint64) *regionFeedState {
 	return &regionFeedState{
-		region:    region,
+		sri:       sri,
 		requestID: requestID,
 	}
 }
@@ -110,25 +81,13 @@ func (s *regionFeedState) start() {
 	s.matcher = newMatcher()
 }
 
-// mark regionFeedState as stopped with the given error if possible.
-func (s *regionFeedState) markStopped(err error) {
+// mark regionFeedState as stopped.
+func (s *regionFeedState) markStopped() {
 	s.state.Lock()
 	defer s.state.Unlock()
 	if s.state.v == stateNormal {
 		s.state.v = stateStopped
-		s.state.err = err
 	}
-}
-
-// mark regionFeedState as removed if possible.
-func (s *regionFeedState) markRemoved() (changed bool) {
-	s.state.Lock()
-	defer s.state.Unlock()
-	if s.state.v == stateStopped {
-		s.state.v = stateRemoved
-		changed = true
-	}
-	return
 }
 
 func (s *regionFeedState) isStale() bool {
@@ -137,57 +96,174 @@ func (s *regionFeedState) isStale() bool {
 	return s.state.v == stateStopped || s.state.v == stateRemoved
 }
 
-func (s *regionFeedState) takeError() (err error) {
-	s.state.Lock()
-	defer s.state.Unlock()
-	err = s.state.err
-	s.state.err = nil
-	return
-}
-
 func (s *regionFeedState) isInitialized() bool {
-	return s.region.lockedRangeState.Initialzied.Load()
+	return s.sri.lockedRange.Initialzied.Load()
 }
 
 func (s *regionFeedState) setInitialized() {
-	s.region.lockedRangeState.Initialzied.Store(true)
+	s.sri.lockedRange.Initialzied.Store(true)
 }
 
 func (s *regionFeedState) getRegionID() uint64 {
-	return s.region.verID.GetID()
+	return s.sri.verID.GetID()
 }
 
 func (s *regionFeedState) getLastResolvedTs() uint64 {
-	return s.region.lockedRangeState.ResolvedTs.Load()
+	return s.sri.lockedRange.CheckpointTs.Load()
 }
 
 // updateResolvedTs update the resolved ts of the current region feed
 func (s *regionFeedState) updateResolvedTs(resolvedTs uint64) {
-	state := s.region.lockedRangeState
+	state := s.sri.lockedRange
 	for {
-		last := state.ResolvedTs.Load()
+		last := state.CheckpointTs.Load()
 		if last > resolvedTs {
 			return
 		}
-		if state.ResolvedTs.CompareAndSwap(last, resolvedTs) {
+		if state.CheckpointTs.CompareAndSwap(last, resolvedTs) {
 			break
 		}
 	}
+}
 
-	if s.region.subscribedTable != nil {
-		// When resolvedTs is received, we need to try to resolve the lock of the region.
-		// Because the updated resolvedTs may less than the target resolvedTs we want advance to.
-		s.region.subscribedTable.tryResolveLock(
-			s.region.verID.GetID(),
-			state,
-		)
+func (s *regionFeedState) getRegionInfo() singleRegionInfo {
+	return s.sri
+}
+
+func (s *regionFeedState) getRegionMeta() (uint64, regionspan.ComparableSpan, string) {
+	return s.sri.verID.GetID(), s.sri.span, s.sri.rpcCtx.Addr
+}
+
+type syncRegionFeedStateMap struct {
+	mu sync.RWMutex
+	// statesInternal is an internal field and must not be accessed from outside.
+	statesInternal map[uint64]*regionFeedState
+}
+
+func newSyncRegionFeedStateMap() *syncRegionFeedStateMap {
+	return &syncRegionFeedStateMap{
+		mu:             sync.RWMutex{},
+		statesInternal: make(map[uint64]*regionFeedState),
 	}
 }
 
-func (s *regionFeedState) getRegionInfo() regionInfo {
-	return s.region
+func (m *syncRegionFeedStateMap) iter(fn func(requestID uint64, state *regionFeedState) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for requestID, state := range m.statesInternal {
+		if !fn(requestID, state) {
+			break
+		}
+	}
 }
 
-func (s *regionFeedState) getRegionMeta() (uint64, tablepb.Span, string) {
-	return s.region.verID.GetID(), s.region.span, s.region.rpcCtx.Addr
+func (m *syncRegionFeedStateMap) setByRequestID(requestID uint64, state *regionFeedState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statesInternal[requestID] = state
+}
+
+func (m *syncRegionFeedStateMap) takeByRequestID(requestID uint64) (*regionFeedState, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state, ok := m.statesInternal[requestID]
+	if ok {
+		delete(m.statesInternal, requestID)
+	}
+	return state, ok
+}
+
+func (m *syncRegionFeedStateMap) takeAll() map[uint64]*regionFeedState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state := m.statesInternal
+	m.statesInternal = make(map[uint64]*regionFeedState)
+	return state
+}
+
+func (m *syncRegionFeedStateMap) setByRegionID(regionID uint64, state *regionFeedState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statesInternal[regionID] = state
+}
+
+func (m *syncRegionFeedStateMap) getByRegionID(regionID uint64) (*regionFeedState, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result, ok := m.statesInternal[regionID]
+	return result, ok
+}
+
+func (m *syncRegionFeedStateMap) delByRegionID(regionID uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.statesInternal, regionID)
+}
+
+func (m *syncRegionFeedStateMap) len() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.statesInternal)
+}
+
+type regionStateManagerInterface interface {
+	getState(regionID uint64) (*regionFeedState, bool)
+	setState(regionID uint64, state *regionFeedState)
+	delState(regionID uint64)
+}
+
+// regionStateManager provides the get/put way like a sync.Map, and it is divided
+// into several buckets to reduce lock contention
+type regionStateManager struct {
+	bucket int
+	states []*syncRegionFeedStateMap
+}
+
+func newRegionStateManager(bucket int) *regionStateManager {
+	if bucket <= 0 {
+		bucket = runtime.NumCPU()
+		if bucket > maxRegionStateBucket {
+			bucket = maxRegionStateBucket
+		}
+		if bucket < minRegionStateBucket {
+			bucket = minRegionStateBucket
+		}
+	}
+	rsm := &regionStateManager{
+		bucket: bucket,
+		states: make([]*syncRegionFeedStateMap, bucket),
+	}
+	for i := range rsm.states {
+		rsm.states[i] = newSyncRegionFeedStateMap()
+	}
+	return rsm
+}
+
+func (rsm *regionStateManager) getBucket(regionID uint64) int {
+	return int(regionID) % rsm.bucket
+}
+
+func (rsm *regionStateManager) getState(regionID uint64) (*regionFeedState, bool) {
+	bucket := rsm.getBucket(regionID)
+	state, ok := rsm.states[bucket].getByRegionID(regionID)
+	return state, ok
+}
+
+func (rsm *regionStateManager) setState(regionID uint64, state *regionFeedState) {
+	bucket := rsm.getBucket(regionID)
+	rsm.states[bucket].setByRegionID(regionID, state)
+}
+
+func (rsm *regionStateManager) delState(regionID uint64) {
+	bucket := rsm.getBucket(regionID)
+	rsm.states[bucket].delByRegionID(regionID)
+}
+
+func (rsm *regionStateManager) regionCount() (count int64) {
+	for _, bucket := range rsm.states {
+		count += int64(bucket.len())
+	}
+	return
 }

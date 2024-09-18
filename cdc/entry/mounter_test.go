@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,27 +22,25 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	ticonfig "github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/executor"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/autoid"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/store/mockstore"
-	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/mock"
+	ticonfig "github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/executor"
+	tidbkv "github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta/autoid"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/store/mockstore"
+	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/filter"
-	"github.com/pingcap/tiflow/pkg/integrity"
-	"github.com/pingcap/tiflow/pkg/sink/codec/avro"
-	codecCommon "github.com/pingcap/tiflow/pkg/sink/codec/common"
-	"github.com/pingcap/tiflow/pkg/spanz"
+	"github.com/pingcap/tiflow/pkg/regionspan"
 	"github.com/pingcap/tiflow/pkg/sqlmodel"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
@@ -311,8 +309,7 @@ func testMounterDisableOldValue(t *testing.T, tc struct {
 	config := config.GetDefaultReplicaConfig()
 	filter, err := filter.NewFilter(config, "")
 	require.Nil(t, err)
-	mounter := NewMounter(scheamStorage,
-		model.DefaultChangeFeedID("c1"), time.UTC, filter, config.Integrity).(*mounter)
+	mounter := NewMounter(scheamStorage, model.DefaultChangeFeedID("c1"), time.UTC, filter).(*mounter)
 	mounter.tz = time.Local
 	ctx := context.Background()
 
@@ -327,19 +324,19 @@ func testMounterDisableOldValue(t *testing.T, tc struct {
 				return
 			}
 			rows++
-			require.Equal(t, row.TableInfo.GetTableName(), tc.tableName)
-			require.Equal(t, row.TableInfo.GetSchemaName(), "test")
+			require.Equal(t, row.Table.Table, tc.tableName)
+			require.Equal(t, row.Table.Schema, "test")
 			// [TODO] check size and reopen this check
 			// require.Equal(t, rowBytes[rows-1], row.ApproximateBytes(), row)
 			t.Log("ApproximateBytes", tc.tableName, rows-1, row.ApproximateBytes())
 			// TODO: test column flag, column type and index columns
 			if len(row.Columns) != 0 {
-				checkSQL, params := prepareCheckSQL(t, tc.tableName, row.GetColumns())
+				checkSQL, params := prepareCheckSQL(t, tc.tableName, row.Columns)
 				result := tk.MustQuery(checkSQL, params...)
 				result.Check([][]interface{}{{"1"}})
 			}
 			if len(row.PreColumns) != 0 {
-				checkSQL, params := prepareCheckSQL(t, tc.tableName, row.GetPreColumns())
+				checkSQL, params := prepareCheckSQL(t, tc.tableName, row.PreColumns)
 				result := tk.MustQuery(checkSQL, params...)
 				result.Check([][]interface{}{{"1"}})
 			}
@@ -447,8 +444,8 @@ func walkTableSpanInStore(t *testing.T, store tidbkv.Storage, tableID int64, f f
 	txn, err := store.Begin()
 	require.Nil(t, err)
 	defer txn.Rollback() //nolint:errcheck
-	startKey, endKey := spanz.GetTableRange(tableID)
-	kvIter, err := txn.Iter(startKey, endKey)
+	tableSpan := regionspan.GetTableSpan(tableID)
+	kvIter, err := txn.Iter(tableSpan.Start, tableSpan.End)
 	require.Nil(t, err)
 	defer kvIter.Close()
 	for kvIter.Valid() {
@@ -874,8 +871,10 @@ func TestGetDefaultZeroValue(t *testing.T) {
 		FieldType:          *ftTypeTimestampNotNull,
 	}
 	_, val, _, _, _ = getDefaultOrZeroValue(&colInfo, tz)
+	sc := new(stmtctx.StatementContext)
+	sc.TimeZone = tz
 	expected, err := types.ParseTimeFromFloatString(
-		types.DefaultStmtNoWarningContext,
+		sc,
 		"2020-11-19 20:12:12", colInfo.FieldType.GetType(), colInfo.FieldType.GetDecimal())
 	require.NoError(t, err)
 	require.Equal(t, expected.String(), val, "mysql.TypeTimestamp + notnull + default")
@@ -886,7 +885,7 @@ func TestGetDefaultZeroValue(t *testing.T) {
 	}
 	_, val, _, _, _ = getDefaultOrZeroValue(&colInfo, tz)
 	expected, err = types.ParseTimeFromFloatString(
-		types.DefaultStmtNoWarningContext,
+		sc,
 		"2020-11-19 20:12:12", colInfo.FieldType.GetType(), colInfo.FieldType.GetDecimal())
 	require.NoError(t, err)
 	require.Equal(t, expected.String(), val, "mysql.TypeTimestamp + null + default")
@@ -908,407 +907,6 @@ func TestGetDefaultZeroValue(t *testing.T) {
 	expectedSet, err := types.ParseSetName(colInfo.FieldType.GetElems(), "1,e", colInfo.FieldType.GetCollate())
 	require.NoError(t, err)
 	require.Equal(t, expectedSet.Value, val, "mysql.TypeSet + notnull + default")
-}
-
-func TestE2ERowLevelChecksum(t *testing.T) {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-	replicaConfig.Integrity.CorruptionHandleLevel = integrity.CorruptionHandleLevelError
-	helper := NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
-	defer helper.Close()
-
-	// upstream TiDB enable checksum functionality
-	helper.Tk().MustExec("set global tidb_enable_row_level_checksum = 1")
-	helper.Tk().MustExec("use test")
-
-	createTableSQL := `create table t (
-   id          int primary key auto_increment,
-
-   c_tinyint   tinyint   null,
-   c_smallint  smallint  null,
-   c_mediumint mediumint null,
-   c_int       int       null,
-   c_bigint    bigint    null,
-
-   c_unsigned_tinyint   tinyint   unsigned null,
-   c_unsigned_smallint  smallint  unsigned null,
-   c_unsigned_mediumint mediumint unsigned null,
-   c_unsigned_int       int       unsigned null,
-   c_unsigned_bigint    bigint    unsigned null,
-
-   c_float   float   null,
-   c_double  double  null,
-   c_decimal decimal null,
-   c_decimal_2 decimal(10, 4) null,
-
-   c_unsigned_float     float unsigned   null,
-   c_unsigned_double    double unsigned  null,
-   c_unsigned_decimal   decimal unsigned null,
-   c_unsigned_decimal_2 decimal(10, 4) unsigned null,
-
-   c_date      date      null,
-   c_datetime  datetime  null,
-   c_timestamp timestamp null,
-   c_time      time      null,
-   c_year      year      null,
-
-   c_tinytext   tinytext      null,
-   c_text       text          null,
-   c_mediumtext mediumtext    null,
-   c_longtext   longtext      null,
-
-   c_tinyblob   tinyblob      null,
-   c_blob       blob          null,
-   c_mediumblob mediumblob    null,
-   c_longblob   longblob      null,
-
-   c_char       char(16)      null,
-   c_varchar    varchar(16)   null,
-   c_binary     binary(16)    null,
-   c_varbinary  varbinary(16) null,
-
-   c_enum enum ('a','b','c') null,
-   c_set  set ('a','b','c')  null,
-   c_bit  bit(64)            null,
-   c_json json               null,
-
--- gbk dmls
-   name varchar(128) CHARACTER SET gbk,
-   country char(32) CHARACTER SET gbk,
-   city varchar(64),
-   description text CHARACTER SET gbk,
-   image tinyblob
-);`
-	_ = helper.DDL2Event(createTableSQL)
-
-	insertDataSQL := `insert into t values (
-     2,
-     1, 2, 3, 4, 5,
-     1, 2, 3, 4, 5,
-     2020.0202, 2020.0303,
-  	 2020.0404, 2021.1208,
-     3.1415, 2.7182, 8000, 179394.233,
-     '2020-02-20', '2020-02-20 02:20:20', '2020-02-20 02:20:20', '02:20:20', '2020',
-     '89504E470D0A1A0A', '89504E470D0A1A0A', '89504E470D0A1A0A', '89504E470D0A1A0A',
-     x'89504E470D0A1A0A', x'89504E470D0A1A0A', x'89504E470D0A1A0A', x'89504E470D0A1A0A',
-     '89504E470D0A1A0A', '89504E470D0A1A0A', x'89504E470D0A1A0A', x'89504E470D0A1A0A',
-     'b', 'b,c', b'1000001', '{
-"key1": "value1",
-"key2": "value2",
-"key3": "123"
-}',
-     '测试', "中国", "上海", "你好,世界", 0xC4E3BAC3CAC0BDE7
-);`
-
-	event := helper.DML2Event(insertDataSQL, "test", "t")
-	require.NotNil(t, event)
-	require.False(t, event.Checksum.Corrupted)
-
-	// avro encoder enable checksum functionality.
-	codecConfig := codecCommon.NewConfig(config.ProtocolAvro)
-	codecConfig.EnableTiDBExtension = true
-	codecConfig.EnableRowChecksum = true
-	codecConfig.AvroDecimalHandlingMode = "string"
-	codecConfig.AvroBigintUnsignedHandlingMode = "string"
-
-	ctx := context.Background()
-	avroEncoder, err := avro.SetupEncoderAndSchemaRegistry4Testing(ctx, codecConfig)
-	defer avro.TeardownEncoderAndSchemaRegistry4Testing()
-	require.NoError(t, err)
-
-	topic := "test.t"
-
-	err = avroEncoder.AppendRowChangedEvent(ctx, topic, event, func() {})
-	require.NoError(t, err)
-	msg := avroEncoder.Build()
-	require.Len(t, msg, 1)
-
-	schemaM, err := avro.NewConfluentSchemaManager(
-		ctx, "http://127.0.0.1:8081", nil)
-	require.NoError(t, err)
-
-	// decoder enable checksum functionality.
-	decoder := avro.NewDecoder(codecConfig, schemaM, topic, nil)
-	err = decoder.AddKeyValue(msg[0].Key, msg[0].Value)
-	require.NoError(t, err)
-
-	messageType, hasNext, err := decoder.HasNext()
-	require.NoError(t, err)
-	require.True(t, hasNext)
-	require.Equal(t, model.MessageTypeRow, messageType)
-
-	event, err = decoder.NextRowChangedEvent()
-	// no error, checksum verification passed.
-	require.NoError(t, err)
-}
-
-func TestVerifyChecksumHasNullFields(t *testing.T) {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-	replicaConfig.Integrity.CorruptionHandleLevel = integrity.CorruptionHandleLevelError
-
-	helper := NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
-	defer helper.Close()
-
-	helper.Tk().MustExec("set global tidb_enable_row_level_checksum = 1")
-	helper.Tk().MustExec("use test")
-
-	_ = helper.DDL2Event(`CREATE table t (a int primary key, b int, c int)`)
-	event := helper.DML2Event(`INSERT INTO t VALUES (1, NULL, NULL)`, "test", "t")
-	require.NotNil(t, event)
-
-	event = helper.DML2Event(`INSERT INTO t VALUES (2, 2, NULL)`, "test", "t")
-	require.NotNil(t, event)
-
-	event = helper.DML2Event(`INSERT INTO t VALUES (3, NULL, 3)`, "test", "t")
-	require.NotNil(t, event)
-}
-
-func TestChecksumAfterAlterSetDefaultValue(t *testing.T) {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-	replicaConfig.Integrity.CorruptionHandleLevel = integrity.CorruptionHandleLevelError
-
-	helper := NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
-	defer helper.Close()
-
-	helper.Tk().MustExec("set global tidb_enable_row_level_checksum = 1")
-	helper.Tk().MustExec("use test")
-
-	_ = helper.DDL2Event("create table t (a int primary key, b int default 1)")
-	event := helper.DML2Event("insert into t (a) values (1)", "test", "t")
-	require.NotNil(t, event)
-
-	tableInfo, ok := helper.schemaStorage.GetLastSnapshot().TableByName("test", "t")
-	require.True(t, ok)
-	_, oldValue := helper.getLastKeyValue(tableInfo.ID)
-
-	_ = helper.DDL2Event("alter table t modify column b int default 2")
-	helper.Tk().MustExec("update t set b = 10 where a = 1")
-	key, value := helper.getLastKeyValue(tableInfo.ID)
-
-	ts := helper.schemaStorage.GetLastSnapshot().CurrentTs()
-	rawKV := &model.RawKVEntry{
-		OpType:   model.OpTypePut,
-		Key:      key,
-		Value:    value,
-		OldValue: oldValue,
-		StartTs:  ts - 1,
-		CRTs:     ts + 1,
-	}
-	polymorphicEvent := model.NewPolymorphicEvent(rawKV)
-	err := helper.mounter.DecodeEvent(context.Background(), polymorphicEvent)
-	require.NoError(t, err)
-	require.NotNil(t, polymorphicEvent.Row)
-}
-
-func TestTimezoneDefaultValue(t *testing.T) {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-	replicaConfig.Integrity.CorruptionHandleLevel = integrity.CorruptionHandleLevelError
-
-	helper := NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
-	defer helper.Close()
-
-	helper.Tk().MustExec("set global tidb_enable_row_level_checksum = 1")
-	helper.Tk().MustExec("use test")
-
-	_ = helper.DDL2Event(`create table test.t(a int primary key, b timestamp default '2023-02-09 13:00:00')`)
-	insertEvent := helper.DML2Event(`insert into test.t(a) values (1)`, "test", "t")
-	require.NotNil(t, insertEvent)
-	require.Equal(t, "2023-02-09 13:00:00", insertEvent.Columns[1].Value.(string))
-}
-
-func TestChecksumAfterAddColumns(t *testing.T) {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-	replicaConfig.Integrity.CorruptionHandleLevel = integrity.CorruptionHandleLevelError
-
-	helper := NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
-	defer helper.Close()
-
-	helper.Tk().MustExec("set global tidb_enable_row_level_checksum = 1")
-	helper.Tk().MustExec("use test")
-
-	_ = helper.DDL2Event("create table t (a int primary key)")
-	event := helper.DML2Event("insert into t values (1)", "test", "t")
-	require.NotNil(t, event)
-
-	_ = helper.DDL2Event("alter table t add column b int default 1")
-
-	tableInfo, ok := helper.schemaStorage.GetLastSnapshot().TableByName("test", "t")
-	require.True(t, ok)
-	_, oldValue := helper.getLastKeyValue(tableInfo.ID)
-
-	helper.Tk().MustExec("update t set b = 10 where a = 1")
-	key, value := helper.getLastKeyValue(tableInfo.ID)
-
-	ts := helper.schemaStorage.GetLastSnapshot().CurrentTs()
-	rawKV := &model.RawKVEntry{
-		OpType:   model.OpTypePut,
-		Key:      key,
-		Value:    value,
-		OldValue: oldValue,
-		StartTs:  ts - 1,
-		CRTs:     ts + 1,
-	}
-	polymorphicEvent := model.NewPolymorphicEvent(rawKV)
-	err := helper.mounter.DecodeEvent(context.Background(), polymorphicEvent)
-	require.NoError(t, err)
-	require.NotNil(t, polymorphicEvent.Row)
-}
-
-func TestChecksumAfterDropColumns(t *testing.T) {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-	replicaConfig.Integrity.CorruptionHandleLevel = integrity.CorruptionHandleLevelError
-
-	helper := NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
-	defer helper.Close()
-
-	helper.Tk().MustExec("set global tidb_enable_row_level_checksum = 1")
-	helper.Tk().MustExec("use test")
-
-	_ = helper.DDL2Event("create table t (a int primary key, b int, c int)")
-	event := helper.DML2Event("insert into t values (1, 2, 3)", "test", "t")
-	require.NotNil(t, event)
-
-	tableInfo, ok := helper.schemaStorage.GetLastSnapshot().TableByName("test", "t")
-	require.True(t, ok)
-	_, oldValue := helper.getLastKeyValue(tableInfo.ID)
-
-	_ = helper.DDL2Event("alter table t drop column b")
-
-	helper.Tk().MustExec("update t set c = 10 where a = 1")
-	key, value := helper.getLastKeyValue(tableInfo.ID)
-
-	ts := helper.schemaStorage.GetLastSnapshot().CurrentTs()
-	rawKV := &model.RawKVEntry{
-		OpType:   model.OpTypePut,
-		Key:      key,
-		Value:    value,
-		OldValue: oldValue,
-		StartTs:  ts - 1,
-		CRTs:     ts + 1,
-	}
-	polymorphicEvent := model.NewPolymorphicEvent(rawKV)
-	err := helper.mounter.DecodeEvent(context.Background(), polymorphicEvent)
-	require.NoError(t, err)
-	require.NotNil(t, polymorphicEvent.Row)
-}
-
-func TestVerifyChecksumNonIntegerPrimaryKey(t *testing.T) {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-	replicaConfig.Integrity.CorruptionHandleLevel = integrity.CorruptionHandleLevelError
-
-	helper := NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
-	defer helper.Close()
-
-	helper.Tk().MustExec("set global tidb_enable_row_level_checksum = 1")
-	helper.Tk().MustExec("use test")
-
-	// primary key is not integer type, so all column encoded into value bytes
-	_ = helper.DDL2Event(`CREATE table t (a varchar(10) primary key, b int)`)
-	event := helper.DML2Event(`INSERT INTO t VALUES ("abc", 3)`, "test", "t")
-	require.NotNil(t, event)
-}
-
-func TestVerifyChecksumTime(t *testing.T) {
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
-	replicaConfig.Integrity.CorruptionHandleLevel = integrity.CorruptionHandleLevelError
-
-	helper := NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
-	defer helper.Close()
-
-	helper.Tk().MustExec("set global tidb_enable_row_level_checksum = 1")
-	helper.Tk().MustExec("use test")
-
-	helper.Tk().MustExec("set global time_zone = '-5:00'")
-	_ = helper.DDL2Event(`CREATE table TBL2 (a int primary key, b TIMESTAMP)`)
-	event := helper.DML2Event(`INSERT INTO TBL2 VALUES (3, '2023-02-09 13:00:00')`, "test", "TBL2")
-	require.NotNil(t, event)
-
-	_ = helper.DDL2Event("create table t (a timestamp primary key, b int)")
-	event = helper.DML2Event("insert into t values ('2023-02-09 13:00:00', 3)", "test", "t")
-	require.NotNil(t, event)
-}
-
-func TestDecodeRow(t *testing.T) {
-	helper := NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	helper.Tk().MustExec("set @@tidb_enable_clustered_index=1;")
-	helper.Tk().MustExec("use test;")
-
-	changefeed := model.DefaultChangeFeedID("changefeed-test-decode-row")
-
-	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
-	require.NoError(t, err)
-
-	cfg := config.GetDefaultReplicaConfig()
-
-	filter, err := filter.NewFilter(cfg, "")
-	require.NoError(t, err)
-
-	schemaStorage, err := NewSchemaStorage(helper.Storage(),
-		ver.Ver, false, changefeed, util.RoleTester, filter)
-	require.NoError(t, err)
-
-	// apply ddl to schemaStorage
-	ddl := "create table test.student(id int primary key, name char(50), age int, gender char(10))"
-	job := helper.DDL2Job(ddl)
-	err = schemaStorage.HandleDDLJob(job)
-	require.NoError(t, err)
-
-	ts := schemaStorage.GetLastSnapshot().CurrentTs()
-
-	schemaStorage.AdvanceResolvedTs(ver.Ver)
-
-	mounter := NewMounter(schemaStorage, changefeed, time.Local, filter, cfg.Integrity).(*mounter)
-
-	helper.Tk().MustExec(`insert into student values(1, "dongmen", 20, "male")`)
-	helper.Tk().MustExec(`update student set age = 27 where id = 1`)
-
-	ctx := context.Background()
-	decodeAndCheckRowInTable := func(tableID int64, f func(key []byte, value []byte) *model.RawKVEntry) {
-		walkTableSpanInStore(t, helper.Storage(), tableID, func(key []byte, value []byte) {
-			rawKV := f(key, value)
-
-			row, err := mounter.unmarshalAndMountRowChanged(ctx, rawKV)
-			require.NoError(t, err)
-			require.NotNil(t, row)
-
-			if row.Columns != nil {
-				require.NotNil(t, mounter.decoder)
-			}
-
-			if row.PreColumns != nil {
-				require.NotNil(t, mounter.preDecoder)
-			}
-		})
-	}
-
-	toRawKV := func(key []byte, value []byte) *model.RawKVEntry {
-		return &model.RawKVEntry{
-			OpType:  model.OpTypePut,
-			Key:     key,
-			Value:   value,
-			StartTs: ts - 1,
-			CRTs:    ts + 1,
-		}
-	}
-
-	tableInfo, ok := schemaStorage.GetLastSnapshot().TableByName("test", "student")
-	require.True(t, ok)
-
-	decodeAndCheckRowInTable(tableInfo.ID, toRawKV)
-	decodeAndCheckRowInTable(tableInfo.ID, toRawKV)
-
-	job = helper.DDL2Job("drop table student")
-	err = schemaStorage.HandleDDLJob(job)
-	require.NoError(t, err)
 }
 
 // TestDecodeEventIgnoreRow tests a PolymorphicEvent.Row is nil
@@ -1333,7 +931,7 @@ func TestDecodeEventIgnoreRow(t *testing.T) {
 	ver, err := helper.Storage().CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
 
-	schemaStorage, err := NewSchemaStorage(helper.Storage(),
+	schemaStorage, err := NewSchemaStorage(helper.GetCurrentMeta(),
 		ver.Ver, false, cfID, util.RoleTester, f)
 	require.Nil(t, err)
 	// apply ddl to schemaStorage
@@ -1345,7 +943,7 @@ func TestDecodeEventIgnoreRow(t *testing.T) {
 
 	ts := schemaStorage.GetLastSnapshot().CurrentTs()
 	schemaStorage.AdvanceResolvedTs(ver.Ver)
-	mounter := NewMounter(schemaStorage, cfID, time.Local, f, cfg.Integrity).(*mounter)
+	mounter := NewMounter(schemaStorage, cfID, time.Local, f).(*mounter)
 
 	type testCase struct {
 		schema  string
@@ -1404,10 +1002,10 @@ func TestDecodeEventIgnoreRow(t *testing.T) {
 			}
 			row := pEvent.Row
 			rows++
-			require.Equal(t, row.TableInfo.GetSchemaName(), "test")
+			require.Equal(t, row.Table.Schema, "test")
 			// Now we only allow filter dml event by table, so we only check row's table.
-			require.NotContains(t, ignoredTables, row.TableInfo.GetTableName())
-			require.Contains(t, tables, row.TableInfo.GetTableName())
+			require.NotContains(t, ignoredTables, row.Table.Table)
+			require.Contains(t, tables, row.Table.Table)
 		})
 		return rows
 	}
@@ -1437,11 +1035,11 @@ func TestBuildTableInfo(t *testing.T) {
 	}{
 		{
 			"CREATE TABLE t1 (c INT PRIMARY KEY)",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) NOT NULL,\n" +
 				"  PRIMARY KEY (`c`(0)) /*T![clustered_index] CLUSTERED */\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) NOT NULL,\n" +
 				"  PRIMARY KEY (`c`(0)) /*T![clustered_index] CLUSTERED */\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
@@ -1454,13 +1052,13 @@ func TestBuildTableInfo(t *testing.T) {
 				" UNIQUE KEY (c2, c3)" +
 				")",
 			// CDC discards field length.
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) unsigned DEFAULT NULL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
 				"  `c3` bit(0) NOT NULL,\n" +
 				"  UNIQUE KEY `idx_0` (`c2`(0),`c3`(0))\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
 				"  `c3` bit(0) NOT NULL,\n" +
@@ -1477,14 +1075,14 @@ func TestBuildTableInfo(t *testing.T) {
 				" PRIMARY KEY (c, c2)" +
 				")",
 			// CDC discards virtual generated column, and generating expression of stored generated column.
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) unsigned NOT NULL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
 				"  `gen2` int(0) GENERATED ALWAYS AS (pass_generated_check) STORED,\n" +
 				"  `c3` bit(0) NOT NULL,\n" +
 				"  PRIMARY KEY (`c`(0),`c2`(0)) /*T![clustered_index] CLUSTERED */\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `c` int(0) unsigned NOT NULL,\n" +
 				"  `c2` varchar(0) NOT NULL,\n" +
 				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
@@ -1500,14 +1098,14 @@ func TestBuildTableInfo(t *testing.T) {
 				"  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */," +
 				"  UNIQUE KEY `b` (`b`)" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `a` int(0) NOT NULL,\n" +
 				"  `b` int(0) DEFAULT NULL,\n" +
 				"  `c` int(0) DEFAULT NULL,\n" +
 				"  PRIMARY KEY (`a`(0)) /*T![clustered_index] CLUSTERED */,\n" +
 				"  UNIQUE KEY `idx_1` (`b`(0))\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `a` int(0) NOT NULL,\n" +
 				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
 				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
@@ -1525,7 +1123,7 @@ func TestBuildTableInfo(t *testing.T) {
 				" UNIQUE INDEX idx_unique_1 (id, email, age)," +
 				" UNIQUE INDEX idx_unique_2 (name, email, address)" +
 				" );",
-			"CREATE TABLE `your_table` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `id` int(0) NOT NULL,\n" +
 				"  `name` varchar(0) NOT NULL,\n" +
 				"  `email` varchar(0) NOT NULL,\n" +
@@ -1535,7 +1133,7 @@ func TestBuildTableInfo(t *testing.T) {
 				"  UNIQUE KEY `idx_1` (`id`(0),`email`(0),`age`(0)),\n" +
 				"  UNIQUE KEY `idx_2` (`name`(0),`email`(0),`address`(0))\n" +
 				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
-			"CREATE TABLE `your_table` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `id` int(0) NOT NULL,\n" +
 				"  `name` varchar(0) NOT NULL,\n" +
 				"  `omitted` unspecified GENERATED ALWAYS AS (pass_generated_check) VIRTUAL,\n" +
@@ -1556,14 +1154,9 @@ func TestBuildTableInfo(t *testing.T) {
 		originTI, err := ddl.BuildTableInfoFromAST(stmt.(*ast.CreateTableStmt))
 		require.NoError(t, err)
 		cdcTableInfo := model.WrapTableInfo(0, "test", 0, originTI)
-		colDatas, _, _, err := datum2Column(cdcTableInfo, map[int64]types.Datum{}, tz)
+		cols, _, _, err := datum2Column(cdcTableInfo, map[int64]types.Datum{}, tz)
 		require.NoError(t, err)
-		e := model.RowChangedEvent{
-			TableInfo: cdcTableInfo,
-			Columns:   colDatas,
-		}
-		cols := e.GetColumns()
-		recoveredTI := model.BuildTiDBTableInfo(cdcTableInfo.TableName.Table, cols, cdcTableInfo.IndexColumnsOffset)
+		recoveredTI := model.BuildTiDBTableInfo(cols, cdcTableInfo.IndexColumnsOffset)
 		handle := sqlmodel.GetWhereHandle(recoveredTI, recoveredTI)
 		require.NotNil(t, handle.UniqueNotNullIdx)
 		require.Equal(t, c.recovered, showCreateTable(t, recoveredTI))
@@ -1585,7 +1178,7 @@ func TestBuildTableInfo(t *testing.T) {
 				cols[i] = nil
 			}
 		}
-		recoveredTI = model.BuildTiDBTableInfo(cdcTableInfo.TableName.Table, cols, cdcTableInfo.IndexColumnsOffset)
+		recoveredTI = model.BuildTiDBTableInfo(cols, cdcTableInfo.IndexColumnsOffset)
 		handle = sqlmodel.GetWhereHandle(recoveredTI, recoveredTI)
 		require.NotNil(t, handle.UniqueNotNullIdx)
 		require.Equal(t, c.recoveredWithNilCol, showCreateTable(t, recoveredTI))
@@ -1611,7 +1204,7 @@ func TestNewDMRowChange(t *testing.T) {
 				" a1 INT NOT NULL," +
 				" a3 INT NOT NULL," +
 				" UNIQUE KEY dex1(a1, a3));",
-			"CREATE TABLE `t1` (\n" +
+			"CREATE TABLE `BuildTiDBTableInfo` (\n" +
 				"  `id` int(0) DEFAULT NULL,\n" +
 				"  `a1` int(0) NOT NULL,\n" +
 				"  `a3` int(0) NOT NULL,\n" +
@@ -1637,7 +1230,7 @@ func TestNewDMRowChange(t *testing.T) {
 				Name: "a3", Type: 3, Charset: "binary", Flag: 51, Value: 2, Default: nil,
 			},
 		}
-		recoveredTI := model.BuildTiDBTableInfo(cdcTableInfo.TableName.Table, cols, cdcTableInfo.IndexColumnsOffset)
+		recoveredTI := model.BuildTiDBTableInfo(cols, cdcTableInfo.IndexColumnsOffset)
 		require.Equal(t, c.recovered, showCreateTable(t, recoveredTI))
 		tableName := &model.TableName{Schema: "db", Table: "t1"}
 		rowChange := sqlmodel.NewRowChange(tableName, nil, []interface{}{1, 1, 2}, nil, recoveredTI, nil, nil)
@@ -1646,7 +1239,7 @@ func TestNewDMRowChange(t *testing.T) {
 		require.Equal(t, []interface{}{1, 2}, argsGot)
 
 		sqlGot, argsGot = sqlmodel.GenDeleteSQL(rowChange, rowChange)
-		require.Equal(t, "DELETE FROM `db`.`t1` WHERE (`a1` = ? AND `a3` = ?) OR (`a1` = ? AND `a3` = ?)", sqlGot)
+		require.Equal(t, "DELETE FROM `db`.`t1` WHERE (`a1`,`a3`) IN ((?,?),(?,?))", sqlGot)
 		require.Equal(t, []interface{}{1, 2, 1, 2}, argsGot)
 	}
 }

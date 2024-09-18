@@ -17,7 +17,7 @@ import (
 	"context"
 	"time"
 
-	cpu "github.com/pingcap/tidb/pkg/util"
+	cpu "github.com/pingcap/tidb-tools/pkg/utils"
 	"github.com/pingcap/tiflow/engine/pkg/promutil"
 	"github.com/prometheus/client_golang/prometheus"
 )

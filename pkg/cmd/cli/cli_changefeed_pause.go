@@ -14,7 +14,7 @@
 package cli
 
 import (
-	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
+	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
 	"github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
@@ -23,10 +23,9 @@ import (
 
 // pauseChangefeedOptions defines flags for the `cli changefeed pause` command.
 type pauseChangefeedOptions struct {
-	apiClient apiv2client.APIV2Interface
+	apiClient apiv1client.APIV1Interface
 
 	changefeedID string
-	namespace    string
 }
 
 // newPauseChangefeedOptions creates new options for the `cli changefeed pause` command.
@@ -37,14 +36,13 @@ func newPauseChangefeedOptions() *pauseChangefeedOptions {
 // addFlags receives a *cobra.Command reference and binds
 // flags related to template printing to it.
 func (o *pauseChangefeedOptions) addFlags(cmd *cobra.Command) {
-	cmd.PersistentFlags().StringVarP(&o.namespace, "namespace", "n", "default", "Replication task (changefeed) Namespace")
 	cmd.PersistentFlags().StringVarP(&o.changefeedID, "changefeed-id", "c", "", "Replication task (changefeed) ID")
 	_ = cmd.MarkPersistentFlagRequired("changefeed-id")
 }
 
 // complete adapts from the command line args to the data and client required.
 func (o *pauseChangefeedOptions) complete(f factory.Factory) error {
-	apiClient, err := f.APIV2Client()
+	apiClient, err := f.APIV1Client()
 	if err != nil {
 		return err
 	}
@@ -56,7 +54,7 @@ func (o *pauseChangefeedOptions) complete(f factory.Factory) error {
 // run the `cli changefeed pause` command.
 func (o *pauseChangefeedOptions) run() error {
 	ctx := context.GetDefaultContext()
-	return o.apiClient.Changefeeds().Pause(ctx, o.namespace, o.changefeedID)
+	return o.apiClient.Changefeeds().Pause(ctx, o.changefeedID)
 }
 
 // newCmdPauseChangefeed creates the `cli changefeed pause` command.

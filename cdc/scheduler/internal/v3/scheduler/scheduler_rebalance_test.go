@@ -18,10 +18,8 @@ import (
 	"testing"
 
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/member"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/replication"
-	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,9 +28,9 @@ func TestSchedulerRebalance(t *testing.T) {
 
 	var checkpointTs model.Ts
 	captures := map[model.CaptureID]*member.CaptureStatus{"a": {}, "b": {}}
-	currentTables := spanz.ArrayToSpan([]model.TableID{1, 2, 3, 4})
+	currentTables := []model.TableID{1, 2, 3, 4}
 
-	replications := mapToSpanMap(map[model.TableID]*replication.ReplicationSet{
+	replications := map[model.TableID]*replication.ReplicationSet{
 		1: {
 			State: replication.ReplicationSetStateReplicating, Primary: "a",
 			Captures: map[string]replication.Role{
@@ -52,7 +50,7 @@ func TestSchedulerRebalance(t *testing.T) {
 			},
 		},
 		4: {State: replication.ReplicationSetStateAbsent},
-	})
+	}
 
 	scheduler := newRebalanceScheduler(model.ChangeFeedID{})
 	require.Equal(t, "rebalance-scheduler", scheduler.Name())
@@ -67,8 +65,7 @@ func TestSchedulerRebalance(t *testing.T) {
 	require.Len(t, tasks, 0)
 
 	// table not in the replication set,
-	tasks = scheduler.Schedule(
-		checkpointTs, spanz.ArrayToSpan([]model.TableID{0}), captures, replications)
+	tasks = scheduler.Schedule(checkpointTs, []model.TableID{0}, captures, replications)
 	require.Len(t, tasks, 0)
 
 	// not all tables are replicating,
@@ -76,24 +73,24 @@ func TestSchedulerRebalance(t *testing.T) {
 	require.Len(t, tasks, 0)
 
 	// table distribution is balanced, should have no task.
-	replications = mapToSpanMap(map[model.TableID]*replication.ReplicationSet{
+	replications = map[model.TableID]*replication.ReplicationSet{
 		1: {State: replication.ReplicationSetStateReplicating, Primary: "a"},
 		2: {State: replication.ReplicationSetStateReplicating, Primary: "a"},
 		3: {State: replication.ReplicationSetStateReplicating, Primary: "b"},
 		4: {State: replication.ReplicationSetStateReplicating, Primary: "b"},
-	})
+	}
 	tasks = scheduler.Schedule(checkpointTs, currentTables, captures, replications)
 	require.Len(t, tasks, 0)
 
 	// Imbalance.
-	replications.ReplaceOrInsert(tablepb.Span{TableID: 5}, &replication.ReplicationSet{
+	replications[5] = &replication.ReplicationSet{
 		State:   replication.ReplicationSetStateReplicating,
 		Primary: "a",
-	})
-	replications.ReplaceOrInsert(tablepb.Span{TableID: 6}, &replication.ReplicationSet{
+	}
+	replications[6] = &replication.ReplicationSet{
 		State:   replication.ReplicationSetStateReplicating,
 		Primary: "a",
-	})
+	}
 
 	// capture is stopping, ignore the request
 	captures["a"].State = member.CaptureStateStopping
@@ -107,7 +104,7 @@ func TestSchedulerRebalance(t *testing.T) {
 	tasks = scheduler.Schedule(checkpointTs, currentTables, captures, replications)
 	require.Len(t, tasks, 1)
 	require.Contains(t, tasks[0].BurstBalance.MoveTables, replication.MoveTable{
-		Span: tablepb.Span{TableID: 1}, DestCapture: "b",
+		TableID: 1, DestCapture: "b",
 	})
 	require.EqualValues(t, 1, atomic.LoadInt32(&scheduler.rebalance))
 

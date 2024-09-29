@@ -15,6 +15,7 @@ package v2
 
 import (
 	"context"
+	"crypto/tls"
 	"net/url"
 	"strings"
 	"time"
@@ -22,36 +23,49 @@ import (
 	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	tidbkv "github.com/pingcap/tidb/kv"
+	tidbkv "github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/owner"
-	"github.com/pingcap/tiflow/cdc/sink"
+	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dispatcher"
+	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/transformer/columnselector"
+	"github.com/pingcap/tiflow/cdc/sink/validator"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/security"
+	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
 	"github.com/pingcap/tiflow/pkg/version"
 	"github.com/r3labs/diff"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
+	"go.etcd.io/etcd/client/pkg/v3/logutil"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 )
 
+// RegisterImportTaskPrefix denotes the key prefix associated with the entries
+// containning import/restore information in the embedded Etcd of the
+// upstream PD.
+const RegisterImportTaskPrefix = "/tidb/brie/import"
+
 // APIV2Helpers is a collections of helper functions of OpenAPIV2.
 // Defining it as an interface to make APIs more testable.
+// Note: Every method in this interface should check the context before returning.
+// If the context is canceled, the method should return an error immediately.
 type APIV2Helpers interface {
 	// verifyCreateChangefeedConfig verifies the changefeedConfig,
-	// and yield an valid changefeedInfo or error
+	// and yield a valid changefeedInfo or error
 	verifyCreateChangefeedConfig(
 		ctx context.Context,
 		cfg *ChangefeedConfig,
 		pdClient pd.Client,
-		statusProvider owner.StatusProvider,
+		provider owner.StatusProvider,
 		ensureGCServiceID string,
 		kvStorage tidbkv.Storage,
 	) (*model.ChangeFeedInfo, error)
@@ -89,15 +103,28 @@ type APIV2Helpers interface {
 		credential *security.Credential,
 	) (pd.Client, error)
 
+	// getEtcdClient returns an Etcd client given the PD endpoints and
+	// tls config
+	getEtcdClient(
+		ctx context.Context,
+		pdAddrs []string,
+		tlsConfig *tls.Config,
+	) (*clientv3.Client, error)
+
 	// getKVCreateTiStore wraps kv.createTiStore method to increase testability
 	createTiStore(
+		ctx context.Context,
 		pdAddrs []string,
 		credential *security.Credential,
 	) (tidbkv.Storage, error)
 
-	// getVerfiedTables wraps entry.VerifyTables to increase testability
-	getVerfiedTables(replicaConfig *config.ReplicaConfig,
-		storage tidbkv.Storage, startTs uint64) (ineligibleTables,
+	// getVerifiedTables wraps entry.VerifyTables to increase testability
+	getVerifiedTables(
+		ctx context.Context,
+		replicaConfig *config.ReplicaConfig,
+		storage tidbkv.Storage, startTs uint64,
+		scheme string, topic string, protocol config.Protocol,
+	) (ineligibleTables,
 		eligibleTables []model.TableName, err error,
 	)
 }
@@ -111,7 +138,7 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 	ctx context.Context,
 	cfg *ChangefeedConfig,
 	pdClient pd.Client,
-	statusProvider owner.StatusProvider,
+	provider owner.StatusProvider,
 	ensureGCServiceID string,
 	kvStorage tidbkv.Storage,
 ) (*model.ChangeFeedInfo, error) {
@@ -138,32 +165,34 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 			"invalid namespace: %s", cfg.Namespace)
 	}
 
-	cfStatus, err := statusProvider.GetChangeFeedStatus(ctx,
-		model.DefaultChangeFeedID(cfg.ID))
+	exists, err := provider.IsChangefeedExists(ctx,
+		model.ChangeFeedID{Namespace: cfg.Namespace, ID: cfg.ID})
 	if err != nil && cerror.ErrChangeFeedNotExists.NotEqual(err) {
 		return nil, err
 	}
-	if cfStatus != nil {
+	if exists {
 		return nil, cerror.ErrChangeFeedAlreadyExists.GenWithStackByArgs(cfg.ID)
 	}
 
+	ts, logical, err := pdClient.GetTS(ctx)
+	if err != nil {
+		return nil, cerror.ErrPDEtcdAPIError.GenWithStackByArgs("fail to get ts from pd client")
+	}
+	currentTSO := oracle.ComposeTS(ts, logical)
 	// verify start ts
 	if cfg.StartTs == 0 {
-		ts, logical, err := pdClient.GetTS(ctx)
-		if err != nil {
-			return nil, cerror.ErrPDEtcdAPIError.GenWithStackByArgs(
-				"fail to get ts from pd client")
-		}
-		cfg.StartTs = oracle.ComposeTS(ts, logical)
+		cfg.StartTs = currentTSO
+	} else if cfg.StartTs > currentTSO {
+		return nil, cerror.ErrAPIInvalidParam.GenWithStack(
+			"invalid start-ts %v, larger than current tso %v", cfg.StartTs, currentTSO)
 	}
-
 	// Ensure the start ts is valid in the next 3600 seconds, aka 1 hour
 	const ensureTTL = 60 * 60
-	if err := gc.EnsureChangefeedStartTsSafety(
+	if err = gc.EnsureChangefeedStartTsSafety(
 		ctx,
 		pdClient,
 		ensureGCServiceID,
-		model.DefaultChangeFeedID(cfg.ID),
+		model.ChangeFeedID{Namespace: cfg.Namespace, ID: cfg.ID},
 		ensureTTL, cfg.StartTs); err != nil {
 		if !cerror.ErrStartTsBeforeGC.Equal(err) {
 			return nil, cerror.ErrPDEtcdAPIError.Wrap(err)
@@ -179,7 +208,6 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 
 	// fill replicaConfig
 	replicaCfg := cfg.ReplicaConfig.ToInternalReplicaConfig()
-
 	// verify replicaConfig
 	sinkURIParsed, err := url.Parse(cfg.SinkURI)
 	if err != nil {
@@ -212,7 +240,10 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 	}
 
 	// verify sink
-	if err := sink.Validate(ctx, cfg.SinkURI, replicaCfg, nil); err != nil {
+	if err = validator.Validate(ctx,
+		model.ChangeFeedID{Namespace: cfg.Namespace, ID: cfg.ID},
+		cfg.SinkURI, replicaCfg, nil,
+	); err != nil {
 		return nil, err
 	}
 
@@ -232,7 +263,8 @@ func (APIV2HelpersImpl) verifyCreateChangefeedConfig(
 }
 
 // verifyUpstream verifies the upstream config before updating a changefeed
-func (h APIV2HelpersImpl) verifyUpstream(ctx context.Context,
+func (h APIV2HelpersImpl) verifyUpstream(
+	ctx context.Context,
 	changefeedConfig *ChangefeedConfig,
 	cfInfo *model.ChangeFeedInfo,
 ) error {
@@ -256,6 +288,7 @@ func (h APIV2HelpersImpl) verifyUpstream(ctx context.Context,
 		return cerror.ErrUpstreamMissMatch.
 			GenWithStackByArgs(cfInfo.UpstreamID, pdClient.GetClusterID(ctx))
 	}
+
 	return nil
 }
 
@@ -321,7 +354,23 @@ func (APIV2HelpersImpl) verifyUpdateChangefeedConfig(
 			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 
-		if err := sink.Validate(ctx, newInfo.SinkURI, newInfo.Config, nil); err != nil {
+		// use the sinkURI to validate and adjust the new config
+		sinkURI := oldInfo.SinkURI
+		if sinkURIUpdated {
+			sinkURI = newInfo.SinkURI
+		}
+		sinkURIParsed, err := url.Parse(sinkURI)
+		if err != nil {
+			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
+		}
+		err = newInfo.Config.ValidateAndAdjust(sinkURIParsed)
+		if err != nil {
+			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
+		}
+
+		if err := validator.Validate(ctx,
+			model.ChangeFeedID{Namespace: cfg.Namespace, ID: cfg.ID},
+			newInfo.SinkURI, newInfo.Config, nil); err != nil {
 			return nil, nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 	}
@@ -346,7 +395,6 @@ func (APIV2HelpersImpl) verifyUpdateChangefeedConfig(
 	if cfg.CertAllowedCN != nil {
 		newUpInfo.CertAllowedCN = cfg.CertAllowedCN
 	}
-
 	changefeedInfoChanged := diff.Changed(oldInfo, newInfo)
 	upstreamInfoChanged := diff.Changed(oldUpInfo, newUpInfo)
 	if !changefeedInfoChanged && !upstreamInfoChanged {
@@ -360,15 +408,30 @@ func (APIV2HelpersImpl) verifyUpdateChangefeedConfig(
 // overrideCheckpointTs is the checkpointTs of the changefeed that specified by the user.
 // or it is the checkpointTs of the changefeed before it is paused.
 // we need to check weather the resuming changefeed is gc safe or not.
-func (APIV2HelpersImpl) verifyResumeChangefeedConfig(ctx context.Context,
+func (APIV2HelpersImpl) verifyResumeChangefeedConfig(
+	ctx context.Context,
 	pdClient pd.Client,
 	gcServiceID string,
 	changefeedID model.ChangeFeedID,
 	overrideCheckpointTs uint64,
 ) error {
+	if overrideCheckpointTs == 0 {
+		return nil
+	}
+
+	ts, logical, err := pdClient.GetTS(ctx)
+	if err != nil {
+		return cerror.ErrPDEtcdAPIError.GenWithStackByArgs("fail to get ts from pd client")
+	}
+	currentTSO := oracle.ComposeTS(ts, logical)
+	if overrideCheckpointTs > currentTSO {
+		return cerror.ErrAPIInvalidParam.GenWithStack(
+			"invalid checkpoint-ts %v, larger than current tso %v", overrideCheckpointTs, currentTSO)
+	}
+
 	// 1h is enough for resuming a changefeed.
 	gcTTL := int64(60 * 60)
-	err := gc.EnsureChangefeedStartTsSafety(
+	err = gc.EnsureChangefeedStartTsSafety(
 		ctx,
 		pdClient,
 		gcServiceID,
@@ -385,7 +448,8 @@ func (APIV2HelpersImpl) verifyResumeChangefeedConfig(ctx context.Context,
 }
 
 // getPDClient returns a PDClient given the PD cluster addresses and a credential
-func (APIV2HelpersImpl) getPDClient(ctx context.Context,
+func (APIV2HelpersImpl) getPDClient(
+	ctx context.Context,
 	pdAddrs []string,
 	credential *security.Credential,
 ) (pd.Client, error) {
@@ -408,29 +472,115 @@ func (APIV2HelpersImpl) getPDClient(ctx context.Context,
 				},
 				MinConnectTimeout: 3 * time.Second,
 			}),
-		))
+		),
+		pd.WithForwardingOption(config.EnablePDForwarding))
 	if err != nil {
 		return nil, cerror.WrapError(cerror.ErrAPIGetPDClientFailed, errors.Trace(err))
 	}
 	return pdClient, nil
 }
 
-// getTiStore wrap the kv.createTiStore method to increase testability
-func (h APIV2HelpersImpl) createTiStore(pdAddrs []string,
-	credential *security.Credential,
-) (tidbkv.Storage, error) {
-	return kv.CreateTiStore(strings.Join(pdAddrs, ","), credential)
+func (h APIV2HelpersImpl) getEtcdClient(
+	ctx context.Context,
+	pdAddrs []string,
+	tlsCfg *tls.Config,
+) (*clientv3.Client, error) {
+	conf := config.GetGlobalServerConfig()
+	grpcTLSOption, err := conf.Security.ToGRPCDialOption()
+	if err != nil {
+		return nil, err
+	}
+	logConfig := &logutil.DefaultZapLoggerConfig
+	logConfig.Level = zap.NewAtomicLevelAt(zapcore.ErrorLevel)
+	res, err := clientv3.New(
+		clientv3.Config{
+			Endpoints:   pdAddrs,
+			TLS:         tlsCfg,
+			LogConfig:   logConfig,
+			DialTimeout: 5 * time.Second,
+			DialOptions: []grpc.DialOption{
+				grpcTLSOption,
+				grpc.WithBlock(),
+				grpc.WithConnectParams(
+					grpc.ConnectParams{
+						Backoff: backoff.Config{
+							BaseDelay:  time.Second,
+							Multiplier: 1.1,
+							Jitter:     0.1,
+							MaxDelay:   3 * time.Second,
+						},
+						MinConnectTimeout: 3 * time.Second,
+					},
+				),
+			},
+		},
+	)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if ctx.Err() != nil {
+		return nil, errors.Trace(ctx.Err())
+	}
+	return res, nil
 }
 
-func (h APIV2HelpersImpl) getVerfiedTables(replicaConfig *config.ReplicaConfig,
-	storage tidbkv.Storage, startTs uint64) (ineligibleTables,
-	eligibleTables []model.TableName, err error,
-) {
+// getTiStore wrap the kv.createTiStore method to increase testability
+func (h APIV2HelpersImpl) createTiStore(
+	ctx context.Context,
+	pdAddrs []string,
+	credential *security.Credential,
+) (tidbkv.Storage, error) {
+	res, err := kv.CreateTiStore(strings.Join(pdAddrs, ","), credential)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if ctx.Err() != nil {
+		return nil, errors.Trace(ctx.Err())
+	}
+	return res, nil
+}
+
+func (h APIV2HelpersImpl) getVerifiedTables(
+	ctx context.Context,
+	replicaConfig *config.ReplicaConfig,
+	storage tidbkv.Storage, startTs uint64,
+	scheme string, topic string, protocol config.Protocol,
+) ([]model.TableName, []model.TableName, error) {
 	f, err := filter.NewFilter(replicaConfig, "")
 	if err != nil {
-		return
+		return nil, nil, err
 	}
-	_, ineligibleTables, eligibleTables, err = entry.
+	tableInfos, ineligibleTables, eligibleTables, err := entry.
 		VerifyTables(f, storage, startTs)
-	return
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if !sink.IsMQScheme(scheme) {
+		return ineligibleTables, eligibleTables, nil
+	}
+
+	eventRouter, err := dispatcher.NewEventRouter(replicaConfig, protocol, topic, scheme)
+	if err != nil {
+		return nil, nil, err
+	}
+	err = eventRouter.VerifyTables(tableInfos)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	selectors, err := columnselector.New(replicaConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+	err = selectors.VerifyTables(tableInfos, eventRouter)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if ctx.Err() != nil {
+		return nil, nil, errors.Trace(ctx.Err())
+	}
+
+	return ineligibleTables, eligibleTables, nil
 }

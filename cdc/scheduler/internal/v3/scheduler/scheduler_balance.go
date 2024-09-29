@@ -19,8 +19,11 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/member"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/replication"
+	"github.com/pingcap/tiflow/pkg/spanz"
+	"go.uber.org/zap"
 )
 
 var _ scheduler = &balanceScheduler{}
@@ -39,13 +42,15 @@ type balanceScheduler struct {
 	forceBalance bool
 
 	maxTaskConcurrency int
+	changefeedID       model.ChangeFeedID
 }
 
-func newBalanceScheduler(interval time.Duration, concurrency int) *balanceScheduler {
+func newBalanceScheduler(interval time.Duration, concurrency int, changefeedID model.ChangeFeedID) *balanceScheduler {
 	return &balanceScheduler{
 		random:               rand.New(rand.NewSource(time.Now().UnixNano())),
 		checkBalanceInterval: interval,
 		maxTaskConcurrency:   concurrency,
+		changefeedID:         changefeedID,
 	}
 }
 
@@ -55,9 +60,9 @@ func (b *balanceScheduler) Name() string {
 
 func (b *balanceScheduler) Schedule(
 	_ model.Ts,
-	currentTables []model.TableID,
+	_ []tablepb.Span,
 	captures map[model.CaptureID]*member.CaptureStatus,
-	replications map[model.TableID]*replication.ReplicationSet,
+	replications *spanz.BtreeMap[*replication.ReplicationSet],
 ) []*replication.ScheduleTask {
 	if !b.forceBalance {
 		now := time.Now()
@@ -70,37 +75,28 @@ func (b *balanceScheduler) Schedule(
 
 	for _, capture := range captures {
 		if capture.State == member.CaptureStateStopping {
-			log.Debug("schedulerv3: capture is stopping, premature to balance table")
+			log.Debug("schedulerv3: capture is stopping, premature to balance table",
+				zap.String("namespace", b.changefeedID.Namespace),
+				zap.String("changefeed", b.changefeedID.ID))
 			return nil
 		}
 	}
 
 	tasks := buildBalanceMoveTables(
-		b.random, currentTables, captures, replications, b.maxTaskConcurrency)
+		b.random, captures, replications, b.maxTaskConcurrency, b.changefeedID)
 	b.forceBalance = len(tasks) != 0
 	return tasks
 }
 
 func buildBalanceMoveTables(
 	random *rand.Rand,
-	currentTables []model.TableID,
 	captures map[model.CaptureID]*member.CaptureStatus,
-	replications map[model.TableID]*replication.ReplicationSet,
+	replications *spanz.BtreeMap[*replication.ReplicationSet],
 	maxTaskConcurrency int,
+	changeFeedID model.ChangeFeedID,
 ) []*replication.ScheduleTask {
-	captureTables := make(map[model.CaptureID][]model.TableID)
-	for _, tableID := range currentTables {
-		rep, ok := replications[tableID]
-		if !ok {
-			continue
-		}
-		for captureID := range rep.Captures {
-			captureTables[captureID] = append(captureTables[captureID], tableID)
-		}
-	}
-
 	moves := newBalanceMoveTables(
-		random, captures, replications, maxTaskConcurrency, model.ChangeFeedID{})
+		random, captures, replications, maxTaskConcurrency, changeFeedID)
 	tasks := make([]*replication.ScheduleTask, 0, len(moves))
 	for i := 0; i < len(moves); i++ {
 		// No need for accept callback here.

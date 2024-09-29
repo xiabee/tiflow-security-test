@@ -27,33 +27,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWriteDML(t *testing.T) {
+func TestWriteDDL(t *testing.T) {
 	t.Parallel()
 
 	rows := []writer.RedoEvent{
 		nil,
-		&model.RowChangedEvent{Table: &model.TableName{TableID: 11}, CommitTs: 11},
-		&model.RowChangedEvent{Table: &model.TableName{TableID: 12}, CommitTs: 15},
-		&model.RowChangedEvent{Table: &model.TableName{TableID: 12}, CommitTs: 8},
+		&model.RowChangedEvent{
+			PhysicalTableID: 11,
+			CommitTs:        11,
+			TableInfo:       &model.TableInfo{TableName: model.TableName{Schema: "test", Table: "t1"}},
+		},
+		&model.RowChangedEvent{
+			PhysicalTableID: 12,
+			CommitTs:        15,
+			TableInfo:       &model.TableInfo{TableName: model.TableName{Schema: "test", Table: "t2"}},
+		},
+		&model.RowChangedEvent{
+			PhysicalTableID: 12,
+			CommitTs:        8,
+			TableInfo:       &model.TableInfo{TableName: model.TableName{Schema: "test", Table: "t2"}},
+		},
 	}
 	testWriteEvents(t, rows)
 }
 
-func TestWriteDDL(t *testing.T) {
+func TestWriteDML(t *testing.T) {
 	t.Parallel()
 
-	tableInfo := &model.TableInfo{
-		TableName: model.TableName{
-			Schema:  "test",
-			Table:   "t",
-			TableID: 11,
-		},
-	}
 	ddls := []writer.RedoEvent{
 		nil,
-		&model.DDLEvent{CommitTs: 1, TableInfo: tableInfo},
-		&model.DDLEvent{CommitTs: 10, TableInfo: tableInfo},
-		&model.DDLEvent{CommitTs: 8, TableInfo: tableInfo},
+		&model.DDLEvent{CommitTs: 1},
+		&model.DDLEvent{CommitTs: 10},
+		&model.DDLEvent{CommitTs: 8},
 	}
 	testWriteEvents(t, ddls)
 }

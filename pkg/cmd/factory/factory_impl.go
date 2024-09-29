@@ -14,19 +14,16 @@
 package factory
 
 import (
-	"crypto/tls"
 	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
 	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
 	cmdconetxt "github.com/pingcap/tiflow/pkg/cmd/context"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
-	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/pkg/version"
 	pd "github.com/tikv/pd/client"
 	etcdlogutil "go.etcd.io/etcd/client/pkg/v3/logutil"
@@ -41,7 +38,7 @@ const (
 )
 
 type factoryImpl struct {
-	clientGetter      ClientGetter
+	ClientGetter
 	fetchedServerAddr string
 }
 
@@ -51,40 +48,10 @@ func NewFactory(clientGetter ClientGetter) Factory {
 		panic("attempt to instantiate factory with nil clientGetter")
 	}
 	f := &factoryImpl{
-		clientGetter: clientGetter,
+		ClientGetter: clientGetter,
 	}
 
 	return f
-}
-
-// ToTLSConfig returns the configuration of tls.
-func (f *factoryImpl) ToTLSConfig() (*tls.Config, error) {
-	return f.clientGetter.ToTLSConfig()
-}
-
-// ToGRPCDialOption returns the option of GRPC dial.
-func (f *factoryImpl) ToGRPCDialOption() (grpc.DialOption, error) {
-	return f.clientGetter.ToGRPCDialOption()
-}
-
-// GetPdAddr returns pd address.
-func (f *factoryImpl) GetPdAddr() string {
-	return f.clientGetter.GetPdAddr()
-}
-
-// GetServerAddr returns CDC server address.
-func (f *factoryImpl) GetServerAddr() string {
-	return f.clientGetter.GetServerAddr()
-}
-
-// GetLogLevel returns log level.
-func (f *factoryImpl) GetLogLevel() string {
-	return f.clientGetter.GetLogLevel()
-}
-
-// GetCredential returns security credentials.
-func (f *factoryImpl) GetCredential() *security.Credential {
-	return f.clientGetter.GetCredential()
 }
 
 // EtcdClient creates new cdc etcd client.
@@ -148,7 +115,7 @@ func (f *factoryImpl) EtcdClient() (*etcd.CDCEtcdClientImpl, error) {
 }
 
 // PdClient creates new pd client.
-func (f factoryImpl) PdClient() (pd.Client, error) {
+func (f *factoryImpl) PdClient() (pd.Client, error) {
 	ctx := cmdconetxt.GetDefaultContext()
 
 	credential := f.GetCredential()
@@ -200,20 +167,6 @@ func (f factoryImpl) PdClient() (pd.Client, error) {
 	return pdClient, nil
 }
 
-// APIV1Client returns cdc api v1 client.
-func (f *factoryImpl) APIV1Client() (apiv1client.APIV1Interface, error) {
-	serverAddr, err := f.findServerAddr()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	log.Info(serverAddr)
-	client, err := apiv1client.NewAPIClient(serverAddr, f.clientGetter.GetCredential())
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return client, checkCDCVersion(client)
-}
-
 // APIV2Client returns cdc api v2 client.
 func (f *factoryImpl) APIV2Client() (apiv2client.APIV2Interface, error) {
 	serverAddr, err := f.findServerAddr()
@@ -221,14 +174,11 @@ func (f *factoryImpl) APIV2Client() (apiv2client.APIV2Interface, error) {
 		return nil, errors.Trace(err)
 	}
 	log.Info(serverAddr)
-	client, err := apiv1client.NewAPIClient(serverAddr, f.clientGetter.GetCredential())
+	client, err := apiv2client.NewAPIClient(serverAddr, f.GetCredential(), f.GetAuthParameters())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if err := checkCDCVersion(client); err != nil {
-		return nil, errors.Trace(err)
-	}
-	return apiv2client.NewAPIClient(serverAddr, f.clientGetter.GetCredential())
+	return client, checkCDCVersion(client)
 }
 
 // findServerAddr find the cdc server address by the following logic
@@ -246,9 +196,12 @@ func (f *factoryImpl) findServerAddr() (string, error) {
 		return f.fetchedServerAddr, nil
 	}
 
-	pdAddr := f.clientGetter.GetPdAddr()
-	serverAddr := f.clientGetter.GetServerAddr()
+	pdAddr := f.GetPdAddr()
+	serverAddr := f.GetServerAddr()
 	if pdAddr == "" && serverAddr == "" {
+		if f.GetCredential().IsTLSEnabled() {
+			return "https://127.0.0.1:8300", nil
+		}
 		return "http://127.0.0.1:8300", nil
 	}
 	if pdAddr != "" && serverAddr != "" {
@@ -256,8 +209,8 @@ func (f *factoryImpl) findServerAddr() (string, error) {
 			"please use parameter --server instead. " +
 			"These two parameters cannot be specified at the same time.")
 	}
-	if f.clientGetter.GetServerAddr() != "" {
-		return f.clientGetter.GetServerAddr(), nil
+	if f.GetServerAddr() != "" {
+		return f.GetServerAddr(), nil
 	}
 	// check pd-address represents a real pd cluster
 	pdClient, err := f.PdClient()
@@ -299,7 +252,7 @@ func (f *factoryImpl) findServerAddr() (string, error) {
 	return "", errors.New("no capture is found")
 }
 
-func checkCDCVersion(client apiv1client.APIV1Interface) error {
+func checkCDCVersion(client apiv2client.APIV2Interface) error {
 	serverStatus, err := client.Status().Get(cmdconetxt.GetDefaultContext())
 	if err != nil {
 		return errors.Trace(err)

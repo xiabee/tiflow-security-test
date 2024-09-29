@@ -122,7 +122,7 @@ type Chann[T any] struct {
 // Note that although the input arguments are  specified as variadic parameter
 // list, however, the function panics if there is more than one option is
 // provided.
-// DEPRECATED: use NewDrainableChann instead.
+// DEPRECATED: use NewAutoDrainChann instead.
 func New[T any](opts ...Opt) *Chann[T] {
 	cfg := &config{
 		cap: -1, len: 0,
@@ -177,7 +177,6 @@ func (ch *Chann[T]) Close() {
 func (ch *Chann[T]) unboundedProcessing() {
 	var nilT T
 
-	ch.q = make([]T, 0, 1<<10)
 	for {
 		select {
 		case e, ok := <-ch.in:
@@ -208,9 +207,7 @@ func (ch *Chann[T]) unboundedProcessing() {
 				return
 			}
 		}
-		if cap(ch.q) < 1<<5 {
-			ch.q = make([]T, 0, 1<<10)
-		}
+		ch.q = nil
 	}
 }
 

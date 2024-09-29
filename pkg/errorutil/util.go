@@ -18,12 +18,13 @@ import (
 
 	gmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/errno"
-	"github.com/pingcap/tidb/infoschema"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/util/dbterror"
-	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/pkg/errno"
+	"github.com/pingcap/tidb/pkg/infoschema"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/util/dbterror"
+	"github.com/pingcap/tidb/pkg/util/dbutil"
 	dmretry "github.com/pingcap/tiflow/dm/pkg/retry"
+	frameModel "github.com/pingcap/tiflow/engine/framework/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	v3rpc "go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 )
@@ -133,15 +134,28 @@ func IsRetryableDDLError(err error) bool {
 		mysql.ErrSyntax,
 		mysql.ErrParse,
 		mysql.ErrNoDB,
+		mysql.ErrBadDB,
 		mysql.ErrNoSuchTable,
 		mysql.ErrNoSuchIndex,
 		mysql.ErrKeyColumnDoesNotExits,
 		mysql.ErrWrongColumnName,
 		mysql.ErrPartitionMgmtOnNonpartitioned,
+		mysql.ErrNonuniqTable,
 		errno.ErrTableWithoutPrimaryKey:
 		return false
 	}
 	return true
+}
+
+// IsAccessDeniedError checks if the error is an access denied error.
+func IsAccessDeniedError(err error) bool {
+	err = errors.Cause(err)
+	mysqlErr, ok := err.(*gmysql.MySQLError)
+	if !ok {
+		return false
+	}
+	return mysqlErr.Number == mysql.ErrAccessDenied ||
+		mysqlErr.Number == mysql.ErrAccessDeniedNoPassword
 }
 
 // IsSyncPointIgnoreError returns whether the error is ignorable for syncpoint.
@@ -154,4 +168,14 @@ func IsSyncPointIgnoreError(err error) bool {
 	// We should ignore the error when the downstream has no
 	// such system variable for compatibility.
 	return mysqlErr.Number == mysql.ErrUnknownSystemVariable
+}
+
+// ConvertErr converts an error to a specific error by worker type.
+func ConvertErr(tp frameModel.WorkerType, err error) error {
+	switch tp {
+	case frameModel.DMJobMaster:
+		err = cerror.ToDMError(err)
+	default:
+	}
+	return err
 }

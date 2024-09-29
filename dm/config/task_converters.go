@@ -17,19 +17,21 @@ import (
 	"fmt"
 	"strings"
 
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb-tools/pkg/column-mapping"
-	"github.com/pingcap/tidb/util/filter"
-	router "github.com/pingcap/tidb/util/table-router"
+	"github.com/pingcap/tidb/pkg/util/filter"
+	router "github.com/pingcap/tidb/pkg/util/table-router"
+	"github.com/pingcap/tiflow/dm/config/dbconfig"
+	"github.com/pingcap/tiflow/dm/config/security"
 	"github.com/pingcap/tiflow/dm/openapi"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/storage"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
+	"github.com/pingcap/tiflow/pkg/column-mapping"
 	"go.uber.org/zap"
 )
 
 // TaskConfigToSubTaskConfigs generates sub task configs by TaskConfig.
-func TaskConfigToSubTaskConfigs(c *TaskConfig, sources map[string]DBConfig) ([]*SubTaskConfig, error) {
+func TaskConfigToSubTaskConfigs(c *TaskConfig, sources map[string]dbconfig.DBConfig) ([]*SubTaskConfig, error) {
 	cfgs := make([]*SubTaskConfig, len(c.MySQLInstances))
 	for i, inst := range c.MySQLInstances {
 		dbCfg, exist := sources[inst.SourceID]
@@ -111,7 +113,7 @@ func TaskConfigToSubTaskConfigs(c *TaskConfig, sources map[string]DBConfig) ([]*
 }
 
 // OpenAPITaskToSubTaskConfigs generates sub task configs by openapi.Task.
-func OpenAPITaskToSubTaskConfigs(task *openapi.Task, toDBCfg *DBConfig, sourceCfgMap map[string]*SourceConfig) (
+func OpenAPITaskToSubTaskConfigs(task *openapi.Task, toDBCfg *dbconfig.DBConfig, sourceCfgMap map[string]*SourceConfig) (
 	[]*SubTaskConfig, error,
 ) {
 	// source name -> migrate rule list
@@ -197,6 +199,15 @@ func OpenAPITaskToSubTaskConfigs(task *openapi.Task, toDBCfg *DBConfig, sourceCf
 		subTaskCfg.MydumperConfig = DefaultMydumperConfig()
 		subTaskCfg.LoaderConfig = DefaultLoaderConfig()
 		if fullCfg := task.SourceConfig.FullMigrateConf; fullCfg != nil {
+			if fullCfg.Analyze != nil {
+				subTaskCfg.LoaderConfig.Analyze = PhysicalPostOpLevel(*fullCfg.Analyze)
+			}
+			if fullCfg.Checksum != nil {
+				subTaskCfg.LoaderConfig.ChecksumPhysical = PhysicalPostOpLevel(*fullCfg.Checksum)
+			}
+			if fullCfg.CompressKvPairs != nil {
+				subTaskCfg.CompressKVPairs = *fullCfg.CompressKvPairs
+			}
 			if fullCfg.Consistency != nil {
 				subTaskCfg.MydumperConfig.ExtraArgs = fmt.Sprintf("--consistency %s", *fullCfg.Consistency)
 			}
@@ -209,7 +220,29 @@ func OpenAPITaskToSubTaskConfigs(task *openapi.Task, toDBCfg *DBConfig, sourceCf
 			if fullCfg.DataDir != nil {
 				subTaskCfg.LoaderConfig.Dir = *fullCfg.DataDir
 			}
-			subTaskCfg.LoaderConfig.OnDuplicateLogical = LogicalDuplicateResolveType(task.OnDuplicate)
+			if fullCfg.DiskQuota != nil {
+				if err := subTaskCfg.LoaderConfig.DiskQuotaPhysical.UnmarshalText([]byte(*fullCfg.DiskQuota)); err != nil {
+					return nil, err
+				}
+			}
+			if fullCfg.ImportMode != nil {
+				subTaskCfg.LoaderConfig.ImportMode = LoadMode(*fullCfg.ImportMode)
+			}
+			if fullCfg.OnDuplicateLogical != nil {
+				subTaskCfg.LoaderConfig.OnDuplicateLogical = LogicalDuplicateResolveType(*fullCfg.OnDuplicateLogical)
+			}
+			if fullCfg.OnDuplicatePhysical != nil {
+				subTaskCfg.LoaderConfig.OnDuplicatePhysical = PhysicalDuplicateResolveType(*fullCfg.OnDuplicatePhysical)
+			}
+			if fullCfg.PdAddr != nil {
+				subTaskCfg.LoaderConfig.PDAddr = *fullCfg.PdAddr
+			}
+			if fullCfg.RangeConcurrency != nil {
+				subTaskCfg.LoaderConfig.RangeConcurrency = *fullCfg.RangeConcurrency
+			}
+			if fullCfg.SortingDir != nil {
+				subTaskCfg.LoaderConfig.SortingDirPhysical = *fullCfg.SortingDir
+			}
 		}
 		// set incremental config
 		subTaskCfg.SyncerConfig = DefaultSyncerConfig()
@@ -285,8 +318,8 @@ func OpenAPITaskToSubTaskConfigs(task *openapi.Task, toDBCfg *DBConfig, sourceCf
 }
 
 // GetTargetDBCfgFromOpenAPITask gets target db config.
-func GetTargetDBCfgFromOpenAPITask(task *openapi.Task) *DBConfig {
-	toDBCfg := &DBConfig{
+func GetTargetDBCfgFromOpenAPITask(task *openapi.Task) *dbconfig.DBConfig {
+	toDBCfg := &dbconfig.DBConfig{
 		Host:     task.TargetConfig.Host,
 		Port:     task.TargetConfig.Port,
 		User:     task.TargetConfig.User,
@@ -297,7 +330,7 @@ func GetTargetDBCfgFromOpenAPITask(task *openapi.Task) *DBConfig {
 		if task.TargetConfig.Security.CertAllowedCn != nil {
 			certAllowedCN = *task.TargetConfig.Security.CertAllowedCn
 		}
-		toDBCfg.Security = &Security{
+		toDBCfg.Security = &security.Security{
 			SSLCABytes:    []byte(task.TargetConfig.Security.SslCaContent),
 			SSLKeyBytes:   []byte(task.TargetConfig.Security.SslKeyContent),
 			SSLCertBytes:  []byte(task.TargetConfig.Security.SslCertContent),
@@ -628,11 +661,9 @@ func SubTaskConfigsToOpenAPITask(subTaskConfigList []*SubTaskConfig) *openapi.Ta
 
 // TaskConfigToOpenAPITask converts TaskConfig to an openapi task.
 func TaskConfigToOpenAPITask(c *TaskConfig, sourceCfgMap map[string]*SourceConfig) (*openapi.Task, error) {
-	cfgs := make(map[string]DBConfig)
+	cfgs := make(map[string]dbconfig.DBConfig)
 	for _, source := range c.MySQLInstances {
 		if cfg, ok := sourceCfgMap[source.SourceID]; ok {
-			// check the password
-			cfg.DecryptPassword()
 			cfgs[source.SourceID] = cfg.From
 		}
 	}

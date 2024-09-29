@@ -16,10 +16,10 @@ package parser
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/util/filter"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/util/filter"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
-	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -66,13 +66,6 @@ var testCases = []testCase{
 		[][]*filter.Table{{genTableName("s1", "")}},
 		[][]*filter.Table{{genTableName("xs1", "")}},
 		[]string{"DROP DATABASE IF EXISTS `xs1`"},
-	},
-	{
-		"alter database collate utf8mb4_general_ci",
-		[]string{"ALTER DATABASE `test` COLLATE = utf8mb4_general_ci"},
-		[][]*filter.Table{{genTableName("test", "")}},
-		[][]*filter.Table{{genTableName("xtest", "")}},
-		[]string{"ALTER DATABASE `xtest` COLLATE = utf8mb4_general_ci"},
 	},
 	{
 		"drop table `Ss1`.`tT1`",
@@ -389,7 +382,7 @@ func TestError(t *testing.T) {
 
 	stmts, err := Parse(p, dml, "", "")
 	require.NoError(t, err)
-	_, err = FetchDDLTables("test", stmts[0], utils.LCTableNamesInsensitive)
+	_, err = FetchDDLTables("test", stmts[0], conn.LCTableNamesInsensitive)
 	require.True(t, terror.ErrUnknownTypeDDL.Equal(err))
 
 	_, err = RenameDDLTable(stmts[0], nil)
@@ -422,7 +415,7 @@ func TestResolveDDL(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, s, 1)
 
-			tableNames, err := FetchDDLTables("test", s[0], utils.LCTableNamesSensitive)
+			tableNames, err := FetchDDLTables("test", s[0], conn.LCTableNamesSensitive)
 			require.NoError(t, err)
 			require.Equal(t, tbs[j], tableNames)
 

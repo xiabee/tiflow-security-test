@@ -23,11 +23,12 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 	"github.com/phayes/freeport"
-	timodel "github.com/pingcap/tidb/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	mysqlParser "github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/redo/reader"
-	mysqlDDL "github.com/pingcap/tiflow/cdc/sinkv2/ddlsink/mysql"
-	"github.com/pingcap/tiflow/cdc/sinkv2/eventsink/txn"
+	mysqlDDL "github.com/pingcap/tiflow/cdc/sink/ddlsink/mysql"
+	"github.com/pingcap/tiflow/cdc/sink/dmlsink/txn"
 	pmysql "github.com/pingcap/tiflow/pkg/sink/mysql"
 	"github.com/stretchr/testify/require"
 )
@@ -107,7 +108,7 @@ func TestApply(t *testing.T) {
 			dbIndex++
 		}()
 		if dbIndex%2 == 0 {
-			testDB, err := pmysql.MockTestDB(true)
+			testDB, err := pmysql.MockTestDB()
 			require.Nil(t, err)
 			return testDB, nil
 		}
@@ -126,152 +127,143 @@ func TestApply(t *testing.T) {
 		mysqlDDL.GetDBConnImpl = getDDLDBConnBak
 	}()
 
+	tableInfo := model.BuildTableInfo("test", "t1", []*model.Column{
+		{
+			Name: "a",
+			Type: mysqlParser.TypeLong,
+			Flag: model.HandleKeyFlag | model.PrimaryKeyFlag,
+		}, {
+			Name: "b",
+			Type: mysqlParser.TypeString,
+			Flag: 0,
+		},
+	}, [][]int{{0}})
 	dmls := []*model.RowChangedEvent{
 		{
-			StartTs:  1100,
-			CommitTs: 1200,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			Columns: []*model.Column{
+			StartTs:   1100,
+			CommitTs:  1200,
+			TableInfo: tableInfo,
+			Columns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 1,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "2",
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		},
 		// update event which doesn't modify handle key
 		{
-			StartTs:  1120,
-			CommitTs: 1220,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			PreColumns: []*model.Column{
+			StartTs:   1120,
+			CommitTs:  1220,
+			TableInfo: tableInfo,
+			PreColumns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 1,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "2",
-					Flag:  0,
 				},
-			},
-			Columns: []*model.Column{
+			}, tableInfo),
+			Columns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 1,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "3",
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		},
 		{
-			StartTs:  1150,
-			CommitTs: 1250,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			Columns: []*model.Column{
+			StartTs:   1150,
+			CommitTs:  1250,
+			TableInfo: tableInfo,
+			Columns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 10,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "20",
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		},
 		{
-			StartTs:  1150,
-			CommitTs: 1250,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			Columns: []*model.Column{
+			StartTs:   1150,
+			CommitTs:  1250,
+			TableInfo: tableInfo,
+			Columns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 100,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "200",
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		},
 		{
-			StartTs:  1200,
-			CommitTs: resolvedTs,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			PreColumns: []*model.Column{
+			StartTs:   1200,
+			CommitTs:  resolvedTs,
+			TableInfo: tableInfo,
+			PreColumns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 10,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "20",
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		},
 		{
-			StartTs:  1200,
-			CommitTs: resolvedTs,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			PreColumns: []*model.Column{
+			StartTs:   1200,
+			CommitTs:  resolvedTs,
+			TableInfo: tableInfo,
+			PreColumns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 1,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "3",
-					Flag:  0,
 				},
-			},
-			Columns: []*model.Column{
+			}, tableInfo),
+			Columns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 2,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "3",
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		},
 		{
-			StartTs:  1200,
-			CommitTs: resolvedTs,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			PreColumns: []*model.Column{
+			StartTs:   1200,
+			CommitTs:  resolvedTs,
+			TableInfo: tableInfo,
+			PreColumns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 100,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "200",
-					Flag:  0,
 				},
-			},
-			Columns: []*model.Column{
+			}, tableInfo),
+			Columns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: 200,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: "300",
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		},
 	}
 	for _, dml := range dmls {
@@ -338,7 +330,7 @@ func TestApplyBigTxn(t *testing.T) {
 			dbIndex++
 		}()
 		if dbIndex%2 == 0 {
-			testDB, err := pmysql.MockTestDB(true)
+			testDB, err := pmysql.MockTestDB()
 			require.Nil(t, err)
 			return testDB, nil
 		}
@@ -357,105 +349,104 @@ func TestApplyBigTxn(t *testing.T) {
 		mysqlDDL.GetDBConnImpl = getDDLDBConnBak
 	}()
 
+	tableInfo := model.BuildTableInfo("test", "t1", []*model.Column{
+		{
+			Name: "a",
+			Type: mysqlParser.TypeLong,
+			Flag: model.HandleKeyFlag | model.PrimaryKeyFlag,
+		}, {
+			Name: "b",
+			Type: mysqlParser.TypeString,
+			Flag: 0,
+		},
+	}, [][]int{{0}})
 	dmls := make([]*model.RowChangedEvent, 0)
 	// insert some rows
-	for i := 1; i <= 60; i++ {
+	for i := 1; i <= 100; i++ {
 		dml := &model.RowChangedEvent{
-			StartTs:  1100,
-			CommitTs: 1200,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			Columns: []*model.Column{
+			StartTs:   1100,
+			CommitTs:  1200,
+			TableInfo: tableInfo,
+			Columns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: i,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: fmt.Sprintf("%d", i+1),
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		}
 		dmls = append(dmls, dml)
 	}
 	// update
-	for i := 1; i <= 60; i++ {
+	for i := 1; i <= 100; i++ {
 		dml := &model.RowChangedEvent{
-			StartTs:  1200,
-			CommitTs: 1300,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			PreColumns: []*model.Column{
+			StartTs:   1200,
+			CommitTs:  1300,
+			TableInfo: tableInfo,
+			PreColumns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: i,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: fmt.Sprintf("%d", i+1),
-					Flag:  0,
 				},
-			},
-			Columns: []*model.Column{
+			}, tableInfo),
+			Columns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: i * 10,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: fmt.Sprintf("%d", i*10+1),
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		}
 		dmls = append(dmls, dml)
 	}
 	// delete and update
-	for i := 1; i <= 30; i++ {
+	for i := 1; i <= 50; i++ {
 		dml := &model.RowChangedEvent{
-			StartTs:  1300,
-			CommitTs: resolvedTs,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			PreColumns: []*model.Column{
+			StartTs:   1300,
+			CommitTs:  resolvedTs,
+			TableInfo: tableInfo,
+			PreColumns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: i * 10,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: fmt.Sprintf("%d", i*10+1),
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		}
 		dmls = append(dmls, dml)
 	}
-	for i := 31; i <= 60; i++ {
+	for i := 51; i <= 100; i++ {
 		dml := &model.RowChangedEvent{
-			StartTs:  1300,
-			CommitTs: resolvedTs,
-			Table:    &model.TableName{Schema: "test", Table: "t1"},
-			PreColumns: []*model.Column{
+			StartTs:   1300,
+			CommitTs:  resolvedTs,
+			TableInfo: tableInfo,
+			PreColumns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: i * 10,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: fmt.Sprintf("%d", i*10+1),
-					Flag:  0,
 				},
-			},
-			Columns: []*model.Column{
+			}, tableInfo),
+			Columns: model.Columns2ColumnDatas([]*model.Column{
 				{
 					Name:  "a",
 					Value: i * 100,
-					Flag:  model.HandleKeyFlag,
 				}, {
 					Name:  "b",
 					Value: fmt.Sprintf("%d", i*100+1),
-					Flag:  0,
 				},
-			},
+			}, tableInfo),
 		}
 		dmls = append(dmls, dml)
 	}
@@ -537,6 +528,10 @@ func getMockDB(t *testing.T) *sql.DB {
 		Number:  1305,
 		Message: "FUNCTION test.tidb_version does not exist",
 	})
+	mock.ExpectQuery("select tidb_version()").WillReturnError(&mysql.MySQLError{
+		Number:  1305,
+		Message: "FUNCTION test.tidb_version does not exist",
+	})
 
 	mock.ExpectBegin()
 	mock.ExpectExec("USE `test`;").WillReturnResult(sqlmock.NewResult(1, 1))
@@ -566,14 +561,14 @@ func getMockDB(t *testing.T) *sql.DB {
 
 	// First, apply row which commitTs equal to resolvedTs
 	mock.ExpectBegin()
-	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a`,`b`) IN ((?,?))").
-		WithArgs(10, "20").
+	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a` = ?)").
+		WithArgs(10).
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a`,`b`) IN ((?,?))").
-		WithArgs(1, "3").
+	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a` = ?)").
+		WithArgs(1).
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a`,`b`) IN ((?,?))").
-		WithArgs(100, "200").
+	mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a` = ?)").
+		WithArgs(100).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("REPLACE INTO `test`.`t1` (`a`,`b`) VALUES (?,?)").
 		WithArgs(2, "3").
@@ -612,6 +607,10 @@ func getMockDBForBigTxn(t *testing.T) *sql.DB {
 		Number:  1305,
 		Message: "FUNCTION test.tidb_version does not exist",
 	})
+	mock.ExpectQuery("select tidb_version()").WillReturnError(&mysql.MySQLError{
+		Number:  1305,
+		Message: "FUNCTION test.tidb_version does not exist",
+	})
 
 	mock.ExpectBegin()
 	mock.ExpectExec("USE `test`;").WillReturnResult(sqlmock.NewResult(1, 1))
@@ -619,7 +618,7 @@ func getMockDBForBigTxn(t *testing.T) *sql.DB {
 	mock.ExpectCommit()
 
 	mock.ExpectBegin()
-	for i := 1; i <= 60; i++ {
+	for i := 1; i <= 100; i++ {
 		mock.ExpectExec("REPLACE INTO `test`.`t1` (`a`,`b`) VALUES (?,?)").
 			WithArgs(i, fmt.Sprintf("%d", i+1)).
 			WillReturnResult(sqlmock.NewResult(1, 1))
@@ -627,12 +626,12 @@ func getMockDBForBigTxn(t *testing.T) *sql.DB {
 	mock.ExpectCommit()
 
 	mock.ExpectBegin()
-	for i := 1; i <= 60; i++ {
-		mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a`,`b`) IN ((?,?))").
-			WithArgs(i, fmt.Sprintf("%d", i+1)).
+	for i := 1; i <= 100; i++ {
+		mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a` = ?)").
+			WithArgs(i).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 	}
-	for i := 1; i <= 60; i++ {
+	for i := 1; i <= 100; i++ {
 		mock.ExpectExec("REPLACE INTO `test`.`t1` (`a`,`b`) VALUES (?,?)").
 			WithArgs(i*10, fmt.Sprintf("%d", i*10+1)).
 			WillReturnResult(sqlmock.NewResult(1, 1))
@@ -641,12 +640,12 @@ func getMockDBForBigTxn(t *testing.T) *sql.DB {
 
 	// First, apply row which commitTs equal to resolvedTs
 	mock.ExpectBegin()
-	for i := 1; i <= 60; i++ {
-		mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a`,`b`) IN ((?,?))").
-			WithArgs(i*10, fmt.Sprintf("%d", i*10+1)).
+	for i := 1; i <= 100; i++ {
+		mock.ExpectExec("DELETE FROM `test`.`t1` WHERE (`a` = ?)").
+			WithArgs(i * 10).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 	}
-	for i := 31; i <= 60; i++ {
+	for i := 51; i <= 100; i++ {
 		mock.ExpectExec("REPLACE INTO `test`.`t1` (`a`,`b`) VALUES (?,?)").
 			WithArgs(i*100, fmt.Sprintf("%d", i*100+1)).
 			WillReturnResult(sqlmock.NewResult(1, 1))

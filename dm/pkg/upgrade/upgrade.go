@@ -18,9 +18,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/pkg/util/dbutil"
 	"github.com/pingcap/tiflow/dm/common"
 	"github.com/pingcap/tiflow/dm/config"
+	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/cputil"
@@ -168,11 +169,11 @@ func upgradeToVer2(cli *clientv3.Client, uctx Context) error {
 	}
 
 	// tableName -> DBConfig
-	dbConfigs := map[string]config.DBConfig{}
+	dbConfigs := map[string]dbconfig.DBConfig{}
 	for task, m := range uctx.SubTaskConfigs {
 		for sourceID, subCfg := range m {
 			tableName := dbutil.TableName(subCfg.MetaSchema, cputil.SyncerCheckpoint(subCfg.Name))
-			subCfg2, err := subCfg.DecryptPassword()
+			subCfg2, err := subCfg.DecryptedClone()
 			if err != nil {
 				log.L().Error("subconfig error when upgrading", zap.String("task", task),
 					zap.String("source id", sourceID), zap.String("subtask config", subCfg.String()), zap.Error(err))
@@ -196,7 +197,7 @@ func upgradeToVer2(cli *clientv3.Client, uctx Context) error {
 	defer cancel()
 
 	for tableName, cfg := range dbConfigs {
-		targetDB, err := conn.DefaultDBProvider.Apply(&cfg)
+		targetDB, err := conn.GetDownstreamDB(&cfg)
 		if err != nil {
 			logger.Error("target DB error when upgrading", zap.String("table name", tableName))
 			return err

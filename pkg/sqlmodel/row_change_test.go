@@ -16,12 +16,13 @@ package sqlmodel
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/charset"
-	timodel "github.com/pingcap/tidb/parser/model"
-	timock "github.com/pingcap/tidb/util/mock"
+	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/charset"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	_ "github.com/pingcap/tidb/pkg/planner/core" // init expression.EvalSimpleAst related function
+	timock "github.com/pingcap/tidb/pkg/util/mock"
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
@@ -270,6 +271,34 @@ func (s *dpanicSuite) TestGenUpdate() {
 	s.Panics(func() {
 		change.GenSQL(DMLUpdate)
 	})
+}
+
+func (s *dpanicSuite) TestExpressionIndex() {
+	source := &cdcmodel.TableName{Schema: "db", Table: "tb1"}
+	sql := `CREATE TABLE tb1 (
+    	id INT PRIMARY KEY,
+    	j JSON,
+    	UNIQUE KEY j_index ((cast(json_extract(j,'$[*]') as signed array)), id)
+)`
+	ti := mockTableInfo(s.T(), sql)
+	change := NewRowChange(source, nil, nil, []interface{}{1, `[1,2,3]`}, ti, nil, nil)
+	sql, args := change.GenSQL(DMLInsert)
+	s.Equal("INSERT INTO `db`.`tb1` (`id`,`j`) VALUES (?,?)", sql)
+	s.Equal([]interface{}{1, `[1,2,3]`}, args)
+	require.Equal(s.T(), 2, change.ColumnCount())
+	keys := change.CausalityKeys()
+	// TODO: need change it after future fix
+	require.Equal(s.T(), []string{"1.id.db.tb1"}, keys)
+
+	change2 := NewRowChange(source, nil, []interface{}{1, `[1,2,3]`}, []interface{}{1, `[1,2,3,4]`}, ti, nil, nil)
+	sql, args = change2.GenSQL(DMLUpdate)
+	s.Equal("UPDATE `db`.`tb1` SET `id` = ?, `j` = ? WHERE `id` = ? LIMIT 1", sql)
+	s.Equal([]interface{}{1, `[1,2,3,4]`, 1}, args)
+
+	change2.Reduce(change)
+	sql, args = change2.GenSQL(DMLInsert)
+	s.Equal("INSERT INTO `db`.`tb1` (`id`,`j`) VALUES (?,?)", sql)
+	s.Equal([]interface{}{1, `[1,2,3,4]`}, args)
 }
 
 func TestGenInsert(t *testing.T) {

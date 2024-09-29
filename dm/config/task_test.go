@@ -14,6 +14,7 @@
 package config
 
 import (
+	"crypto/rand"
 	"os"
 	"path"
 	"reflect"
@@ -22,10 +23,14 @@ import (
 	"testing"
 
 	"github.com/coreos/go-semver/semver"
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb/util/filter"
-	router "github.com/pingcap/tidb/util/table-router"
+	"github.com/pingcap/tidb/pkg/util/filter"
+	router "github.com/pingcap/tidb/pkg/util/table-router"
+	"github.com/pingcap/tiflow/dm/config/dbconfig"
+	"github.com/pingcap/tiflow/dm/config/security"
+	"github.com/pingcap/tiflow/dm/pkg/encrypt"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	"github.com/pingcap/tiflow/dm/pkg/utils"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,22 +66,6 @@ filters:
     schema-pattern: "test_*"
     events: ["all dml"]
     action: Do
-
-column-mappings:
-  column-mapping-rule-1:
-    schema-pattern: "test_*"
-    table-pattern: "t_*"
-    expression: "partition id"
-    source-column: "id"
-    target-column: "id"
-    arguments: ["1", "test", "t", "_"]
-  column-mapping-rule-2:
-    schema-pattern: "test_*"
-    table-pattern: "t_*"
-    expression: "partition id"
-    source-column: "id"
-    target-column: "id"
-    arguments: ["2", "test", "t", "_"]
 
 mydumpers:
   global1:
@@ -120,7 +109,6 @@ mysql-instances:
   - source-id: "mysql-replica-01"
     route-rules: ["route-rule-2"]
     filter-rules: ["filter-rule-2"]
-    column-mapping-rules: ["column-mapping-rule-2"]
     mydumper-config-name: "global1"
     loader-config-name: "global1"
     syncer-config-name: "global1"
@@ -129,7 +117,6 @@ mysql-instances:
   - source-id: "mysql-replica-02"
     route-rules: ["route-rule-1"]
     filter-rules: ["filter-rule-1"]
-    column-mapping-rules: ["column-mapping-rule-1"]
     mydumper-config-name: "global2"
     loader-config-name: "global2"
     syncer-config-name: "global2"
@@ -139,7 +126,7 @@ func TestUnusedTaskConfig(t *testing.T) {
 	t.Parallel()
 
 	taskConfig := NewTaskConfig()
-	err := taskConfig.Decode(correctTaskConfig)
+	err := taskConfig.FromYaml(correctTaskConfig)
 	require.NoError(t, err)
 	errorTaskConfig := `---
 name: test
@@ -174,22 +161,6 @@ filters:
     schema-pattern: "test_*"
     events: ["all dml"]
     action: Do
-
-column-mappings:
-  column-mapping-rule-1:
-    schema-pattern: "test_*"
-    table-pattern: "t_*"
-    expression: "partition id"
-    source-column: "id"
-    target-column: "id"
-    arguments: ["1", "test", "t", "_"]
-  column-mapping-rule-2:
-    schema-pattern: "test_*"
-    table-pattern: "t_*"
-    expression: "partition id"
-    source-column: "id"
-    target-column: "id"
-    arguments: ["2", "test", "t", "_"]
 
 mydumpers:
   global1:
@@ -233,7 +204,6 @@ mysql-instances:
   - source-id: "mysql-replica-01"
     route-rules: ["route-rule-1"]
     filter-rules: ["filter-rule-1"]
-    column-mapping-rules: ["column-mapping-rule-1"]
     mydumper-config-name: "global1"
     loader-config-name: "global1"
     syncer-config-name: "global1"
@@ -241,14 +211,13 @@ mysql-instances:
   - source-id: "mysql-replica-02"
     route-rules: ["route-rule-1"]
     filter-rules: ["filter-rule-1"]
-    column-mapping-rules: ["column-mapping-rule-1"]
     mydumper-config-name: "global2"
     loader-config-name: "global2"
     syncer-config-name: "global2"
 `
 	taskConfig = NewTaskConfig()
-	err = taskConfig.Decode(errorTaskConfig)
-	require.ErrorContains(t, err, "The configurations as following [column-mapping-rule-2 expr-1 filter-rule-2 route-rule-2] are set in global configuration")
+	err = taskConfig.FromYaml(errorTaskConfig)
+	require.ErrorContains(t, err, "The configurations as following [expr-1 filter-rule-2 route-rule-2] are set in global configuration")
 }
 
 func TestName(t *testing.T) {
@@ -274,7 +243,6 @@ mysql-instances:
     server-id: 101
     block-allow-list:  "instance"
     route-rules: ["sharding-route-rules-table", "sharding-route-rules-schema"]
-    column-mapping-rules: ["instance-1"]
     mydumper-config-name: "global"
     loader-config-name: "global"
     syncer-config-name: "global"
@@ -299,17 +267,16 @@ mysql-instances:
   - source-id: "mysql-replica-01"
     block-allow-list:  "instance"
     route-rules: ["sharding-route-rules-table", "sharding-route-rules-schema"]
-    column-mapping-rules: ["instance-1"]
     mydumper-config-name: "global"
     loader-config-name: "global"
     syncer-config-name: "global"
 `
 	taskConfig := NewTaskConfig()
-	err := taskConfig.Decode(errorTaskConfig1)
+	err := taskConfig.FromYaml(errorTaskConfig1)
 	// field server-id is not a member of TaskConfig
 	require.ErrorContains(t, err, "line 18: field server-id not found in type config.MySQLInstance")
 
-	err = taskConfig.Decode(errorTaskConfig2)
+	err = taskConfig.FromYaml(errorTaskConfig2)
 	// field name duplicate
 	require.ErrorContains(t, err, "line 3: field name already set in type config.TaskConfig")
 
@@ -513,8 +480,8 @@ func TestTaskBlockAllowList(t *testing.T) {
 
 	cfg := &TaskConfig{
 		Name:           "test",
-		TaskMode:       "full",
-		TargetDB:       &DBConfig{},
+		TaskMode:       ModeFull,
+		TargetDB:       &dbconfig.DBConfig{},
 		MySQLInstances: []*MySQLInstance{{SourceID: "source-1"}},
 		BWList:         map[string]*filter.Rules{"source-1": filterRules1},
 	}
@@ -564,13 +531,13 @@ func TestGenAndFromSubTaskConfigs(t *testing.T) {
 			"sql_mode":  " NO_AUTO_VALUE_ON_ZERO,ANSI_QUOTES",
 			"time_zone": "+00:00",
 		}
-		security = Security{
+		security = security.Security{
 			SSLCA:         "/path/to/ca",
 			SSLCert:       "/path/to/cert",
 			SSLKey:        "/path/to/key",
 			CertAllowedCN: []string{"allowed-cn"},
 		}
-		rawDBCfg = RawDBConfig{
+		rawDBCfg = dbconfig.RawDBConfig{
 			MaxIdleConns: 333,
 			ReadTimeout:  "2m",
 			WriteTimeout: "1m",
@@ -628,7 +595,7 @@ func TestGenAndFromSubTaskConfigs(t *testing.T) {
 			DeleteValueExpr: "state = 1",
 		}
 		validatorCfg = ValidatorConfig{Mode: ValidationNone}
-		source1DBCfg = DBConfig{
+		source1DBCfg = dbconfig.DBConfig{
 			Host:             "127.0.0.1",
 			Port:             3306,
 			User:             "user_from_1",
@@ -638,7 +605,7 @@ func TestGenAndFromSubTaskConfigs(t *testing.T) {
 			Security:         &security,
 			RawDBCfg:         &rawDBCfg,
 		}
-		source2DBCfg = DBConfig{
+		source2DBCfg = dbconfig.DBConfig{
 			Host:             "127.0.0.1",
 			Port:             3307,
 			User:             "user_from_2",
@@ -671,7 +638,7 @@ func TestGenAndFromSubTaskConfigs(t *testing.T) {
 				BinLogGTID: "1-1-12,4-4-4",
 			},
 			From: source1DBCfg,
-			To: DBConfig{
+			To: dbconfig.DBConfig{
 				Host:             "127.0.0.1",
 				Port:             4000,
 				User:             "user_to",
@@ -696,10 +663,16 @@ func TestGenAndFromSubTaskConfigs(t *testing.T) {
 			},
 			LoaderConfig: LoaderConfig{
 				PoolSize:            32,
-				Dir:                 "./dumpped_data",
+				Dir:                 "./dumped_data",
+				SortingDirPhysical:  "./dumped_data",
 				ImportMode:          LoadModePhysical,
 				OnDuplicateLogical:  OnDuplicateReplace,
 				OnDuplicatePhysical: OnDuplicateNone,
+				ChecksumPhysical:    OpLevelRequired,
+				Analyze:             OpLevelOptional,
+				PDAddr:              "http://test:2379",
+				RangeConcurrency:    32,
+				CompressKVPairs:     "gzip",
 			},
 			SyncerConfig: SyncerConfig{
 				WorkerCount:             32,
@@ -833,7 +806,7 @@ func TestGenAndFromSubTaskConfigs(t *testing.T) {
 	require.Equal(t, wordCount(cfg.String()), wordCount(cfg2.String())) // since rules are unordered, so use wordCount to compare
 
 	require.NoError(t, cfg.adjust())
-	stCfgs, err := TaskConfigToSubTaskConfigs(cfg, map[string]DBConfig{source1: source1DBCfg, source2: source2DBCfg})
+	stCfgs, err := TaskConfigToSubTaskConfigs(cfg, map[string]dbconfig.DBConfig{source1: source1DBCfg, source2: source2DBCfg})
 	require.NoError(t, err)
 	// revert ./dumpped_data.from-sub-tasks
 	stCfgs[0].LoaderConfig.Dir = stCfg1.LoaderConfig.Dir
@@ -858,6 +831,10 @@ func TestGenAndFromSubTaskConfigs(t *testing.T) {
 	stCfg2.EnableHeartbeat = false
 	require.Equal(t, stCfg1.String(), stCfgs[0].String())
 	require.Equal(t, stCfg2.String(), stCfgs[1].String())
+	// adjust loader config
+	stCfg1.Mode = "full"
+	require.NoError(t, stCfg1.Adjust(false))
+	require.Equal(t, stCfgs[0].SortingDirPhysical, stCfg1.SortingDirPhysical)
 }
 
 func TestMetaVerify(t *testing.T) {
@@ -935,28 +912,28 @@ func TestAdjustTargetDBConfig(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		dbConfig DBConfig
-		result   DBConfig
+		dbConfig dbconfig.DBConfig
+		result   dbconfig.DBConfig
 		version  *semver.Version
 	}{
 		{
-			DBConfig{},
-			DBConfig{Session: map[string]string{}},
+			dbconfig.DBConfig{},
+			dbconfig.DBConfig{Session: map[string]string{}},
 			semver.New("0.0.0"),
 		},
 		{
-			DBConfig{Session: map[string]string{"SQL_MODE": "ANSI_QUOTES"}},
-			DBConfig{Session: map[string]string{"sql_mode": "ANSI_QUOTES"}},
+			dbconfig.DBConfig{Session: map[string]string{"SQL_MODE": "ANSI_QUOTES"}},
+			dbconfig.DBConfig{Session: map[string]string{"sql_mode": "ANSI_QUOTES"}},
 			semver.New("2.0.7"),
 		},
 		{
-			DBConfig{},
-			DBConfig{Session: map[string]string{tidbTxnMode: tidbTxnOptimistic}},
+			dbconfig.DBConfig{},
+			dbconfig.DBConfig{Session: map[string]string{tidbTxnMode: tidbTxnOptimistic}},
 			semver.New("3.0.1"),
 		},
 		{
-			DBConfig{Session: map[string]string{"SQL_MODE": "", tidbTxnMode: "pessimistic"}},
-			DBConfig{Session: map[string]string{"sql_mode": "", tidbTxnMode: "pessimistic"}},
+			dbconfig.DBConfig{Session: map[string]string{"SQL_MODE": "", tidbTxnMode: "pessimistic"}},
+			dbconfig.DBConfig{Session: map[string]string{"sql_mode": "", tidbTxnMode: "pessimistic"}},
 			semver.New("4.0.0-beta.2"),
 		},
 	}
@@ -972,8 +949,8 @@ func TestDefaultConfig(t *testing.T) {
 
 	cfg := NewTaskConfig()
 	cfg.Name = "test"
-	cfg.TaskMode = "all"
-	cfg.TargetDB = &DBConfig{}
+	cfg.TaskMode = ModeAll
+	cfg.TargetDB = &dbconfig.DBConfig{}
 	cfg.MySQLInstances = append(cfg.MySQLInstances, &MySQLInstance{SourceID: "source1"})
 	require.NoError(t, cfg.adjust())
 	require.Equal(t, DefaultMydumperConfig(), *cfg.MySQLInstances[0].Mydumper)
@@ -988,8 +965,8 @@ func TestExclusiveAndWrongExprFilterFields(t *testing.T) {
 
 	cfg := NewTaskConfig()
 	cfg.Name = "test"
-	cfg.TaskMode = "all"
-	cfg.TargetDB = &DBConfig{}
+	cfg.TaskMode = ModeAll
+	cfg.TargetDB = &dbconfig.DBConfig{}
 	cfg.MySQLInstances = append(cfg.MySQLInstances, &MySQLInstance{SourceID: "source1"})
 	require.NoError(t, cfg.adjust())
 
@@ -1054,7 +1031,7 @@ func TestTaskConfigForDowngrade(t *testing.T) {
 	t.Parallel()
 
 	cfg := NewTaskConfig()
-	err := cfg.Decode(correctTaskConfig)
+	err := cfg.FromYaml(correctTaskConfig)
 	require.NoError(t, err)
 
 	cfgForDowngrade := NewTaskConfigForDowngrade(cfg)
@@ -1156,6 +1133,8 @@ func TestLoadConfigAdjust(t *testing.T) {
 		OnDuplicate:         "",
 		OnDuplicateLogical:  "replace",
 		OnDuplicatePhysical: "none",
+		ChecksumPhysical:    "required",
+		Analyze:             "optional",
 	}, cfg)
 
 	// test deprecated OnDuplicate will write to OnDuplicateLogical
@@ -1168,4 +1147,42 @@ func TestLoadConfigAdjust(t *testing.T) {
 	cfg.OnDuplicatePhysical = "wrong"
 	err := cfg.adjust()
 	require.True(t, terror.ErrConfigInvalidPhysicalDuplicateResolution.Equal(err))
+}
+
+func TestTaskYamlForDowngrade(t *testing.T) {
+	originCfg := TaskConfig{
+		Name:     "test",
+		TaskMode: ModeFull,
+		MySQLInstances: []*MySQLInstance{
+			{
+				SourceID: "mysql-3306",
+			},
+		},
+		TargetDB: &dbconfig.DBConfig{
+			Password: "123456",
+		},
+	}
+	// when secret key is empty, the password should be kept
+	content, err := originCfg.YamlForDowngrade()
+	require.NoError(t, err)
+	newCfg := &TaskConfig{}
+	require.NoError(t, newCfg.FromYaml(content))
+	require.Equal(t, originCfg.TargetDB.Password, newCfg.TargetDB.Password)
+
+	// when secret key is not empty, the password should be encrypted
+	key := make([]byte, 32)
+	_, err = rand.Read(key)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		encrypt.InitCipher(nil)
+	})
+	encrypt.InitCipher(key)
+	content, err = originCfg.YamlForDowngrade()
+	require.NoError(t, err)
+	newCfg = &TaskConfig{}
+	require.NoError(t, newCfg.FromYaml(content))
+	require.NotEqual(t, originCfg.TargetDB.Password, newCfg.TargetDB.Password)
+	decryptedPass, err := utils.Decrypt(newCfg.TargetDB.Password)
+	require.NoError(t, err)
+	require.Equal(t, originCfg.TargetDB.Password, decryptedPass)
 }

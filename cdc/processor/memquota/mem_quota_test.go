@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,8 +53,10 @@ func TestMemQuotaBlockAcquire(t *testing.T) {
 	defer m.Close()
 	err := m.BlockAcquire(100)
 	require.NoError(t, err)
-	m.Record(1, model.NewResolvedTs(1), 50)
-	m.Record(1, model.NewResolvedTs(2), 50)
+
+	span := spanz.TableIDToComparableSpan(1)
+	m.Record(span, model.NewResolvedTs(1), 50)
+	m.Record(span, model.NewResolvedTs(2), 50)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -68,8 +71,8 @@ func TestMemQuotaBlockAcquire(t *testing.T) {
 		err := m.BlockAcquire(50)
 		require.NoError(t, err)
 	}()
-	m.Release(1, model.NewResolvedTs(1))
-	m.Release(1, model.NewResolvedTs(2))
+	m.Release(span, model.NewResolvedTs(1))
+	m.Release(span, model.NewResolvedTs(2))
 	wg.Wait()
 }
 
@@ -80,7 +83,8 @@ func TestMemQuotaClose(t *testing.T) {
 
 	err := m.BlockAcquire(100)
 	require.NoError(t, err)
-	m.Record(1, model.NewResolvedTs(2), 100)
+	span := spanz.TableIDToComparableSpan(1)
+	m.Record(span, model.NewResolvedTs(2), 100)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -112,7 +116,7 @@ func TestMemQuotaClose(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		m.Release(1, model.NewResolvedTs(2))
+		m.Release(span, model.NewResolvedTs(2))
 	}()
 	m.Close()
 	wg.Wait()
@@ -158,27 +162,28 @@ func TestMemQuotaRecordAndRelease(t *testing.T) {
 
 	m := NewMemQuota(model.DefaultChangeFeedID("1"), 300, "")
 	defer m.Close()
-	m.AddTable(1)
+	span := spanz.TableIDToComparableSpan(1)
+	m.AddTable(span)
 
 	require.True(t, m.TryAcquire(100))
-	m.Record(1, model.NewResolvedTs(100), 100)
+	m.Record(span, model.NewResolvedTs(100), 100)
 	require.True(t, m.TryAcquire(100))
-	m.Record(1, model.NewResolvedTs(200), 100)
+	m.Record(span, model.NewResolvedTs(200), 100)
 	require.True(t, m.TryAcquire(100))
-	m.Record(1, model.NewResolvedTs(300), 100)
+	m.Record(span, model.NewResolvedTs(300), 100)
 	require.False(t, m.TryAcquire(1))
 	require.False(t, m.hasAvailable(1))
 	// release the memory of resolvedTs 100
-	m.Release(1, model.NewResolvedTs(101))
+	m.Release(span, model.NewResolvedTs(101))
 	require.True(t, m.hasAvailable(100))
 	// release the memory of resolvedTs 200
-	m.Release(1, model.NewResolvedTs(201))
+	m.Release(span, model.NewResolvedTs(201))
 	require.True(t, m.hasAvailable(200))
 	// release the memory of resolvedTs 300
-	m.Release(1, model.NewResolvedTs(301))
+	m.Release(span, model.NewResolvedTs(301))
 	require.True(t, m.hasAvailable(300))
 	// release the memory of resolvedTs 300 again
-	m.Release(1, model.NewResolvedTs(301))
+	m.Release(span, model.NewResolvedTs(301))
 	require.True(t, m.hasAvailable(300))
 }
 
@@ -187,7 +192,8 @@ func TestMemQuotaRecordAndReleaseWithBatchID(t *testing.T) {
 
 	m := NewMemQuota(model.DefaultChangeFeedID("1"), 300, "")
 	defer m.Close()
-	m.AddTable(1)
+	span := spanz.TableIDToComparableSpan(1)
+	m.AddTable(span)
 
 	require.True(t, m.TryAcquire(100))
 	resolvedTs := model.ResolvedTs{
@@ -195,21 +201,21 @@ func TestMemQuotaRecordAndReleaseWithBatchID(t *testing.T) {
 		Ts:      100,
 		BatchID: 1,
 	}
-	m.Record(1, resolvedTs, 100)
+	m.Record(span, resolvedTs, 100)
 	resolvedTs = model.ResolvedTs{
 		Mode:    model.BatchResolvedMode,
 		Ts:      100,
 		BatchID: 2,
 	}
 	require.True(t, m.TryAcquire(100))
-	m.Record(1, resolvedTs, 100)
+	m.Record(span, resolvedTs, 100)
 	resolvedTs = model.ResolvedTs{
 		Mode:    model.BatchResolvedMode,
 		Ts:      100,
 		BatchID: 3,
 	}
 	require.True(t, m.TryAcquire(100))
-	m.Record(1, resolvedTs, 100)
+	m.Record(span, resolvedTs, 100)
 	require.False(t, m.TryAcquire(1))
 	require.False(t, m.hasAvailable(1))
 
@@ -219,10 +225,10 @@ func TestMemQuotaRecordAndReleaseWithBatchID(t *testing.T) {
 		Ts:      100,
 		BatchID: 2,
 	}
-	m.Release(1, resolvedTs)
+	m.Release(span, resolvedTs)
 	require.True(t, m.hasAvailable(200))
 	// release the memory of resolvedTs 101
-	m.Release(1, model.NewResolvedTs(101))
+	m.Release(span, model.NewResolvedTs(101))
 	require.True(t, m.hasAvailable(300))
 }
 
@@ -231,22 +237,23 @@ func TestMemQuotaRecordAndClean(t *testing.T) {
 
 	m := NewMemQuota(model.DefaultChangeFeedID("1"), 300, "")
 	defer m.Close()
-	m.AddTable(1)
+	span := spanz.TableIDToComparableSpan(1)
+	m.AddTable(span)
 
 	require.True(t, m.TryAcquire(100))
-	m.Record(1, model.NewResolvedTs(100), 100)
+	m.Record(span, model.NewResolvedTs(100), 100)
 	require.True(t, m.TryAcquire(100))
-	m.Record(1, model.NewResolvedTs(200), 100)
+	m.Record(span, model.NewResolvedTs(200), 100)
 	require.True(t, m.TryAcquire(100))
-	m.Record(1, model.NewResolvedTs(300), 100)
+	m.Record(span, model.NewResolvedTs(300), 100)
 	require.False(t, m.TryAcquire(1))
 	require.False(t, m.hasAvailable(1))
 
 	// clean the all memory.
-	cleanedBytes := m.ClearTable(1)
+	cleanedBytes := m.ClearTable(span)
 	require.Equal(t, uint64(300), cleanedBytes)
 	require.True(t, m.hasAvailable(100))
 
-	cleanedBytes = m.RemoveTable(1)
+	cleanedBytes = m.RemoveTable(span)
 	require.Equal(t, uint64(0), cleanedBytes)
 }

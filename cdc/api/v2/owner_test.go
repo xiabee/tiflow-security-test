@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestResignOwner(t *testing.T) {
+func TestResignController(t *testing.T) {
 	t.Parallel()
 	// case 1: get owner successfully.
 	{

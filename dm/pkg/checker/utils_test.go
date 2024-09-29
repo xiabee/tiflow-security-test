@@ -16,8 +16,10 @@ package checker
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,7 +34,8 @@ func TestVersionComparison(t *testing.T) {
 		{"5.6.0", true, false, true, true},
 		{"5.7.0", true, true, true, true},
 		{"5.8.0", true, true, true, true}, // although it does not exist
-		{"8.0.1", true, true, false, false},
+		{"8.0.1", true, true, true, true},
+		{"8.1.0", true, true, false, true},
 		{"255.255.255", true, true, false, false}, // max version
 	}
 
@@ -122,4 +125,13 @@ func TestGetColumnsAndIgnorable(t *testing.T) {
 		columns := getColumnsAndIgnorable(stmt.(*ast.CreateTableStmt))
 		require.Equal(t, c.expected, columns)
 	}
+}
+
+func TestMarkCheckError(t *testing.T) {
+	res := &Result{}
+	markCheckError(res, terror.ErrNoMasterStatus.Generate())
+	require.Equal(t, terror.ErrNoMasterStatus.Workaround(), res.Instruction)
+	res = &Result{}
+	markCheckError(res, errors.New("other err"))
+	require.Zero(t, len(res.Instruction))
 }

@@ -183,7 +183,7 @@ func (f *FilePathGenerator) CheckOrWriteSchema(
 	}
 
 	var def TableDefinition
-	def.FromTableInfo(tableInfo, table.TableInfoVersion)
+	def.FromTableInfo(tableInfo, table.TableInfoVersion, f.config.OutputColumnID)
 	if !def.IsTableSchema() {
 		// only check schema for table
 		log.Error("invalid table schema",
@@ -276,6 +276,7 @@ func (f *FilePathGenerator) GenerateDateStr() string {
 	var dateStr string
 
 	currTime := f.pdClock.CurrentTime()
+	// Note: `dateStr` is formatted using local TZ.
 	switch f.config.DateSeparator {
 	case config.DateSeparatorYear.String():
 		dateStr = currTime.Format("2006")
@@ -385,7 +386,7 @@ func (f *FilePathGenerator) getNextFileIdxFromIndexFile(
 	}
 
 	if lastFileExists {
-		fileReader, err := f.storage.Open(ctx, lastFilePath)
+		fileReader, err := f.storage.Open(ctx, lastFilePath, nil)
 		if err != nil {
 			return 0, err
 		}
@@ -448,6 +449,7 @@ func RemoveExpiredFiles(
 
 	ttl := time.Duration(cfg.FileExpirationDays) * time.Hour * 24
 	currTime := oracle.GetTimeFromTS(checkpointTs).Add(-ttl)
+	// Note: `expiredDate` is formatted using local TZ.
 	expiredDate := currTime.Format("2006-01-02")
 
 	cnt := uint64(0)

@@ -39,7 +39,7 @@ func TestListCaptures(t *testing.T) {
 		cp.EXPECT().IsReady().Return(true).AnyTimes()
 		cp.EXPECT().IsOwner().Return(true).AnyTimes()
 		statusProvider := mock_owner.NewMockStatusProvider(ctrl)
-		cp.EXPECT().StatusProvider().Return(statusProvider)
+		cp.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
 		statusProvider.EXPECT().GetCaptures(gomock.Any()).Return(nil, errors.New("fake"))
 
 		apiV2 := NewOpenAPIV2ForTest(cp, APIV2HelpersImpl{})

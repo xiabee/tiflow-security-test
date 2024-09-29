@@ -15,7 +15,7 @@ package redo
 
 import (
 	"net/http"
-	_ "net/http/pprof" //nolint:gosec
+	_ "net/http/pprof" // init pprof
 	"net/url"
 	"runtime/debug"
 	"time"

@@ -26,23 +26,23 @@ import (
 // to adapt the current Processor implementation to it.
 // TODO find a way to make the semantics easier to understand.
 type TableExecutor interface {
-	// AddTable add a new table with `Checkpoint.CheckpointTs`
+	// AddTableSpan add a new table span with `Checkpoint.CheckpointTs`
 	// if `isPrepare` is true, the 1st phase of the 2 phase scheduling protocol.
 	// if `isPrepare` is false, the 2nd phase.
-	AddTable(
-		ctx context.Context, tableID model.TableID, checkpoint tablepb.Checkpoint, isPrepare bool,
+	AddTableSpan(
+		ctx context.Context, span tablepb.Span, checkpoint tablepb.Checkpoint, isPrepare bool,
 	) (done bool, err error)
 
-	// IsAddTableFinished make sure the requested table is in the proper status
-	IsAddTableFinished(tableID model.TableID, isPrepare bool) (done bool)
+	// IsAddTableSpanFinished make sure the requested table span is in the proper status
+	IsAddTableSpanFinished(span tablepb.Span, isPrepare bool) (done bool)
 
-	// RemoveTable remove the table, return true if the table is already removed
-	RemoveTable(tableID model.TableID) (done bool)
-	// IsRemoveTableFinished convince the table is fully stopped.
+	// RemoveTableSpan remove the table, return true if the table is already removed
+	RemoveTableSpan(span tablepb.Span) (done bool)
+	// IsRemoveTableSpanFinished convince the table is fully stopped.
 	// return false if table is not stopped
 	// return true and corresponding checkpoint otherwise.
-	IsRemoveTableFinished(tableID model.TableID) (model.Ts, bool)
+	IsRemoveTableSpanFinished(span tablepb.Span) (model.Ts, bool)
 
-	// GetTableStatus return the checkpoint and resolved ts for the given table.
-	GetTableStatus(tableID model.TableID, collectStat bool) tablepb.TableStatus
+	// GetTableSpanStatus return the checkpoint and resolved ts for the given table span.
+	GetTableSpanStatus(span tablepb.Span, collectStat bool) tablepb.TableStatus
 }

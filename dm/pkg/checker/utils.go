@@ -22,11 +22,12 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb-tools/pkg/utils"
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/format"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/format"
 	"github.com/pingcap/tiflow/dm/pkg/log"
+	"github.com/pingcap/tiflow/dm/pkg/terror"
+	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"go.uber.org/zap"
 )
 
@@ -131,14 +132,19 @@ func IsTiDBFromVersion(version string) bool {
 func markCheckError(result *Result, err error) {
 	if err != nil {
 		state := StateFailure
-		if utils.OriginError(err) == context.Canceled {
+		if cerrors.OriginError(err) == context.Canceled {
 			state = StateWarning
 		}
 		// `StateWarning` can't cover `StateFailure`.
 		if result.State != StateFailure {
 			result.State = state
 		}
-		result.Errors = append(result.Errors, &Error{Severity: state, ShortErr: err.Error()})
+		if err2, ok := err.(*terror.Error); ok {
+			result.Errors = append(result.Errors, &Error{Severity: state, ShortErr: err2.ErrorWithoutWorkaround()})
+			result.Instruction = err2.Workaround()
+		} else {
+			result.Errors = append(result.Errors, &Error{Severity: state, ShortErr: err.Error()})
+		}
 	}
 }
 

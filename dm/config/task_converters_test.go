@@ -17,11 +17,12 @@ import (
 	"testing"
 
 	"github.com/pingcap/check"
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb/util/filter"
+	"github.com/pingcap/tidb/pkg/util/filter"
+	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/openapi"
 	"github.com/pingcap/tiflow/dm/openapi/fixtures"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,12 +54,12 @@ func (t *testConfig) TestOpenAPITaskToSubTaskConfigs(c *check.C) {
 func testNoShardTaskToSubTaskConfigs(c *check.C) {
 	task, err := fixtures.GenNoShardOpenAPITaskForTest()
 	c.Assert(err, check.IsNil)
-	sourceCfg1, err := ParseYamlAndVerify(SampleSourceConfig)
+	sourceCfg1, err := SourceCfgFromYamlAndVerify(SampleSourceConfig)
 	c.Assert(err, check.IsNil)
 	source1Name := task.SourceConfig.SourceConf[0].SourceName
 	sourceCfg1.SourceID = task.SourceConfig.SourceConf[0].SourceName
 	sourceCfgMap := map[string]*SourceConfig{source1Name: sourceCfg1}
-	toDBCfg := &DBConfig{
+	toDBCfg := &dbconfig.DBConfig{
 		Host:     task.TargetConfig.Host,
 		Port:     task.TargetConfig.Port,
 		User:     task.TargetConfig.User,
@@ -121,16 +122,16 @@ func testNoShardTaskToSubTaskConfigs(c *check.C) {
 func testShardAndFilterTaskToSubTaskConfigs(c *check.C) {
 	task, err := fixtures.GenShardAndFilterOpenAPITaskForTest()
 	c.Assert(err, check.IsNil)
-	sourceCfg1, err := ParseYamlAndVerify(SampleSourceConfig)
+	sourceCfg1, err := SourceCfgFromYamlAndVerify(SampleSourceConfig)
 	c.Assert(err, check.IsNil)
 	source1Name := task.SourceConfig.SourceConf[0].SourceName
 	sourceCfg1.SourceID = source1Name
-	sourceCfg2, err := ParseYamlAndVerify(SampleSourceConfig)
+	sourceCfg2, err := SourceCfgFromYamlAndVerify(SampleSourceConfig)
 	c.Assert(err, check.IsNil)
 	source2Name := task.SourceConfig.SourceConf[1].SourceName
 	sourceCfg2.SourceID = source2Name
 
-	toDBCfg := &DBConfig{
+	toDBCfg := &dbconfig.DBConfig{
 		Host:     task.TargetConfig.Host,
 		Port:     task.TargetConfig.Port,
 		User:     task.TargetConfig.User,
@@ -265,12 +266,12 @@ func (t *testConfig) TestSubTaskConfigsToOpenAPITask(c *check.C) {
 func testNoShardSubTaskConfigsToOpenAPITask(c *check.C) {
 	task, err := fixtures.GenNoShardOpenAPITaskForTest()
 	c.Assert(err, check.IsNil)
-	sourceCfg1, err := ParseYamlAndVerify(SampleSourceConfig)
+	sourceCfg1, err := SourceCfgFromYamlAndVerify(SampleSourceConfig)
 	c.Assert(err, check.IsNil)
 	source1Name := task.SourceConfig.SourceConf[0].SourceName
 	sourceCfg1.SourceID = task.SourceConfig.SourceConf[0].SourceName
 	sourceCfgMap := map[string]*SourceConfig{source1Name: sourceCfg1}
-	toDBCfg := &DBConfig{
+	toDBCfg := &dbconfig.DBConfig{
 		Host:     task.TargetConfig.Host,
 		Port:     task.TargetConfig.Port,
 		User:     task.TargetConfig.User,
@@ -294,16 +295,16 @@ func testNoShardSubTaskConfigsToOpenAPITask(c *check.C) {
 func testShardAndFilterSubTaskConfigsToOpenAPITask(c *check.C) {
 	task, err := fixtures.GenShardAndFilterOpenAPITaskForTest()
 	c.Assert(err, check.IsNil)
-	sourceCfg1, err := ParseYamlAndVerify(SampleSourceConfig)
+	sourceCfg1, err := SourceCfgFromYamlAndVerify(SampleSourceConfig)
 	c.Assert(err, check.IsNil)
 	source1Name := task.SourceConfig.SourceConf[0].SourceName
 	sourceCfg1.SourceID = source1Name
-	sourceCfg2, err := ParseYamlAndVerify(SampleSourceConfig)
+	sourceCfg2, err := SourceCfgFromYamlAndVerify(SampleSourceConfig)
 	c.Assert(err, check.IsNil)
 	source2Name := task.SourceConfig.SourceConf[1].SourceName
 	sourceCfg2.SourceID = source2Name
 
-	toDBCfg := &DBConfig{
+	toDBCfg := &dbconfig.DBConfig{
 		Host:     task.TargetConfig.Host,
 		Port:     task.TargetConfig.Port,
 		User:     task.TargetConfig.User,
@@ -351,12 +352,12 @@ func TestConvertWithIgnoreCheckItems(t *testing.T) {
 	require.NoError(t, err)
 	ignoreCheckingItems := []string{DumpPrivilegeChecking, VersionChecking}
 	task.IgnoreCheckingItems = &ignoreCheckingItems
-	sourceCfg1, err := ParseYamlAndVerify(SampleSourceConfig)
+	sourceCfg1, err := SourceCfgFromYamlAndVerify(SampleSourceConfig)
 	require.NoError(t, err)
 	source1Name := task.SourceConfig.SourceConf[0].SourceName
 	sourceCfg1.SourceID = task.SourceConfig.SourceConf[0].SourceName
 	sourceCfgMap := map[string]*SourceConfig{source1Name: sourceCfg1}
-	toDBCfg := &DBConfig{
+	toDBCfg := &dbconfig.DBConfig{
 		Host:     task.TargetConfig.Host,
 		Port:     task.TargetConfig.Port,
 		User:     task.TargetConfig.User,
@@ -383,7 +384,7 @@ func TestConvertBetweenOpenAPITaskAndTaskConfig(t *testing.T) {
 	task, err := fixtures.GenNoShardOpenAPITaskForTest()
 	require.NoError(t, err)
 
-	sourceCfg1, err := ParseYamlAndVerify(SampleSourceConfig)
+	sourceCfg1, err := SourceCfgFromYamlAndVerify(SampleSourceConfig)
 	require.NoError(t, err)
 	source1Name := task.SourceConfig.SourceConf[0].SourceName
 	sourceCfg1.SourceID = source1Name

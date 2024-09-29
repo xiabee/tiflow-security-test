@@ -126,7 +126,7 @@ func (r Role) MarshalJSON() ([]byte, error) {
 // ReplicationSet is a state machine that manages replication states.
 type ReplicationSet struct { //nolint:revive
 	Changefeed model.ChangeFeedID
-	TableID    model.TableID
+	Span       tablepb.Span
 	State      ReplicationSetState
 	// Primary is the capture ID that is currently replicating the table.
 	Primary model.CaptureID
@@ -140,25 +140,55 @@ type ReplicationSet struct { //nolint:revive
 
 // NewReplicationSet returns a new replication set.
 func NewReplicationSet(
-	tableID model.TableID,
+	span tablepb.Span,
 	checkpoint model.Ts,
 	tableStatus map[model.CaptureID]*tablepb.TableStatus,
 	changefeed model.ChangeFeedID,
 ) (*ReplicationSet, error) {
 	r := &ReplicationSet{
 		Changefeed: changefeed,
-		TableID:    tableID,
+		Span:       span,
 		Captures:   make(map[string]Role),
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: checkpoint,
 			ResolvedTs:   checkpoint,
+		},
+		// We need to initialize the stats with the checkpoint ts.
+		// Only when the table into ReplicationSetStateReplicating state, owner will update the table's stats
+		// In advanceCheckpoint, it will first check table.Stats.StageCheckpoints["puller-egress"] whether it is nil,
+		// Only when it's not nil, then consider it join to calculate the slowest puller resolved ts.
+		// If we don't initialize the stats here, when the new table is stuck in incremental scan
+		// the min puller resolved ts calulcated in advanceCheckpoint will increase continuely
+		Stats: tablepb.Stats{
+			StageCheckpoints: map[string]tablepb.Checkpoint{
+				"puller-egress": {
+					CheckpointTs: checkpoint,
+					ResolvedTs:   checkpoint,
+				},
+				"puller-ingress": {
+					CheckpointTs: checkpoint,
+					ResolvedTs:   checkpoint,
+				},
+				"sink": {
+					CheckpointTs: checkpoint,
+					ResolvedTs:   checkpoint,
+				},
+				"sorter-ingress": {
+					CheckpointTs: checkpoint,
+					ResolvedTs:   checkpoint,
+				},
+				"sorter-egress": {
+					CheckpointTs: checkpoint,
+					ResolvedTs:   checkpoint,
+				},
+			},
 		},
 	}
 	// Count of captures that is in Stopping states.
 	stoppingCount := 0
 	committed := false
 	for captureID, table := range tableStatus {
-		if r.TableID != table.TableID {
+		if !r.Span.Eq(&table.Span) {
 			return nil, r.inconsistentError(table, captureID,
 				"schedulerv3: table id inconsistent")
 		}
@@ -202,7 +232,7 @@ func NewReplicationSet(
 			log.Warn("schedulerv3: found a stopping capture during initializing",
 				zap.String("namespace", r.Changefeed.Namespace),
 				zap.String("changefeed", r.Changefeed.ID),
-				zap.Int64("tableID", table.TableID),
+				zap.Int64("tableID", table.Span.TableID),
 				zap.Any("replicationSet", r),
 				zap.Any("status", tableStatus))
 			err := r.setCapture(captureID, RoleUndetermined)
@@ -217,7 +247,7 @@ func NewReplicationSet(
 			log.Warn("schedulerv3: unknown table state",
 				zap.String("namespace", r.Changefeed.Namespace),
 				zap.String("changefeed", r.Changefeed.ID),
-				zap.Int64("tableID", table.TableID),
+				zap.Int64("tableID", table.Span.TableID),
 				zap.Any("replicationSet", r),
 				zap.Any("status", tableStatus))
 		}
@@ -334,7 +364,7 @@ func (r *ReplicationSet) inconsistentError(
 	}...)
 	log.L().WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 	return errors.ErrReplicationSetInconsistent.GenWithStackByArgs(
-		fmt.Sprintf("tableID %d, %s", r.TableID, msg))
+		fmt.Sprintf("tableID %d, %s", r.Span.TableID, msg))
 }
 
 func (r *ReplicationSet) multiplePrimaryError(
@@ -349,14 +379,14 @@ func (r *ReplicationSet) multiplePrimaryError(
 	}...)
 	log.L().WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 	return errors.ErrReplicationSetMultiplePrimaryError.GenWithStackByArgs(
-		fmt.Sprintf("tableID %d, %s", r.TableID, msg))
+		fmt.Sprintf("tableID %d, %s", r.Span.TableID, msg))
 }
 
 // checkInvariant ensures ReplicationSet invariant is hold.
 func (r *ReplicationSet) checkInvariant(
 	input *tablepb.TableStatus, captureID model.CaptureID,
 ) error {
-	if r.TableID != input.TableID {
+	if !r.Span.Eq(&input.Span) {
 		return r.inconsistentError(input, captureID,
 			"schedulerv3: tableID must be the same")
 	}
@@ -477,7 +507,7 @@ func (r *ReplicationSet) pollOnPrepare(
 				DispatchTableRequest: &schedulepb.DispatchTableRequest{
 					Request: &schedulepb.DispatchTableRequest_AddTable{
 						AddTable: &schedulepb.AddTableRequest{
-							TableID:     r.TableID,
+							Span:        r.Span,
 							IsSecondary: true,
 							Checkpoint:  r.Checkpoint,
 						},
@@ -560,7 +590,9 @@ func (r *ReplicationSet) pollOnCommit(
 					MsgType: schedulepb.MsgDispatchTableRequest,
 					DispatchTableRequest: &schedulepb.DispatchTableRequest{
 						Request: &schedulepb.DispatchTableRequest_RemoveTable{
-							RemoveTable: &schedulepb.RemoveTableRequest{TableID: r.TableID},
+							RemoveTable: &schedulepb.RemoveTableRequest{
+								Span: r.Span,
+							},
 						},
 					},
 				}, false, nil
@@ -599,7 +631,7 @@ func (r *ReplicationSet) pollOnCommit(
 				DispatchTableRequest: &schedulepb.DispatchTableRequest{
 					Request: &schedulepb.DispatchTableRequest_AddTable{
 						AddTable: &schedulepb.AddTableRequest{
-							TableID:     r.TableID,
+							Span:        r.Span,
 							IsSecondary: false,
 							Checkpoint:  r.Checkpoint,
 						},
@@ -643,7 +675,7 @@ func (r *ReplicationSet) pollOnCommit(
 				DispatchTableRequest: &schedulepb.DispatchTableRequest{
 					Request: &schedulepb.DispatchTableRequest_AddTable{
 						AddTable: &schedulepb.AddTableRequest{
-							TableID:     r.TableID,
+							Span:        r.Span,
 							IsSecondary: false,
 							Checkpoint:  r.Checkpoint,
 						},
@@ -690,7 +722,9 @@ func (r *ReplicationSet) pollOnCommit(
 					MsgType: schedulepb.MsgDispatchTableRequest,
 					DispatchTableRequest: &schedulepb.DispatchTableRequest{
 						Request: &schedulepb.DispatchTableRequest_RemoveTable{
-							RemoveTable: &schedulepb.RemoveTableRequest{TableID: r.TableID},
+							RemoveTable: &schedulepb.RemoveTableRequest{
+								Span: r.Span,
+							},
 						},
 					},
 				}, false, nil
@@ -793,7 +827,9 @@ func (r *ReplicationSet) pollOnRemoving(
 			MsgType: schedulepb.MsgDispatchTableRequest,
 			DispatchTableRequest: &schedulepb.DispatchTableRequest{
 				Request: &schedulepb.DispatchTableRequest_RemoveTable{
-					RemoveTable: &schedulepb.RemoveTableRequest{TableID: r.TableID},
+					RemoveTable: &schedulepb.RemoveTableRequest{
+						Span: r.Span,
+					},
 				},
 			},
 		}, false, nil
@@ -842,7 +878,7 @@ func (r *ReplicationSet) handleAddTable(
 		log.Warn("schedulerv3: add table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.TableID),
+			zap.Int64("tableID", r.Span.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -852,7 +888,7 @@ func (r *ReplicationSet) handleAddTable(
 	}
 	oldState := r.State
 	status := tablepb.TableStatus{
-		TableID:    r.TableID,
+		Span:       r.Span,
 		State:      tablepb.TableStateAbsent,
 		Checkpoint: tablepb.Checkpoint{},
 	}
@@ -877,7 +913,7 @@ func (r *ReplicationSet) handleMoveTable(
 		log.Warn("schedulerv3: move table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.TableID),
+			zap.Int64("tableID", r.Span.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -888,7 +924,7 @@ func (r *ReplicationSet) handleMoveTable(
 		log.Warn("schedulerv3: move table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.TableID),
+			zap.Int64("tableID", r.Span.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -905,7 +941,7 @@ func (r *ReplicationSet) handleMoveTable(
 		zap.Any("replicationSet", r),
 		zap.Stringer("old", oldState))
 	status := tablepb.TableStatus{
-		TableID:    r.TableID,
+		Span:       r.Span,
 		State:      tablepb.TableStateAbsent,
 		Checkpoint: tablepb.Checkpoint{},
 	}
@@ -918,7 +954,7 @@ func (r *ReplicationSet) handleRemoveTable() ([]*schedulepb.Message, error) {
 		log.Warn("schedulerv3: remove table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.TableID),
+			zap.Int64("tableID", r.Span.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -927,7 +963,7 @@ func (r *ReplicationSet) handleRemoveTable() ([]*schedulepb.Message, error) {
 		log.Warn("schedulerv3: remove table is ignored",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.TableID),
+			zap.Int64("tableID", r.Span.TableID),
 			zap.Any("replicationSet", r))
 		return nil, nil
 	}
@@ -936,12 +972,12 @@ func (r *ReplicationSet) handleRemoveTable() ([]*schedulepb.Message, error) {
 	log.Info("schedulerv3: replication state transition, remove table",
 		zap.String("namespace", r.Changefeed.Namespace),
 		zap.String("changefeed", r.Changefeed.ID),
-		zap.Int64("tableID", r.TableID),
+		zap.Int64("tableID", r.Span.TableID),
 		zap.Any("replicationSet", r),
 		zap.Stringer("old", oldState))
 	status := tablepb.TableStatus{
-		TableID: r.TableID,
-		State:   tablepb.TableStateReplicating,
+		Span:  r.Span,
+		State: tablepb.TableStateReplicating,
 		Checkpoint: tablepb.Checkpoint{
 			CheckpointTs: r.Checkpoint.CheckpointTs,
 			ResolvedTs:   r.Checkpoint.ResolvedTs,
@@ -969,15 +1005,15 @@ func (r *ReplicationSet) handleCaptureShutdown(
 	}
 	// The capture has shutdown, the table has stopped.
 	status := tablepb.TableStatus{
-		TableID: r.TableID,
-		State:   tablepb.TableStateStopped,
+		Span:  r.Span,
+		State: tablepb.TableStateStopped,
 	}
 	oldState := r.State
 	msgs, err := r.poll(&status, captureID)
 	log.Info("schedulerv3: replication state transition, capture shutdown",
 		zap.String("namespace", r.Changefeed.Namespace),
 		zap.String("changefeed", r.Changefeed.ID),
-		zap.Int64("tableID", r.TableID),
+		zap.Int64("tableID", r.Span.TableID),
 		zap.Any("replicationSet", r),
 		zap.Stringer("old", oldState), zap.Stringer("new", r.State))
 	return msgs, true, errors.Trace(err)
@@ -990,7 +1026,7 @@ func (r *ReplicationSet) updateCheckpointAndStats(
 		log.Warn("schedulerv3: resolved ts should not less than checkpoint ts",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.TableID),
+			zap.Int64("tableID", r.Span.TableID),
 			zap.Any("replicationSet", r),
 			zap.Any("checkpoint", checkpoint))
 
@@ -1009,7 +1045,7 @@ func (r *ReplicationSet) updateCheckpointAndStats(
 		log.Warn("schedulerv3: resolved ts should not less than checkpoint ts",
 			zap.String("namespace", r.Changefeed.Namespace),
 			zap.String("changefeed", r.Changefeed.ID),
-			zap.Int64("tableID", r.TableID),
+			zap.Int64("tableID", r.Span.TableID),
 			zap.Any("replicationSet", r),
 			zap.Any("checkpointTs", r.Checkpoint.CheckpointTs),
 			zap.Any("resolvedTs", r.Checkpoint.ResolvedTs))

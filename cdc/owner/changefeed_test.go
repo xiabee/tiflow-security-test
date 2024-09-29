@@ -23,22 +23,23 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	timodel "github.com/pingcap/tidb/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/puller"
 	credo "github.com/pingcap/tiflow/cdc/redo"
 	"github.com/pingcap/tiflow/cdc/scheduler"
 	"github.com/pingcap/tiflow/cdc/scheduler/schedulepb"
+	"github.com/pingcap/tiflow/cdc/vars"
 	"github.com/pingcap/tiflow/pkg/config"
-	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
-	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/redo"
+	"github.com/pingcap/tiflow/pkg/sink/observer"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
 	"github.com/pingcap/tiflow/pkg/upstream"
+	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 )
@@ -88,7 +89,7 @@ type mockDDLSink struct {
 	// whether to record the DDL history, only for rename table
 	recordDDLHistory bool
 	// a slice of DDL history, only for rename table
-	ddlHistory []string
+	ddlHistory []*model.DDLEvent
 	mu         struct {
 		sync.Mutex
 		checkpointTs  model.Ts
@@ -116,7 +117,7 @@ func (m *mockDDLSink) emitDDLEvent(ctx context.Context, ddl *model.DDLEvent) (bo
 		}
 	}()
 	if m.recordDDLHistory {
-		m.ddlHistory = append(m.ddlHistory, ddl.Query)
+		m.ddlHistory = append(m.ddlHistory, ddl)
 	} else {
 		m.ddlHistory = nil
 	}
@@ -154,6 +155,13 @@ func (m *mockDDLSink) Barrier(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockDDLSink) emitBootstrap(ctx context.Context, bootstrap *model.DDLEvent) error {
+	if m.recordDDLHistory {
+		m.ddlHistory = append(m.ddlHistory, bootstrap)
+	}
+	return nil
+}
+
 type mockScheduler struct {
 	currentTables []model.TableID
 }
@@ -188,9 +196,11 @@ func (m *mockScheduler) DrainCapture(target model.CaptureID) (int, error) {
 // Close closes the scheduler and releases resources.
 func (m *mockScheduler) Close(ctx context.Context) {}
 
-func createChangefeed4Test(ctx cdcContext.Context, t *testing.T,
+func createChangefeed4Test(globalVars *vars.GlobalVars,
+	changefeedInfo *model.ChangeFeedInfo,
+	t *testing.T,
 ) (
-	*changefeed, map[model.CaptureID]*model.CaptureInfo, *orchestrator.ReactorStateTester,
+	*changefeed, map[model.CaptureID]*model.CaptureInfo, *orchestrator.ReactorStateTester, *orchestrator.ChangefeedReactorState,
 ) {
 	up := upstream.NewUpstream4Test(&gc.MockPDClient{
 		UpdateServiceGCSafePointFunc: func(ctx context.Context, serviceID string, ttl int64, safePoint uint64) (uint64, error) {
@@ -199,25 +209,25 @@ func createChangefeed4Test(ctx cdcContext.Context, t *testing.T,
 	})
 
 	state := orchestrator.NewChangefeedReactorState(etcd.DefaultCDCClusterID,
-		ctx.ChangefeedVars().ID)
+		model.DefaultChangeFeedID(changefeedInfo.ID))
 	tester := orchestrator.NewReactorStateTester(t, state, nil)
 	state.PatchInfo(func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
 		require.Nil(t, info)
-		info = ctx.ChangefeedVars().Info
+		info = changefeedInfo
 		return info, true, nil
 	})
 	tester.MustApplyPatches()
-	cf := newChangefeed4Test(ctx.ChangefeedVars().ID, state, up,
+	cf := newChangefeed4Test(model.DefaultChangeFeedID(changefeedInfo.ID),
+		state.Info, state.Status, NewFeedStateManager(up, state), up,
 		// new ddl puller
 		func(ctx context.Context,
-			replicaConfig *config.ReplicaConfig,
 			up *upstream.Upstream,
 			startTs uint64,
 			changefeed model.ChangeFeedID,
 			schemaStorage entry.SchemaStorage,
 			filter filter.Filter,
-		) (puller.DDLPuller, error) {
-			return &mockDDLPuller{resolvedTs: startTs - 1, schemaStorage: schemaStorage}, nil
+		) puller.DDLPuller {
+			return &mockDDLPuller{resolvedTs: startTs - 1, schemaStorage: schemaStorage}
 		},
 		// new ddl ddlSink
 		func(_ model.ChangeFeedID, _ *model.ChangeFeedInfo, _ func(error), _ func(error)) DDLSink {
@@ -228,73 +238,92 @@ func createChangefeed4Test(ctx cdcContext.Context, t *testing.T,
 		},
 		// new scheduler
 		func(
-			ctx cdcContext.Context, pdClock pdutil.Clock, epoch uint64, redoMetaManager credo.MetaManager,
+			ctx context.Context, id model.ChangeFeedID, up *upstream.Upstream, epoch uint64,
+			cfg *config.SchedulerConfig, redoMetaManager credo.MetaManager,
+			globalVars *vars.GlobalVars,
 		) (scheduler.Scheduler, error) {
 			return &mockScheduler{}, nil
-		})
+		},
+		// new downstream observer
+		func(
+			ctx context.Context, id model.ChangeFeedID,
+			sinkURIStr string, replCfg *config.ReplicaConfig,
+			opts ...observer.NewObserverOption,
+		) (observer.Observer, error) {
+			return observer.NewDummyObserver(), nil
+		},
+		globalVars,
+	)
+
 	cf.upstream = up
 
 	tester.MustUpdate(fmt.Sprintf("%s/capture/%s",
-		etcd.DefaultClusterAndMetaPrefix, ctx.GlobalVars().CaptureInfo.ID),
-		[]byte(`{"id":"`+ctx.GlobalVars().CaptureInfo.ID+`","address":"127.0.0.1:8300"}`))
+		etcd.DefaultClusterAndMetaPrefix, globalVars.CaptureInfo.ID),
+		[]byte(`{"id":"`+globalVars.CaptureInfo.ID+`","address":"127.0.0.1:8300"}`))
 	tester.MustApplyPatches()
-	captures := map[model.CaptureID]*model.CaptureInfo{ctx.GlobalVars().CaptureInfo.ID: ctx.GlobalVars().CaptureInfo}
-	return cf, captures, tester
+	captures := map[model.CaptureID]*model.CaptureInfo{globalVars.CaptureInfo.ID: globalVars.CaptureInfo}
+	return cf, captures, tester, state
 }
 
 func TestPreCheck(t *testing.T) {
-	ctx := cdcContext.NewBackendContext4Test(true)
-	cf, captures, tester := createChangefeed4Test(ctx, t)
-	cf.Tick(ctx, captures)
+	globalvars, changefeedVars := vars.NewGlobalVarsAndChangefeedInfo4Test()
+	_, captures, tester, state := createChangefeed4Test(globalvars, changefeedVars, t)
+	state.CheckCaptureAlive(globalvars.CaptureInfo.ID)
+	preflightCheck(state, captures)
 	tester.MustApplyPatches()
-	require.NotNil(t, cf.state.Status)
+	require.NotNil(t, state.Status)
 
 	// test clean the meta data of offline capture
 	offlineCaputreID := "offline-capture"
-	cf.state.PatchTaskPosition(offlineCaputreID, func(position *model.TaskPosition) (*model.TaskPosition, bool, error) {
+	state.PatchTaskPosition(offlineCaputreID, func(position *model.TaskPosition) (*model.TaskPosition, bool, error) {
 		return new(model.TaskPosition), true, nil
 	})
 	tester.MustApplyPatches()
 
-	cf.Tick(ctx, captures)
+	state.CheckCaptureAlive(globalvars.CaptureInfo.ID)
+	require.False(t, preflightCheck(state, captures))
 	tester.MustApplyPatches()
-	require.NotNil(t, cf.state.Status)
-	require.NotContains(t, cf.state.TaskPositions, offlineCaputreID)
+	require.NotNil(t, state.Status)
+	require.NotContains(t, state.TaskPositions, offlineCaputreID)
 }
 
 func TestInitialize(t *testing.T) {
-	ctx := cdcContext.NewBackendContext4Test(true)
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	globalvars, changefeedInfo := vars.NewGlobalVarsAndChangefeedInfo4Test()
+	ctx := context.Background()
+	cf, captures, tester, state := createChangefeed4Test(globalvars, changefeedInfo, t)
 	defer cf.Close(ctx)
 	// pre check
-	cf.Tick(ctx, captures)
+	state.CheckCaptureAlive(globalvars.CaptureInfo.ID)
+	require.False(t, preflightCheck(state, captures))
 	tester.MustApplyPatches()
 
 	// initialize
-	ctx.GlobalVars().EtcdClient = &etcd.CDCEtcdClientImpl{}
-	cf.Tick(ctx, captures)
+	globalvars.EtcdClient = &etcd.CDCEtcdClientImpl{}
+	cf.Tick(ctx, state.Info, state.Status, captures)
 	tester.MustApplyPatches()
-	require.Equal(t, cf.state.Status.CheckpointTs, ctx.ChangefeedVars().Info.StartTs)
+	require.Equal(t, state.Status.CheckpointTs, changefeedInfo.StartTs)
 }
 
 func TestChangefeedHandleError(t *testing.T) {
-	ctx := cdcContext.NewBackendContext4Test(true)
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	globalvars, changefeedInfo := vars.NewGlobalVarsAndChangefeedInfo4Test()
+	ctx := context.Background()
+	cf, captures, tester, state := createChangefeed4Test(globalvars, changefeedInfo, t)
 	defer cf.Close(ctx)
 	// pre check
-	cf.Tick(ctx, captures)
+	state.CheckCaptureAlive(globalvars.CaptureInfo.ID)
+	require.False(t, preflightCheck(state, captures))
 	tester.MustApplyPatches()
 
 	// initialize
-	cf.Tick(ctx, captures)
+	cf.Tick(ctx, state.Info, state.Status, captures)
 	tester.MustApplyPatches()
 
 	cf.errCh <- errors.New("fake error")
 	// handle error
-	cf.Tick(ctx, captures)
+	cf.Tick(ctx, state.Info, state.Status, captures)
 	tester.MustApplyPatches()
-	require.Equal(t, cf.state.Status.CheckpointTs, ctx.ChangefeedVars().Info.StartTs)
-	require.Equal(t, cf.state.Info.Error.Message, "fake error")
+	require.Equal(t, state.Status.CheckpointTs, changefeedInfo.StartTs)
+	require.Equal(t, state.Info.Error.Message, "fake error")
 }
 
 func TestExecDDL(t *testing.T) {
@@ -306,22 +335,25 @@ func TestExecDDL(t *testing.T) {
 	job := helper.DDL2Job("create table test0.table0(id int primary key)")
 	startTs := job.BinlogInfo.FinishedTS + 1000
 
-	ctx := cdcContext.NewContext4Test(context.Background(), true)
-	ctx.ChangefeedVars().Info.StartTs = startTs
-
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	globalvars, changefeedInfo := vars.NewGlobalVarsAndChangefeedInfo4Test()
+	changefeedInfo.StartTs = startTs
+	ctx := context.Background()
+	cf, captures, tester, state := createChangefeed4Test(globalvars, changefeedInfo, t)
 	cf.upstream.KVStorage = helper.Storage()
 	defer cf.Close(ctx)
-	tickThreeTime := func() {
-		cf.Tick(ctx, captures)
+	tickTwoTime := func() {
+		checkpointTs, minTableBarrierTs := cf.Tick(ctx, state.Info, state.Status, captures)
+		updateStatus(state, checkpointTs, minTableBarrierTs)
 		tester.MustApplyPatches()
-		cf.Tick(ctx, captures)
-		tester.MustApplyPatches()
-		cf.Tick(ctx, captures)
+		checkpointTs, minTableBarrierTs = cf.Tick(ctx, state.Info, state.Status, captures)
+		updateStatus(state, checkpointTs, minTableBarrierTs)
 		tester.MustApplyPatches()
 	}
 	// pre check and initialize
-	tickThreeTime()
+	state.CheckCaptureAlive(globalvars.CaptureInfo.ID)
+	require.False(t, preflightCheck(state, captures))
+	tester.MustApplyPatches()
+	tickTwoTime()
 	tableIDs, err := cf.schema.AllPhysicalTables(ctx, startTs-1)
 	require.Nil(t, err)
 	require.Len(t, tableIDs, 1)
@@ -334,8 +366,8 @@ func TestExecDDL(t *testing.T) {
 	job.BinlogInfo.FinishedTS = mockDDLPuller.resolvedTs
 	mockDDLPuller.ddlQueue = append(mockDDLPuller.ddlQueue, job)
 	// three tick to make sure all barrier set in initialize is handled
-	tickThreeTime()
-	require.Equal(t, cf.state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
+	tickTwoTime()
+	require.Equal(t, state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
 	// The ephemeral table should have left no trace in the schema cache
 	tableIDs, err = cf.schema.AllPhysicalTables(ctx, mockDDLPuller.resolvedTs)
 	require.Nil(t, err)
@@ -344,38 +376,38 @@ func TestExecDDL(t *testing.T) {
 	// executing the ddl finished
 	mockDDLSink.ddlDone = true
 	mockDDLPuller.resolvedTs += 1000
-	tickThreeTime()
-	require.Equal(t, mockDDLPuller.resolvedTs, cf.state.Status.CheckpointTs)
+	tickTwoTime()
+	require.Equal(t, mockDDLPuller.resolvedTs, state.Status.CheckpointTs)
 
 	// handle create database
 	job = helper.DDL2Job("create database test1")
 	mockDDLPuller.resolvedTs += 1000
 	job.BinlogInfo.FinishedTS = mockDDLPuller.resolvedTs
 	mockDDLPuller.ddlQueue = append(mockDDLPuller.ddlQueue, job)
-	tickThreeTime()
-	require.Equal(t, cf.state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
+	tickTwoTime()
+	require.Equal(t, state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
 	require.Equal(t, "create database test1", mockDDLSink.ddlExecuting.Query)
 
 	// executing the ddl finished
 	mockDDLSink.ddlDone = true
 	mockDDLPuller.resolvedTs += 1000
-	tickThreeTime()
-	require.Equal(t, cf.state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
+	tickTwoTime()
+	require.Equal(t, state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
 
 	// handle create table
 	job = helper.DDL2Job("create table test1.test1(id int primary key)")
 	mockDDLPuller.resolvedTs += 1000
 	job.BinlogInfo.FinishedTS = mockDDLPuller.resolvedTs
 	mockDDLPuller.ddlQueue = append(mockDDLPuller.ddlQueue, job)
-	tickThreeTime()
+	tickTwoTime()
 
-	require.Equal(t, cf.state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
+	require.Equal(t, state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
 	require.Equal(t, "create table test1.test1(id int primary key)", mockDDLSink.ddlExecuting.Query)
 
 	// executing the ddl finished
 	mockDDLSink.ddlDone = true
 	mockDDLPuller.resolvedTs += 1000
-	tickThreeTime()
+	tickTwoTime()
 	require.Contains(t, cf.scheduler.(*mockScheduler).currentTables, job.TableID)
 }
 
@@ -388,22 +420,28 @@ func TestEmitCheckpointTs(t *testing.T) {
 	job := helper.DDL2Job("create table test0.table0(id int primary key)")
 	startTs := job.BinlogInfo.FinishedTS + 1000
 
-	ctx := cdcContext.NewContext4Test(context.Background(), true)
-	ctx.ChangefeedVars().Info.StartTs = startTs
-
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	globalvars, changefeedInfo := vars.NewGlobalVarsAndChangefeedInfo4Test()
+	changefeedInfo.StartTs = startTs
+	ctx := context.Background()
+	cf, captures, tester, state := createChangefeed4Test(globalvars, changefeedInfo, t)
 	cf.upstream.KVStorage = helper.Storage()
 
 	defer cf.Close(ctx)
 	tickThreeTime := func() {
-		cf.Tick(ctx, captures)
+		checkpointTs, minTableBarrierTs := cf.Tick(ctx, state.Info, state.Status, captures)
+		updateStatus(state, checkpointTs, minTableBarrierTs)
 		tester.MustApplyPatches()
-		cf.Tick(ctx, captures)
+		checkpointTs, minTableBarrierTs = cf.Tick(ctx, state.Info, state.Status, captures)
+		updateStatus(state, checkpointTs, minTableBarrierTs)
 		tester.MustApplyPatches()
-		cf.Tick(ctx, captures)
+		checkpointTs, minTableBarrierTs = cf.Tick(ctx, state.Info, state.Status, captures)
+		updateStatus(state, checkpointTs, minTableBarrierTs)
 		tester.MustApplyPatches()
 	}
 	// pre check and initialize
+	state.CheckCaptureAlive(globalvars.CaptureInfo.ID)
+	require.False(t, preflightCheck(state, captures))
+	tester.MustApplyPatches()
 	tickThreeTime()
 	mockDDLSink := cf.ddlManager.ddlSink.(*mockDDLSink)
 
@@ -420,12 +458,12 @@ func TestEmitCheckpointTs(t *testing.T) {
 	mockDDLPuller := cf.ddlManager.ddlPuller.(*mockDDLPuller)
 	mockDDLPuller.resolvedTs = startTs + 1000
 	cf.ddlManager.schema.AdvanceResolvedTs(mockDDLPuller.resolvedTs)
-	cf.state.Status.CheckpointTs = mockDDLPuller.resolvedTs
+	state.Status.CheckpointTs = mockDDLPuller.resolvedTs
 	job.BinlogInfo.FinishedTS = mockDDLPuller.resolvedTs
 	mockDDLPuller.ddlQueue = append(mockDDLPuller.ddlQueue, job)
 	// three tick to make sure all barrier set in initialize is handled
 	tickThreeTime()
-	require.Equal(t, cf.state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
+	require.Equal(t, state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
 	tables, err = cf.ddlManager.allTables(ctx)
 	require.Nil(t, err)
 	// The ephemeral table should only be deleted after the ddl is executed.
@@ -439,25 +477,29 @@ func TestEmitCheckpointTs(t *testing.T) {
 	mockDDLSink.ddlDone = true
 	mockDDLPuller.resolvedTs += 2000
 	tickThreeTime()
-	require.Equal(t, cf.state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
+	require.Equal(t, state.Status.CheckpointTs, mockDDLPuller.resolvedTs)
 	ts, names = mockDDLSink.getCheckpointTsAndTableNames()
 	require.Equal(t, ts, mockDDLPuller.resolvedTs)
 	require.Len(t, names, 0)
 }
 
 func TestSyncPoint(t *testing.T) {
-	ctx := cdcContext.NewBackendContext4Test(true)
-	ctx.ChangefeedVars().Info.Config.EnableSyncPoint = true
-	ctx.ChangefeedVars().Info.Config.SyncPointInterval = 1 * time.Second
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	globalvars, changefeedInfo := vars.NewGlobalVarsAndChangefeedInfo4Test()
+	ctx := context.Background()
+	changefeedInfo.Config.EnableSyncPoint = util.AddressOf(true)
+	changefeedInfo.Config.SyncPointInterval = util.AddressOf(1 * time.Second)
+	// SyncPoint option is only available for MySQL compatible database.
+	changefeedInfo.SinkURI = "mysql://"
+	cf, captures, tester, state := createChangefeed4Test(globalvars, changefeedInfo, t)
 	defer cf.Close(ctx)
 
 	// pre check
-	cf.Tick(ctx, captures)
+	state.CheckCaptureAlive(globalvars.CaptureInfo.ID)
+	require.False(t, preflightCheck(state, captures))
 	tester.MustApplyPatches()
 
 	// initialize
-	cf.Tick(ctx, captures)
+	cf.Tick(ctx, state.Info, state.Status, captures)
 	tester.MustApplyPatches()
 
 	mockDDLPuller := cf.ddlManager.ddlPuller.(*mockDDLPuller)
@@ -466,7 +508,8 @@ func TestSyncPoint(t *testing.T) {
 	mockDDLPuller.resolvedTs = oracle.GoTimeToTS(oracle.GetTimeFromTS(mockDDLPuller.resolvedTs).Add(5 * time.Second))
 	// tick 20 times
 	for i := 0; i <= 20; i++ {
-		cf.Tick(ctx, captures)
+		checkpointTs, minTableBarrierTs := cf.Tick(ctx, state.Info, state.Status, captures)
+		updateStatus(state, checkpointTs, minTableBarrierTs)
 		tester.MustApplyPatches()
 	}
 	for i := 1; i < len(mockDDLSink.syncPointHis); i++ {
@@ -477,37 +520,42 @@ func TestSyncPoint(t *testing.T) {
 }
 
 func TestFinished(t *testing.T) {
-	ctx := cdcContext.NewBackendContext4Test(true)
-	ctx.ChangefeedVars().Info.TargetTs = ctx.ChangefeedVars().Info.StartTs + 1000
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	globalvars, changefeedInfo := vars.NewGlobalVarsAndChangefeedInfo4Test()
+	ctx := context.Background()
+	changefeedInfo.TargetTs = changefeedInfo.StartTs + 1000
+	cf, captures, tester, state := createChangefeed4Test(globalvars, changefeedInfo, t)
 	defer cf.Close(ctx)
 
 	// pre check
-	cf.Tick(ctx, captures)
+	state.CheckCaptureAlive(globalvars.CaptureInfo.ID)
+	require.False(t, preflightCheck(state, captures))
 	tester.MustApplyPatches()
 
 	// initialize
-	cf.Tick(ctx, captures)
+	cf.Tick(ctx, state.Info, state.Status, captures)
 	tester.MustApplyPatches()
 
 	mockDDLPuller := cf.ddlManager.ddlPuller.(*mockDDLPuller)
 	mockDDLPuller.resolvedTs += 2000
 	// tick many times to make sure the change feed is stopped
 	for i := 0; i <= 10; i++ {
-		cf.Tick(ctx, captures)
+		checkpointTs, minTableBarrierTs := cf.Tick(ctx, state.Info, state.Status, captures)
+		updateStatus(state, checkpointTs, minTableBarrierTs)
 		tester.MustApplyPatches()
 	}
-	fmt.Println("checkpoint ts", cf.state.Status.CheckpointTs)
-	fmt.Println("target ts", cf.state.Info.TargetTs)
-	require.Equal(t, cf.state.Status.CheckpointTs, cf.state.Info.TargetTs)
-	require.Equal(t, cf.state.Info.State, model.StateFinished)
+	fmt.Println("checkpoint ts", state.Status.CheckpointTs)
+	fmt.Println("target ts", state.Info.TargetTs)
+	require.Equal(t, state.Status.CheckpointTs, state.Info.TargetTs)
+	require.Equal(t, state.Info.State, model.StateFinished)
 }
 
 func TestRemoveChangefeed(t *testing.T) {
-	baseCtx, cancel := context.WithCancel(context.Background())
-	ctx := cdcContext.NewContext4Test(baseCtx, true)
-	info := ctx.ChangefeedVars().Info
+	globalVars, changefeedInfo := vars.NewGlobalVarsAndChangefeedInfo4Test()
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	info := changefeedInfo
 	dir := t.TempDir()
+	info.SinkURI = "mysql://"
 	info.Config.Consistent = &config.ConsistentConfig{
 		Level:                 "eventual",
 		Storage:               filepath.Join("nfs://", dir),
@@ -516,48 +564,55 @@ func TestRemoveChangefeed(t *testing.T) {
 		EncodingWorkerNum:     redo.DefaultEncodingWorkerNum,
 		FlushWorkerNum:        redo.DefaultFlushWorkerNum,
 	}
-	ctx = cdcContext.WithChangefeedVars(ctx, &cdcContext.ChangefeedVars{
-		ID:   ctx.ChangefeedVars().ID,
-		Info: info,
-	})
-	testChangefeedReleaseResource(t, ctx, cancel, dir, true /*expectedInitialized*/)
+	testChangefeedReleaseResource(ctx, t, globalVars, changefeedInfo, cancel, dir, true /*expectedInitialized*/)
 }
 
 func TestRemovePausedChangefeed(t *testing.T) {
-	baseCtx, cancel := context.WithCancel(context.Background())
-	ctx := cdcContext.NewContext4Test(baseCtx, true)
-	info := ctx.ChangefeedVars().Info
+	globalVars, changefeedInfo := vars.NewGlobalVarsAndChangefeedInfo4Test()
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	info := changefeedInfo
 	info.State = model.StateStopped
 	dir := t.TempDir()
+	// Field `Consistent` is valid only when the downstream
+	// is MySQL compatible  Schema
+	info.SinkURI = "mysql://"
 	info.Config.Consistent = &config.ConsistentConfig{
 		Level:             "eventual",
 		Storage:           filepath.Join("nfs://", dir),
 		FlushIntervalInMs: redo.DefaultFlushIntervalInMs,
 	}
-	ctx = cdcContext.WithChangefeedVars(ctx, &cdcContext.ChangefeedVars{
-		ID:   ctx.ChangefeedVars().ID,
-		Info: info,
-	})
-	testChangefeedReleaseResource(t, ctx, cancel, dir, false /*expectedInitialized*/)
+	testChangefeedReleaseResource(ctx, t, globalVars, changefeedInfo, cancel, dir, false /*expectedInitialized*/)
 }
 
 func testChangefeedReleaseResource(
+	ctx context.Context,
 	t *testing.T,
-	ctx cdcContext.Context,
+	globalVars *vars.GlobalVars,
+	changefeedInfo *model.ChangeFeedInfo,
 	cancel context.CancelFunc,
 	redoLogDir string,
 	expectedInitialized bool,
 ) {
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	var err error
+	cf, captures, tester, state := createChangefeed4Test(globalVars, changefeedInfo, t)
 
 	// pre check
-	cf.Tick(ctx, captures)
+	state.CheckCaptureAlive(globalVars.CaptureInfo.ID)
+	require.False(t, preflightCheck(state, captures))
 	tester.MustApplyPatches()
 
 	// initialize
-	cf.Tick(ctx, captures)
+	cf.Tick(ctx, state.Info, state.Status, captures)
 	tester.MustApplyPatches()
-	require.Equal(t, cf.initialized, expectedInitialized)
+	require.Equal(t, cf.initialized.Load(), expectedInitialized)
+
+	// redo's metaManager:Run() will call preStart, which will clean up the redo log dir.
+	// Run() is another background goroutine called in tick()
+	// so it's not guaranteed to be started before the next tick()
+	// Thus, we need to wait for a while to make sure the redo log dir is cleaned up before remove changefeed
+	// Otherwise, it will delete the delete mark file after we remove changefeed, which will cause the test to fail
+	time.Sleep(5 * time.Second)
 
 	// remove changefeed from state manager by admin job
 	cf.feedStateManager.PushAdminJob(&model.AdminJob{
@@ -566,11 +621,11 @@ func testChangefeedReleaseResource(
 	})
 	cf.isReleased = false
 	// changefeed tick will release resources
-	err := cf.tick(ctx, captures)
+	cf.Tick(ctx, state.Info, state.Status, captures)
 	require.Nil(t, err)
 	cancel()
 
-	if cf.state.Info.Config.Consistent.UseFileBackend {
+	if state.Info.Config.Consistent.UseFileBackend {
 		// check redo log dir is deleted
 		_, err = os.Stat(redoLogDir)
 		require.True(t, os.IsNotExist(err))
@@ -583,60 +638,61 @@ func testChangefeedReleaseResource(
 
 func TestBarrierAdvance(t *testing.T) {
 	for i := 0; i < 2; i++ {
-		ctx := cdcContext.NewBackendContext4Test(true)
+		globalVars, changefeedInfo := vars.NewGlobalVarsAndChangefeedInfo4Test()
+		ctx := context.Background()
 		if i == 1 {
-			ctx.ChangefeedVars().Info.Config.EnableSyncPoint = true
-			ctx.ChangefeedVars().Info.Config.SyncPointInterval = 100 * time.Second
+			changefeedInfo.Config.EnableSyncPoint = util.AddressOf(true)
+			changefeedInfo.Config.SyncPointInterval = util.AddressOf(100 * time.Second)
 		}
+		changefeedInfo.SinkURI = "mysql://"
 
-		cf, captures, tester := createChangefeed4Test(ctx, t)
+		cf, captures, tester, state := createChangefeed4Test(globalVars, changefeedInfo, t)
 		defer cf.Close(ctx)
 
 		// The changefeed load the info from etcd.
-		cf.state.Status = &model.ChangeFeedStatus{
-			CheckpointTs:      cf.state.Info.StartTs,
-			MinTableBarrierTs: cf.state.Info.StartTs + 5,
+		state.Status = &model.ChangeFeedStatus{
+			CheckpointTs:      state.Info.StartTs,
+			MinTableBarrierTs: state.Info.StartTs + 5,
 		}
-
 		// Do the preflightCheck and initialize the changefeed.
-		cf.Tick(ctx, captures)
+		cf.Tick(ctx, state.Info, state.Status, captures)
 		tester.MustApplyPatches()
 		if i == 1 {
 			cf.ddlManager.ddlResolvedTs += 10
 		}
-		_, barrier, err := cf.ddlManager.tick(ctx, cf.state.Status.CheckpointTs, nil)
+		_, barrier, err := cf.ddlManager.tick(ctx, state.Status.CheckpointTs)
+
 		require.Nil(t, err)
 
-		err = cf.handleBarrier(ctx, barrier)
+		err = cf.handleBarrier(ctx, state.Info, state.Status, barrier)
 		require.Nil(t, err)
+
 		if i == 0 {
-			require.Equal(t, cf.state.Info.StartTs, barrier.GlobalBarrierTs)
+			require.Equal(t, state.Info.StartTs, barrier.GlobalBarrierTs)
 		}
+
 		// sync-point is enabled, sync point barrier is ticked
 		if i == 1 {
-			require.Equal(t, cf.state.Info.StartTs+10, barrier.GlobalBarrierTs)
+			require.Equal(t, state.Info.StartTs+10, barrier.GlobalBarrierTs)
 		}
 
 		// Suppose tableCheckpoint has been advanced.
-		cf.state.Status.CheckpointTs += 10
+		state.Status.CheckpointTs += 10
 
 		// Need more 1 tick to advance barrier if sync-point is enabled.
 		if i == 1 {
-			err = cf.handleBarrier(ctx, barrier)
+			err = cf.handleBarrier(ctx, state.Info, state.Status, barrier)
 			require.Nil(t, err)
-			require.Equal(t, cf.state.Info.StartTs+10, barrier.GlobalBarrierTs)
+			require.Equal(t, state.Info.StartTs+10, barrier.GlobalBarrierTs)
 
 			// Then the last tick barrier must be advanced correctly.
 			cf.ddlManager.ddlResolvedTs += 1000000000000
-			_, barrier, err = cf.ddlManager.tick(ctx, cf.state.Status.CheckpointTs+10, nil)
+			_, barrier, err = cf.ddlManager.tick(ctx, state.Status.CheckpointTs+10)
 			require.Nil(t, err)
-			err = cf.handleBarrier(ctx, barrier)
-			nextSyncPointTs := oracle.
-				GoTimeToTS(oracle.GetTimeFromTS(cf.state.Status.CheckpointTs + 10).
-					Add(ctx.ChangefeedVars().Info.Config.SyncPointInterval))
+			err = cf.handleBarrier(ctx, state.Info, state.Status, barrier)
+
 			require.Nil(t, err)
-			require.Equal(t, nextSyncPointTs, barrier.GlobalBarrierTs)
-			require.Less(t, cf.state.Status.CheckpointTs+10, barrier.GlobalBarrierTs)
+			require.Less(t, state.Status.CheckpointTs+10, barrier.GlobalBarrierTs)
 			require.Less(t, barrier.GlobalBarrierTs, cf.ddlManager.ddlResolvedTs)
 		}
 	}

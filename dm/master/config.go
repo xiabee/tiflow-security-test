@@ -16,7 +16,6 @@ package master
 import (
 	"bytes"
 	_ "embed"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -89,7 +88,6 @@ func NewConfig() *Config {
 	fs.Var(&cfg.CertAllowedCN, "cert-allowed-cn", "the trusted common name that allowed to visit")
 
 	fs.StringVar(&cfg.V1SourcesPath, "v1-sources-path", "", "directory path used to store source config files when upgrading from v1.0.x")
-	fs.StringVar(&cfg.SecretKeyPath, "secret-key-path", "", "path of file that contains secret key for encrypting and decrypting password, the secret key should be a hex AES-256 key of length 64")
 
 	return cfg
 }
@@ -140,8 +138,6 @@ type Config struct {
 
 	// tls config
 	security.Security
-	SecretKeyPath string `toml:"secret-key-path" json:"secret-key-path"  yaml:"secret-key-path"`
-	SecretKey     []byte `toml:"-" json:"-" yaml:"-"`
 
 	printVersion      bool
 	printSampleConfig bool
@@ -342,29 +338,7 @@ func (c *Config) adjust() error {
 		c.ExperimentalFeatures.OpenAPI = false
 		log.L().Warn("openapi is a GA feature and removed from experimental features, so this configuration may have no affect in feature release, please set openapi=true in dm-master config file")
 	}
-
-	return c.adjustSecretKeyPath()
-}
-
-func (c *Config) adjustSecretKeyPath() error {
-	if c.SecretKeyPath == "" {
-		return nil
-	}
-
-	content, err := os.ReadFile(c.SecretKeyPath)
-	if err != nil {
-		return terror.ErrConfigSecretKeyPath.Generate(err)
-	}
-	contentStr := strings.TrimSpace(string(content))
-	decodeContent, err := hex.DecodeString(contentStr)
-	if err != nil {
-		return terror.ErrConfigSecretKeyPath.Generate(err)
-	}
-	if len(decodeContent) != 32 {
-		return terror.ErrConfigSecretKeyPath.Generate("the secret key must be a hex AES-256 key of length 64")
-	}
-	c.SecretKey = decodeContent
-	return nil
+	return err
 }
 
 // Reload load config from local file.

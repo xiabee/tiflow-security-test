@@ -87,7 +87,7 @@ type LogReaderConfig struct {
 type LogReader struct {
 	cfg   *LogReaderConfig
 	meta  *common.LogMeta
-	rowCh chan *model.RowChangedEventInRedoLog
+	rowCh chan *model.RowChangedEvent
 	ddlCh chan *model.DDLEvent
 }
 
@@ -106,7 +106,7 @@ func newLogReader(ctx context.Context, cfg *LogReaderConfig) (*LogReader, error)
 
 	logReader := &LogReader{
 		cfg:   cfg,
-		rowCh: make(chan *model.RowChangedEventInRedoLog, defaultReaderChanSize),
+		rowCh: make(chan *model.RowChangedEvent, defaultReaderChanSize),
 		ddlCh: make(chan *model.DDLEvent, defaultReaderChanSize),
 	}
 	// remove logs in local dir first, if have logs left belongs to previous changefeed with the same name may have error when apply logs
@@ -189,6 +189,22 @@ func (l *LogReader) runReader(egCtx context.Context, cfg *readerConfig) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
+	for i := 0; i < len(fileReaders); i++ {
+		rl, err := fileReaders[i].Read()
+		if err != nil {
+			if err != io.EOF {
+				return errors.Trace(err)
+			}
+			continue
+		}
+
+		ld := &logWithIdx{
+			data: rl,
+			idx:  i,
+		}
+		redoLogHeap = append(redoLogHeap, ld)
+	}
+	heap.Init(&redoLogHeap)
 
 	for redoLogHeap.Len() != 0 {
 		item := heap.Pop(&redoLogHeap).(*logWithIdx)
@@ -238,11 +254,8 @@ func (l *LogReader) ReadNextRow(ctx context.Context) (*model.RowChangedEvent, er
 	select {
 	case <-ctx.Done():
 		return nil, errors.Trace(ctx.Err())
-	case rowInRedoLog := <-l.rowCh:
-		if rowInRedoLog != nil {
-			return rowInRedoLog.ToRowChangedEvent(), nil
-		}
-		return nil, nil
+	case row := <-l.rowCh:
+		return row, nil
 	}
 }
 
@@ -369,10 +382,10 @@ func (h logHeap) Less(i, j int) bool {
 			return h[i].data.RedoRow.Row.StartTs < h[j].data.RedoRow.Row.StartTs
 		}
 		// in the same txn, we need to sort by delete/update/insert order
-		if h[i].data.RedoRow.Row.ToRowChangedEvent().IsDelete() {
+		if h[i].data.RedoRow.Row.IsDelete() {
 			return true
-		} else if h[i].data.RedoRow.Row.ToRowChangedEvent().IsUpdate() {
-			return !h[j].data.RedoRow.Row.ToRowChangedEvent().IsDelete()
+		} else if h[i].data.RedoRow.Row.IsUpdate() {
+			return !h[j].data.RedoRow.Row.IsDelete()
 		}
 		return false
 	}

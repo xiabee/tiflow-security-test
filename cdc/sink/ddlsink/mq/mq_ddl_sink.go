@@ -76,7 +76,7 @@ type DDLSink struct {
 	admin kafka.ClusterAdminClient
 }
 
-func newDDLSink(
+func newDDLSink(ctx context.Context,
 	changefeedID model.ChangeFeedID,
 	producer ddlproducer.DDLProducer,
 	adminClient kafka.ClusterAdminClient,
@@ -92,7 +92,7 @@ func newDDLSink(
 		topicManager:   topicManager,
 		encoderBuilder: encoderBuilder,
 		producer:       producer,
-		statistics:     metrics.NewStatistics(changefeedID, sink.RowSink),
+		statistics:     metrics.NewStatistics(ctx, changefeedID, sink.RowSink),
 		admin:          adminClient,
 	}
 }

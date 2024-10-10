@@ -15,8 +15,7 @@ package sqlmodel
 
 import (
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
 )
@@ -103,7 +102,7 @@ func getPKIsHandleIdx(ti *model.TableInfo) *model.IndexInfo {
 			Unique:  true,
 			Primary: true,
 			State:   model.StatePublic,
-			Tp:      pmodel.IndexTypeBtree,
+			Tp:      model.IndexTypeBtree,
 			Columns: []*model.IndexColumn{{
 				Name:   pk.Name,
 				Offset: pk.Offset,

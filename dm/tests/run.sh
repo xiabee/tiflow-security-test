@@ -3,7 +3,6 @@
 set -eu
 
 TEST_DIR=/tmp/dm_test
-export DM_MASTER_EXTRA_ARG=""
 CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source $CUR/_utils/env_variables
 

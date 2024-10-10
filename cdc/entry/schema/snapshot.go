@@ -25,7 +25,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	timeta "github.com/pingcap/tidb/pkg/meta"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
@@ -479,15 +479,6 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		err := s.inner.renameTables(job, job.BinlogInfo.FinishedTS)
 		if err != nil {
 			return errors.Trace(err)
-		}
-	case timodel.ActionCreateTables:
-		multiTableInfos := job.BinlogInfo.MultipleTableInfos
-		for _, tableInfo := range multiTableInfos {
-			err := s.inner.createTable(model.WrapTableInfo(job.SchemaID, job.SchemaName,
-				job.BinlogInfo.FinishedTS, tableInfo), job.BinlogInfo.FinishedTS)
-			if err != nil {
-				return errors.Trace(err)
-			}
 		}
 	case timodel.ActionCreateTable, timodel.ActionCreateView, timodel.ActionRecoverTable:
 		err := s.inner.createTable(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
@@ -1084,27 +1075,28 @@ func (s *snapshot) alterPartitioning(job *timodel.Job) error {
 }
 
 func (s *snapshot) renameTables(job *timodel.Job, currentTs uint64) error {
-	args, err := timodel.GetRenameTablesArgs(job)
+	var oldSchemaIDs, newSchemaIDs, oldTableIDs []int64
+	var newTableNames, oldSchemaNames []*timodel.CIStr
+	err := job.DecodeArgs(&oldSchemaIDs, &newSchemaIDs, &newTableNames, &oldTableIDs, &oldSchemaNames)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if len(job.BinlogInfo.MultipleTableInfos) < len(args.RenameTableInfos) {
+	if len(job.BinlogInfo.MultipleTableInfos) < len(newTableNames) {
 		return cerror.ErrInvalidDDLJob.GenWithStackByArgs(job.ID)
 	}
 	// NOTE: should handle failures in halfway better.
-	for _, info := range args.RenameTableInfos {
-		if err := s.dropTable(info.TableID, currentTs); err != nil {
+	for _, tableID := range oldTableIDs {
+		if err := s.dropTable(tableID, currentTs); err != nil {
 			return errors.Trace(err)
 		}
 	}
 	for i, tableInfo := range job.BinlogInfo.MultipleTableInfos {
-		info := args.RenameTableInfos[i]
-		newSchema, ok := s.schemaByID(info.NewSchemaID)
+		newSchema, ok := s.schemaByID(newSchemaIDs[i])
 		if !ok {
-			return cerror.ErrSnapshotSchemaNotFound.GenWithStackByArgs(info.NewSchemaID)
+			return cerror.ErrSnapshotSchemaNotFound.GenWithStackByArgs(newSchemaIDs[i])
 		}
 		newSchemaName := newSchema.Name.O
-		tbInfo := model.WrapTableInfo(info.NewSchemaID, newSchemaName, job.BinlogInfo.FinishedTS, tableInfo)
+		tbInfo := model.WrapTableInfo(newSchemaIDs[i], newSchemaName, job.BinlogInfo.FinishedTS, tableInfo)
 		err = s.createTable(tbInfo, currentTs)
 		if err != nil {
 			return errors.Trace(err)

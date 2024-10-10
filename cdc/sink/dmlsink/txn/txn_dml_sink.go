@@ -58,9 +58,11 @@ type dmlSink struct {
 	scheme string
 }
 
-// GetDBConnImpl is the implementation of pmysql.IDBConnectionFactory.
+// GetDBConnImpl is the implementation of pmysql.Factory.
 // Exported for testing.
-var GetDBConnImpl pmysql.IDBConnectionFactory = &pmysql.DBConnectionFactory{}
+// Maybe we can use a better way to do this. Because this is not thread-safe.
+// You can use `SetupSuite` and `TearDownSuite` to do this to get a better way.
+var GetDBConnImpl pmysql.Factory = pmysql.CreateMySQLDBConn
 
 // NewMySQLSink creates a mysql dmlSink with given parameters.
 func NewMySQLSink(
@@ -72,7 +74,7 @@ func NewMySQLSink(
 	conflictDetectorSlots uint64,
 ) (*dmlSink, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	statistics := metrics.NewStatistics(changefeedID, sink.TxnSink)
+	statistics := metrics.NewStatistics(ctx, changefeedID, sink.TxnSink)
 
 	backendImpls, err := mysql.NewMySQLBackends(ctx, changefeedID, sinkURI, replicaConfig, GetDBConnImpl, statistics)
 	if err != nil {
@@ -115,7 +117,7 @@ func newSink(ctx context.Context,
 	for i, backend := range backends {
 		w := newWorker(ctx1, changefeedID, i, backend, len(backends))
 		txnCh := sink.alive.conflictDetector.GetOutChByCacheID(int64(i))
-		g.Go(func() error { return w.runLoop(txnCh) })
+		g.Go(func() error { return w.run(txnCh) })
 		sink.workers = append(sink.workers, w)
 	}
 

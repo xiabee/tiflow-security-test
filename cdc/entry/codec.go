@@ -35,9 +35,12 @@ var (
 )
 
 var (
-	intLen           = 8
-	tablePrefixLen   = len(tablePrefix)
-	prefixTableIDLen = tablePrefixLen + intLen /*tableID*/
+	intLen            = 8
+	tablePrefixLen    = len(tablePrefix)
+	recordPrefixLen   = len(recordPrefix)
+	metaPrefixLen     = len(metaPrefix)
+	prefixTableIDLen  = tablePrefixLen + intLen  /*tableID*/
+	prefixRecordIDLen = recordPrefixLen + intLen /*recordID*/
 )
 
 // MetaType is for data structure meta/data flag.
@@ -60,6 +63,36 @@ const (
 	ListData MetaType = 'l'
 )
 
+type meta interface {
+	getType() MetaType
+}
+
+type metaHashData struct {
+	key   string
+	field []byte
+}
+
+func (d metaHashData) getType() MetaType {
+	return HashData
+}
+
+type metaListData struct {
+	key   string
+	index int64
+}
+
+func (d metaListData) getType() MetaType {
+	return ListData
+}
+
+type other struct {
+	tp MetaType
+}
+
+func (d other) getType() MetaType {
+	return d.tp
+}
+
 func decodeTableID(key []byte) (rest []byte, tableID int64, err error) {
 	if len(key) < prefixTableIDLen || !bytes.HasPrefix(key, tablePrefix) {
 		return nil, 0, cerror.ErrInvalidRecordKey.GenWithStackByArgs(key)
@@ -70,6 +103,65 @@ func decodeTableID(key []byte) (rest []byte, tableID int64, err error) {
 		return nil, 0, cerror.WrapError(cerror.ErrCodecDecode, err)
 	}
 	return
+}
+
+func decodeRecordID(key []byte) (rest []byte, recordID int64, err error) {
+	if len(key) < prefixRecordIDLen || !bytes.HasPrefix(key, recordPrefix) {
+		return nil, 0, cerror.ErrInvalidRecordKey.GenWithStackByArgs(key)
+	}
+	key = key[recordPrefixLen:]
+	rest, recordID, err = codec.DecodeInt(key)
+	if err != nil {
+		return nil, 0, cerror.WrapError(cerror.ErrCodecDecode, err)
+	}
+	return
+}
+
+func decodeMetaKey(ek []byte) (meta, error) {
+	if !bytes.HasPrefix(ek, metaPrefix) {
+		return nil, cerror.ErrInvalidRecordKey.GenWithStackByArgs(ek)
+	}
+
+	ek = ek[metaPrefixLen:]
+	ek, rawKey, err := codec.DecodeBytes(ek, nil)
+	if err != nil {
+		return nil, cerror.WrapError(cerror.ErrCodecDecode, err)
+	}
+	key := string(rawKey)
+
+	ek, rawTp, err := codec.DecodeUint(ek)
+	if err != nil {
+		return nil, cerror.WrapError(cerror.ErrCodecDecode, err)
+	}
+	switch MetaType(rawTp) {
+	case HashData:
+		if len(ek) > 0 {
+			var field []byte
+			_, field, err = codec.DecodeBytes(ek, nil)
+			if err != nil {
+				return nil, cerror.WrapError(cerror.ErrCodecDecode, err)
+			}
+			return metaHashData{key: key, field: field}, nil
+		}
+		if len(ek) > 0 {
+			// TODO: warning hash key decode failure
+			panic("hash key decode failure, should never happen")
+		}
+	case ListData:
+		if len(ek) == 0 {
+			panic("list key decode failure")
+		}
+		var index int64
+		_, index, err = codec.DecodeInt(ek)
+		if err != nil {
+			return nil, cerror.WrapError(cerror.ErrCodecDecode, err)
+		}
+		return metaListData{key: key, index: index}, nil
+	// TODO decode other key
+	default:
+		return other{tp: MetaType(rawTp)}, nil
+	}
+	return nil, cerror.ErrUnknownMetaType.GenWithStackByArgs(rawTp)
 }
 
 // decodeRow decodes a byte slice into datums with an existing row map.
@@ -210,9 +302,6 @@ func unflatten(datum types.Datum, ft *types.FieldType, loc *time.Location) (type
 		byteSize := (ft.GetFlen() + 7) >> 3
 		datum.SetUint64(0)
 		datum.SetMysqlBit(types.NewBinaryLiteralFromUint(val, byteSize))
-	case mysql.TypeTiDBVectorFloat32:
-		datum.SetVectorFloat32(types.ZeroVectorFloat32)
-		return datum, nil
 	}
 	return datum, nil
 }

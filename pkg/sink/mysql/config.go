@@ -77,8 +77,6 @@ const (
 
 	// defaultcachePrepStmts is the default value of cachePrepStmts
 	defaultCachePrepStmts = true
-
-	defaultHasVectorType = false
 )
 
 type urlConfig struct {
@@ -98,7 +96,6 @@ type urlConfig struct {
 	EnableBatchDML               *bool   `form:"batch-dml-enable"`
 	EnableMultiStatement         *bool   `form:"multi-stmt-enable"`
 	EnableCachePreparedStatement *bool   `form:"cache-prep-stmts"`
-	HasVectorType                *bool   `form:"has-vector-type"`
 }
 
 // Config is the configs for MySQL backend.
@@ -120,7 +117,6 @@ type Config struct {
 	// IsBDRModeSupported is true if the downstream is TiDB and write source is existed.
 	// write source exists when the downstream is TiDB and version is greater than or equal to v6.5.0.
 	IsWriteSourceExisted bool
-	HasVectorType        bool // HasVectorType is true if the column is vector type
 
 	SourceID        uint64
 	BatchDMLEnable  bool
@@ -144,7 +140,6 @@ func NewConfig() *Config {
 		MultiStmtEnable:        defaultMultiStmtEnable,
 		CachePrepStmts:         defaultCachePrepStmts,
 		SourceID:               config.DefaultTiDBSourceID,
-		HasVectorType:          defaultHasVectorType,
 	}
 }
 
@@ -200,9 +195,7 @@ func (c *Config) Apply(
 	if err = getDuration(urlParameter.Timeout, &c.DialTimeout); err != nil {
 		return err
 	}
-
 	getBatchDMLEnable(urlParameter, &c.BatchDMLEnable)
-	getHasVectorType(urlParameter, &c.HasVectorType)
 	getMultiStmtEnable(urlParameter, &c.MultiStmtEnable)
 	getCachePrepStmts(urlParameter, &c.CachePrepStmts)
 	c.ForceReplicate = replicaConfig.ForceReplicate
@@ -449,12 +442,6 @@ func getDuration(s *string, target *string) error {
 func getBatchDMLEnable(values *urlConfig, batchDMLEnable *bool) {
 	if values.EnableBatchDML != nil {
 		*batchDMLEnable = *values.EnableBatchDML
-	}
-}
-
-func getHasVectorType(values *urlConfig, hasVectorType *bool) {
-	if values.HasVectorType != nil {
-		*hasVectorType = *values.HasVectorType
 	}
 }
 

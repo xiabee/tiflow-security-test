@@ -18,9 +18,8 @@ import (
 	"math/rand"
 	"testing"
 
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/charset"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -32,7 +31,7 @@ func generateTableDef() (TableDefinition, *model.TableInfo) {
 	ft := types.NewFieldType(mysql.TypeLong)
 	ft.SetFlag(mysql.PriKeyFlag | mysql.NotNullFlag)
 	col := &timodel.ColumnInfo{
-		Name:         pmodel.NewCIStr("Id"),
+		Name:         timodel.NewCIStr("Id"),
 		FieldType:    *ft,
 		DefaultValue: 10,
 	}
@@ -42,7 +41,7 @@ func generateTableDef() (TableDefinition, *model.TableInfo) {
 	ft.SetFlag(mysql.NotNullFlag)
 	ft.SetFlen(128)
 	col = &timodel.ColumnInfo{
-		Name:         pmodel.NewCIStr("LastName"),
+		Name:         timodel.NewCIStr("LastName"),
 		FieldType:    *ft,
 		DefaultValue: "Default LastName",
 	}
@@ -51,7 +50,7 @@ func generateTableDef() (TableDefinition, *model.TableInfo) {
 	ft = types.NewFieldType(mysql.TypeVarchar)
 	ft.SetFlen(64)
 	col = &timodel.ColumnInfo{
-		Name:         pmodel.NewCIStr("FirstName"),
+		Name:         timodel.NewCIStr("FirstName"),
 		FieldType:    *ft,
 		DefaultValue: "Default FirstName",
 	}
@@ -59,7 +58,7 @@ func generateTableDef() (TableDefinition, *model.TableInfo) {
 
 	ft = types.NewFieldType(mysql.TypeDatetime)
 	col = &timodel.ColumnInfo{
-		Name:         pmodel.NewCIStr("Birthday"),
+		Name:         timodel.NewCIStr("Birthday"),
 		FieldType:    *ft,
 		DefaultValue: 12345678,
 	}
@@ -374,7 +373,7 @@ func TestTableCol(t *testing.T) {
 		require.Nil(t, err, tc.name)
 		require.JSONEq(t, tc.expected, string(encodedCol), tc.name)
 
-		_, err = tableCol.ToTiColumnInfo(100)
+		_, err = tableCol.ToTiColumnInfo()
 		require.NoError(t, err)
 	}
 }

@@ -28,7 +28,7 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/docker/go-units"
 	"github.com/dustin/go-humanize"
-	"github.com/pingcap/tidb/pkg/lightning/config"
+	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/util/filter"
 	router "github.com/pingcap/tidb/pkg/util/table-router"
@@ -345,6 +345,9 @@ func (m *LoaderConfig) adjust() error {
 		m.PoolSize = defaultPoolSize
 	}
 
+	if m.OnDuplicateLogical == "" && m.OnDuplicate != "" {
+		m.OnDuplicateLogical = m.OnDuplicate
+	}
 	if m.OnDuplicateLogical == "" {
 		m.OnDuplicateLogical = OnDuplicateReplace
 	}
@@ -628,8 +631,8 @@ func (c *TaskConfig) DecodeFile(fpath string) error {
 	return c.adjust()
 }
 
-// FromYaml loads config from file data.
-func (c *TaskConfig) FromYaml(data string) error {
+// Decode loads config from file data.
+func (c *TaskConfig) Decode(data string) error {
 	err := yaml.UnmarshalStrict([]byte(data), c)
 	if err != nil {
 		return terror.ErrConfigYamlTransform.Delegate(err, "decode task config failed")
@@ -1076,8 +1079,12 @@ func checkValidExpr(expr string) error {
 func (c *TaskConfig) YamlForDowngrade() (string, error) {
 	t := NewTaskConfigForDowngrade(c)
 
-	// try to encrypt password
-	t.TargetDB.Password = utils.EncryptOrPlaintext(utils.DecryptOrPlaintext(t.TargetDB.Password))
+	// encrypt password
+	cipher, err := utils.Encrypt(utils.DecryptOrPlaintext(t.TargetDB.Password))
+	if err != nil {
+		return "", err
+	}
+	t.TargetDB.Password = cipher
 
 	// omit default values, so we can ignore them for later marshal
 	t.omitDefaultVals()
@@ -1246,7 +1253,6 @@ type TaskConfigForDowngrade struct {
 
 // NewTaskConfigForDowngrade create new TaskConfigForDowngrade.
 func NewTaskConfigForDowngrade(taskConfig *TaskConfig) *TaskConfigForDowngrade {
-	targetDB := *taskConfig.TargetDB
 	return &TaskConfigForDowngrade{
 		Name:                      taskConfig.Name,
 		TaskMode:                  taskConfig.TaskMode,
@@ -1260,7 +1266,7 @@ func NewTaskConfigForDowngrade(taskConfig *TaskConfig) *TaskConfigForDowngrade {
 		HeartbeatReportInterval:   taskConfig.HeartbeatReportInterval,
 		Timezone:                  taskConfig.Timezone,
 		CaseSensitive:             taskConfig.CaseSensitive,
-		TargetDB:                  &targetDB,
+		TargetDB:                  taskConfig.TargetDB,
 		OnlineDDLScheme:           taskConfig.OnlineDDLScheme,
 		Routes:                    taskConfig.Routes,
 		Filters:                   taskConfig.Filters,

@@ -11,6 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build intest
+// +build intest
+
 package columnselector
 
 import (
@@ -32,18 +35,12 @@ func TestNewColumnSelector(t *testing.T) {
 	require.NotNil(t, selectors)
 	require.Len(t, selectors.selectors, 0)
 
-	tableInfo := model.BuildTableInfo("test", "table1", []*model.Column{
-		{
-			Name: "col1",
-		},
-		{
-			Name: "col2",
-		},
-	}, nil)
-
 	event := &model.RowChangedEvent{
-		TableInfo: tableInfo,
-		Columns: model.Columns2ColumnDatas([]*model.Column{
+		Table: &model.TableName{
+			Schema: "test",
+			Table:  "table1",
+		},
+		Columns: []*model.Column{
 			{
 				Name:  "col1",
 				Value: []byte("val1"),
@@ -52,8 +49,8 @@ func TestNewColumnSelector(t *testing.T) {
 				Name:  "col2",
 				Value: []byte("val2"),
 			},
-		}, tableInfo),
-		PreColumns: model.Columns2ColumnDatas([]*model.Column{
+		},
+		PreColumns: []*model.Column{
 			{
 				Name:  "col1",
 				Value: []byte("val1"),
@@ -62,7 +59,7 @@ func TestNewColumnSelector(t *testing.T) {
 				Name:  "col2",
 				Value: []byte("val2"),
 			},
-		}, tableInfo),
+		},
 	}
 
 	for _, column := range event.Columns {
@@ -130,8 +127,9 @@ func TestVerifyTables(t *testing.T) {
 
 	event4Test := func() *model.RowChangedEvent {
 		return &model.RowChangedEvent{
+			Table:     &model.TableName{Schema: "test", Table: "t1"},
 			TableInfo: tableInfo,
-			Columns: model.Columns2ColumnDatas([]*model.Column{
+			Columns: []*model.Column{
 				{
 					Name:  "a",
 					Value: []byte("1"),
@@ -152,8 +150,8 @@ func TestVerifyTables(t *testing.T) {
 					Name:  "e",
 					Value: []byte("5"),
 				},
-			}, tableInfo),
-			PreColumns: model.Columns2ColumnDatas([]*model.Column{
+			},
+			PreColumns: []*model.Column{
 				{
 					Name:  "a",
 					Value: []byte("1"),
@@ -174,7 +172,7 @@ func TestVerifyTables(t *testing.T) {
 					Name:  "e",
 					Value: []byte("5"),
 				},
-			}, tableInfo),
+			},
 		}
 	}
 

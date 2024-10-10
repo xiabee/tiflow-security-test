@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/codec/craft"
 	"github.com/pingcap/tiflow/pkg/sink/codec/csv"
-	"github.com/pingcap/tiflow/pkg/sink/codec/debezium"
 	"github.com/pingcap/tiflow/pkg/sink/codec/maxwell"
 	"github.com/pingcap/tiflow/pkg/sink/codec/open"
 	"github.com/pingcap/tiflow/pkg/sink/codec/simple"
@@ -32,8 +31,7 @@ import (
 
 // NewRowEventEncoderBuilder returns an RowEventEncoderBuilder
 func NewRowEventEncoderBuilder(
-	ctx context.Context,
-	cfg *common.Config,
+	ctx context.Context, cfg *common.Config,
 ) (codec.RowEventEncoderBuilder, error) {
 	switch cfg.Protocol {
 	case config.ProtocolDefault, config.ProtocolOpen:
@@ -48,8 +46,6 @@ func NewRowEventEncoderBuilder(
 		return canal.NewJSONRowEventEncoderBuilder(ctx, cfg)
 	case config.ProtocolCraft:
 		return craft.NewBatchEncoderBuilder(cfg), nil
-	case config.ProtocolDebezium:
-		return debezium.NewBatchEncoderBuilder(cfg, config.GetGlobalServerConfig().ClusterID), nil
 	case config.ProtocolSimple:
 		return simple.NewBuilder(ctx, cfg)
 	default:

@@ -59,7 +59,6 @@ func ignoreExcept(itemMap map[string]struct{}) []string {
 		config.LightningDownstreamVersionChecking,
 		config.LightningFreeSpaceChecking,
 		config.LightningMutexFeatureChecking,
-		config.LightningTableEmptyChecking,
 	}
 	ignoreCheckingItems := make([]string, 0, len(items)-len(itemMap))
 	for _, i := range items {
@@ -75,7 +74,7 @@ func TestIgnoreAllCheckingItems(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msg, 0)
 
-	result, err := RunCheckOnConfigs(context.Background(), nil, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), nil, false)
 	require.NoError(t, err)
 	require.Nil(t, result)
 
@@ -89,7 +88,7 @@ func TestIgnoreAllCheckingItems(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msg, 0)
 
-	result, err = RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err = RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.Nil(t, result)
 }
@@ -114,7 +113,7 @@ func TestDumpPrivilegeChecking(t *testing.T) {
 	mock = initMockDB(t)
 	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for User"}).
 		AddRow("GRANT USAGE ON *.* TO 'haha'@'%'"))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), result.Summary.Failed)
 	require.Contains(t, result.Results[0].Errors[0].ShortErr, "lack of Select privilege")
@@ -124,7 +123,7 @@ func TestDumpPrivilegeChecking(t *testing.T) {
 	mock = initMockDB(t)
 	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for User"}).
 		AddRow("GRANT SELECT ON db.* TO 'haha'@'%'"))
-	result, err = RunCheckOnConfigs(context.Background(), cfgs, true, 100, 100)
+	result, err = RunCheckOnConfigs(context.Background(), cfgs, true)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), result.Summary.Failed)
 	require.Contains(t, result.Results[0].Errors[0].ShortErr, "lack of Select global (*.*) privilege")
@@ -159,7 +158,7 @@ func TestReplicationPrivilegeChecking(t *testing.T) {
 	mock = initMockDB(t)
 	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for User"}).
 		AddRow("GRANT USAGE ON *.* TO 'haha'@'%'"))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), result.Summary.Failed)
 	require.Contains(t, result.Results[0].Errors[0].ShortErr, "lack of REPLICATION SLAVE global (*.*) privilege")
@@ -172,93 +171,6 @@ func TestReplicationPrivilegeChecking(t *testing.T) {
 		mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for User"}).
 			AddRow("GRANT REPLICATION SLAVE,REPLICATION CLIENT ON *.* TO 'haha'@'%'"))
 	}, cfgs)
-}
-
-func TestRunCheckOnConfigsLimit(t *testing.T) {
-	cfgs := []*config.SubTaskConfig{
-		{
-			Mode: config.ModeAll,
-			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{
-				config.DumpPrivilegeChecking:        {},
-				config.ReplicationPrivilegeChecking: {},
-			}),
-		},
-	}
-
-	// with limit = 100, there should be 2 error
-
-	mock := initMockDB(t)
-	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for User"}).
-		AddRow("GRANT USAGE ON *.* TO 'haha'@'%'"))
-	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for User"}).
-		AddRow("GRANT USAGE ON *.* TO 'haha'@'%'"))
-
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
-	require.NoError(t, err)
-	require.EqualValues(t, 2, result.Summary.Failed)
-	require.Len(t, result.Results, 2)
-
-	// test limit = 1
-
-	mock = initMockDB(t)
-	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for User"}).
-		AddRow("GRANT USAGE ON *.* TO 'haha'@'%'"))
-	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for User"}).
-		AddRow("GRANT USAGE ON *.* TO 'haha'@'%'"))
-
-	result, err = RunCheckOnConfigs(context.Background(), cfgs, false, 0, 1)
-	require.NoError(t, err)
-	require.EqualValues(t, 2, result.Summary.Failed)
-	require.Len(t, result.Results, 1)
-
-	// test limit warning of sub-results
-
-	cfgs = []*config.SubTaskConfig{
-		{
-			Mode:                config.ModeAll,
-			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.TableSchemaChecking: {}}),
-		},
-	}
-	errNoSuchTable := &gmysql.MySQLError{Number: 1146, Message: "Table 'xxx' doesn't exist"}
-
-	createTable1 := `CREATE TABLE %s (
-				  id int(11) DEFAULT NULL,
-				  b int(11) DEFAULT NULL
-				) ENGINE=InnoDB DEFAULT CHARSET=latin1`
-
-	mock = initMockDB(t)
-	mock.MatchExpectationsInOrder(false)
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'max_connections'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("max_connections", "2"))
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_1`").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb1)))
-	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_1`").WillReturnError(errNoSuchTable) // downstream connection mock
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_2`").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb2)))
-	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_2`").WillReturnError(errNoSuchTable) // downstream connection mock
-
-	result, err = RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
-	require.NoError(t, err)
-	require.Contains(t, result.Results[0].Errors[0].ShortErr, "primary/unique key does not exist")
-	require.Contains(t, result.Results[0].Errors[1].ShortErr, "primary/unique key does not exist")
-	require.NoError(t, mock.ExpectationsWereMet())
-
-	mock = initMockDB(t)
-	mock.MatchExpectationsInOrder(false)
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'max_connections'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("max_connections", "2"))
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_1`").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb1)))
-	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_1`").WillReturnError(errNoSuchTable) // downstream connection mock
-	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
-	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_2`").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb2)))
-	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_2`").WillReturnError(errNoSuchTable) // downstream connection mock
-
-	result, err = RunCheckOnConfigs(context.Background(), cfgs, false, 1, 0)
-	require.NoError(t, err)
-	require.Len(t, result.Results[0].Errors, 1)
-	require.Contains(t, result.Results[0].Errors[0].ShortErr, "primary/unique key does not exist")
-	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestTargetDBPrivilegeChecking(t *testing.T) {
@@ -281,7 +193,7 @@ func TestTargetDBPrivilegeChecking(t *testing.T) {
 	mock = initMockDB(t)
 	mock.ExpectQuery("SHOW GRANTS").WillReturnRows(sqlmock.NewRows([]string{"Grants for User"}).
 		AddRow("GRANT SELECT,UPDATE,CREATE,DELETE,INSERT,ALTER ON *.* TO 'test'@'%'"))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), result.Summary.Warning)
 	require.Contains(t, result.Results[0].Errors[0].ShortErr, "lack of Drop global (*.*) privilege")
@@ -330,7 +242,7 @@ func TestVersionChecking(t *testing.T) {
 	mock = initMockDB(t)
 	mock.ExpectQuery("SHOW GLOBAL VARIABLES LIKE 'version'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).
 		AddRow("version", "10.1.29-MariaDB"))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.True(t, result.Summary.Passed)
 	require.Equal(t, int64(1), result.Summary.Warning)
@@ -348,7 +260,7 @@ func TestVersionChecking(t *testing.T) {
 	mock = initMockDB(t)
 	mock.ExpectQuery("SHOW GLOBAL VARIABLES LIKE 'version'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).
 		AddRow("version", "5.5.26-log"))
-	result, err = RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err = RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.True(t, result.Summary.Passed)
 	require.Equal(t, int64(1), result.Summary.Warning)
@@ -375,7 +287,7 @@ func TestServerIDChecking(t *testing.T) {
 	mock = initMockDB(t)
 	mock.ExpectQuery("SHOW GLOBAL VARIABLES LIKE 'server_id'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).
 		AddRow("server_id", "0"))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.True(t, result.Summary.Passed)
 	require.Contains(t, result.Results[0].Instruction, "Set server_id greater than 0")
@@ -409,7 +321,7 @@ func TestBinlogEnableChecking(t *testing.T) {
 	mock = initMockDB(t)
 	mock.ExpectQuery("SHOW GLOBAL VARIABLES LIKE 'log_bin'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).
 		AddRow("log_bin", "OFF"))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.False(t, result.Summary.Passed)
 	require.Contains(t, result.Results[0].Errors[0].ShortErr, "log_bin is OFF, and should be ON")
@@ -443,7 +355,7 @@ func TestBinlogFormatChecking(t *testing.T) {
 	mock = initMockDB(t)
 	mock.ExpectQuery("SHOW GLOBAL VARIABLES LIKE 'binlog_format'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).
 		AddRow("binlog_format", "STATEMENT"))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.Contains(t, result.Results[0].Errors[0].ShortErr, "binlog_format is STATEMENT, and should be ROW")
 
@@ -480,7 +392,7 @@ func TestBinlogRowImageChecking(t *testing.T) {
 		AddRow("version", "5.7.26-log"))
 	mock.ExpectQuery("SHOW GLOBAL VARIABLES LIKE 'binlog_row_image'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).
 		AddRow("binlog_row_image", "MINIMAL"))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.Contains(t, result.Results[0].Errors[0].ShortErr, "binlog_row_image is MINIMAL, and should be FULL")
 
@@ -543,7 +455,7 @@ func TestTableSchemaChecking(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_2`").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb2)))
 	mock.ExpectQuery("SHOW CREATE TABLE `db_1`.`t_2`").WillReturnError(errNoSuchTable) // downstream connection mock
 
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.Contains(t, result.Results[0].Errors[0].ShortErr, "primary/unique key does not exist")
 	require.Contains(t, result.Results[0].Errors[1].ShortErr, "primary/unique key does not exist")
@@ -623,7 +535,7 @@ func TestShardTableSchemaChecking(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE .*").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb1)))
 	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
 	mock.ExpectQuery("SHOW CREATE TABLE .*").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable2, tb2)))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.Contains(t, result.Results[0].Errors[0].ShortErr, "different column definition")
 
@@ -715,7 +627,7 @@ func TestShardAutoIncrementIDChecking(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE .*").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb1)))
 	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
 	mock.ExpectQuery("SHOW CREATE TABLE .*").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb2)))
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.Regexp(t, "sourceID  table .* of sharding .* have auto-increment key", result.Results[0].Errors[0].ShortErr)
 
@@ -790,7 +702,7 @@ func TestSameTargetTableDetection(t *testing.T) {
 	mock.ExpectQuery("SHOW VARIABLES LIKE 'sql_mode'").WillReturnRows(sqlmock.NewRows([]string{"Variable_name", "Value"}).AddRow("sql_mode", ""))
 	mock.ExpectQuery("SHOW CREATE TABLE .*").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb1)))
 	mock.ExpectQuery("SHOW CREATE TABLE .*").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb2)))
-	_, err = RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	_, err = RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.ErrorContains(t, err, "same table name in case-insensitive")
 }
 
@@ -876,7 +788,7 @@ func checkHappyPath(t *testing.T, pre func(), cfgs []*config.SubTaskConfig) {
 	require.Equal(t, CheckTaskSuccess, msg)
 
 	pre()
-	result, err := RunCheckOnConfigs(context.Background(), cfgs, false, 100, 100)
+	result, err := RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.NoError(t, err)
 	require.True(t, result.Summary.Passed)
 	require.Equal(t, int64(0), result.Summary.Warning)

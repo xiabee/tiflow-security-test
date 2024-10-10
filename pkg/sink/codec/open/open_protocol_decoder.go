@@ -19,7 +19,6 @@ import (
 	"encoding/binary"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -58,7 +57,7 @@ func NewBatchDecoder(ctx context.Context, config *common.Config, db *sql.DB) (co
 	)
 	if config.LargeMessageHandle.EnableClaimCheck() {
 		storageURI := config.LargeMessageHandle.ClaimCheckStorageURI
-		externalStorage, err = util.GetExternalStorage(ctx, storageURI, nil, util.NewS3Retryer(10, 10*time.Second, 10*time.Second))
+		externalStorage, err = util.GetExternalStorageFromURI(ctx, storageURI)
 		if err != nil {
 			return nil, cerror.WrapError(cerror.ErrKafkaInvalidConfig, err)
 		}
@@ -208,7 +207,11 @@ func (b *BatchDecoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 
 	event := b.nextEvent
 	if b.nextKey.OnlyHandleKey {
+		var err error
 		event = b.assembleHandleKeyOnlyEvent(ctx, event)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
 	}
 
 	b.nextKey = nil
@@ -253,54 +256,47 @@ func (b *BatchDecoder) assembleHandleKeyOnlyEvent(
 	ctx context.Context, handleKeyOnlyEvent *model.RowChangedEvent,
 ) *model.RowChangedEvent {
 	var (
-		schema   = handleKeyOnlyEvent.TableInfo.GetSchemaName()
-		table    = handleKeyOnlyEvent.TableInfo.GetTableName()
+		schema   = handleKeyOnlyEvent.Table.Schema
+		table    = handleKeyOnlyEvent.Table.Table
 		commitTs = handleKeyOnlyEvent.CommitTs
 	)
 
-	tableInfo := handleKeyOnlyEvent.TableInfo
 	if handleKeyOnlyEvent.IsInsert() {
 		conditions := make(map[string]interface{}, len(handleKeyOnlyEvent.Columns))
 		for _, col := range handleKeyOnlyEvent.Columns {
-			colName := tableInfo.ForceGetColumnName(col.ColumnID)
-			conditions[colName] = col.Value
+			conditions[col.Name] = col.Value
 		}
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, conditions)
+
 		columns := b.buildColumns(holder, conditions)
-		indexColumns := model.GetHandleAndUniqueIndexOffsets4Test(columns)
-		handleKeyOnlyEvent.TableInfo = model.BuildTableInfo(schema, table, columns, indexColumns)
-		handleKeyOnlyEvent.Columns = model.Columns2ColumnDatas(columns, handleKeyOnlyEvent.TableInfo)
+		handleKeyOnlyEvent.Columns = columns
 	} else if handleKeyOnlyEvent.IsDelete() {
 		conditions := make(map[string]interface{}, len(handleKeyOnlyEvent.PreColumns))
 		for _, col := range handleKeyOnlyEvent.PreColumns {
-			colName := tableInfo.ForceGetColumnName(col.ColumnID)
-			conditions[colName] = col.Value
+			conditions[col.Name] = col.Value
 		}
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, conditions)
+
 		preColumns := b.buildColumns(holder, conditions)
-		indexColumns := model.GetHandleAndUniqueIndexOffsets4Test(preColumns)
-		handleKeyOnlyEvent.TableInfo = model.BuildTableInfo(schema, table, preColumns, indexColumns)
-		handleKeyOnlyEvent.PreColumns = model.Columns2ColumnDatas(preColumns, handleKeyOnlyEvent.TableInfo)
+		handleKeyOnlyEvent.PreColumns = preColumns
 	} else if handleKeyOnlyEvent.IsUpdate() {
 		conditions := make(map[string]interface{}, len(handleKeyOnlyEvent.Columns))
 		for _, col := range handleKeyOnlyEvent.Columns {
-			colName := tableInfo.ForceGetColumnName(col.ColumnID)
-			conditions[colName] = col.Value
+			conditions[col.Name] = col.Value
 		}
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, conditions)
+
 		columns := b.buildColumns(holder, conditions)
-		indexColumns := model.GetHandleAndUniqueIndexOffsets4Test(columns)
-		handleKeyOnlyEvent.TableInfo = model.BuildTableInfo(schema, table, columns, indexColumns)
-		handleKeyOnlyEvent.Columns = model.Columns2ColumnDatas(columns, handleKeyOnlyEvent.TableInfo)
+		handleKeyOnlyEvent.Columns = columns
 
 		conditions = make(map[string]interface{}, len(handleKeyOnlyEvent.PreColumns))
 		for _, col := range handleKeyOnlyEvent.PreColumns {
-			colName := tableInfo.ForceGetColumnName(col.ColumnID)
-			conditions[colName] = col.Value
+			conditions[col.Name] = col.Value
 		}
 		holder = common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, conditions)
+
 		preColumns := b.buildColumns(holder, conditions)
-		handleKeyOnlyEvent.PreColumns = model.Columns2ColumnDatas(preColumns, handleKeyOnlyEvent.TableInfo)
+		handleKeyOnlyEvent.PreColumns = preColumns
 	}
 
 	return handleKeyOnlyEvent

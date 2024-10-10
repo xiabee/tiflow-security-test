@@ -14,7 +14,6 @@
 package simple
 
 import (
-	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"sort"
@@ -22,8 +21,7 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/types"
 	tiTypes "github.com/pingcap/tidb/pkg/types"
@@ -163,7 +161,7 @@ func newTiColumnInfo(
 ) *timodel.ColumnInfo {
 	col := new(timodel.ColumnInfo)
 	col.ID = colID
-	col.Name = pmodel.NewCIStr(column.Name)
+	col.Name = timodel.NewCIStr(column.Name)
 
 	col.FieldType = *types.NewFieldType(types.StrToType(column.DataType.MySQLType))
 	col.SetCharset(column.DataType.Charset)
@@ -257,14 +255,14 @@ func newTiIndexInfo(indexSchema *IndexSchema, columns []*timodel.ColumnInfo, ind
 			}
 		}
 		indexColumns[i] = &timodel.IndexColumn{
-			Name:   pmodel.NewCIStr(col),
+			Name:   timodel.NewCIStr(col),
 			Offset: offset,
 		}
 	}
 
 	return &timodel.IndexInfo{
 		ID:      indexID,
-		Name:    pmodel.NewCIStr(indexSchema.Name),
+		Name:    timodel.NewCIStr(indexSchema.Name),
 		Columns: indexColumns,
 		Unique:  indexSchema.Unique,
 		Primary: indexSchema.Primary,
@@ -340,7 +338,7 @@ func newTableInfo(m *TableSchema) *model.TableInfo {
 		schemaVersion = m.Version
 
 		tidbTableInfo.ID = m.TableID
-		tidbTableInfo.Name = pmodel.NewCIStr(m.Table)
+		tidbTableInfo.Name = timodel.NewCIStr(m.Table)
 		tidbTableInfo.UpdateTS = m.Version
 
 		nextMockID := int64(100)
@@ -382,44 +380,80 @@ func newDDLEvent(msg *message) *model.DDLEvent {
 
 // buildRowChangedEvent converts from message to RowChangedEvent.
 func buildRowChangedEvent(
-	msg *message, tableInfo *model.TableInfo, enableRowChecksum bool, db *sql.DB,
+	msg *message, tableInfo *model.TableInfo, enableRowChecksum bool,
 ) (*model.RowChangedEvent, error) {
 	result := &model.RowChangedEvent{
-		CommitTs:        msg.CommitTs,
-		PhysicalTableID: msg.TableID,
-		TableInfo:       tableInfo,
-		Columns:         decodeColumns(msg.Data, tableInfo),
-		PreColumns:      decodeColumns(msg.Old, tableInfo),
+		CommitTs:  msg.CommitTs,
+		TableInfo: tableInfo,
+		Table:     &tableInfo.TableName,
 	}
 
+	result.Columns = decodeColumns(msg.Data, tableInfo)
+	result.PreColumns = decodeColumns(msg.Old, tableInfo)
+
 	if enableRowChecksum && msg.Checksum != nil {
+		var (
+			previousCorrupted bool
+			currentCorrupted  bool
+		)
+		err := common.VerifyChecksum(result.PreColumns, tableInfo.Columns, msg.Checksum.Previous)
+		if err != nil {
+			log.Info("checksum corrupted on the previous columns", zap.Any("message", msg))
+			previousCorrupted = true
+		}
+		err = common.VerifyChecksum(result.Columns, tableInfo.Columns, msg.Checksum.Current)
+		if err != nil {
+			log.Info("checksum corrupted on the current columns", zap.Any("message", msg))
+			currentCorrupted = true
+		}
+
 		result.Checksum = &integrity.Checksum{
-			Current:   msg.Checksum.Current,
 			Previous:  msg.Checksum.Previous,
+			Current:   msg.Checksum.Current,
 			Corrupted: msg.Checksum.Corrupted,
 			Version:   msg.Checksum.Version,
 		}
 
-		err := common.VerifyChecksum(result, db)
-		if err != nil || msg.Checksum.Corrupted {
+		corrupted := msg.Checksum.Corrupted || previousCorrupted || currentCorrupted
+		if corrupted {
 			log.Warn("consumer detect checksum corrupted",
-				zap.String("schema", msg.Schema), zap.String("table", msg.Table), zap.Error(err))
+				zap.String("schema", msg.Schema),
+				zap.String("table", msg.Table))
+			for idx, col := range result.PreColumns {
+				colInfo := tableInfo.Columns[idx]
+				log.Info("data corrupted, print each previous column for debugging",
+					zap.String("name", colInfo.Name.O),
+					zap.Any("type", colInfo.GetType()),
+					zap.Any("charset", colInfo.GetCharset()),
+					zap.Any("flag", colInfo.GetFlag()),
+					zap.Any("value", col.Value),
+					zap.Any("default", colInfo.GetDefaultValue()))
+			}
+			for idx, col := range result.Columns {
+				colInfo := tableInfo.Columns[idx]
+				log.Info("data corrupted, print each column for debugging",
+					zap.String("name", colInfo.Name.O),
+					zap.Any("type", colInfo.GetType()),
+					zap.Any("charset", colInfo.GetCharset()),
+					zap.Any("flag", colInfo.GetFlag()),
+					zap.Any("value", col.Value),
+					zap.Any("default", colInfo.GetDefaultValue()))
+			}
 			return nil, cerror.ErrDecodeFailed.GenWithStackByArgs("checksum corrupted")
-
 		}
 	}
 
-	for _, col := range result.Columns {
-		adjustTimestampValue(col, tableInfo.ForceGetColumnInfo(col.ColumnID).FieldType)
+	for idx, col := range result.Columns {
+		adjustTimestampValue(col, tableInfo.Columns[idx].FieldType)
 	}
-	for _, col := range result.PreColumns {
-		adjustTimestampValue(col, tableInfo.ForceGetColumnInfo(col.ColumnID).FieldType)
+	for idx, col := range result.PreColumns {
+		adjustTimestampValue(col, tableInfo.Columns[idx].FieldType)
 	}
 
 	return result, nil
 }
 
-func adjustTimestampValue(column *model.ColumnData, flag types.FieldType) {
+func adjustTimestampValue(column *model.Column, flag types.FieldType) {
 	if flag.GetType() != mysql.TypeTimestamp {
 		return
 	}
@@ -437,11 +471,11 @@ func adjustTimestampValue(column *model.ColumnData, flag types.FieldType) {
 
 func decodeColumns(
 	rawData map[string]interface{}, tableInfo *model.TableInfo,
-) []*model.ColumnData {
+) []*model.Column {
 	if rawData == nil {
 		return nil
 	}
-	var result []*model.ColumnData
+	var result []*model.Column
 	for _, info := range tableInfo.Columns {
 		value, ok := rawData[info.Name.O]
 		if !ok {
@@ -450,13 +484,12 @@ func decodeColumns(
 				zap.String("column", info.Name.O))
 			continue
 		}
-		columnID := tableInfo.ForceGetColumnIDByName(info.Name.O)
-		col := decodeColumn(value, columnID, &info.FieldType)
+		col := decodeColumn(value, &info.FieldType)
 		if col == nil {
 			log.Panic("cannot decode column",
 				zap.String("name", info.Name.O), zap.Any("data", value))
 		}
-
+		col.Name = info.Name.O
 		result = append(result, col)
 	}
 	return result
@@ -563,14 +596,14 @@ func (a *jsonMarshaller) newDMLMessage(
 	}
 	if event.IsInsert() {
 		m.Type = DMLTypeInsert
-		m.Data = a.formatColumns(event.Columns, event.TableInfo, onlyHandleKey)
+		m.Data = a.formatColumns(event.Columns, event.TableInfo.Columns, onlyHandleKey)
 	} else if event.IsDelete() {
 		m.Type = DMLTypeDelete
-		m.Old = a.formatColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
+		m.Old = a.formatColumns(event.PreColumns, event.TableInfo.Columns, onlyHandleKey)
 	} else if event.IsUpdate() {
 		m.Type = DMLTypeUpdate
-		m.Data = a.formatColumns(event.Columns, event.TableInfo, onlyHandleKey)
-		m.Old = a.formatColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
+		m.Data = a.formatColumns(event.Columns, event.TableInfo.Columns, onlyHandleKey)
+		m.Old = a.formatColumns(event.PreColumns, event.TableInfo.Columns, onlyHandleKey)
 	}
 	if a.config.EnableRowChecksum && event.Checksum != nil {
 		m.Checksum = &checksum{
@@ -585,18 +618,16 @@ func (a *jsonMarshaller) newDMLMessage(
 }
 
 func (a *jsonMarshaller) formatColumns(
-	columns []*model.ColumnData, tableInfo *model.TableInfo, onlyHandleKey bool,
+	columns []*model.Column, colInfos []*timodel.ColumnInfo, onlyHandleKey bool,
 ) map[string]interface{} {
 	result := make(map[string]interface{}, len(columns))
-	colInfos := tableInfo.GetColInfosForRowChangedEvent()
-	for i, col := range columns {
+	for idx, col := range columns {
 		if col != nil {
-			flag := tableInfo.ForceGetColumnFlagType(col.ColumnID)
-			if onlyHandleKey && !flag.IsHandleKey() {
+			if onlyHandleKey && !col.Flag.IsHandleKey() {
 				continue
 			}
-			value := encodeValue(col.Value, colInfos[i].Ft, a.config.TimeZone.String())
-			result[tableInfo.ForceGetColumnName(col.ColumnID)] = value
+			value := encodeValue(col.Value, &colInfos[idx].FieldType, a.config.TimeZone.String())
+			result[col.Name] = value
 		}
 	}
 	return result
@@ -639,8 +670,6 @@ func (a *avroMarshaller) encodeValue4Avro(
 		return v, "double"
 	case string:
 		return v, "string"
-	case tiTypes.VectorFloat32:
-		return v.String(), "string"
 	default:
 		log.Panic("unexpected type for avro value", zap.Any("value", value))
 	}
@@ -653,6 +682,7 @@ func encodeValue(
 	if value == nil {
 		return nil
 	}
+
 	var err error
 	switch ft.GetType() {
 	case mysql.TypeBit:
@@ -716,8 +746,6 @@ func encodeValue(
 		} else {
 			result = string(v)
 		}
-	case tiTypes.VectorFloat32:
-		result = v.String()
 	default:
 		result = fmt.Sprintf("%v", v)
 	}
@@ -725,13 +753,16 @@ func encodeValue(
 	return result
 }
 
-func decodeColumn(value interface{}, id int64, fieldType *types.FieldType) *model.ColumnData {
-	result := &model.ColumnData{
-		ColumnID: id,
-		Value:    value,
+func decodeColumn(value interface{}, fieldType *types.FieldType) *model.Column {
+	result := &model.Column{
+		Value: value,
 	}
 	if value == nil {
 		return result
+	}
+
+	if mysql.HasPriKeyFlag(fieldType.GetFlag()) {
+		result.Flag.SetIsHandleKey()
 	}
 
 	var err error
@@ -758,18 +789,7 @@ func decodeColumn(value interface{}, id int64, fieldType *types.FieldType) *mode
 		case int64:
 			value = uint64(v)
 		}
-	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeLong, mysql.TypeInt24:
-		switch v := value.(type) {
-		case string:
-			if mysql.HasUnsignedFlag(fieldType.GetFlag()) {
-				value, err = strconv.ParseUint(v, 10, 64)
-			} else {
-				value, err = strconv.ParseInt(v, 10, 64)
-			}
-		default:
-			value = v
-		}
-	case mysql.TypeYear:
+	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeLong, mysql.TypeInt24, mysql.TypeYear:
 		switch v := value.(type) {
 		case string:
 			value, err = strconv.ParseInt(v, 10, 64)
@@ -779,10 +799,9 @@ func decodeColumn(value interface{}, id int64, fieldType *types.FieldType) *mode
 	case mysql.TypeLonglong:
 		switch v := value.(type) {
 		case string:
-			if mysql.HasUnsignedFlag(fieldType.GetFlag()) {
+			value, err = strconv.ParseInt(v, 10, 64)
+			if err != nil {
 				value, err = strconv.ParseUint(v, 10, 64)
-			} else {
-				value, err = strconv.ParseInt(v, 10, 64)
 			}
 		case map[string]interface{}:
 			value = uint64(v["value"].(int64))
@@ -792,9 +811,7 @@ func decodeColumn(value interface{}, id int64, fieldType *types.FieldType) *mode
 	case mysql.TypeFloat:
 		switch v := value.(type) {
 		case string:
-			var val float64
-			val, err = strconv.ParseFloat(v, 32)
-			value = float32(val)
+			value, err = strconv.ParseFloat(v, 32)
 		default:
 			value = v
 		}

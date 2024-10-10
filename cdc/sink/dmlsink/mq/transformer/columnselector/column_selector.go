@@ -58,17 +58,16 @@ func (s *selector) Match(schema, table string) bool {
 // the caller's should make sure the given event match the selector first before apply it.
 func (s *selector) Apply(event *model.RowChangedEvent) error {
 	// defensive check, this should not happen.
-	if !s.Match(event.TableInfo.GetSchemaName(), event.TableInfo.GetTableName()) {
+	if !s.Match(event.Table.Schema, event.Table.Table) {
 		return errors.ErrColumnSelectorFailed.GenWithStack(
-			"the given event does not match the column selector, table: %v", event.TableInfo.TableName)
+			"the given event does not match the column selector, table: %v", event.Table)
 	}
 
 	retainedColumns := make(map[string]struct{}, len(event.Columns))
 	if len(event.Columns) != 0 {
 		for idx, column := range event.Columns {
-			colName := event.TableInfo.ForceGetColumnName(column.ColumnID)
-			if s.columnM.MatchColumn(colName) {
-				retainedColumns[colName] = struct{}{}
+			if s.columnM.MatchColumn(column.Name) {
+				retainedColumns[column.Name] = struct{}{}
 				continue
 			}
 			event.Columns[idx] = nil
@@ -77,16 +76,15 @@ func (s *selector) Apply(event *model.RowChangedEvent) error {
 		if !verifyIndices(event.TableInfo, retainedColumns) {
 			return errors.ErrColumnSelectorFailed.GenWithStack(
 				"no primary key columns or unique key columns obtained after filter out, "+
-					"table: %+v", event.TableInfo.TableName)
+					"table: %+v", event.Table)
 		}
 	}
 
 	if len(event.PreColumns) != 0 {
 		clear(retainedColumns)
 		for idx, column := range event.PreColumns {
-			colName := event.TableInfo.ForceGetColumnName(column.ColumnID)
-			if s.columnM.MatchColumn(colName) {
-				retainedColumns[colName] = struct{}{}
+			if s.columnM.MatchColumn(column.Name) {
+				retainedColumns[column.Name] = struct{}{}
 				continue
 			}
 			event.PreColumns[idx] = nil
@@ -94,7 +92,7 @@ func (s *selector) Apply(event *model.RowChangedEvent) error {
 		if !verifyIndices(event.TableInfo, retainedColumns) {
 			return errors.ErrColumnSelectorFailed.GenWithStack(
 				"no primary key columns or unique key columns obtained after filter out, "+
-					"table: %+v", event.TableInfo.TableName)
+					"table: %+v", event.Table)
 		}
 	}
 
@@ -126,7 +124,7 @@ func New(cfg *config.ReplicaConfig) (*ColumnSelector, error) {
 // Apply the column selector to the given event.
 func (c *ColumnSelector) Apply(event *model.RowChangedEvent) error {
 	for _, s := range c.selectors {
-		if s.Match(event.TableInfo.GetSchemaName(), event.TableInfo.GetTableName()) {
+		if s.Match(event.Table.Schema, event.Table.Table) {
 			return s.Apply(event)
 		}
 	}

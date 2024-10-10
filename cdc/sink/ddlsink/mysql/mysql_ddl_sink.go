@@ -20,18 +20,15 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/coreos/go-semver/semver"
-	lru "github.com/hashicorp/golang-lru"
+	cerrors "github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/dumpling/export"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/ddlsink"
 	"github.com/pingcap/tiflow/cdc/sink/metrics"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/errors"
+	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/errorutil"
 	"github.com/pingcap/tiflow/pkg/quotes"
 	"github.com/pingcap/tiflow/pkg/retry"
@@ -45,13 +42,11 @@ const (
 
 	// networkDriftDuration is used to construct a context timeout for database operations.
 	networkDriftDuration = 5 * time.Second
-
-	defaultSupportVectorVersion = "8.4.0"
 )
 
-// GetDBConnImpl is the implementation of pmysql.IDBConnectionFactory.
+// GetDBConnImpl is the implementation of pmysql.Factory.
 // Exported for testing.
-var GetDBConnImpl pmysql.IDBConnectionFactory = &pmysql.DBConnectionFactory{}
+var GetDBConnImpl pmysql.Factory = pmysql.CreateMySQLDBConn
 
 // Assert Sink implementation
 var _ ddlsink.Sink = (*DDLSink)(nil)
@@ -66,13 +61,6 @@ type DDLSink struct {
 	// statistics is the statistics of this sink.
 	// We use it to record the DDL count.
 	statistics *metrics.Statistics
-
-	// lastExecutedNormalDDLCache is a fast path to check whether aync DDL of a table
-	// is running in downstream.
-	// map: model.TableName -> timodel.ActionType
-	lastExecutedNormalDDLCache *lru.Cache
-
-	needFormat bool
 }
 
 // NewDDLSink creates a new DDLSink.
@@ -88,35 +76,26 @@ func NewDDLSink(
 		return nil, err
 	}
 
-	dsnStr, err := pmysql.GenerateDSN(ctx, sinkURI, cfg, GetDBConnImpl.CreateTemporaryConnection)
+	dsnStr, err := pmysql.GenerateDSN(ctx, sinkURI, cfg, GetDBConnImpl)
 	if err != nil {
 		return nil, err
 	}
 
-	db, err := GetDBConnImpl.CreateStandardConnection(ctx, dsnStr)
+	db, err := GetDBConnImpl(ctx, dsnStr)
 	if err != nil {
 		return nil, err
 	}
 
-	cfg.IsTiDB = pmysql.CheckIsTiDB(ctx, db)
-
-	cfg.IsWriteSourceExisted, err = pmysql.CheckIfBDRModeIsSupported(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-
-	lruCache, err := lru.New(1024)
+	cfg.IsTiDB, err = pmysql.CheckIsTiDB(ctx, db)
 	if err != nil {
 		return nil, err
 	}
 
 	m := &DDLSink{
-		id:                         changefeedID,
-		db:                         db,
-		cfg:                        cfg,
-		statistics:                 metrics.NewStatistics(changefeedID, sink.TxnSink),
-		lastExecutedNormalDDLCache: lruCache,
-		needFormat:                 needFormatDDL(db, cfg),
+		id:         changefeedID,
+		db:         db,
+		cfg:        cfg,
+		statistics: metrics.NewStatistics(ctx, changefeedID, sink.TxnSink),
 	}
 
 	log.Info("MySQL DDL sink is created",
@@ -127,18 +106,10 @@ func NewDDLSink(
 
 // WriteDDLEvent writes a DDL event to the mysql database.
 func (m *DDLSink) WriteDDLEvent(ctx context.Context, ddl *model.DDLEvent) error {
-	m.waitAsynExecDone(ctx, ddl)
-
-	if m.shouldAsyncExecDDL(ddl) {
-		m.lastExecutedNormalDDLCache.Remove(ddl.TableInfo.TableName)
-		return m.asyncExecDDL(ctx, ddl)
+	if ddl.Type == timodel.ActionAddIndex && m.cfg.IsTiDB {
+		return m.asyncExecAddIndexDDLIfTimeout(ctx, ddl)
 	}
-
-	if err := m.execDDLWithMaxRetries(ctx, ddl); err != nil {
-		return errors.Trace(err)
-	}
-	m.lastExecutedNormalDDLCache.Add(ddl.TableInfo.TableName, ddl.Type)
-	return nil
+	return m.execDDLWithMaxRetries(ctx, ddl)
 }
 
 func (m *DDLSink) execDDLWithMaxRetries(ctx context.Context, ddl *model.DDLEvent) error {
@@ -204,14 +175,6 @@ func (m *DDLSink) execDDL(pctx context.Context, ddl *model.DDLEvent) error {
 
 	shouldSwitchDB := needSwitchDB(ddl)
 
-	// Convert vector type to string type for unsupport database
-	if m.needFormat {
-		if newQuery := formatQuery(ddl.Query); newQuery != ddl.Query {
-			log.Warn("format ddl query", zap.String("newQuery", newQuery), zap.String("query", ddl.Query), zap.String("collate", ddl.Collate), zap.String("charset", ddl.Charset))
-			ddl.Query = newQuery
-		}
-	}
-
 	failpoint.Inject("MySQLSinkExecDDLDelay", func() {
 		select {
 		case <-ctx.Done():
@@ -222,8 +185,8 @@ func (m *DDLSink) execDDL(pctx context.Context, ddl *model.DDLEvent) error {
 	})
 
 	start := time.Now()
-	log.Info("Start exec DDL", zap.String("namespace", m.id.Namespace), zap.String("changefeed", m.id.ID),
-		zap.Uint64("commitTs", ddl.CommitTs), zap.String("DDL", ddl.Query))
+	log.Info("Start exec DDL", zap.Any("DDL", ddl), zap.String("namespace", m.id.Namespace),
+		zap.String("changefeed", m.id.ID))
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -240,38 +203,27 @@ func (m *DDLSink) execDDL(pctx context.Context, ddl *model.DDLEvent) error {
 		}
 	}
 
-	// we try to set cdc write source for the ddl
-	if err = pmysql.SetWriteSource(pctx, m.cfg, tx); err != nil {
-		if rbErr := tx.Rollback(); rbErr != nil {
-			if errors.Cause(rbErr) != context.Canceled {
-				log.Error("Failed to rollback",
-					zap.String("namespace", m.id.Namespace),
-					zap.String("changefeed", m.id.ID), zap.Error(err))
-			}
-		}
-		return err
-	}
-
 	if _, err = tx.ExecContext(ctx, ddl.Query); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
-			log.Error("Failed to rollback",
+			log.Error("Failed to rollback", zap.String("sql", ddl.Query),
 				zap.String("namespace", m.id.Namespace),
-				zap.String("changefeed", m.id.ID),
-				zap.String("sql", ddl.Query),
-				zap.Error(err))
+				zap.String("changefeed", m.id.ID), zap.Error(err))
 		}
 		return err
 	}
 
 	if err = tx.Commit(); err != nil {
-		log.Error("Failed to exec DDL", zap.String("namespace", m.id.Namespace), zap.String("changefeed", m.id.ID),
-			zap.Duration("duration", time.Since(start)), zap.String("sql", ddl.Query), zap.Error(err))
-		return errors.WrapError(errors.ErrMySQLTxnError, errors.WithMessage(err, fmt.Sprintf("Query info: %s; ", ddl.Query)))
+		log.Error("Failed to exec DDL", zap.String("sql", ddl.Query),
+			zap.Duration("duration", time.Since(start)),
+			zap.String("namespace", m.id.Namespace),
+			zap.String("changefeed", m.id.ID), zap.Error(err))
+		return cerror.WrapError(cerror.ErrMySQLTxnError, cerrors.WithMessage(err, fmt.Sprintf("Query info: %s; ", ddl.Query)))
 	}
 
-	log.Info("Exec DDL succeeded",
-		zap.String("namespace", m.id.Namespace), zap.String("changefeed", m.id.ID),
-		zap.Duration("duration", time.Since(start)), zap.String("sql", ddl.Query))
+	log.Info("Exec DDL succeeded", zap.String("sql", ddl.Query),
+		zap.Duration("duration", time.Since(start)),
+		zap.String("namespace", m.id.Namespace),
+		zap.String("changefeed", m.id.ID))
 	return nil
 }
 
@@ -283,27 +235,6 @@ func needSwitchDB(ddl *model.DDLEvent) bool {
 		return false
 	}
 	return true
-}
-
-// needFormatDDL checks vector type support
-func needFormatDDL(db *sql.DB, cfg *pmysql.Config) bool {
-	if !cfg.HasVectorType {
-		log.Warn("please set `has-vector-type` to be true if a column is vector type when the downstream is not TiDB or TiDB version less than specify version",
-			zap.Any("hasVectorType", cfg.HasVectorType), zap.Any("supportVectorVersion", defaultSupportVectorVersion))
-		return false
-	}
-	versionInfo, err := export.SelectVersion(db)
-	if err != nil {
-		log.Warn("fail to get version", zap.Error(err), zap.Bool("isTiDB", cfg.IsTiDB))
-		return false
-	}
-	serverInfo := version.ParseServerInfo(versionInfo)
-	version := semver.New(defaultSupportVectorVersion)
-	if !cfg.IsTiDB || serverInfo.ServerVersion.LessThan(*version) {
-		log.Error("downstream unsupport vector type. it will be converted to longtext", zap.String("version", serverInfo.ServerVersion.String()), zap.String("supportVectorVersion", defaultSupportVectorVersion), zap.Bool("isTiDB", cfg.IsTiDB))
-		return true
-	}
-	return false
 }
 
 // WriteCheckpointTs does nothing.
@@ -324,5 +255,57 @@ func (m *DDLSink) Close() {
 				zap.String("changefeed", m.id.ID),
 				zap.Error(err))
 		}
+	}
+}
+
+// asyncExecAddIndexDDLIfTimeout executes ddl in async mode.
+// this function only works in TiDB, because TiDB will save ddl jobs
+// and execute them asynchronously even if ticdc crashed.
+func (m *DDLSink) asyncExecAddIndexDDLIfTimeout(ctx context.Context, ddl *model.DDLEvent) error {
+	done := make(chan error, 1)
+	// wait for 2 seconds at most
+	tick := time.NewTimer(2 * time.Second)
+	defer tick.Stop()
+	log.Info("async exec add index ddl start",
+		zap.String("changefeedID", m.id.String()),
+		zap.Uint64("commitTs", ddl.CommitTs),
+		zap.String("ddl", ddl.Query))
+	go func() {
+		if err := m.execDDLWithMaxRetries(ctx, ddl); err != nil {
+			log.Error("async exec add index ddl failed",
+				zap.String("changefeedID", m.id.String()),
+				zap.Uint64("commitTs", ddl.CommitTs),
+				zap.String("ddl", ddl.Query))
+			done <- err
+			return
+		}
+		log.Info("async exec add index ddl done",
+			zap.String("changefeedID", m.id.String()),
+			zap.Uint64("commitTs", ddl.CommitTs),
+			zap.String("ddl", ddl.Query))
+		done <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		// if the ddl is canceled, we just return nil, if the ddl is not received by tidb,
+		// the downstream ddl is lost, because the checkpoint ts is forwarded.
+		log.Info("async add index ddl exits as canceled",
+			zap.String("changefeedID", m.id.String()),
+			zap.Uint64("commitTs", ddl.CommitTs),
+			zap.String("ddl", ddl.Query))
+		return nil
+	case err := <-done:
+		// if the ddl is executed within 2 seconds, we just return the result to the caller.
+		return err
+	case <-tick.C:
+		// if the ddl is still running, we just return nil,
+		// then if the ddl is failed, the downstream ddl is lost.
+		// because the checkpoint ts is forwarded.
+		log.Info("async add index ddl is still running",
+			zap.String("changefeedID", m.id.String()),
+			zap.Uint64("commitTs", ddl.CommitTs),
+			zap.String("ddl", ddl.Query))
+		return nil
 	}
 }

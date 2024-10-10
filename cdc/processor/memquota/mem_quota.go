@@ -87,11 +87,7 @@ func NewMemQuota(changefeedID model.ChangeFeedID, totalBytes uint64, comp string
 	m.wg.Add(1)
 	go func() {
 		timer := time.NewTicker(3 * time.Second)
-		defer func() {
-			timer.Stop()
-			MemoryQuota.DeleteLabelValues(changefeedID.Namespace, changefeedID.ID, "total", comp)
-			MemoryQuota.DeleteLabelValues(changefeedID.Namespace, changefeedID.ID, "used", comp)
-		}()
+		defer timer.Stop()
 		for {
 			select {
 			case <-timer.C:
@@ -176,12 +172,9 @@ func (m *MemQuota) Record(span tablepb.Span, resolved model.ResolvedTs, nBytes u
 		// Can't find the table record, the table must be removed.
 		usedBytes := m.usedBytes.Load()
 		if usedBytes < nBytes {
-			log.Panic("MemQuota.record fail",
-				zap.Uint64("used", usedBytes), zap.Uint64("record", nBytes))
+			log.Panic("MemQuota.refund fail",
+				zap.Uint64("used", usedBytes), zap.Uint64("refund", nBytes))
 		}
-		// If we cannot find the table, then the previous acquired memory quota needed to be returned.
-		// Note that "usedBytes.Add(^(nBytes - 1))" means "usedBytes.Sub(nBytes)". But atomic don't
-		// have Sub method.
 		if m.usedBytes.Add(^(nBytes - 1)) < m.totalBytes {
 			m.blockAcquireCond.Broadcast()
 		}

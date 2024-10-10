@@ -25,9 +25,8 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/golang/mock/gomock"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/compression"
@@ -89,7 +88,9 @@ func TestEncodeDMLEnableChecksum(t *testing.T) {
 	replicaConfig.Integrity.IntegrityCheckLevel = integrity.CheckLevelCorrectness
 	createTableDDL, _, updateEvent, _ := utils.NewLargeEvent4Test(t, replicaConfig)
 	rand.New(rand.NewSource(time.Now().Unix())).Shuffle(len(createTableDDL.TableInfo.Columns), func(i, j int) {
-		createTableDDL.TableInfo.Columns[i], createTableDDL.TableInfo.Columns[j] = createTableDDL.TableInfo.Columns[j], createTableDDL.TableInfo.Columns[i]
+		createTableDDL.TableInfo.Columns[i],
+			createTableDDL.TableInfo.Columns[j] = createTableDDL.TableInfo.Columns[j],
+			createTableDDL.TableInfo.Columns[i]
 	})
 
 	ctx := context.Background()
@@ -1052,15 +1053,12 @@ func TestEncodeIntegerTypes(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, decodedRow.CommitTs, event.CommitTs)
 
-			decodedColumns := make(map[string]*model.ColumnData, len(decodedRow.Columns))
+			decodedColumns := make(map[string]*model.Column, len(decodedRow.Columns))
 			for _, column := range decodedRow.Columns {
-				colName := decodedRow.TableInfo.ForceGetColumnName(column.ColumnID)
-				decodedColumns[colName] = column
+				decodedColumns[column.Name] = column
 			}
-
 			for _, expected := range event.Columns {
-				colName := event.TableInfo.ForceGetColumnName(expected.ColumnID)
-				decoded, ok := decodedColumns[colName]
+				decoded, ok := decodedColumns[expected.Name]
 				require.True(t, ok)
 				require.EqualValues(t, expected.Value, decoded.Value)
 			}
@@ -1131,14 +1129,12 @@ func TestEncoderOtherTypes(t *testing.T) {
 		decodedRow, err := dec.NextRowChangedEvent()
 		require.NoError(t, err)
 
-		decodedColumns := make(map[string]*model.ColumnData, len(decodedRow.Columns))
+		decodedColumns := make(map[string]*model.Column, len(decodedRow.Columns))
 		for _, column := range decodedRow.Columns {
-			colName := decodedRow.TableInfo.ForceGetColumnName(column.ColumnID)
-			decodedColumns[colName] = column
+			decodedColumns[column.Name] = column
 		}
 		for _, expected := range row.Columns {
-			colName := row.TableInfo.ForceGetColumnName(expected.ColumnID)
-			decoded, ok := decodedColumns[colName]
+			decoded, ok := decodedColumns[expected.Name]
 			require.True(t, ok)
 			require.EqualValues(t, expected.Value, decoded.Value)
 		}
@@ -1377,40 +1373,25 @@ func TestEncodeLargeEventsNormal(t *testing.T) {
 				require.Equal(t, decodedRow.CommitTs, event.CommitTs)
 				require.Equal(t, decodedRow.TableInfo.GetSchemaName(), event.TableInfo.GetSchemaName())
 				require.Equal(t, decodedRow.TableInfo.GetTableName(), event.TableInfo.GetTableName())
-				require.Equal(t, decodedRow.GetTableID(), event.GetTableID())
 
-				decodedColumns := make(map[string]*model.ColumnData, len(decodedRow.Columns))
+				decodedColumns := make(map[string]*model.Column, len(decodedRow.Columns))
 				for _, column := range decodedRow.Columns {
-					colName := decodedRow.TableInfo.ForceGetColumnName(column.ColumnID)
-					decodedColumns[colName] = column
+					decodedColumns[column.Name] = column
 				}
 				for _, col := range event.Columns {
-					colName := event.TableInfo.ForceGetColumnName(col.ColumnID)
-					decoded, ok := decodedColumns[colName]
+					decoded, ok := decodedColumns[col.Name]
 					require.True(t, ok)
-					switch v := col.Value.(type) {
-					case types.VectorFloat32:
-						require.EqualValues(t, v.String(), decoded.Value)
-					default:
-						require.EqualValues(t, v, decoded.Value)
-					}
+					require.EqualValues(t, col.Value, decoded.Value)
 				}
 
-				decodedPreviousColumns := make(map[string]*model.ColumnData, len(decodedRow.PreColumns))
+				decodedPreviousColumns := make(map[string]*model.Column, len(decodedRow.PreColumns))
 				for _, column := range decodedRow.PreColumns {
-					colName := decodedRow.TableInfo.ForceGetColumnName(column.ColumnID)
-					decodedPreviousColumns[colName] = column
+					decodedPreviousColumns[column.Name] = column
 				}
 				for _, col := range event.PreColumns {
-					colName := event.TableInfo.ForceGetColumnName(col.ColumnID)
-					decoded, ok := decodedPreviousColumns[colName]
+					decoded, ok := decodedPreviousColumns[col.Name]
 					require.True(t, ok)
-					switch v := col.Value.(type) {
-					case types.VectorFloat32:
-						require.EqualValues(t, v.String(), decoded.Value)
-					default:
-						require.EqualValues(t, v, decoded.Value)
-					}
+					require.EqualValues(t, col.Value, decoded.Value)
 				}
 			}
 		}
@@ -1484,97 +1465,80 @@ func TestLargerMessageHandleClaimCheck(t *testing.T) {
 	require.Nil(t, badDec)
 
 	codecConfig.LargeMessageHandle.ClaimCheckStorageURI = "file:///tmp/simple-claim-check"
-	for _, rawValue := range []bool{false, true} {
-		codecConfig.LargeMessageHandle.ClaimCheckRawValue = rawValue
-		for _, format := range []common.EncodingFormatType{
-			common.EncodingFormatAvro,
-			common.EncodingFormatJSON,
+	for _, format := range []common.EncodingFormatType{
+		common.EncodingFormatAvro,
+		common.EncodingFormatJSON,
+	} {
+		codecConfig.EncodingFormat = format
+		for _, compressionType := range []string{
+			compression.None,
+			compression.Snappy,
+			compression.LZ4,
 		} {
-			codecConfig.EncodingFormat = format
-			for _, compressionType := range []string{
-				compression.None,
-				compression.Snappy,
-				compression.LZ4,
-			} {
-				codecConfig.MaxMessageBytes = config.DefaultMaxMessageBytes
-				codecConfig.LargeMessageHandle.LargeMessageHandleCompression = compressionType
+			codecConfig.MaxMessageBytes = config.DefaultMaxMessageBytes
+			codecConfig.LargeMessageHandle.LargeMessageHandleCompression = compressionType
 
-				b, err = NewBuilder(ctx, codecConfig)
-				require.NoError(t, err)
-				enc := b.Build()
+			b, err = NewBuilder(ctx, codecConfig)
+			require.NoError(t, err)
+			enc := b.Build()
 
-				m, err := enc.EncodeDDLEvent(ddlEvent)
-				require.NoError(t, err)
+			m, err := enc.EncodeDDLEvent(ddlEvent)
+			require.NoError(t, err)
 
-				dec, err := NewDecoder(ctx, codecConfig, nil)
-				require.NoError(t, err)
+			dec, err := NewDecoder(ctx, codecConfig, nil)
+			require.NoError(t, err)
 
-				err = dec.AddKeyValue(m.Key, m.Value)
-				require.NoError(t, err)
+			err = dec.AddKeyValue(m.Key, m.Value)
+			require.NoError(t, err)
 
-				messageType, hasNext, err := dec.HasNext()
-				require.NoError(t, err)
-				require.True(t, hasNext)
-				require.Equal(t, model.MessageTypeDDL, messageType)
+			messageType, hasNext, err := dec.HasNext()
+			require.NoError(t, err)
+			require.True(t, hasNext)
+			require.Equal(t, model.MessageTypeDDL, messageType)
 
-				_, err = dec.NextDDLEvent()
-				require.NoError(t, err)
+			_, err = dec.NextDDLEvent()
+			require.NoError(t, err)
 
-				enc.(*encoder).config.MaxMessageBytes = 500
-				err = enc.AppendRowChangedEvent(ctx, "", updateEvent, func() {})
-				require.NoError(t, err)
+			enc.(*encoder).config.MaxMessageBytes = 500
+			err = enc.AppendRowChangedEvent(ctx, "", updateEvent, func() {})
+			require.NoError(t, err)
 
-				claimCheckLocationM := enc.Build()[0]
+			claimCheckLocationM := enc.Build()[0]
 
-				dec.config.MaxMessageBytes = 500
-				err = dec.AddKeyValue(claimCheckLocationM.Key, claimCheckLocationM.Value)
-				require.NoError(t, err)
+			dec.config.MaxMessageBytes = 500
+			err = dec.AddKeyValue(claimCheckLocationM.Key, claimCheckLocationM.Value)
+			require.NoError(t, err)
 
-				messageType, hasNext, err = dec.HasNext()
-				require.NoError(t, err)
-				require.True(t, hasNext)
-				require.Equal(t, model.MessageTypeRow, messageType)
-				require.NotEqual(t, "", dec.msg.ClaimCheckLocation)
+			messageType, hasNext, err = dec.HasNext()
+			require.NoError(t, err)
+			require.True(t, hasNext)
+			require.Equal(t, model.MessageTypeRow, messageType)
+			require.NotEqual(t, "", dec.msg.ClaimCheckLocation)
 
-				decodedRow, err := dec.NextRowChangedEvent()
-				require.NoError(t, err)
+			decodedRow, err := dec.NextRowChangedEvent()
+			require.NoError(t, err)
 
-				require.Equal(t, decodedRow.CommitTs, updateEvent.CommitTs)
-				require.Equal(t, decodedRow.TableInfo.GetSchemaName(), updateEvent.TableInfo.GetSchemaName())
-				require.Equal(t, decodedRow.TableInfo.GetTableName(), updateEvent.TableInfo.GetTableName())
+			require.Equal(t, decodedRow.CommitTs, updateEvent.CommitTs)
+			require.Equal(t, decodedRow.TableInfo.GetSchemaName(), updateEvent.TableInfo.GetSchemaName())
+			require.Equal(t, decodedRow.TableInfo.GetTableName(), updateEvent.TableInfo.GetTableName())
 
-				decodedColumns := make(map[string]*model.ColumnData, len(decodedRow.Columns))
-				for _, column := range decodedRow.Columns {
-					colName := decodedRow.TableInfo.ForceGetColumnName(column.ColumnID)
-					decodedColumns[colName] = column
-				}
-				for _, col := range updateEvent.Columns {
-					colName := updateEvent.TableInfo.ForceGetColumnName(col.ColumnID)
-					decoded, ok := decodedColumns[colName]
-					require.True(t, ok)
-					switch v := col.Value.(type) {
-					case types.VectorFloat32:
-						require.EqualValues(t, v.String(), decoded.Value, colName)
-					default:
-						require.EqualValues(t, v, decoded.Value, colName)
-					}
-				}
+			decodedColumns := make(map[string]*model.Column, len(decodedRow.Columns))
+			for _, column := range decodedRow.Columns {
+				decodedColumns[column.Name] = column
+			}
+			for _, col := range updateEvent.Columns {
+				decoded, ok := decodedColumns[col.Name]
+				require.True(t, ok)
+				require.EqualValues(t, col.Value, decoded.Value)
+			}
 
-				for _, column := range decodedRow.PreColumns {
-					colName := decodedRow.TableInfo.ForceGetColumnName(column.ColumnID)
-					decodedColumns[colName] = column
-				}
-				for _, col := range updateEvent.PreColumns {
-					colName := updateEvent.TableInfo.ForceGetColumnName(col.ColumnID)
-					decoded, ok := decodedColumns[colName]
-					require.True(t, ok)
-					switch v := col.Value.(type) {
-					case types.VectorFloat32:
-						require.EqualValues(t, v.String(), decoded.Value, colName)
-					default:
-						require.EqualValues(t, v, decoded.Value, colName)
-					}
-				}
+			for _, column := range decodedRow.PreColumns {
+				decodedColumns[column.Name] = column
+			}
+			for _, col := range updateEvent.PreColumns {
+				decoded, ok := decodedColumns[col.Name]
+				require.True(t, ok)
+				require.EqualValues(t, col.Value, decoded.Value)
 			}
 		}
 	}
@@ -1622,7 +1586,7 @@ func TestLargeMessageHandleKeyOnly(t *testing.T) {
 
 			enc.(*encoder).config.MaxMessageBytes = 500
 			dec.config.MaxMessageBytes = 500
-			for _, event = range events {
+			for _, event := range events {
 				err = enc.AppendRowChangedEvent(ctx, "", event, func() {})
 				require.NoError(t, err)
 
@@ -1643,11 +1607,9 @@ func TestLargeMessageHandleKeyOnly(t *testing.T) {
 					obtainedValues[name] = value
 				}
 				for _, col := range event.Columns {
-					colName := event.TableInfo.ForceGetColumnName(col.ColumnID)
-					colFlag := event.TableInfo.ForceGetColumnFlagType(col.ColumnID)
-					if colFlag.IsHandleKey() {
-						require.Contains(t, dec.msg.Data, colName)
-						obtained := obtainedValues[colName]
+					if col.Flag.IsHandleKey() {
+						require.Contains(t, dec.msg.Data, col.Name)
+						obtained := obtainedValues[col.Name]
 						switch v := obtained.(type) {
 						case string:
 							var err error
@@ -1656,7 +1618,7 @@ func TestLargeMessageHandleKeyOnly(t *testing.T) {
 						}
 						require.EqualValues(t, col.Value, obtained)
 					} else {
-						require.NotContains(t, dec.msg.Data, colName)
+						require.NotContains(t, dec.msg.Data, col.Name)
 					}
 				}
 
@@ -1665,11 +1627,9 @@ func TestLargeMessageHandleKeyOnly(t *testing.T) {
 					obtainedValues[name] = value
 				}
 				for _, col := range event.PreColumns {
-					colName := event.TableInfo.ForceGetColumnName(col.ColumnID)
-					colFlag := event.TableInfo.ForceGetColumnFlagType(col.ColumnID)
-					if colFlag.IsHandleKey() {
-						require.Contains(t, dec.msg.Old, colName)
-						obtained := obtainedValues[colName]
+					if col.Flag.IsHandleKey() {
+						require.Contains(t, dec.msg.Old, col.Name)
+						obtained := obtainedValues[col.Name]
 						switch v := obtained.(type) {
 						case string:
 							var err error
@@ -1678,7 +1638,7 @@ func TestLargeMessageHandleKeyOnly(t *testing.T) {
 						}
 						require.EqualValues(t, col.Value, obtained)
 					} else {
-						require.NotContains(t, dec.msg.Data, colName)
+						require.NotContains(t, dec.msg.Data, col.Name)
 					}
 				}
 
@@ -1700,7 +1660,7 @@ func TestLargeMessageHandleKeyOnly(t *testing.T) {
 			require.True(t, hasNext)
 			require.Equal(t, model.MessageTypeDDL, messageType)
 
-			for _, event = range events {
+			for _, event := range events {
 				mock.ExpectQuery("SELECT @@global.time_zone").
 					WillReturnRows(mock.NewRows([]string{""}).AddRow("SYSTEM"))
 
@@ -1729,65 +1689,43 @@ func TestLargeMessageHandleKeyOnly(t *testing.T) {
 				require.Equal(t, decodedRow.TableInfo.GetSchemaName(), event.TableInfo.GetSchemaName())
 				require.Equal(t, decodedRow.TableInfo.GetTableName(), event.TableInfo.GetTableName())
 
-				decodedColumns := make(map[string]*model.ColumnData, len(decodedRow.Columns))
+				decodedColumns := make(map[string]*model.Column, len(decodedRow.Columns))
 				for _, column := range decodedRow.Columns {
-					colName := decodedRow.TableInfo.ForceGetColumnName(column.ColumnID)
-					decodedColumns[colName] = column
+					decodedColumns[column.Name] = column
 				}
 				for _, col := range event.Columns {
-					colName := event.TableInfo.ForceGetColumnName(col.ColumnID)
-					decoded, ok := decodedColumns[colName]
+					decoded, ok := decodedColumns[col.Name]
 					require.True(t, ok)
-					colInfo := event.TableInfo.ForceGetColumnFlagType(col.ColumnID)
-					if colInfo.IsBinary() {
+					if col.Flag.IsBinary() {
 						switch v := col.Value.(type) {
 						case []byte:
 							length := len(decoded.Value.([]uint8))
-							require.Equal(t, v[:length], decoded.Value, colName)
-						case types.VectorFloat32:
-							require.Equal(t, v.String(), decoded.Value, colName)
+							require.Equal(t, v[:length], decoded.Value, col.Name)
 						default:
-							require.Equal(t, col.Value, decoded.Value, colName)
+							require.EqualValues(t, col.Value, decoded.Value, col.Name)
 						}
 					} else {
-						switch v := col.Value.(type) {
-						case []byte:
-							require.Equal(t, string(v), decoded.Value, colName)
-						default:
-							require.Equal(t, v, decoded.Value, colName)
-						}
+						require.EqualValues(t, col.Value, decoded.Value, col.Name)
 					}
 				}
 
 				clear(decodedColumns)
 				for _, column := range decodedRow.PreColumns {
-					colName := decodedRow.TableInfo.ForceGetColumnName(column.ColumnID)
-					decodedColumns[colName] = column
+					decodedColumns[column.Name] = column
 				}
 				for _, col := range event.PreColumns {
-					colName := event.TableInfo.ForceGetColumnName(col.ColumnID)
-					decoded, ok := decodedColumns[colName]
+					decoded, ok := decodedColumns[col.Name]
 					require.True(t, ok)
-					colInfo := event.TableInfo.ForceGetColumnFlagType(col.ColumnID)
-					if colInfo.IsBinary() {
+					if col.Flag.IsBinary() {
 						switch v := col.Value.(type) {
 						case []byte:
 							length := len(decoded.Value.([]uint8))
-							require.Equal(t, v[:length], decoded.Value, colName)
-						case types.VectorFloat32:
-							require.Equal(t, v.String(), decoded.Value, colName)
+							require.Equal(t, v[:length], decoded.Value, col.Name)
 						default:
-							require.Equal(t, col.Value, decoded.Value, colName)
+							require.EqualValues(t, col.Value, decoded.Value, col.Name)
 						}
 					} else {
-						switch v := col.Value.(type) {
-						case types.VectorFloat32:
-							require.Equal(t, v.String(), decoded.Value, colName)
-						case []byte:
-							require.Equal(t, string(v), decoded.Value, colName)
-						default:
-							require.Equal(t, v, decoded.Value, colName)
-						}
+						require.EqualValues(t, col.Value, decoded.Value, col.Name)
 					}
 				}
 			}

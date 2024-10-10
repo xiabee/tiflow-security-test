@@ -20,32 +20,41 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	"go.uber.org/zap"
+	"golang.org/x/text/encoding/charmap"
 )
 
 // Column is a type only used in codec internally.
 type Column struct {
 	Type byte `json:"t"`
 	// Deprecated: please use Flag instead.
-	WhereHandle bool                 `json:"h,omitempty"`
+	WhereHandle *bool                `json:"h,omitempty"`
 	Flag        model.ColumnFlagType `json:"f"`
 	Value       any                  `json:"v"`
 }
 
+// NewColumn creates a Column.
+func NewColumn(value any, tp byte) *Column {
+	return &Column{
+		Value: value,
+		Type:  tp,
+	}
+}
+
 // FromRowChangeColumn converts from a row changed column to a codec column.
-func (c *Column) FromRowChangeColumn(col model.ColumnDataX) {
-	c.Type = col.GetType()
-	c.Flag = col.GetFlag()
+func (c *Column) FromRowChangeColumn(col *model.Column) {
+	c.Type = col.Type
+	c.Flag = col.Flag
 	if c.Flag.IsHandleKey() {
-		c.WhereHandle = true
+		whereHandle := true
+		c.WhereHandle = &whereHandle
 	}
 	if col.Value == nil {
 		c.Value = nil
 		return
 	}
-	switch c.Type {
+	switch col.Type {
 	case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar:
 		var str string
 		switch col.Value.(type) {
@@ -61,8 +70,6 @@ func (c *Column) FromRowChangeColumn(col model.ColumnDataX) {
 			str = str[1 : len(str)-1]
 		}
 		c.Value = str
-	case mysql.TypeTiDBVectorFloat32:
-		c.Value = col.Value.(types.VectorFloat32).String()
 	default:
 		c.Value = col.Value
 	}
@@ -89,20 +96,48 @@ func (c *Column) ToRowChangeColumn(name string) *model.Column {
 			}
 		}
 		col.Value = []byte(str)
-	case mysql.TypeFloat:
-		col.Value = float32(col.Value.(float64))
-	case mysql.TypeYear:
-		col.Value = int64(col.Value.(uint64))
-	case mysql.TypeEnum, mysql.TypeSet:
-		val, err := col.Value.(json.Number).Int64()
-		if err != nil {
-			log.Panic("invalid column value for enum, please report a bug",
-				zap.Any("col", c), zap.Error(err))
-		}
-		col.Value = uint64(val)
-	case mysql.TypeTiDBVectorFloat32:
 	default:
+		col.Value = c.Value
 	}
+	return col
+}
+
+// ToCanalJSONFormatColumn converts from a codec column to a row changed column in canal-json format.
+func (c *Column) ToCanalJSONFormatColumn(name string, isBlob bool) *model.Column {
+	col := new(model.Column)
+	col.Type = c.Type
+	col.Flag = c.Flag
+	col.Name = name
+	col.Value = c.Value
+	if col.Value == nil {
+		return col
+	}
+
+	value, ok := col.Value.(string)
+	if !ok {
+		log.Panic("canal-json encoded message should have type in `string`")
+	}
+
+	if col.Type == mysql.TypeBit || col.Type == mysql.TypeSet {
+		val, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			log.Panic("invalid column value for bit", zap.Any("col", c), zap.Error(err))
+		}
+		col.Value = val
+		return col
+	}
+
+	var err error
+	if isBlob {
+		// when encoding the `JavaSQLTypeBLOB`, use `ISO8859_1` decoder, now reverse it back.
+		encoder := charmap.ISO8859_1.NewEncoder()
+		value, err = encoder.String(value)
+		if err != nil {
+			log.Panic("invalid column value, please report a bug", zap.Any("col", col), zap.Error(err))
+		}
+	}
+
+	col.Value = value
 	return col
 }
 

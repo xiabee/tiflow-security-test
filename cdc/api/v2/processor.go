@@ -18,7 +18,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/pingcap/tiflow/cdc/api"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
@@ -37,7 +36,7 @@ import (
 func (h *OpenAPIV2) getProcessor(c *gin.Context) {
 	ctx := c.Request.Context()
 	namespace := getNamespaceValueWithDefault(c)
-	changefeedID := model.ChangeFeedID{Namespace: namespace, ID: c.Param(api.APIOpVarChangefeedID)}
+	changefeedID := model.ChangeFeedID{Namespace: namespace, ID: c.Param(apiOpVarChangefeedID)}
 	if err := model.ValidateChangefeedID(changefeedID.ID); err != nil {
 		_ = c.Error(
 			cerror.ErrAPIInvalidParam.GenWithStack(
@@ -131,8 +130,12 @@ func (h *OpenAPIV2) getProcessor(c *gin.Context) {
 // @Router	/api/v2/processors [get]
 func (h *OpenAPIV2) listProcessors(c *gin.Context) {
 	ctx := c.Request.Context()
-	provider := h.capture.StatusProvider()
-	infos, err := provider.GetProcessors(ctx)
+	controller, err := h.capture.GetController()
+	if err != nil {
+		_ = c.Error(err)
+		return
+	}
+	infos, err := controller.GetProcessors(ctx)
 	if err != nil {
 		_ = c.Error(err)
 		return

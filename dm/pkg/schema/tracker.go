@@ -21,19 +21,16 @@ import (
 	"sync"
 
 	"github.com/pingcap/errors"
-	tidbConfig "github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/ddl/schematracker"
 	"github.com/pingcap/tidb/pkg/executor"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/autoid"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util/chunk"
@@ -93,19 +90,15 @@ type executorContext struct {
 
 var _ sqlexec.RestrictedSQLExecutor = executorContext{}
 
-func (se executorContext) GetRestrictedSQLExecutor() sqlexec.RestrictedSQLExecutor {
-	return se
-}
-
 func (se executorContext) ParseWithParams(context.Context, string, ...interface{}) (ast.StmtNode, error) {
 	return nil, nil
 }
 
-func (se executorContext) ExecRestrictedStmt(context.Context, ast.StmtNode, ...sqlexec.OptionFuncAlias) ([]chunk.Row, []*resolve.ResultField, error) {
+func (se executorContext) ExecRestrictedStmt(context.Context, ast.StmtNode, ...sqlexec.OptionFuncAlias) ([]chunk.Row, []*ast.ResultField, error) {
 	return nil, nil, nil
 }
 
-func (se executorContext) ExecRestrictedSQL(context.Context, []sqlexec.OptionFuncAlias, string, ...interface{}) ([]chunk.Row, []*resolve.ResultField, error) {
+func (se executorContext) ExecRestrictedSQL(context.Context, []sqlexec.OptionFuncAlias, string, ...interface{}) ([]chunk.Row, []*ast.ResultField, error) {
 	return nil, nil, nil
 }
 
@@ -139,22 +132,16 @@ func (tr *Tracker) Init(
 
 	logger = logger.WithFields(zap.String("component", "schema-tracker"), zap.String("task", task))
 
-	// set max-index-length to maximum allowable (3072*4)
-	tidbConfig.UpdateGlobal(func(conf *tidbConfig.Config) {
-		conf.MaxIndexLength = 12288
-	})
-
 	upTracker := schematracker.NewSchemaTracker(lowerCaseTableNames)
 	dsSession := mock.NewContext()
-	dsSession.SetValue(ddl.SuppressErrorTooLongKeyKey, true)
+	dsSession.GetSessionVars().StrictSQLMode = false
 	downTracker := &downstreamTracker{
 		downstreamConn: downstreamConn,
 		se:             dsSession,
 		tableInfos:     make(map[string]*DownstreamTableInfo),
 	}
 	// TODO: need to use upstream timezone to correctly check literal is in [1970, 2038]
-	sctx := mock.NewContext()
-	se := executorContext{Context: sctx}
+	se := executorContext{Context: mock.NewContext()}
 	tr.Lock()
 	defer tr.Unlock()
 	tr.lowerCaseTableNames = lowerCaseTableNames
@@ -229,12 +216,12 @@ func (tr *Tracker) GetTableInfo(table *filter.Table) (*model.TableInfo, error) {
 	if tr.closed.Load() {
 		return nil, dmterror.ErrSchemaTrackerIsClosed.New("fail to get table info")
 	}
-	return tr.upstreamTracker.TableByName(context.Background(), pmodel.NewCIStr(table.Schema), pmodel.NewCIStr(table.Name))
+	return tr.upstreamTracker.TableByName(model.NewCIStr(table.Schema), model.NewCIStr(table.Name))
 }
 
 // GetCreateTable returns the `CREATE TABLE` statement of the table.
 func (tr *Tracker) GetCreateTable(ctx context.Context, table *filter.Table) (string, error) {
-	tableInfo, err := tr.upstreamTracker.TableByName(ctx, pmodel.NewCIStr(table.Schema), pmodel.NewCIStr(table.Name))
+	tableInfo, err := tr.upstreamTracker.TableByName(model.NewCIStr(table.Schema), model.NewCIStr(table.Name))
 	if err != nil {
 		return "", err
 	}
@@ -253,7 +240,7 @@ func (tr *Tracker) AllSchemas() []string {
 
 // ListSchemaTables lists all tables in the schema.
 func (tr *Tracker) ListSchemaTables(schema string) ([]string, error) {
-	ret, err := tr.upstreamTracker.AllTableNamesOfSchema(pmodel.NewCIStr(schema))
+	ret, err := tr.upstreamTracker.AllTableNamesOfSchema(model.NewCIStr(schema))
 	if err != nil {
 		return nil, dmterror.ErrSchemaTrackerUnSchemaNotExist.Generate(schema)
 	}
@@ -265,7 +252,7 @@ func (tr *Tracker) ListSchemaTables(schema string) ([]string, error) {
 // TODO: move out of this package!
 func (tr *Tracker) GetSingleColumnIndices(db, tbl, col string) ([]*model.IndexInfo, error) {
 	col = strings.ToLower(col)
-	t, err := tr.upstreamTracker.TableByName(context.Background(), pmodel.NewCIStr(db), pmodel.NewCIStr(tbl))
+	t, err := tr.upstreamTracker.TableByName(model.NewCIStr(db), model.NewCIStr(tbl))
 	if err != nil {
 		return nil, err
 	}
@@ -312,12 +299,12 @@ func (tr *Tracker) Close() {
 
 // DropTable drops a table from this tracker.
 func (tr *Tracker) DropTable(table *filter.Table) error {
-	return tr.upstreamTracker.DeleteTable(pmodel.NewCIStr(table.Schema), pmodel.NewCIStr(table.Name))
+	return tr.upstreamTracker.DeleteTable(model.NewCIStr(table.Schema), model.NewCIStr(table.Name))
 }
 
 // CreateSchemaIfNotExists creates a SCHEMA of the given name if it did not exist.
 func (tr *Tracker) CreateSchemaIfNotExists(db string) error {
-	dbName := pmodel.NewCIStr(db)
+	dbName := model.NewCIStr(db)
 	if tr.upstreamTracker.SchemaByName(dbName) != nil {
 		return nil
 	}
@@ -343,19 +330,17 @@ func cloneTableInfo(ti *model.TableInfo) *model.TableInfo {
 
 // CreateTableIfNotExists creates a TABLE of the given name if it did not exist.
 func (tr *Tracker) CreateTableIfNotExists(table *filter.Table, ti *model.TableInfo) error {
-	schemaName := pmodel.NewCIStr(table.Schema)
-	tableName := pmodel.NewCIStr(table.Name)
+	schemaName := model.NewCIStr(table.Schema)
+	tableName := model.NewCIStr(table.Name)
 	ti = cloneTableInfo(ti)
 	ti.Name = tableName
-	return tr.upstreamTracker.CreateTableWithInfo(tr.se, schemaName, ti, nil, ddl.WithOnExist(ddl.OnExistIgnore))
+	return tr.upstreamTracker.CreateTableWithInfo(tr.se, schemaName, ti, ddl.OnExistIgnore)
 }
 
 // SplitBatchCreateTableAndHandle will split the batch if it exceeds the kv entry size limit.
-func (tr *Tracker) SplitBatchCreateTableAndHandle(schema pmodel.CIStr, info []*model.TableInfo, l int, r int) error {
+func (tr *Tracker) SplitBatchCreateTableAndHandle(schema model.CIStr, info []*model.TableInfo, l int, r int) error {
 	var err error
-	if err = tr.upstreamTracker.BatchCreateTableWithInfo(
-		tr.se, schema, info[l:r], ddl.WithOnExist(ddl.OnExistIgnore),
-	); kv.ErrEntryTooLarge.Equal(err) {
+	if err = tr.upstreamTracker.BatchCreateTableWithInfo(tr.se, schema, info[l:r], ddl.OnExistIgnore); kv.ErrEntryTooLarge.Equal(err) {
 		if r-l == 1 {
 			return err
 		}
@@ -382,11 +367,11 @@ func (tr *Tracker) BatchCreateTableIfNotExist(tablesToCreate map[string]map[stri
 
 		var cloneTis []*model.TableInfo
 		for table, ti := range tableNameInfo {
-			cloneTi := cloneTableInfo(ti)         // clone TableInfo w.r.t the warning of the CreateTable function
-			cloneTi.Name = pmodel.NewCIStr(table) // TableInfo has no `TableName`
+			cloneTi := cloneTableInfo(ti)        // clone TableInfo w.r.t the warning of the CreateTable function
+			cloneTi.Name = model.NewCIStr(table) // TableInfo has no `TableName`
 			cloneTis = append(cloneTis, cloneTi)
 		}
-		schemaName := pmodel.NewCIStr(schema)
+		schemaName := model.NewCIStr(schema)
 		if err := tr.SplitBatchCreateTableAndHandle(schemaName, cloneTis, 0, len(cloneTis)); err != nil {
 			return err
 		}
@@ -482,12 +467,12 @@ func (dt *downstreamTracker) getTableInfoByCreateStmt(tctx *tcontext.Context, ta
 	}
 
 	// suppress ErrTooLongKey
-	dt.se.SetValue(ddl.SuppressErrorTooLongKeyKey, true)
+	strictSQLModeBackup := dt.se.GetSessionVars().StrictSQLMode
 	// support drop PK
 	enableClusteredIndexBackup := dt.se.GetSessionVars().EnableClusteredIndex
 	dt.se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOff
 	defer func() {
-		dt.se.ClearValue(ddl.SuppressErrorTooLongKeyKey)
+		dt.se.GetSessionVars().StrictSQLMode = strictSQLModeBackup
 		dt.se.GetSessionVars().EnableClusteredIndex = enableClusteredIndexBackup
 	}()
 

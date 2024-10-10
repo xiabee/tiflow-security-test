@@ -19,7 +19,6 @@ import (
 	"unsafe"
 
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tiflow/cdc/model"
 )
 
@@ -201,9 +200,7 @@ func EncodeTiDBType(allocator *SliceAllocator, ty byte, flag model.ColumnFlagTyp
 		mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob:
 		// value type for these mysql types are []byte
 		return value.([]byte)
-	case mysql.TypeFloat:
-		return encodeFloat64(allocator.byteSlice(4)[:0], float64(value.(float32)))
-	case mysql.TypeDouble:
+	case mysql.TypeFloat, mysql.TypeDouble:
 		// value type for these mysql types are float64
 		return encodeFloat64(allocator.byteSlice(8)[:0], value.(float64))
 	case mysql.TypeYear:
@@ -221,9 +218,6 @@ func EncodeTiDBType(allocator *SliceAllocator, ty byte, flag model.ColumnFlagTyp
 		fallthrough
 	case mysql.TypeGeometry:
 		return nil
-	case mysql.TypeTiDBVectorFloat32:
-		vec := value.(types.VectorFloat32)
-		return []byte(vec.String())
 	}
 	return nil
 }

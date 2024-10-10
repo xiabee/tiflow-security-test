@@ -171,11 +171,6 @@ error = '''
 TiCDC cluster is unhealthy
 '''
 
-["CDC:ErrCodeNilFunction"]
-error = '''
-function is not initialized
-'''
-
 ["CDC:ErrCodecDecode"]
 error = '''
 codec decode error
@@ -208,17 +203,12 @@ failed to convert ddl '%s' to filter event type
 
 ["CDC:ErrCorruptedDataMutation"]
 error = '''
-Changefeed %s.%s stopped due to corrupted data mutation received
+Changefeed %s.%s stopped due to corrupted data mutation received. Corrupted mutation detail information %+v
 '''
 
 ["CDC:ErrCraftCodecInvalidData"]
 error = '''
 craft codec invalid data
-'''
-
-["CDC:ErrCredentialNotFound"]
-error = '''
-credential not found: %s
 '''
 
 ["CDC:ErrDDLSchemaNotFound"]
@@ -229,11 +219,6 @@ cannot find mysql.tidb_ddl_job schema
 ["CDC:ErrDatumUnflatten"]
 error = '''
 unflatten datume data
-'''
-
-["CDC:ErrDebeziumEncodeFailed"]
-error = '''
-debezium encode failed
 '''
 
 ["CDC:ErrDecodeFailed"]
@@ -258,7 +243,7 @@ dispatcher failed
 
 ["CDC:ErrEncodeFailed"]
 error = '''
-encode failed
+encode failed: %s
 '''
 
 ["CDC:ErrEtcdIgnore"]
@@ -358,7 +343,7 @@ get tikv grpc context failed
 
 ["CDC:ErrHandleDDLFailed"]
 error = '''
-handle ddl failed, query: %s, startTs: %d. If you want to skip this DDL and continue with replication, you can manually execute this DDL downstream. Afterwards, add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.
+handle ddl failed, job: %s, query: %s, startTs: %d. If you want to skip this DDL and continue with replication, you can manually execute this DDL downstream. Afterwards, add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.
 '''
 
 ["CDC:ErrIllegalSorterParameter"]
@@ -503,7 +488,7 @@ kafka send message failed
 
 ["CDC:ErrKafkaTopicExprInvalid"]
 error = '''
-invalid topic expression: %s 
+invalid topic expression
 '''
 
 ["CDC:ErrLeaseExpired"]
@@ -1011,11 +996,6 @@ error = '''
 fail to create changefeed because target-ts %d is earlier than start-ts %d
 '''
 
-["CDC:ErrTiDBUnexpectedJobMeta"]
-error = '''
-unexpected `job_meta` from tidb
-'''
-
 ["CDC:ErrTiKVEventFeed"]
 error = '''
 tikv event feed failed
@@ -1029,16 +1009,6 @@ generate tls config failed
 ["CDC:ErrURLFormatInvalid"]
 error = '''
 url format is invalid
-'''
-
-["CDC:ErrUnauthorized"]
-error = '''
-user %s unauthorized, error: %s
-'''
-
-["CDC:ErrUnexpected"]
-error = '''
-cdc met unexpected error: %s
 '''
 
 ["CDC:ErrUnknownKVEventType"]

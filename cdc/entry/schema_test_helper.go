@@ -15,7 +15,7 @@ package entry
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -25,8 +25,7 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/kv"
 	timeta "github.com/pingcap/tidb/pkg/meta"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -42,7 +41,7 @@ import (
 
 // SchemaTestHelper is a test helper for schema which creates an internal tidb instance to generate DDL jobs with meta information
 type SchemaTestHelper struct {
-	t       testing.TB
+	t       *testing.T
 	tk      *testkit.TestKit
 	storage kv.Storage
 	domain  *domain.Domain
@@ -55,14 +54,14 @@ type SchemaTestHelper struct {
 // NewSchemaTestHelperWithReplicaConfig creates a SchemaTestHelper
 // by using the given replica config.
 func NewSchemaTestHelperWithReplicaConfig(
-	t testing.TB, replicaConfig *config.ReplicaConfig,
+	t *testing.T, replicaConfig *config.ReplicaConfig,
 ) *SchemaTestHelper {
 	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 	ticonfig.UpdateGlobal(func(conf *ticonfig.Config) {
 		conf.AlterPrimaryKey = true
 	})
-	session.SetSchemaLease(time.Second)
+	session.SetSchemaLease(0)
 	session.DisableStats4Test()
 	domain, err := session.BootstrapSession(store)
 	require.NoError(t, err)
@@ -87,7 +86,7 @@ func NewSchemaTestHelperWithReplicaConfig(
 		changefeedID, util.RoleTester, filter)
 	require.NoError(t, err)
 
-	mounter := NewMounter(schemaStorage, changefeedID, time.Local,
+	m := NewMounter(schemaStorage, changefeedID, time.Local,
 		filter, replicaConfig.Integrity)
 
 	return &SchemaTestHelper{
@@ -97,12 +96,12 @@ func NewSchemaTestHelperWithReplicaConfig(
 		domain:        domain,
 		filter:        filter,
 		schemaStorage: schemaStorage,
-		mounter:       mounter,
+		mounter:       m,
 	}
 }
 
 // NewSchemaTestHelper creates a SchemaTestHelper
-func NewSchemaTestHelper(t testing.TB) *SchemaTestHelper {
+func NewSchemaTestHelper(t *testing.T) *SchemaTestHelper {
 	return NewSchemaTestHelperWithReplicaConfig(t, config.GetDefaultReplicaConfig())
 }
 
@@ -121,27 +120,37 @@ func (s *SchemaTestHelper) DDL2Job(ddl string) *timodel.Job {
 		return res
 	}
 
-	// the RawArgs field in job fetched from tidb snapshot meta is cleared out after the job is done,
+	// the RawArgs field in job fetched from tidb snapshot meta is incorrent,
 	// so we manually construct `job.RawArgs` to do the workaround.
 	// we assume the old schema name is same as the new schema name here.
 	// for example, "ALTER TABLE RENAME test.t1 TO test.t1, test.t2 to test.t22", schema name is "test"
 	schema := strings.Split(strings.Split(strings.Split(res.Query, ",")[1], " ")[1], ".")[0]
 	tableNum := len(res.BinlogInfo.MultipleTableInfos)
-	args := &timodel.RenameTablesArgs{
-		RenameTableInfos: make([]*timodel.RenameTableArgs, 0, tableNum),
-	}
+	oldSchemaIDs := make([]int64, tableNum)
 	for i := 0; i < tableNum; i++ {
-		args.RenameTableInfos = append(args.RenameTableInfos, &timodel.RenameTableArgs{
-			OldSchemaID:   res.SchemaID,
-			NewSchemaID:   res.SchemaID,
-			TableID:       res.BinlogInfo.MultipleTableInfos[i].ID,
-			NewTableName:  res.BinlogInfo.MultipleTableInfos[i].Name,
-			OldSchemaName: pmodel.NewCIStr(schema),
-			OldTableName:  pmodel.NewCIStr(fmt.Sprintf("old_%d", i)),
-		})
+		oldSchemaIDs[i] = res.SchemaID
 	}
-	res, err = GetNewJobWithArgs(res, args)
+	oldTableIDs := make([]int64, tableNum)
+	for i := 0; i < tableNum; i++ {
+		oldTableIDs[i] = res.BinlogInfo.MultipleTableInfos[i].ID
+	}
+	newTableNames := make([]timodel.CIStr, tableNum)
+	for i := 0; i < tableNum; i++ {
+		newTableNames[i] = res.BinlogInfo.MultipleTableInfos[i].Name
+	}
+	oldSchemaNames := make([]timodel.CIStr, tableNum)
+	for i := 0; i < tableNum; i++ {
+		oldSchemaNames[i] = timodel.NewCIStr(schema)
+	}
+	newSchemaIDs := oldSchemaIDs
+
+	args := []interface{}{
+		oldSchemaIDs, newSchemaIDs,
+		newTableNames, oldTableIDs, oldSchemaNames,
+	}
+	rawArgs, err := json.Marshal(args)
 	require.NoError(s.t, err)
+	res.RawArgs = rawArgs
 	return res
 }
 
@@ -224,21 +233,31 @@ func (s *SchemaTestHelper) DDL2Event(ddl string) *model.DDLEvent {
 		// for example, "ALTER TABLE RENAME test.t1 TO test.t1, test.t2 to test.t22", schema name is "test"
 		schema := strings.Split(strings.Split(strings.Split(res.Query, ",")[1], " ")[1], ".")[0]
 		tableNum := len(res.BinlogInfo.MultipleTableInfos)
-		args := &timodel.RenameTablesArgs{
-			RenameTableInfos: make([]*timodel.RenameTableArgs, 0, tableNum),
-		}
+		oldSchemaIDs := make([]int64, tableNum)
 		for i := 0; i < tableNum; i++ {
-			args.RenameTableInfos = append(args.RenameTableInfos, &timodel.RenameTableArgs{
-				OldSchemaID:   res.SchemaID,
-				NewSchemaID:   res.SchemaID,
-				NewTableName:  res.BinlogInfo.MultipleTableInfos[i].Name,
-				TableID:       res.BinlogInfo.MultipleTableInfos[i].ID,
-				OldSchemaName: pmodel.NewCIStr(schema),
-				OldTableName:  pmodel.NewCIStr("old" + res.BinlogInfo.MultipleTableInfos[i].Name.L),
-			})
+			oldSchemaIDs[i] = res.SchemaID
 		}
-		res, err = GetNewJobWithArgs(res, args)
+		oldTableIDs := make([]int64, tableNum)
+		for i := 0; i < tableNum; i++ {
+			oldTableIDs[i] = res.BinlogInfo.MultipleTableInfos[i].ID
+		}
+		newTableNames := make([]timodel.CIStr, tableNum)
+		for i := 0; i < tableNum; i++ {
+			newTableNames[i] = res.BinlogInfo.MultipleTableInfos[i].Name
+		}
+		oldSchemaNames := make([]timodel.CIStr, tableNum)
+		for i := 0; i < tableNum; i++ {
+			oldSchemaNames[i] = timodel.NewCIStr(schema)
+		}
+		newSchemaIDs := oldSchemaIDs
+
+		args := []interface{}{
+			oldSchemaIDs, newSchemaIDs,
+			newTableNames, oldTableIDs, oldSchemaNames,
+		}
+		rawArgs, err := json.Marshal(args)
 		require.NoError(s.t, err)
+		res.RawArgs = rawArgs
 	}
 
 	err = s.schemaStorage.HandleDDLJob(res)

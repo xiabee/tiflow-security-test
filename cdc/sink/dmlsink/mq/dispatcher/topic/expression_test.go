@@ -17,13 +17,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
 func TestSubstituteTopicExpression(t *testing.T) {
-	t.Parallel()
-
 	cases := []struct {
 		name       string
 		expression string
@@ -231,8 +228,6 @@ func TestSubstituteTopicExpression(t *testing.T) {
 }
 
 func TestSchemaOptional(t *testing.T) {
-	t.Parallel()
-
 	expression := "prefix_{table}"
 	topicExpr := Expression(expression)
 	err := topicExpr.Validate()
@@ -245,8 +240,6 @@ func TestSchemaOptional(t *testing.T) {
 }
 
 func TestTableOptional(t *testing.T) {
-	t.Parallel()
-
 	expression := "prefix_{schema}"
 	topicExpr := Expression(expression)
 	err := topicExpr.Validate()
@@ -256,22 +249,6 @@ func TestTableOptional(t *testing.T) {
 	tableName := "abc"
 	topicName := topicExpr.Substitute(schemaName, tableName)
 	require.Equal(t, topicName, "prefix_test")
-}
-
-func TestInvalidExpression(t *testing.T) {
-	t.Parallel()
-
-	invalidExpr := "%invalid{schema}"
-	topicExpr := Expression(invalidExpr)
-
-	err := topicExpr.Validate()
-	require.ErrorIs(t, err, errors.ErrKafkaInvalidTopicExpression)
-	require.ErrorContains(t, err, invalidExpr)
-
-	err = topicExpr.ValidateForAvro()
-	require.ErrorIs(t, err, errors.ErrKafkaInvalidTopicExpression)
-	require.ErrorContains(t, err, "Avro")
-	require.ErrorContains(t, err, invalidExpr)
 }
 
 // cmd: go test -run='^$' -bench '^(BenchmarkSubstitute)$' github.com/pingcap/tiflow/cdc/sink/dispatcher/topic

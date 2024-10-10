@@ -38,6 +38,12 @@ var customReplicaConfig = &ReplicaConfig{
 	SyncPointInterval:     util.AddressOf(JSONDuration{duration: 10 * time.Minute}),
 	SyncPointRetention:    util.AddressOf(JSONDuration{duration: 24 * time.Hour}),
 	Filter: &FilterConfig{
+		MySQLReplicationRules: &MySQLReplicationRules{
+			DoTables:     []*Table{{"a", "b"}, {"c", "d"}},
+			DoDBs:        []string{"a", "c"},
+			IgnoreTables: []*Table{{"d", "e"}, {"f", "g"}},
+			IgnoreDBs:    []string{"d", "x"},
+		},
 		IgnoreTxnStartTs: []uint64{1, 2, 3},
 		EventFilters: []EventFilterRule{{
 			Matcher:                  []string{"test.worker"},
@@ -73,13 +79,10 @@ var customReplicaConfig = &ReplicaConfig{
 		DateSeparator:               "day",
 		EncoderConcurrency:          util.AddressOf(32),
 		EnablePartitionSeparator:    util.AddressOf(true),
-		ContentCompatible:           util.AddressOf(true),
 		SendBootstrapIntervalInSec:  util.AddressOf(int64(120)),
 		SendBootstrapInMsgCount:     util.AddressOf(int32(10000)),
 		SendBootstrapToAllPartition: util.AddressOf(true),
-		DebeziumDisableSchema:       util.AddressOf(true),
 		OpenProtocolConfig:          &OpenProtocolConfig{OutputOldValue: true},
-		DebeziumConfig:              &DebeziumConfig{OutputOldValue: true},
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
 		EnableTableAcrossNodes: false,
@@ -126,13 +129,10 @@ var defaultReplicaConfig = &ReplicaConfig{
 		DateSeparator:               "day",
 		EncoderConcurrency:          util.AddressOf(32),
 		EnablePartitionSeparator:    util.AddressOf(true),
-		ContentCompatible:           util.AddressOf(false),
 		SendBootstrapIntervalInSec:  util.AddressOf(int64(120)),
 		SendBootstrapInMsgCount:     util.AddressOf(int32(10000)),
 		SendBootstrapToAllPartition: util.AddressOf(true),
-		DebeziumDisableSchema:       util.AddressOf(false),
 		OpenProtocolConfig:          &OpenProtocolConfig{OutputOldValue: true},
-		DebeziumConfig:              &DebeziumConfig{OutputOldValue: true},
 	},
 	Scheduler: &ChangefeedSchedulerConfig{
 		EnableTableAcrossNodes: false,
@@ -240,8 +240,6 @@ func testChangefeed(ctx context.Context, client *CDCRESTClient) error {
 		Do(ctx)
 	assertResponseIsOK(resp)
 
-	// sleep to wait owner to tick
-	time.Sleep(2 * time.Second)
 	resp = client.Get().WithURI("changefeeds/changefeed-test-v2-black-hole-1?namespace=test").Do(ctx)
 	assertResponseIsOK(resp)
 	cf := &ChangeFeedInfo{}
@@ -323,20 +321,15 @@ func testRemoveChangefeed(ctx context.Context, client *CDCRESTClient) error {
 	return nil
 }
 
-func listCaptures(ctx context.Context, client *CDCRESTClient) *ListResponse[Capture] {
+func testCapture(ctx context.Context, client *CDCRESTClient) error {
 	resp := client.Get().WithURI("captures").Do(ctx)
 	assertResponseIsOK(resp)
 	captures := &ListResponse[Capture]{}
 	if err := json.Unmarshal(resp.body, captures); err != nil {
 		log.Panic("unmarshal failed", zap.String("body", string(resp.body)), zap.Error(err))
 	}
-	return captures
-}
-
-func testCapture(ctx context.Context, client *CDCRESTClient) error {
-	captures := listCaptures(ctx, client)
 	if len(captures.Items) != 1 {
-		log.Panic("capture size is not 1", zap.Any("resp", captures))
+		log.Panic("capture size is not 1", zap.Any("resp", resp))
 	}
 	println("pass test: capture apis")
 	return nil
@@ -368,19 +361,9 @@ func testProcessor(ctx context.Context, client *CDCRESTClient) error {
 }
 
 func testResignOwner(ctx context.Context, client *CDCRESTClient) error {
-	old := listCaptures(ctx, client)
 	resp := client.Post().WithURI("owner/resign").Do(ctx)
 	assertResponseIsOK(resp)
-	// sleep sometime to wait capture resign owner, then check the capture id again
-	// resign owner mustn't reset the capture
-	time.Sleep(3 * time.Second)
-	newCapture := listCaptures(ctx, client)
-	if len(newCapture.Items) != 1 || len(old.Items) != 1 {
-		log.Panic("capture size is not equals 1", zap.Any("old", old), zap.Any("new", newCapture))
-	}
-	if newCapture.Items[0].ID != old.Items[0].ID {
-		log.Panic("capture id is not equals, capture is reset", zap.Any("old", old), zap.Any("new", newCapture))
-	}
+	assertResponseIsOK(resp)
 	println("pass test: owner apis")
 	return nil
 }

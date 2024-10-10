@@ -45,7 +45,7 @@ func TestCDCMetaData(t *testing.T) {
 	router := newRouter(apiV2)
 
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
-	cp.EXPECT().IsOwner().Return(true).AnyTimes()
+	cp.EXPECT().IsController().Return(true).AnyTimes()
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
 	cp.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 
@@ -82,7 +82,7 @@ func TestCDCMetaData(t *testing.T) {
 func TestWithUpstreamConfig(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	upManager := upstream.NewManager(ctx, upstream.CaptureTopologyCfg{GCServiceID: "abc"})
+	upManager := upstream.NewManager(ctx, "abc")
 	upManager.AddUpstream(&model.UpstreamInfo{
 		ID:          uint64(1),
 		PDEndpoints: "http://127.0.0.1:22379",

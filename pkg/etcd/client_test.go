@@ -71,8 +71,7 @@ func (m mockWatcher) RequestProgress(ctx context.Context) error {
 }
 
 func TestRetry(t *testing.T) {
-	// here we need to change maxTries, which is not thread safe
-	// so we don't use t.Parallel() for this test
+	t.Parallel()
 
 	originValue := maxTries
 	// to speedup the test

@@ -26,7 +26,7 @@ import (
 	"github.com/linkedin/goavro/v2"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/rowcodec"
@@ -86,7 +86,7 @@ func (a *BatchEncoder) encodeKey(ctx context.Context, topic string, e *model.Row
 		columns:  cols,
 		colInfos: colInfos,
 	}
-	avroCodec, header, err := a.getKeySchemaCodec(ctx, topic, &e.TableInfo.TableName, e.TableInfo.Version, keyColumns)
+	avroCodec, header, err := a.getKeySchemaCodec(ctx, topic, e.Table, e.TableInfo.Version, keyColumns)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -164,14 +164,14 @@ func (a *BatchEncoder) encodeValue(ctx context.Context, topic string, e *model.R
 	}
 
 	input := &avroEncodeInput{
-		columns:  e.GetColumns(),
-		colInfos: e.TableInfo.GetColInfosForRowChangedEvent(),
+		columns:  e.Columns,
+		colInfos: e.ColInfos,
 	}
 	if len(input.columns) == 0 {
 		return nil, nil
 	}
 
-	avroCodec, header, err := a.getValueSchemaCodec(ctx, topic, &e.TableInfo.TableName, e.TableInfo.Version, input)
+	avroCodec, header, err := a.getValueSchemaCodec(ctx, topic, e.Table, e.TableInfo.Version, input)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -230,8 +230,8 @@ func (a *BatchEncoder) AppendRowChangedEvent(
 		value,
 		e.CommitTs,
 		model.MessageTypeRow,
-		e.TableInfo.GetSchemaNamePtr(),
-		e.TableInfo.GetTableNamePtr(),
+		&e.Table.Schema,
+		&e.Table.Table,
 	)
 	message.Callback = callback
 	message.IncRowsCount()
@@ -240,7 +240,7 @@ func (a *BatchEncoder) AppendRowChangedEvent(
 		log.Warn("Single message is too large for avro",
 			zap.Int("maxMessageBytes", a.config.MaxMessageBytes),
 			zap.Int("length", message.Length()),
-			zap.Any("table", e.TableInfo.TableName))
+			zap.Any("table", e.Table))
 		return cerror.ErrMessageTooLarge.GenWithStackByArgs(message.Length())
 	}
 
@@ -359,31 +359,30 @@ const (
 )
 
 var type2TiDBType = map[byte]string{
-	mysql.TypeTiny:              "INT",
-	mysql.TypeShort:             "INT",
-	mysql.TypeInt24:             "INT",
-	mysql.TypeLong:              "INT",
-	mysql.TypeLonglong:          "BIGINT",
-	mysql.TypeFloat:             "FLOAT",
-	mysql.TypeDouble:            "DOUBLE",
-	mysql.TypeBit:               "BIT",
-	mysql.TypeNewDecimal:        "DECIMAL",
-	mysql.TypeTinyBlob:          "TEXT",
-	mysql.TypeMediumBlob:        "TEXT",
-	mysql.TypeBlob:              "TEXT",
-	mysql.TypeLongBlob:          "TEXT",
-	mysql.TypeVarchar:           "TEXT",
-	mysql.TypeVarString:         "TEXT",
-	mysql.TypeString:            "TEXT",
-	mysql.TypeEnum:              "ENUM",
-	mysql.TypeSet:               "SET",
-	mysql.TypeJSON:              "JSON",
-	mysql.TypeDate:              "DATE",
-	mysql.TypeDatetime:          "DATETIME",
-	mysql.TypeTimestamp:         "TIMESTAMP",
-	mysql.TypeDuration:          "TIME",
-	mysql.TypeYear:              "YEAR",
-	mysql.TypeTiDBVectorFloat32: "TiDBVECTORFloat32",
+	mysql.TypeTiny:       "INT",
+	mysql.TypeShort:      "INT",
+	mysql.TypeInt24:      "INT",
+	mysql.TypeLong:       "INT",
+	mysql.TypeLonglong:   "BIGINT",
+	mysql.TypeFloat:      "FLOAT",
+	mysql.TypeDouble:     "DOUBLE",
+	mysql.TypeBit:        "BIT",
+	mysql.TypeNewDecimal: "DECIMAL",
+	mysql.TypeTinyBlob:   "TEXT",
+	mysql.TypeMediumBlob: "TEXT",
+	mysql.TypeBlob:       "TEXT",
+	mysql.TypeLongBlob:   "TEXT",
+	mysql.TypeVarchar:    "TEXT",
+	mysql.TypeVarString:  "TEXT",
+	mysql.TypeString:     "TEXT",
+	mysql.TypeEnum:       "ENUM",
+	mysql.TypeSet:        "SET",
+	mysql.TypeJSON:       "JSON",
+	mysql.TypeDate:       "DATE",
+	mysql.TypeDatetime:   "DATETIME",
+	mysql.TypeTimestamp:  "TIMESTAMP",
+	mysql.TypeDuration:   "TIME",
+	mysql.TypeYear:       "YEAR",
 }
 
 func getTiDBTypeFromColumn(col *model.Column) string {
@@ -440,8 +439,6 @@ func mysqlTypeFromTiDBType(tidbType string) byte {
 		result = mysql.TypeDuration
 	case "YEAR":
 		result = mysql.TypeYear
-	case "TiDBVECTORFloat32":
-		result = mysql.TypeTiDBVectorFloat32
 	default:
 		log.Panic("this should not happen, unknown TiDB type", zap.String("type", tidbType))
 	}
@@ -815,11 +812,6 @@ func (a *BatchEncoder) columnToAvroSchema(
 			Type:       "int",
 			Parameters: map[string]string{tidbType: tt},
 		}, nil
-	case mysql.TypeTiDBVectorFloat32:
-		return avroSchema{
-			Type:       "string",
-			Parameters: map[string]string{tidbType: tt},
-		}, nil
 	default:
 		log.Error("unknown mysql type", zap.Any("mysqlType", col.Type))
 		return nil, cerror.ErrAvroEncodeFailed.GenWithStack("unknown mysql type")
@@ -979,11 +971,6 @@ func (a *BatchEncoder) columnToAvroData(
 			return int32(n), "int", nil
 		}
 		return int32(col.Value.(int64)), "int", nil
-	case mysql.TypeTiDBVectorFloat32:
-		if vec, ok := col.Value.(types.VectorFloat32); ok {
-			return vec.String(), "string", nil
-		}
-		return nil, "", cerror.ErrAvroEncodeFailed
 	default:
 		log.Error("unknown mysql type", zap.Any("value", col.Value), zap.Any("mysqlType", col.Type))
 		return nil, "", cerror.ErrAvroEncodeFailed.GenWithStack("unknown mysql type")

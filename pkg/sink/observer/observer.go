@@ -38,14 +38,14 @@ type Observer interface {
 
 // NewObserverOpt represents available options when creating a new observer.
 type NewObserverOpt struct {
-	dbConnFactory pmysql.ConnectionFactory
+	dbConnFactory pmysql.Factory
 }
 
 // NewObserverOption configures NewObserverOpt.
 type NewObserverOption func(*NewObserverOpt)
 
 // WithDBConnFactory specifies factory to create db connection.
-func WithDBConnFactory(factory pmysql.ConnectionFactory) NewObserverOption {
+func WithDBConnFactory(factory pmysql.Factory) NewObserverOption {
 	return func(opt *NewObserverOpt) {
 		opt.dbConnFactory = factory
 	}
@@ -92,7 +92,10 @@ func NewObserver(
 		db.SetMaxIdleConns(2)
 		db.SetMaxOpenConns(2)
 
-		isTiDB := pmysql.CheckIsTiDB(ctx, db)
+		isTiDB, err := pmysql.CheckIsTiDB(ctx, db)
+		if err != nil {
+			return nil, err
+		}
 		if isTiDB {
 			return NewTiDBObserver(db), nil
 		}

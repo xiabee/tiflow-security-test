@@ -366,7 +366,7 @@ func decodeColumnGroup(bits []byte, allocator *SliceAllocator, dict *termDiction
 	}, nil
 }
 
-func newColumnGroup(allocator *SliceAllocator, ty byte, columns []*model.ColumnData, tb *model.TableInfo, onlyHandleKeyColumns bool) (int, *columnGroup) {
+func newColumnGroup(allocator *SliceAllocator, ty byte, columns []*model.Column, onlyHandleKeyColumns bool) (int, *columnGroup) {
 	l := len(columns)
 	if l == 0 {
 		return 0, nil
@@ -378,16 +378,18 @@ func newColumnGroup(allocator *SliceAllocator, ty byte, columns []*model.ColumnD
 	estimatedSize := 0
 	idx := 0
 	for _, col := range columns {
-		colx := model.GetColumnDataX(col, tb)
-		if colx.ColumnData == nil || onlyHandleKeyColumns && !colx.GetFlag().IsHandleKey() {
+		if col == nil {
 			continue
 		}
-		names[idx] = colx.GetName()
-		types[idx] = uint64(colx.GetType())
-		flags[idx] = uint64(colx.GetFlag())
-		value := EncodeTiDBType(allocator, colx.GetType(), colx.GetFlag(), colx.Value)
+		if onlyHandleKeyColumns && !col.Flag.IsHandleKey() {
+			continue
+		}
+		names[idx] = col.Name
+		types[idx] = uint64(col.Type)
+		flags[idx] = uint64(col.Flag)
+		value := EncodeTiDBType(allocator, col.Type, col.Flag, col.Value)
 		values[idx] = value
-		estimatedSize += len(colx.GetName()) + len(value) + 16 /* two 64-bits integers */
+		estimatedSize += len(col.Name) + len(value) + 16 /* two 64-bits integers */
 		idx++
 	}
 	if idx > 0 {
@@ -416,23 +418,13 @@ func newRowChangedMessage(allocator *SliceAllocator, ev *model.RowChangedEvent, 
 	groups := allocator.columnGroupSlice(numGroups)
 	estimatedSize := 0
 	idx := 0
-	if size, group := newColumnGroup(
-		allocator,
-		columnGroupTypeNew,
-		ev.Columns,
-		ev.TableInfo,
-		false); group != nil {
+	if size, group := newColumnGroup(allocator, columnGroupTypeNew, ev.Columns, false); group != nil {
 		groups[idx] = group
 		idx++
 		estimatedSize += size
 	}
 	onlyHandleKeyColumns = onlyHandleKeyColumns && ev.IsDelete()
-	if size, group := newColumnGroup(
-		allocator,
-		columnGroupTypeOld,
-		ev.PreColumns,
-		ev.TableInfo,
-		onlyHandleKeyColumns); group != nil {
+	if size, group := newColumnGroup(allocator, columnGroupTypeOld, ev.PreColumns, onlyHandleKeyColumns); group != nil {
 		groups[idx] = group
 		estimatedSize += size
 	}
@@ -468,16 +460,16 @@ func (b *RowChangedEventBuffer) Encode() []byte {
 // AppendRowChangedEvent append a new event to buffer
 func (b *RowChangedEventBuffer) AppendRowChangedEvent(ev *model.RowChangedEvent, onlyHandleKeyColumns bool) (rows, size int) {
 	var partition int64 = -1
-	if ev.TableInfo.IsPartitionTable() {
-		partition = ev.GetTableID()
+	if ev.Table.IsPartition {
+		partition = ev.Table.TableID
 	}
 
 	var schema, table *string
-	if len(ev.TableInfo.GetSchemaName()) > 0 {
-		schema = ev.TableInfo.GetSchemaNamePtr()
+	if len(ev.Table.Schema) > 0 {
+		schema = &ev.Table.Schema
 	}
-	if len(ev.TableInfo.GetTableName()) > 0 {
-		table = ev.TableInfo.GetTableNamePtr()
+	if len(ev.Table.Table) > 0 {
+		table = &ev.Table.Table
 	}
 
 	b.estimatedSize += b.headers.appendHeader(

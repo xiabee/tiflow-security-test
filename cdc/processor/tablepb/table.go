@@ -72,30 +72,30 @@ func (k Key) MarshalJSON() ([]byte, error) {
 }
 
 var (
-	_ encoding.TextMarshaler = &Span{}
+	_ encoding.TextMarshaler = Span{}
 	_ encoding.TextMarshaler = (*Span)(nil)
 )
 
 // MarshalText implements encoding.TextMarshaler (used in proto.CompactTextString).
 // It is helpful to format span in log.
-func (s *Span) MarshalText() ([]byte, error) {
+func (s Span) MarshalText() ([]byte, error) {
 	return []byte(s.String()), nil
 }
 
 func (s *Span) String() string {
-	length := len("{tableID:, startKey:, endKey:}")
+	length := len("{table_id:,start_key:,end_key:}")
 	length += 8 // for TableID
 	length += len(s.StartKey) + len(s.EndKey)
-	var b strings.Builder
+	b := strings.Builder{}
 	b.Grow(length)
-	b.Write([]byte("{tableID:"))
+	b.Write([]byte("{table_id:"))
 	b.Write([]byte(strconv.Itoa(int(s.TableID))))
 	if len(s.StartKey) > 0 {
-		b.Write([]byte(", startKey:"))
+		b.Write([]byte(",start_key:"))
 		b.Write([]byte(s.StartKey.String()))
 	}
 	if len(s.EndKey) > 0 {
-		b.Write([]byte(", endKey:"))
+		b.Write([]byte(",end_key:"))
 		b.Write([]byte(s.EndKey.String()))
 	}
 	b.Write([]byte("}"))

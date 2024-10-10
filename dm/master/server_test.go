@@ -35,9 +35,9 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	tiddl "github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util"
 	tidbmock "github.com/pingcap/tidb/pkg/util/mock"
@@ -947,7 +947,7 @@ func (t *testMasterSuite) TestStartTaskWithRemoveMeta() {
 	var wg sync.WaitGroup
 	// taskName is relative to taskConfig
 	cfg := config.NewTaskConfig()
-	err := cfg.FromYaml(taskConfig)
+	err := cfg.Decode(taskConfig)
 	require.NoError(t.T(), err)
 	taskName := cfg.Name
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1769,7 +1769,7 @@ func (t *testMasterSuite) TestOperateSource() {
 	s1.leader.Store(oneselfLeader)
 	require.NoError(t.T(), s1.Start(ctx))
 	defer s1.Close()
-	mysqlCfg, err := config.SourceCfgFromYamlAndVerify(config.SampleSourceConfig)
+	mysqlCfg, err := config.ParseYamlAndVerify(config.SampleSourceConfig)
 	require.NoError(t.T(), err)
 	mysqlCfg.From.Password = os.Getenv("MYSQL_PSWD")
 	task, err := mysqlCfg.Yaml()

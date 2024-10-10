@@ -19,9 +19,9 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	mock_controller "github.com/pingcap/tiflow/cdc/controller/mock"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
-	mock_owner "github.com/pingcap/tiflow/cdc/owner/mock"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/util"
@@ -32,27 +32,26 @@ func TestVerifyCreateChangefeedConfig(t *testing.T) {
 	ctx := context.Background()
 	pdClient := &mockPDClient{}
 	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
 	helper.Tk().MustExec("use test;")
 	storage := helper.Storage()
-	provider := mock_owner.NewMockStatusProvider(gomock.NewController(t))
+	ctrl := mock_controller.NewMockController(gomock.NewController(t))
 	cfg := &ChangefeedConfig{}
 	h := &APIV2HelpersImpl{}
-	cfInfo, err := h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	cfInfo, err := h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.Nil(t, cfInfo)
 	require.NotNil(t, err)
 	cfg.SinkURI = "blackhole://"
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
+	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
 	// repliconfig is nil
 	require.Panics(t, func() {
-		_, _ = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+		_, _ = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	})
 	cfg.ReplicaConfig = GetDefaultReplicaConfig()
 	cfg.ReplicaConfig.ForceReplicate = false
 	cfg.ReplicaConfig.IgnoreIneligibleTable = true
 	cfg.SinkURI = "blackhole://"
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.Nil(t, err)
 	require.NotNil(t, cfInfo)
 	require.NotEqual(t, "", cfInfo.ID)
@@ -61,55 +60,49 @@ func TestVerifyCreateChangefeedConfig(t *testing.T) {
 
 	// invalid changefeed id or namespace id
 	cfg.ID = "abdc/sss"
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.NotNil(t, err)
 	cfg.ID = ""
 	cfg.Namespace = "abdc/sss"
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.NotNil(t, err)
 	cfg.ID = ""
 	cfg.Namespace = ""
 	// changefeed already exists
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(true, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(true, nil)
+	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.NotNil(t, err)
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, cerror.ErrChangeFeedNotExists.GenWithStackByArgs("aaa"))
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, cerror.ErrChangeFeedNotExists.GenWithStackByArgs("aaa"))
+	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.Nil(t, err)
 	require.Equal(t, uint64(123), cfInfo.UpstreamID)
 	cfg.TargetTs = 3
 	cfg.StartTs = 4
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
+	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.NotNil(t, err)
 	cfg.TargetTs = 6
 	cfg.SinkURI = "aaab://"
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
+	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.NotNil(t, err)
 	cfg.SinkURI = string([]byte{0x7f, ' '})
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
+	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.NotNil(t, err)
 
 	cfg.StartTs = 0
 	// use blackhole to workaround
 	cfg.SinkURI = "blackhole://127.0.0.1:9092/test?protocol=avro"
 	cfg.ReplicaConfig.ForceReplicate = false
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
+	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.NoError(t, err)
 
 	cfg.ReplicaConfig.ForceReplicate = true
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
+	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, ctrl, "en", storage)
 	require.Error(t, cerror.ErrOldValueNotEnabled, err)
-
-	// invalid start-ts, in the future
-	cfg.StartTs = 1000000000000000000
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
-	require.Error(t, cerror.ErrAPIInvalidParam, err)
 }
 
 func TestVerifyUpdateChangefeedConfig(t *testing.T) {

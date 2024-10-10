@@ -35,8 +35,8 @@ import (
 	"github.com/pingcap/tiflow/cdc/redo"
 	"github.com/pingcap/tiflow/cdc/scheduler"
 	"github.com/pingcap/tiflow/cdc/scheduler/schedulepb"
-	"github.com/pingcap/tiflow/cdc/vars"
 	"github.com/pingcap/tiflow/pkg/config"
+	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/filter"
@@ -65,10 +65,7 @@ type Processor interface {
 	//
 	// It can be called in etcd ticks, so it should never be blocked.
 	// Tick Returns: error and warnings. error will be propagated to the owner, and warnings will be record.
-	Tick(context.Context, *model.ChangeFeedInfo, *model.ChangeFeedStatus) (error, error)
-
-	// Close closes the processor.
-	Close() error
+	Tick(cdcContext.Context, *model.ChangeFeedInfo, *model.ChangeFeedStatus) (error, error)
 }
 
 var _ Processor = (*processor)(nil)
@@ -76,7 +73,7 @@ var _ Processor = (*processor)(nil)
 type processor struct {
 	changefeedID model.ChangeFeedID
 	captureInfo  *model.CaptureInfo
-	globalVars   *vars.GlobalVars
+	globalVars   *cdcContext.GlobalVars
 
 	upstream     *upstream.Upstream
 	lastSchemaTs model.Ts
@@ -97,7 +94,7 @@ type processor struct {
 	initialized *atomic.Bool
 	initializer *async.Initializer
 
-	lazyInit func(ctx context.Context) error
+	lazyInit func(ctx cdcContext.Context) error
 	newAgent func(
 		context.Context, *model.Liveness, uint64, *config.SchedulerConfig,
 		etcd.OwnerCaptureInfoClient,
@@ -143,20 +140,15 @@ func (p *processor) AddTableSpan(
 		return false, nil
 	}
 
-	failpoint.Inject("ProcessorAddTableError", func() {
-		failpoint.Return(false, cerror.New("processor add table injected error"))
-	})
-
 	startTs := checkpoint.CheckpointTs
 	if startTs == 0 {
-		log.Error("table start ts must not be 0",
+		log.Panic("table start ts must not be 0",
 			zap.String("captureID", p.captureInfo.ID),
 			zap.String("namespace", p.changefeedID.Namespace),
 			zap.String("changefeed", p.changefeedID.ID),
 			zap.Stringer("span", &span),
 			zap.Uint64("checkpointTs", startTs),
 			zap.Bool("isPrepare", isPrepare))
-		return false, cerror.ErrUnexpected.FastGenByArgs("table start ts must not be 0")
 	}
 
 	state, alreadyExist := p.sinkManager.r.GetTableState(span)
@@ -432,7 +424,6 @@ func NewProcessor(
 	changefeedEpoch uint64,
 	cfg *config.SchedulerConfig,
 	ownerCaptureInfoClient etcd.OwnerCaptureInfoClient,
-	globalVars *vars.GlobalVars,
 ) *processor {
 	p := &processor{
 		upstream:        up,
@@ -446,7 +437,6 @@ func NewProcessor(
 		initialized: atomic.NewBool(false),
 
 		ownerCaptureInfoClient: ownerCaptureInfoClient,
-		globalVars:             globalVars,
 
 		metricSyncTableNumGauge: syncTableNumGauge.
 			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
@@ -496,11 +486,11 @@ func isProcessorIgnorableError(err error) bool {
 //
 // It can be called in etcd ticks, so it should never be blocked.
 func (p *processor) Tick(
-	ctx context.Context,
+	ctx cdcContext.Context,
 	info *model.ChangeFeedInfo, status *model.ChangeFeedStatus,
 ) (error, error) {
 	if !p.initialized.Load() {
-		initialized, err := p.initializer.TryInitialize(ctx, p.lazyInit, p.globalVars.ChangefeedThreadPool)
+		initialized, err := p.initializer.TryInitialize(ctx, p.lazyInit, ctx.GlobalVars().ChangefeedThreadPool)
 		if err != nil {
 			return errors.Trace(err), nil
 		}
@@ -518,11 +508,10 @@ func (p *processor) Tick(
 		return err, nil
 	}
 	if p.upstream.IsClosed() {
-		log.Error("upstream is closed",
+		log.Panic("upstream is closed",
 			zap.Uint64("upstreamID", p.upstream.ID),
 			zap.String("namespace", p.changefeedID.Namespace),
 			zap.String("changefeed", p.changefeedID.ID))
-		return cerror.ErrUnexpected.FastGenByArgs("upstream is closed"), nil
 	}
 	// skip this tick
 	if !p.upstream.IsNormal() {
@@ -569,7 +558,7 @@ func (p *processor) handleWarnings() error {
 	return err
 }
 
-func (p *processor) tick(ctx context.Context) (error, error) {
+func (p *processor) tick(ctx cdcContext.Context) (error, error) {
 	warning := p.handleWarnings()
 	if err := p.handleErrorCh(); err != nil {
 		return errors.Trace(err), warning
@@ -599,13 +588,16 @@ func isMysqlCompatibleBackend(sinkURIStr string) (bool, error) {
 }
 
 // lazyInitImpl create Filter, SchemaStorage, Mounter instances at the first tick.
-func (p *processor) lazyInitImpl(_ context.Context) (err error) {
+func (p *processor) lazyInitImpl(etcdCtx cdcContext.Context) (err error) {
 	if p.initialized.Load() {
 		return nil
 	}
+
 	// Here we use a separated context for sub-components, so we can custom the
 	// order of stopping all sub-components when closing the processor.
-	ctx := context.Background()
+	prcCtx := cdcContext.NewContext(context.Background(), etcdCtx.GlobalVars())
+	prcCtx = cdcContext.WithChangefeedVars(prcCtx, etcdCtx.ChangefeedVars())
+	p.globalVars = prcCtx.GlobalVars()
 
 	var tz *time.Location
 	// todo: get the timezone from the global config or the changefeed config?
@@ -622,31 +614,32 @@ func (p *processor) lazyInitImpl(_ context.Context) (err error) {
 		return errors.Trace(err)
 	}
 
-	if err = p.initDDLHandler(ctx); err != nil {
+	if err = p.initDDLHandler(prcCtx); err != nil {
 		return err
 	}
 	p.ddlHandler.name = "ddlHandler"
 	p.ddlHandler.changefeedID = p.changefeedID
-	p.ddlHandler.spawn(ctx)
+	p.ddlHandler.spawn(prcCtx)
 
 	p.mg.r = entry.NewMounterGroup(p.ddlHandler.r.schemaStorage,
 		cfConfig.Mounter.WorkerNum,
 		p.filter, tz, p.changefeedID, cfConfig.Integrity)
 	p.mg.name = "MounterGroup"
 	p.mg.changefeedID = p.changefeedID
-	p.mg.spawn(ctx)
+	p.mg.spawn(prcCtx)
 
-	sourceID, err := pdutil.GetSourceID(ctx, p.upstream.PDClient)
+	sourceID, err := pdutil.GetSourceID(prcCtx, p.upstream.PDClient)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	log.Info("get sourceID from PD", zap.Uint64("sourceID", sourceID), zap.Stringer("changefeedID", p.changefeedID))
 	cfConfig.Sink.TiDBSourceID = sourceID
+	log.Info("get sourceID from PD", zap.Uint64("sourceID", sourceID),
+		zap.Stringer("changefeedID", p.changefeedID))
 
 	p.redo.r = redo.NewDMLManager(p.changefeedID, cfConfig.Consistent)
 	p.redo.name = "RedoManager"
 	p.redo.changefeedID = p.changefeedID
-	p.redo.spawn(ctx)
+	p.redo.spawn(prcCtx)
 
 	sortEngine, err := p.globalVars.SortEngineFactory.Create(p.changefeedID)
 	log.Info("Processor creates sort engine",
@@ -664,22 +657,21 @@ func (p *processor) lazyInitImpl(_ context.Context) (err error) {
 	p.sourceManager.r = sourcemanager.New(
 		p.changefeedID, p.upstream, p.mg.r,
 		sortEngine, util.GetOrZero(cfConfig.BDRMode),
-		util.GetOrZero(cfConfig.EnableTableMonitor),
 		isMysqlBackend)
 	p.sourceManager.name = "SourceManager"
 	p.sourceManager.changefeedID = p.changefeedID
-	p.sourceManager.spawn(ctx)
+	p.sourceManager.spawn(prcCtx)
 
 	p.sinkManager.r = sinkmanager.New(
 		p.changefeedID, p.latestInfo.SinkURI, cfConfig, p.upstream,
 		p.ddlHandler.r.schemaStorage, p.redo.r, p.sourceManager.r, isMysqlBackend)
 	p.sinkManager.name = "SinkManager"
 	p.sinkManager.changefeedID = p.changefeedID
-	p.sinkManager.spawn(ctx)
+	p.sinkManager.spawn(prcCtx)
 
 	// Bind them so that sourceManager can notify sinkManager.r.
 	p.sourceManager.r.OnResolve(p.sinkManager.r.UpdateReceivedSorterResolvedTs)
-	p.agent, err = p.newAgent(ctx, p.liveness, p.changefeedEpoch, p.cfg, p.ownerCaptureInfoClient)
+	p.agent, err = p.newAgent(prcCtx, p.liveness, p.changefeedEpoch, p.cfg, p.ownerCaptureInfoClient)
 	if err != nil {
 		return err
 	}
@@ -762,10 +754,14 @@ func (p *processor) initDDLHandler(ctx context.Context) error {
 	}
 
 	serverCfg := config.GetGlobalServerConfig()
-	changefeedID := model.DefaultChangeFeedID(p.changefeedID.ID + "_processor_ddl_puller")
-	ddlPuller := puller.NewDDLJobPuller(
-		ctx, p.upstream, ddlStartTs, serverCfg, changefeedID, schemaStorage, p.filter,
+	ddlPuller, err := puller.NewDDLJobPuller(
+		ctx, p.upstream, ddlStartTs,
+		serverCfg, p.changefeedID, schemaStorage,
+		f, false, /* isOwner */
 	)
+	if err != nil {
+		return errors.Trace(err)
+	}
 	p.ddlHandler.r = &ddlHandler{puller: ddlPuller, schemaStorage: schemaStorage}
 	return nil
 }
@@ -910,7 +906,7 @@ func (p *processor) Close() error {
 		p.agent = nil
 	}
 
-	// mark tables share the same ctx with its original table, don't need to cancel
+	// mark tables share the same cdcContext with its original table, don't need to cancel
 	failpoint.Inject("processorStopDelay", nil)
 
 	log.Info("processor closed",
@@ -1049,6 +1045,10 @@ func (d *ddlHandler) Run(ctx context.Context, _ ...chan<- error) error {
 			failpoint.Inject("processorDDLResolved", nil)
 			if jobEntry.OpType == model.OpTypeResolved {
 				d.schemaStorage.AdvanceResolvedTs(jobEntry.CRTs)
+			}
+			err := jobEntry.Err
+			if err != nil {
+				return errors.Trace(err)
 			}
 		}
 	})

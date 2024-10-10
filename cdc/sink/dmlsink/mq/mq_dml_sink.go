@@ -26,8 +26,10 @@ import (
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dmlproducer"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/manager"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/transformer"
+	"github.com/pingcap/tiflow/cdc/sink/metrics"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
 	"github.com/pingcap/tiflow/pkg/config"
+	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/sink/codec"
 	"github.com/pingcap/tiflow/pkg/sink/kafka"
 	"go.uber.org/atomic"
@@ -87,7 +89,8 @@ func newDMLSink(
 	errCh chan error,
 ) *dmlSink {
 	ctx, cancel := context.WithCancelCause(ctx)
-	worker := newWorker(changefeedID, protocol, producer, encoderGroup)
+	statistics := metrics.NewStatistics(ctx, changefeedID, sink.RowSink)
+	worker := newWorker(changefeedID, protocol, producer, encoderGroup, statistics)
 
 	s := &dmlSink{
 		id:                   changefeedID,
@@ -146,18 +149,15 @@ func (s *dmlSink) WriteEvents(txns ...*dmlsink.CallbackableEvent[*model.SingleTa
 	if s.alive.isDead {
 		return errors.Trace(errors.New("dead dmlSink"))
 	}
-	// Because we split txn to rows when sending to the MQ.
-	// So we need to convert the txn level callback to row level callback.
-	toRowCallback := func(txnCallback func(), totalCount uint64) func() {
-		var calledCount atomic.Uint64
-		// The callback of the last row will trigger the callback of the txn.
+	// merge the split row callback into one callback
+	mergedCallback := func(outCallback func(), totalCount uint64) func() {
+		var acked atomic.Uint64
 		return func() {
-			if calledCount.Inc() == totalCount {
-				txnCallback()
+			if acked.Add(1) == totalCount {
+				outCallback()
 			}
 		}
 	}
-
 	for _, txn := range txns {
 		if txn.GetTableSinkState() != state.TableSinkSinking {
 			// The table where the event comes from is in stopping, so it's safe
@@ -165,7 +165,8 @@ func (s *dmlSink) WriteEvents(txns ...*dmlsink.CallbackableEvent[*model.SingleTa
 			txn.Callback()
 			continue
 		}
-		rowCallback := toRowCallback(txn.Callback, uint64(len(txn.Event.Rows)))
+		callback := mergedCallback(txn.Callback, uint64(len(txn.Event.Rows)))
+
 		for _, row := range txn.Event.Rows {
 			topic := s.alive.eventRouter.GetTopicForRowChange(row)
 			partitionNum, err := s.alive.topicManager.GetPartitionNum(s.ctx, topic)
@@ -183,17 +184,13 @@ func (s *dmlSink) WriteEvents(txns ...*dmlsink.CallbackableEvent[*model.SingleTa
 				s.cancel(err)
 				return errors.Trace(err)
 			}
-			// Note: Calculate the partition index after the transformer is applied.
-			// Because the transformer may change the row of the event.
+
 			index, key, err := s.alive.eventRouter.GetPartitionForRowChange(row, partitionNum)
 			if err != nil {
 				s.cancel(err)
 				return errors.Trace(err)
 			}
-
 			// This never be blocked because this is an unbounded channel.
-			// We already limit the memory usage by MemoryQuota at SinkManager level.
-			// So it is safe to send the event to a unbounded channel here.
 			s.alive.worker.msgChan.In() <- mqEvent{
 				key: model.TopicPartitionKey{
 					Topic:          topic,
@@ -203,7 +200,7 @@ func (s *dmlSink) WriteEvents(txns ...*dmlsink.CallbackableEvent[*model.SingleTa
 				},
 				rowEvent: &dmlsink.RowChangeCallbackableEvent{
 					Event:     row,
-					Callback:  rowCallback,
+					Callback:  callback,
 					SinkState: txn.SinkState,
 				},
 			}

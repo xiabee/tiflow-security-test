@@ -418,7 +418,7 @@ LOOP:
 			}
 		}
 
-		// For events whose LogPos is 0, it will not trigger event modification, we directly return.
+		// fake rotate. binlog recorder should handle it
 		if c.lastEventFromUpstream.Header.LogPos == 0 {
 			event = c.lastEventFromUpstream
 			c.lastEventFromUpstream = nil

@@ -334,24 +334,6 @@ func TestValidateAndAdjustCSVConfig(t *testing.T) {
 			wantErr: "",
 		},
 		{
-			name: "valid delimiter with 2 characters",
-			config: &CSVConfig{
-				Quote:                "\"",
-				Delimiter:            "FE",
-				BinaryEncodingMethod: BinaryEncodingHex,
-			},
-			wantErr: "",
-		},
-		{
-			name: "valid delimiter with 3 characters",
-			config: &CSVConfig{
-				Quote:                "\"",
-				Delimiter:            "|@|",
-				BinaryEncodingMethod: BinaryEncodingHex,
-			},
-			wantErr: "",
-		},
-		{
 			name: "delimiter is empty",
 			config: &CSVConfig{
 				Quote:     "'",
@@ -368,13 +350,12 @@ func TestValidateAndAdjustCSVConfig(t *testing.T) {
 			wantErr: "csv config delimiter contains line break characters",
 		},
 		{
-			name: "delimiter contains more than three characters",
+			name: "delimiter contains more than one character",
 			config: &CSVConfig{
 				Quote:     "'",
-				Delimiter: "FEFA",
+				Delimiter: "\r\t",
 			},
-			wantErr: "csv config delimiter contains more than three characters, note that escape " +
-				"sequences can only be used in double quotes in toml configuration items.",
+			wantErr: "csv config delimiter contains more than one character",
 		},
 		{
 			name: "delimiter and quote are same",
@@ -382,15 +363,7 @@ func TestValidateAndAdjustCSVConfig(t *testing.T) {
 				Quote:     "'",
 				Delimiter: "'",
 			},
-			wantErr: "csv config quote and delimiter has common characters which is not allowed",
-		},
-		{
-			name: "delimiter and quote contain common characters",
-			config: &CSVConfig{
-				Quote:     "E",
-				Delimiter: "FE",
-			},
-			wantErr: "csv config quote and delimiter has common characters which is not allowed",
+			wantErr: "csv config quote and delimiter cannot be the same",
 		},
 		{
 			name: "invalid binary encoding method",

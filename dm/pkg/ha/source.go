@@ -49,6 +49,7 @@ func GetAllSourceCfgBeforeV202(cli *clientv3.Client) (map[string]*config.SourceC
 		err  error
 	)
 	resp, err = cli.Get(ctx, common.UpstreamConfigKeyAdapterV1.Path(), clientv3.WithPrefix())
+
 	if err != nil {
 		return scm, 0, terror.ErrHAFailTxnOperation.Delegate(err, "fail to get upstream source configs <= v2.0.2")
 	}
@@ -112,7 +113,7 @@ func sourceCfgFromResp(source string, resp *clientv3.GetResponse) (map[string]*c
 
 	for _, kv := range resp.Kvs {
 		var cfg config.SourceConfig
-		err := cfg.FromToml(string(kv.Value))
+		err := cfg.Parse(string(kv.Value))
 		if err != nil {
 			return scm, terror.ErrConfigEtcdParse.Delegate(err, kv.Key)
 		}

@@ -16,30 +16,52 @@ package csv
 import (
 	"testing"
 
-	"github.com/pingcap/tiflow/cdc/entry"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCSVBatchCodec(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	ddl := helper.DDL2Event("create table test.table1(col1 int primary key)")
-	event1 := helper.DML2Event("insert into test.table1 values (1)", "test", "table1")
-	event2 := helper.DML2Event("insert into test.table1 values (2)", "test", "table1")
-
 	testCases := []*model.SingleTableTxn{
 		{
+			Table: &model.TableName{Schema: "test", Table: "table1"},
 			Rows: []*model.RowChangedEvent{
-				event1,
-				event2,
+				{
+					CommitTs: 1,
+					Table:    &model.TableName{Schema: "test", Table: "table1"},
+					Columns: []*model.Column{{
+						Name:  "tiny",
+						Value: int64(1), Type: mysql.TypeTiny,
+					}},
+					ColInfos: []rowcodec.ColInfo{{
+						ID:            1,
+						IsPKHandle:    false,
+						VirtualGenCol: false,
+						Ft:            types.NewFieldType(mysql.TypeTiny),
+					}},
+				},
+				{
+					CommitTs: 2,
+					Table:    &model.TableName{Schema: "test", Table: "table1"},
+					Columns: []*model.Column{{
+						Name:  "tiny",
+						Value: int64(2), Type: mysql.TypeTiny,
+					}},
+					ColInfos: []rowcodec.ColInfo{{
+						ID:            1,
+						IsPKHandle:    false,
+						VirtualGenCol: false,
+						Ft:            types.NewFieldType(mysql.TypeTiny),
+					}},
+				},
 			},
 		},
 		{
-			TableInfo: ddl.TableInfo,
-			Rows:      nil,
+			Table: &model.TableName{Schema: "test", Table: "table1"},
+			Rows:  nil,
 		},
 	}
 
@@ -74,15 +96,21 @@ func TestCSVAppendRowChangedEventWithCallback(t *testing.T) {
 	require.NotNil(t, encoder)
 
 	count := 0
+	row := &model.RowChangedEvent{
+		CommitTs: 1,
+		Table:    &model.TableName{Schema: "test", Table: "table1"},
+		Columns:  []*model.Column{{Name: "tiny", Value: int64(1), Type: mysql.TypeTiny}},
+		ColInfos: []rowcodec.ColInfo{{
+			ID:            1,
+			IsPKHandle:    false,
+			VirtualGenCol: false,
+			Ft:            types.NewFieldType(mysql.TypeTiny),
+		}},
+	}
 
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	_ = helper.DDL2Event("create table test.table1(col1 int primary key)")
-	row := helper.DML2Event("insert into test.table1 values (1)", "test", "table1")
 	txn := &model.SingleTableTxn{
-		TableInfo: row.TableInfo,
-		Rows:      []*model.RowChangedEvent{row},
+		Table: row.Table,
+		Rows:  []*model.RowChangedEvent{row},
 	}
 	callback := func() {
 		count += 1

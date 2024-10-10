@@ -137,7 +137,8 @@ type SinkConfig struct {
 
 	// DispatchRules is only available when the downstream is MQ.
 	DispatchRules []*DispatchRule `toml:"dispatchers" json:"dispatchers,omitempty"`
-
+	// CSVConfig is only available when the downstream is Storage.
+	CSVConfig       *CSVConfig        `toml:"csv" json:"csv,omitempty"`
 	ColumnSelectors []*ColumnSelector `toml:"column-selectors" json:"column-selectors,omitempty"`
 	// SchemaRegistry is only available when the downstream is MQ using avro protocol.
 	SchemaRegistry *string `toml:"schema-registry" json:"schema-registry,omitempty"`
@@ -169,6 +170,7 @@ type SinkConfig struct {
 	// which is used to set the `tidb_cdc_write_source` session variable.
 	// Note: This field is only used internally and only used in the MySQL sink.
 	TiDBSourceID uint64 `toml:"-" json:"-"`
+
 	// SafeMode is only available when the downstream is DB.
 	SafeMode           *bool               `toml:"safe-mode" json:"safe-mode,omitempty"`
 	KafkaConfig        *KafkaConfig        `toml:"kafka-config" json:"kafka-config,omitempty"`
@@ -192,17 +194,9 @@ type SinkConfig struct {
 	// If set to false, bootstrap message will only be sent to the first partition of each topic.
 	// Default value is true.
 	SendBootstrapToAllPartition *bool `toml:"send-bootstrap-to-all-partition" json:"send-bootstrap-to-all-partition,omitempty"`
-	// SendAllBootstrapAtStart determines whether to send all tables bootstrap message at changefeed start.
-	SendAllBootstrapAtStart *bool `toml:"send-all-bootstrap-at-start" json:"send-all-bootstrap-at-start,omitempty"`
-	// Debezium only. Whether schema should be excluded in the output.
-	DebeziumDisableSchema *bool `toml:"debezium-disable-schema" json:"debezium-disable-schema,omitempty"`
-
-	// CSVConfig is only available when the downstream is Storage.
-	CSVConfig *CSVConfig `toml:"csv" json:"csv,omitempty"`
+	SendAllBootstrapAtStart     *bool `toml:"send-all-bootstrap-at-start" json:"send-all-bootstrap-at-start,omitempty"`
 	// OpenProtocol related configurations
 	OpenProtocol *OpenProtocolConfig `toml:"open" json:"open,omitempty"`
-	// DebeziumConfig related configurations
-	Debezium *DebeziumConfig `toml:"debezium" json:"debezium,omitempty"`
 }
 
 // MaskSensitiveData masks sensitive data in SinkConfig
@@ -244,9 +238,7 @@ func (s *SinkConfig) ShouldSendAllBootstrapAtStart() bool {
 
 // CSVConfig defines a series of configuration items for csv codec.
 type CSVConfig struct {
-	// delimiter between fields, it can be 1 character or at most 2 characters
-	// It can not be CR or LF or contains CR or LF.
-	// It should have exclusive characters with quote.
+	// delimiter between fields
 	Delimiter string `toml:"delimiter" json:"delimiter"`
 	// quoting character
 	Quote string `toml:"quote" json:"quote"`
@@ -256,10 +248,6 @@ type CSVConfig struct {
 	IncludeCommitTs bool `toml:"include-commit-ts" json:"include-commit-ts"`
 	// encoding method of binary type
 	BinaryEncodingMethod string `toml:"binary-encoding-method" json:"binary-encoding-method"`
-	// output old value
-	OutputOldValue bool `toml:"output-old-value" json:"output-old-value"`
-	// output handle key
-	OutputHandleKey bool `toml:"output-handle-key" json:"output-handle-key"`
 }
 
 func (c *CSVConfig) validateAndAdjust() error {
@@ -285,24 +273,19 @@ func (c *CSVConfig) validateAndAdjust() error {
 	case 0:
 		return cerror.WrapError(cerror.ErrSinkInvalidConfig,
 			errors.New("csv config delimiter cannot be empty"))
-	case 1, 2, 3:
+	case 1:
 		if strings.ContainsRune(c.Delimiter, CR) || strings.ContainsRune(c.Delimiter, LF) {
 			return cerror.WrapError(cerror.ErrSinkInvalidConfig,
 				errors.New("csv config delimiter contains line break characters"))
 		}
 	default:
 		return cerror.WrapError(cerror.ErrSinkInvalidConfig,
-			errors.New("csv config delimiter contains more than three characters, note that escape "+
-				"sequences can only be used in double quotes in toml configuration items."))
+			errors.New("csv config delimiter contains more than one character"))
 	}
 
-	if len(c.Quote) > 0 {
-		for _, r := range c.Delimiter {
-			if strings.ContainsRune(c.Quote, r) {
-				return cerror.WrapError(cerror.ErrSinkInvalidConfig,
-					errors.New("csv config quote and delimiter has common characters which is not allowed"))
-			}
-		}
+	if len(c.Quote) > 0 && strings.Contains(c.Delimiter, c.Quote) {
+		return cerror.WrapError(cerror.ErrSinkInvalidConfig,
+			errors.New("csv config quote and delimiter cannot be the same"))
 	}
 
 	// validate binary encoding method
@@ -871,14 +854,6 @@ func (s *SinkConfig) ValidateProtocol(scheme string) error {
 		if s.OpenProtocol != nil {
 			outputOldValue = s.OpenProtocol.OutputOldValue
 		}
-	case ProtocolDebezium:
-		if s.Debezium != nil {
-			outputOldValue = s.Debezium.OutputOldValue
-		}
-	case ProtocolCsv:
-		if s.CSVConfig != nil {
-			outputOldValue = s.CSVConfig.OutputOldValue
-		}
 	case ProtocolAvro:
 		outputOldValue = false
 	default:
@@ -889,7 +864,7 @@ func (s *SinkConfig) ValidateProtocol(scheme string) error {
 	switch scheme {
 	case sink.KafkaScheme, sink.KafkaSSLScheme:
 		outputRawChangeEvent = s.KafkaConfig.GetOutputRawChangeEvent()
-	case sink.PulsarScheme, sink.PulsarSSLScheme, sink.PulsarHTTPScheme, sink.PulsarHTTPSScheme:
+	case sink.PulsarScheme, sink.PulsarSSLScheme:
 		outputRawChangeEvent = s.PulsarConfig.GetOutputRawChangeEvent()
 	default:
 		outputRawChangeEvent = s.CloudStorageConfig.GetOutputRawChangeEvent()
@@ -912,14 +887,15 @@ func (s *SinkConfig) applyParameterBySinkURI(sinkURI *url.URL) error {
 		return nil
 	}
 
+	cfgInSinkURI := map[string]string{}
+	cfgInFile := map[string]string{}
 	params := sinkURI.Query()
-	var errFromURI, errFromFile strings.Builder
 
 	txnAtomicityFromURI := AtomicityLevel(params.Get(TxnAtomicityKey))
 	if txnAtomicityFromURI != unknownTxnAtomicity {
 		if util.GetOrZero(s.TxnAtomicity) != unknownTxnAtomicity && util.GetOrZero(s.TxnAtomicity) != txnAtomicityFromURI {
-			errFromURI.WriteString(fmt.Sprintf("%s=%s, ", TxnAtomicityKey, txnAtomicityFromURI))
-			errFromFile.WriteString(fmt.Sprintf("%s=%s, ", TxnAtomicityKey, util.GetOrZero(s.TxnAtomicity)))
+			cfgInSinkURI[TxnAtomicityKey] = string(txnAtomicityFromURI)
+			cfgInFile[TxnAtomicityKey] = string(util.GetOrZero(s.TxnAtomicity))
 		}
 		s.TxnAtomicity = util.AddressOf(txnAtomicityFromURI)
 	}
@@ -927,17 +903,31 @@ func (s *SinkConfig) applyParameterBySinkURI(sinkURI *url.URL) error {
 	protocolFromURI := params.Get(ProtocolKey)
 	if protocolFromURI != "" {
 		if s.Protocol != nil && util.GetOrZero(s.Protocol) != protocolFromURI {
-			errFromURI.WriteString(fmt.Sprintf("%s=%s, ", ProtocolKey, protocolFromURI))
-			errFromFile.WriteString(fmt.Sprintf("%s=%s, ", ProtocolKey, util.GetOrZero(s.Protocol)))
+			cfgInSinkURI[ProtocolKey] = protocolFromURI
+			cfgInFile[ProtocolKey] = util.GetOrZero(s.Protocol)
 		}
 		s.Protocol = util.AddressOf(protocolFromURI)
 	}
 
-	if errFromURI.Len() == 0 && errFromFile.Len() == 0 {
-		return nil
+	getError := func() error {
+		if len(cfgInSinkURI) != len(cfgInFile) {
+			log.Panic("inconsistent configuration items in sink uri and configuration file",
+				zap.Any("cfgInSinkURI", cfgInSinkURI), zap.Any("cfgInFile", cfgInFile))
+		}
+		if len(cfgInSinkURI) == 0 && len(cfgInFile) == 0 {
+			return nil
+		}
+		getErrMsg := func(cfgIn map[string]string) string {
+			var errMsg strings.Builder
+			for k, v := range cfgIn {
+				errMsg.WriteString(fmt.Sprintf("%s=%s, ", k, v))
+			}
+			return errMsg.String()[0 : errMsg.Len()-2]
+		}
+		return cerror.ErrIncompatibleSinkConfig.GenWithStackByArgs(
+			getErrMsg(cfgInSinkURI), getErrMsg(cfgInFile))
 	}
-	return cerror.ErrIncompatibleSinkConfig.GenWithStackByArgs(
-		errFromURI.String()[0:errFromURI.Len()-2], errFromFile.String()[0:errFromFile.Len()-2])
+	return getError()
 }
 
 // CheckCompatibilityWithSinkURI check whether the sinkURI is compatible with the sink config.
@@ -1007,10 +997,5 @@ func (g *GlueSchemaRegistryConfig) NoCredentials() bool {
 
 // OpenProtocolConfig represents the configurations for open protocol encoding
 type OpenProtocolConfig struct {
-	OutputOldValue bool `toml:"output-old-value" json:"output-old-value"`
-}
-
-// DebeziumConfig represents the configurations for debezium protocol encoding
-type DebeziumConfig struct {
 	OutputOldValue bool `toml:"output-old-value" json:"output-old-value"`
 }

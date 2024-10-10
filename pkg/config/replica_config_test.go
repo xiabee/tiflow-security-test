@@ -69,7 +69,6 @@ func TestReplicaConfigMarshal(t *testing.T) {
 	conf.Sink.ContentCompatible = aws.Bool(true)
 	conf.Sink.SafeMode = aws.Bool(true)
 	conf.Sink.AdvanceTimeoutInSec = util.AddressOf(uint(150))
-	conf.Sink.DebeziumDisableSchema = util.AddressOf(false)
 	conf.Sink.KafkaConfig = &KafkaConfig{
 		PartitionNum:                 aws.Int32(1),
 		ReplicationFactor:            aws.Int16(1),
@@ -103,7 +102,6 @@ func TestReplicaConfigMarshal(t *testing.T) {
 			AvroEnableWatermark:            aws.Bool(true),
 			AvroDecimalHandlingMode:        aws.String("string"),
 			AvroBigintUnsignedHandlingMode: aws.String("string"),
-			EncodingFormat:                 aws.String("json"),
 		},
 		LargeMessageHandle: &LargeMessageHandleConfig{
 			LargeMessageHandleOption: LargeMessageHandleOptionHandleKeyOnly,
@@ -143,9 +141,6 @@ func TestReplicaConfigMarshal(t *testing.T) {
 		FlushInterval:  aws.String("1m"),
 		FileSize:       aws.Int(1024),
 		OutputColumnID: aws.Bool(false),
-	}
-	conf.Sink.Debezium = &DebeziumConfig{
-		OutputOldValue: true,
 	}
 	conf.Sink.OpenProtocol = &OpenProtocolConfig{
 		OutputOldValue: true,

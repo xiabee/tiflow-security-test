@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/member"
 	"github.com/pingcap/tiflow/cdc/scheduler/internal/v3/replication"
 	"github.com/pingcap/tiflow/pkg/spanz"
-	"go.uber.org/zap"
 )
 
 var _ scheduler = &balanceScheduler{}
@@ -42,15 +41,13 @@ type balanceScheduler struct {
 	forceBalance bool
 
 	maxTaskConcurrency int
-	changefeedID       model.ChangeFeedID
 }
 
-func newBalanceScheduler(interval time.Duration, concurrency int, changefeedID model.ChangeFeedID) *balanceScheduler {
+func newBalanceScheduler(interval time.Duration, concurrency int) *balanceScheduler {
 	return &balanceScheduler{
 		random:               rand.New(rand.NewSource(time.Now().UnixNano())),
 		checkBalanceInterval: interval,
 		maxTaskConcurrency:   concurrency,
-		changefeedID:         changefeedID,
 	}
 }
 
@@ -75,15 +72,13 @@ func (b *balanceScheduler) Schedule(
 
 	for _, capture := range captures {
 		if capture.State == member.CaptureStateStopping {
-			log.Debug("schedulerv3: capture is stopping, premature to balance table",
-				zap.String("namespace", b.changefeedID.Namespace),
-				zap.String("changefeed", b.changefeedID.ID))
+			log.Debug("schedulerv3: capture is stopping, premature to balance table")
 			return nil
 		}
 	}
 
 	tasks := buildBalanceMoveTables(
-		b.random, captures, replications, b.maxTaskConcurrency, b.changefeedID)
+		b.random, captures, replications, b.maxTaskConcurrency)
 	b.forceBalance = len(tasks) != 0
 	return tasks
 }
@@ -93,10 +88,9 @@ func buildBalanceMoveTables(
 	captures map[model.CaptureID]*member.CaptureStatus,
 	replications *spanz.BtreeMap[*replication.ReplicationSet],
 	maxTaskConcurrency int,
-	changeFeedID model.ChangeFeedID,
 ) []*replication.ScheduleTask {
 	moves := newBalanceMoveTables(
-		random, captures, replications, maxTaskConcurrency, changeFeedID)
+		random, captures, replications, maxTaskConcurrency, model.ChangeFeedID{})
 	tasks := make([]*replication.ScheduleTask, 0, len(moves))
 	for i := 0; i < len(moves); i++ {
 		// No need for accept callback here.

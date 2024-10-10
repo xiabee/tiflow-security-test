@@ -347,7 +347,7 @@ func GetTaskNameFromArgOrFile(arg string) string {
 		return arg
 	}
 	cfg := config.NewTaskConfig()
-	if err := cfg.FromYaml(string(content)); err != nil {
+	if err := cfg.Decode(string(content)); err != nil {
 		return arg
 	}
 	return cfg.Name

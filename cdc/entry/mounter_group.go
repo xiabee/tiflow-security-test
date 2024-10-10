@@ -78,10 +78,7 @@ func NewMounterGroup(
 }
 
 func (m *mounterGroup) Run(ctx context.Context, _ ...chan<- error) error {
-	inputChanSize := mounterGroupInputChanSizeGauge.WithLabelValues(m.changefeedID.Namespace, m.changefeedID.ID)
-	ticker := time.NewTicker(defaultMetricInterval)
 	defer func() {
-		ticker.Stop()
 		mounterGroupInputChanSizeGauge.DeleteLabelValues(m.changefeedID.Namespace, m.changefeedID.ID)
 	}()
 	g, ctx := errgroup.WithContext(ctx)
@@ -91,12 +88,15 @@ func (m *mounterGroup) Run(ctx context.Context, _ ...chan<- error) error {
 		})
 	}
 	g.Go(func() error {
+		metrics := mounterGroupInputChanSizeGauge.WithLabelValues(m.changefeedID.Namespace, m.changefeedID.ID)
+		ticker := time.NewTicker(defaultMetricInterval)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return errors.Trace(ctx.Err())
 			case <-ticker.C:
-				inputChanSize.Set(float64(len(m.inputCh)))
+				metrics.Set(float64(len(m.inputCh)))
 			}
 		}
 	})

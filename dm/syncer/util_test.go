@@ -21,7 +21,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	_ "github.com/pingcap/tidb/pkg/types/parser_driver"
 	"github.com/pingcap/tidb/pkg/util/filter"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
@@ -96,8 +96,8 @@ func TestGetTableByDML(t *testing.T) {
 func TestTableNameResultSet(t *testing.T) {
 	rs := &ast.TableSource{
 		Source: &ast.TableName{
-			Schema: pmodel.NewCIStr("test"),
-			Name:   pmodel.NewCIStr("t1"),
+			Schema: model.NewCIStr("test"),
+			Name:   model.NewCIStr("t1"),
 		},
 	}
 	table, err := tableNameResultSet(rs)

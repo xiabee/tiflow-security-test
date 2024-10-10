@@ -140,17 +140,6 @@ func DefaultS3Retryer() request.Retryer {
 	}
 }
 
-// NewS3Retryer creates a new s3 retryer.
-func NewS3Retryer(maxRetries int, minRetryDelay, minThrottleDelay time.Duration) request.Retryer {
-	return retryerWithLog{
-		DefaultRetryer: client.DefaultRetryer{
-			NumMaxRetries:    maxRetries,
-			MinRetryDelay:    minRetryDelay,
-			MinThrottleDelay: minThrottleDelay,
-		},
-	}
-}
-
 type extStorageWithTimeout struct {
 	storage.ExternalStorage
 	timeout time.Duration

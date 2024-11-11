@@ -62,6 +62,7 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 const (
@@ -345,7 +346,8 @@ func (s *Server) RegisterWorker(ctx context.Context, req *pb.RegisterWorkerReque
 	}
 	log.L().Info("register worker successfully", zap.String("name", req.Name), zap.String("address", req.Address))
 	return &pb.RegisterWorkerResponse{
-		Result: true,
+		Result:    true,
+		SecretKey: s.cfg.SecretKey,
 	}, nil
 }
 
@@ -492,26 +494,25 @@ func (s *Server) StartTask(ctx context.Context, req *pb.StartTaskRequest) (*pb.S
 	}
 
 	resp := &pb.StartTaskResponse{}
-	respWithErr := func(err error) (*pb.StartTaskResponse, error) {
+	respWithErr := func(err error) *pb.StartTaskResponse {
 		resp.Msg += err.Error()
-		// nolint:nilerr
-		return resp, nil
+		return resp
 	}
 
 	cliArgs := config.TaskCliArgs{
 		StartTime: req.StartTime,
 	}
 	if err := cliArgs.Verify(); err != nil {
-		return respWithErr(err)
+		return respWithErr(err), nil
 	}
 
 	cfg, stCfgs, err := s.generateSubTask(ctx, req.Task, &cliArgs)
 	if err != nil {
-		return respWithErr(err)
+		return respWithErr(err), nil
 	}
 	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
 	if err != nil {
-		return respWithErr(err)
+		return respWithErr(err), nil
 	}
 	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
 	if err != nil {
@@ -560,35 +561,35 @@ func (s *Server) StartTask(ctx context.Context, req *pb.StartTaskRequest) (*pb.S
 			// use same latch for remove-meta and start-task
 			release, err3 = s.scheduler.AcquireSubtaskLatch(cfg.Name)
 			if err3 != nil {
-				return respWithErr(terror.ErrSchedulerLatchInUse.Generate("RemoveMeta", cfg.Name))
+				return respWithErr(terror.ErrSchedulerLatchInUse.Generate("RemoveMeta", cfg.Name)), nil
 			}
 			defer release()
 			latched = true
 
 			if scm := s.scheduler.GetSubTaskCfgsByTask(cfg.Name); len(scm) > 0 {
 				return respWithErr(terror.Annotate(terror.ErrSchedulerSubTaskExist.Generate(cfg.Name, sources),
-					"while remove-meta is true"))
+					"while remove-meta is true")), nil
 			}
 			err = s.removeMetaData(ctx, cfg.Name, cfg.MetaSchema, cfg.TargetDB)
 			if err != nil {
-				return respWithErr(terror.Annotate(err, "while removing metadata"))
+				return respWithErr(terror.Annotate(err, "while removing metadata")), nil
 			}
 		}
 
 		if req.StartTime == "" {
 			err = ha.DeleteAllTaskCliArgs(s.etcdClient, cfg.Name)
 			if err != nil {
-				return respWithErr(terror.Annotate(err, "while removing task command line arguments"))
+				return respWithErr(terror.Annotate(err, "while removing task command line arguments")), nil
 			}
 		} else {
 			err = ha.PutTaskCliArgs(s.etcdClient, cfg.Name, sources, cliArgs)
 			if err != nil {
-				return respWithErr(terror.Annotate(err, "while putting task command line arguments"))
+				return respWithErr(terror.Annotate(err, "while putting task command line arguments")), nil
 			}
 		}
 		err = s.scheduler.AddSubTasks(latched, pb.Stage_Running, subtaskCfgPointersToInstances(stCfgs...)...)
 		if err != nil {
-			return respWithErr(err)
+			return respWithErr(err), nil
 		}
 
 		if release != nil {
@@ -1286,8 +1287,6 @@ func (s *Server) getSourceConfigs(sources []string) map[string]*config.SourceCon
 	cfgs := make(map[string]*config.SourceConfig)
 	for _, source := range sources {
 		if cfg := s.scheduler.GetSourceCfgByID(source); cfg != nil {
-			// check the password
-			cfg.DecryptPassword()
 			cfgs[source] = cfg
 		}
 	}
@@ -1343,7 +1342,7 @@ func (s *Server) CheckTask(ctx context.Context, req *pb.CheckTaskRequest) (*pb.C
 func parseAndAdjustSourceConfig(ctx context.Context, contents []string) ([]*config.SourceConfig, error) {
 	cfgs := make([]*config.SourceConfig, len(contents))
 	for i, content := range contents {
-		cfg, err := config.ParseYaml(content)
+		cfg, err := config.SourceCfgFromYaml(content)
 		if err != nil {
 			return cfgs, err
 		}
@@ -1391,7 +1390,7 @@ func checkAndAdjustSourceConfigForDMCtl(ctx context.Context, cfg *config.SourceC
 func parseSourceConfig(contents []string) ([]*config.SourceConfig, error) {
 	cfgs := make([]*config.SourceConfig, len(contents))
 	for i, content := range contents {
-		cfg, err := config.ParseYaml(content)
+		cfg, err := config.SourceCfgFromYaml(content)
 		if err != nil {
 			return cfgs, err
 		}
@@ -1425,7 +1424,7 @@ func GetLatestMeta(ctx context.Context, flavor string, dbConfig *dbconfig.DBConf
 	return &config.Meta{BinLogName: pos.Name, BinLogPos: pos.Pos, BinLogGTID: gSet}, nil
 }
 
-func AdjustTargetDB(ctx context.Context, dbConfig *dbconfig.DBConfig) error {
+func AdjustTargetDBSessionCfg(ctx context.Context, dbConfig *dbconfig.DBConfig) error {
 	cfg := *dbConfig
 	if len(cfg.Password) > 0 {
 		cfg.Password = utils.DecryptOrPlaintext(cfg.Password)
@@ -1649,13 +1648,13 @@ func (s *Server) generateSubTask(
 		}
 		err = cfg.Adjust()
 	} else {
-		err = cfg.Decode(task)
+		err = cfg.FromYaml(task)
 	}
 	if err != nil {
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
 
-	err = AdjustTargetDB(ctx, cfg.TargetDB)
+	err = AdjustTargetDBSessionCfg(ctx, cfg.TargetDB)
 	if err != nil {
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
@@ -2482,7 +2481,7 @@ func (s *Server) GetCfg(ctx context.Context, req *pb.GetCfgRequest) (*pb.GetCfgR
 			return resp2, nil
 		}
 		toDBCfg := config.GetTargetDBCfgFromOpenAPITask(task)
-		if adjustDBErr := AdjustTargetDB(ctx, toDBCfg); adjustDBErr != nil {
+		if adjustDBErr := AdjustTargetDBSessionCfg(ctx, toDBCfg); adjustDBErr != nil {
 			if adjustDBErr != nil {
 				resp2.Msg = adjustDBErr.Error()
 				// nolint:nilerr
@@ -3317,5 +3316,95 @@ func (s *Server) UpdateValidation(ctx context.Context, req *pb.UpdateValidationR
 	return &pb.UpdateValidationResponse{
 		Result:  true,
 		Sources: workerResps,
+	}, nil
+}
+
+func (s *Server) Encrypt(ctx context.Context, req *pb.EncryptRequest) (*pb.EncryptResponse, error) {
+	var (
+		resp2 *pb.EncryptResponse
+		err   error
+	)
+	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
+	if shouldRet {
+		return resp2, err
+	}
+	ciphertext, err := utils.Encrypt(req.Plaintext)
+	if err != nil {
+		// nolint:nilerr
+		return &pb.EncryptResponse{
+			Result: false,
+			Msg:    err.Error(),
+		}, nil
+	}
+	return &pb.EncryptResponse{
+		Result:     true,
+		Ciphertext: ciphertext,
+	}, nil
+}
+
+func (s *Server) ListTaskConfigs(ctx context.Context, req *emptypb.Empty) (*pb.ListTaskConfigsResponse, error) {
+	var (
+		resp2 *pb.ListTaskConfigsResponse
+		err   error
+	)
+	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
+	if shouldRet {
+		return resp2, err
+	}
+
+	subtaskCfgsOfTasks := s.scheduler.GetSubTaskCfgs()
+	contents := make(map[string]string, len(subtaskCfgsOfTasks))
+	for taskName, subtaskCfgMap := range subtaskCfgsOfTasks {
+		subtaskCfgs := make([]*config.SubTaskConfig, 0, len(subtaskCfgMap))
+		for sourceID := range subtaskCfgMap {
+			subTaskConfig := subtaskCfgMap[sourceID]
+			subtaskCfgs = append(subtaskCfgs, &subTaskConfig)
+		}
+		sort.Slice(subtaskCfgs, func(i, j int) bool {
+			return subtaskCfgs[i].SourceID < subtaskCfgs[j].SourceID
+		})
+		taskCfg := config.SubTaskConfigsToTaskConfig(subtaskCfgs...)
+		content, err := taskCfg.YamlForDowngrade()
+		if err != nil {
+			// nolint:nilerr
+			return &pb.ListTaskConfigsResponse{
+				Result: false,
+				Msg:    fmt.Sprintf("failed to marshal task config of %s: %s", taskName, err.Error()),
+			}, nil
+		}
+		contents[taskName] = content
+	}
+	return &pb.ListTaskConfigsResponse{
+		Result:      true,
+		TaskConfigs: contents,
+	}, nil
+}
+
+func (s *Server) ListSourceConfigs(ctx context.Context, req *emptypb.Empty) (*pb.ListSourceConfigsResponse, error) {
+	var (
+		resp2 *pb.ListSourceConfigsResponse
+		err   error
+	)
+	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
+	if shouldRet {
+		return resp2, err
+	}
+
+	sourceCfgs := s.scheduler.GetSourceCfgs()
+	contents := make(map[string]string, len(sourceCfgs))
+	for sourceID, cfg := range sourceCfgs {
+		yamlContent, err := cfg.YamlForDowngrade()
+		if err != nil {
+			// nolint:nilerr
+			return &pb.ListSourceConfigsResponse{
+				Result: false,
+				Msg:    fmt.Sprintf("fail to marshal source config of %s: %s", sourceID, err.Error()),
+			}, nil
+		}
+		contents[sourceID] = yamlContent
+	}
+	return &pb.ListSourceConfigsResponse{
+		Result:        true,
+		SourceConfigs: contents,
 	}, nil
 }

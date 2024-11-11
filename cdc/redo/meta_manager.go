@@ -493,7 +493,6 @@ func (m *metaManager) bgFlushMeta(egCtx context.Context) (err error) {
 			zap.Error(err))
 	}()
 
-	m.lastFlushTime = time.Now()
 	for {
 		select {
 		case <-egCtx.Done():

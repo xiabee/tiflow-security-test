@@ -25,14 +25,13 @@ fi
 
 # CDC mock
 "$MOCKGEN" -source cdc/owner/owner.go -destination cdc/owner/mock/owner_mock.go
-"$MOCKGEN" -source cdc/controller/controller.go -destination cdc/controller/mock/controller_mock.go
 "$MOCKGEN" -source cdc/owner/status_provider.go -destination cdc/owner/mock/status_provider_mock.go
 "$MOCKGEN" -source cdc/api/v2/api_helpers.go -destination cdc/api/v2/api_helpers_mock.go -package v2
 "$MOCKGEN" -source pkg/etcd/etcd.go -destination pkg/etcd/mock/etcd_client_mock.go
 "$MOCKGEN" -source cdc/processor/manager.go -destination cdc/processor/mock/manager_mock.go
 "$MOCKGEN" -source cdc/capture/capture.go -destination cdc/capture/mock/capture_mock.go
 "$MOCKGEN" -source pkg/cmd/factory/factory.go -destination pkg/cmd/factory/mock/factory_mock.go -package mock_factory
-"$MOCKGEN" -source cdc/processor/sourcemanager/engine/engine.go -destination cdc/processor/sourcemanager/engine/mock/engine_mock.go
+"$MOCKGEN" -source cdc/processor/sourcemanager/sorter/engine.go -destination cdc/processor/sourcemanager/sorter/mock/engine_mock.go
 "$MOCKGEN" -source pkg/api/v2/changefeed.go -destination pkg/api/v2/mock/changefeed_mock.go -package mock
 "$MOCKGEN" -source pkg/api/v2/tso.go -destination pkg/api/v2/mock/tso_mock.go -package mock
 "$MOCKGEN" -source pkg/api/v2/unsafe.go -destination pkg/api/v2/mock/unsafe_mock.go -package mock

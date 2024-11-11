@@ -72,8 +72,8 @@ func genTxnKeys(txn *model.SingleTableTxn) []uint64 {
 func genRowKeys(row *model.RowChangedEvent) [][]byte {
 	var keys [][]byte
 	if len(row.Columns) != 0 {
-		for iIdx, idxCol := range row.IndexColumns {
-			key := genKeyList(row.Columns, iIdx, idxCol, row.Table.TableID)
+		for iIdx, idxCol := range row.TableInfo.IndexColumnsOffset {
+			key := genKeyList(row.GetColumns(), iIdx, idxCol, row.GetTableID())
 			if len(key) == 0 {
 				continue
 			}
@@ -81,8 +81,8 @@ func genRowKeys(row *model.RowChangedEvent) [][]byte {
 		}
 	}
 	if len(row.PreColumns) != 0 {
-		for iIdx, idxCol := range row.IndexColumns {
-			key := genKeyList(row.PreColumns, iIdx, idxCol, row.Table.TableID)
+		for iIdx, idxCol := range row.TableInfo.IndexColumnsOffset {
+			key := genKeyList(row.GetPreColumns(), iIdx, idxCol, row.GetTableID())
 			if len(key) == 0 {
 				continue
 			}
@@ -92,9 +92,9 @@ func genRowKeys(row *model.RowChangedEvent) [][]byte {
 	if len(keys) == 0 {
 		// use table ID as key if no key generated (no PK/UK),
 		// no concurrence for rows in the same table.
-		log.Debug("Use table id as the key", zap.Int64("tableID", row.Table.TableID))
+		log.Debug("Use table id as the key", zap.Int64("tableID", row.GetTableID()))
 		tableKey := make([]byte, 8)
-		binary.BigEndian.PutUint64(tableKey, uint64(row.Table.TableID))
+		binary.BigEndian.PutUint64(tableKey, uint64(row.GetTableID()))
 		keys = [][]byte{tableKey}
 	}
 	return keys

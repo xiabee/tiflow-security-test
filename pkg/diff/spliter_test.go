@@ -19,7 +19,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
+	"github.com/pingcap/tidb/pkg/util/dbutil/dbutiltest"
 )
 
 var _ = Suite(&testSpliterSuite{})
@@ -114,7 +114,7 @@ func (s *testSpliterSuite) TestSplitRangeByRandom(c *C) {
 	}
 
 	for i, testCase := range testCases {
-		tableInfo, err := dbutil.GetTableInfoBySQL(testCase.createTableSQL, parser.New())
+		tableInfo, err := dbutiltest.GetTableInfoBySQL(testCase.createTableSQL, parser.New())
 		c.Assert(err, IsNil)
 
 		splitCols, err := getSplitFields(tableInfo, nil)
@@ -201,7 +201,7 @@ func (s *testSpliterSuite) TestRandomSpliter(c *C) {
 	}
 
 	for i, testCase := range testCases {
-		tableInfo, err := dbutil.GetTableInfoBySQL(testCase.createTableSQL, parser.New())
+		tableInfo, err := dbutiltest.GetTableInfoBySQL(testCase.createTableSQL, parser.New())
 		c.Assert(err, IsNil)
 
 		tableInstance := &TableInstance{
@@ -251,7 +251,7 @@ func (s *testSpliterSuite) TestBucketSpliter(c *C) {
 	c.Assert(err, IsNil)
 
 	createTableSQL := "create table `test`.`test`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo, err := dbutil.GetTableInfoBySQL(createTableSQL, parser.New())
+	tableInfo, err := dbutiltest.GetTableInfoBySQL(createTableSQL, parser.New())
 	c.Assert(err, IsNil)
 
 	testCases := []struct {
@@ -449,15 +449,9 @@ func createFakeResultForBucketSplit(mock sqlmock.Sqlmock, aRandomValues, bRandom
 		+---------+------------+-------------+----------+-----------+-------+---------+-------------+-------------+
 	*/
 
-	rows := []string{
-		"Db_name", "Table_name", "Column_name", "Is_index", "Bucket_id",
-		"Count", "Repeats", "Lower_Bound", "Upper_Bound",
-	}
-	statsRows := sqlmock.NewRows(rows)
+	statsRows := sqlmock.NewRows([]string{"Db_name", "Table_name", "Column_name", "Is_index", "Bucket_id", "Count", "Repeats", "Lower_Bound", "Upper_Bound"})
 	for i := 0; i < 5; i++ {
-		statsRows.AddRow("test", "test", "PRIMARY", 1, (i+1)*64, (i+1)*64, 1,
-			fmt.Sprintf("(%d, %d)", i*64, i*12),
-			fmt.Sprintf("(%d, %d)", (i+1)*64-1, (i+1)*12-1))
+		statsRows.AddRow("test", "test", "PRIMARY", 1, (i+1)*64, (i+1)*64, 1, fmt.Sprintf("(%d, %d)", i*64, i*12), fmt.Sprintf("(%d, %d)", (i+1)*64-1, (i+1)*12-1))
 	}
 	mock.ExpectQuery("SHOW STATS_BUCKETS").WillReturnRows(statsRows)
 

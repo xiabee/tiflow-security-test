@@ -368,7 +368,7 @@ func (c *consumer) emitDMLEvents(
 				)
 				continue
 			}
-			row.Table.TableID = tableID
+			row.PhysicalTableID = tableID
 			c.tableSinkMap[tableID].AppendRowChangedEvents(row)
 			filteredCnt++
 		}
@@ -647,7 +647,7 @@ func main() {
 	if enableProfiling {
 		go func() {
 			server := &http.Server{
-				Addr:              ":6060",
+				Addr:              "127.0.0.1:6060",
 				ReadHeaderTimeout: 5 * time.Second,
 			}
 

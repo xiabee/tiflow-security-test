@@ -27,9 +27,8 @@ import (
 	"github.com/golang/mock/gomock"
 	tidbkv "github.com/pingcap/tidb/pkg/kv"
 	mock_capture "github.com/pingcap/tiflow/cdc/capture/mock"
-	"github.com/pingcap/tiflow/cdc/controller"
-	mock_controller "github.com/pingcap/tiflow/cdc/controller/mock"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/owner"
 	mock_owner "github.com/pingcap/tiflow/cdc/owner/mock"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
@@ -72,9 +71,11 @@ func TestCreateChangefeed(t *testing.T) {
 	cp.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 	cp.EXPECT().GetUpstreamManager().Return(mockUpManager, nil).AnyTimes()
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	cp.EXPECT().IsController().Return(true).AnyTimes()
-	ctrl := mock_controller.NewMockController(gomock.NewController(t))
-	cp.EXPECT().GetController().Return(ctrl, nil).AnyTimes()
+	cp.EXPECT().IsOwner().Return(true).AnyTimes()
+	mo := mock_owner.NewMockOwner(gomock.NewController(t))
+	provider := mock_owner.NewMockStatusProvider(gomock.NewController(t))
+	cp.EXPECT().GetOwner().Return(mo, nil).AnyTimes()
+	cp.EXPECT().StatusProvider().Return(provider).AnyTimes()
 
 	// case 1: json format mismatches with the spec.
 	errConfig := struct {
@@ -188,7 +189,7 @@ func TestCreateChangefeed(t *testing.T) {
 		DoAndReturn(func(ctx context.Context,
 			cfg *ChangefeedConfig,
 			pdClient pd.Client,
-			ctrl controller.Controller,
+			provider owner.StatusProvider,
 			ensureGCServiceID string,
 			kvStorage tidbkv.Storage,
 		) (*model.ChangeFeedInfo, error) {
@@ -202,7 +203,7 @@ func TestCreateChangefeed(t *testing.T) {
 				SinkURI:    cfg.SinkURI,
 			}, nil
 		}).AnyTimes()
-	ctrl.EXPECT().
+	mo.EXPECT().
 		CreateChangefeed(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(cerrors.ErrPDEtcdAPIError).Times(1)
 
@@ -223,7 +224,7 @@ func TestCreateChangefeed(t *testing.T) {
 	helpers.EXPECT().
 		getEtcdClient(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(testEtcdCluster.RandClient(), nil)
-	ctrl.EXPECT().
+	mo.EXPECT().
 		CreateChangefeed(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).
 		AnyTimes()
@@ -250,7 +251,7 @@ func TestGetChangeFeed(t *testing.T) {
 	cp := mock_capture.NewMockCapture(gomock.NewController(t))
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
 	cp.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
-	cp.EXPECT().IsController().Return(true).AnyTimes()
+	cp.EXPECT().IsOwner().Return(true).AnyTimes()
 
 	apiV2 := NewOpenAPIV2ForTest(cp, APIV2HelpersImpl{})
 	router := newRouter(apiV2)
@@ -334,6 +335,7 @@ func TestUpdateChangefeed(t *testing.T) {
 	t.Parallel()
 	update := testCase{url: "/api/v2/changefeeds/%s", method: "PUT"}
 	helpers := NewMockAPIV2Helpers(gomock.NewController(t))
+	mockOwner := mock_owner.NewMockOwner(gomock.NewController(t))
 	mockCapture := mock_capture.NewMockCapture(gomock.NewController(t))
 	apiV2 := NewOpenAPIV2ForTest(mockCapture, helpers)
 	router := newRouter(apiV2)
@@ -341,7 +343,8 @@ func TestUpdateChangefeed(t *testing.T) {
 	statusProvider := &mockStatusProvider{}
 	mockCapture.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
 	mockCapture.EXPECT().IsReady().Return(true).AnyTimes()
-	mockCapture.EXPECT().IsController().Return(true).AnyTimes()
+	mockCapture.EXPECT().IsOwner().Return(true).AnyTimes()
+	mockCapture.EXPECT().GetOwner().Return(mockOwner, nil).AnyTimes()
 
 	// case 1 invalid id
 	invalidID := "Invalid_#"
@@ -391,11 +394,9 @@ func TestUpdateChangefeed(t *testing.T) {
 	// case 4: changefeed stopped, but get upstream failed: not found
 	oldCfInfo.UpstreamID = 100
 	oldCfInfo.State = "stopped"
-	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
-	etcdClient.EXPECT().
+	mockCapture.EXPECT().
 		GetUpstreamInfo(gomock.Any(), gomock.Eq(uint64(100)), gomock.Any()).
 		Return(nil, cerrors.ErrUpstreamNotFound).Times(1)
-	mockCapture.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), update.method,
@@ -409,10 +410,9 @@ func TestUpdateChangefeed(t *testing.T) {
 
 	// case 5: json failed
 	oldCfInfo.UpstreamID = 1
-	etcdClient.EXPECT().
+	mockCapture.EXPECT().
 		GetUpstreamInfo(gomock.Any(), gomock.Eq(uint64(1)), gomock.Any()).
 		Return(nil, nil).AnyTimes()
-	mockCapture.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), update.method,
@@ -474,7 +474,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		verifyUpdateChangefeedConfig(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(&model.ChangeFeedInfo{}, &model.UpstreamInfo{}, nil).
 		Times(1)
-	etcdClient.EXPECT().
+	mockOwner.EXPECT().
 		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(cerrors.ErrEtcdAPIError).Times(1)
 
@@ -494,7 +494,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		Return(oldCfInfo, &model.UpstreamInfo{}, nil).
 		Times(1)
 	mockCapture.EXPECT().GetUpstreamManager().Return(upstream.NewManager4Test(&mockPDClient{}), nil).AnyTimes()
-	etcdClient.EXPECT().
+	mockOwner.EXPECT().
 		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).Times(1)
 
@@ -511,7 +511,7 @@ func TestUpdateChangefeed(t *testing.T) {
 		Return(oldCfInfo, &model.UpstreamInfo{}, nil).
 		Times(1)
 	mockCapture.EXPECT().GetUpstreamManager().Return(upstream.NewManager4Test(&mockPDClient{}), nil).AnyTimes()
-	etcdClient.EXPECT().
+	mockOwner.EXPECT().
 		UpdateChangefeedAndUpstream(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(nil).Times(1)
 
@@ -528,9 +528,9 @@ func TestListChangeFeeds(t *testing.T) {
 	ctx := gomock.NewController(t)
 	cp := mock_capture.NewMockCapture(ctx)
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	cp.EXPECT().IsController().Return(true).AnyTimes()
-	controller := mock_controller.NewMockController(ctx)
-	cp.EXPECT().GetController().Return(controller, nil).AnyTimes()
+	cp.EXPECT().IsOwner().Return(true).AnyTimes()
+	provider := mock_owner.NewMockStatusProvider(ctx)
+	cp.EXPECT().StatusProvider().Return(provider).AnyTimes()
 
 	apiV2 := NewOpenAPIV2ForTest(cp, APIV2HelpersImpl{})
 	router := newRouter(apiV2)
@@ -545,7 +545,7 @@ func TestListChangeFeeds(t *testing.T) {
 	}
 
 	// case 1: list all changefeeds regardless of the state
-	controller.EXPECT().GetAllChangeFeedInfo(gomock.Any()).Return(
+	provider.EXPECT().GetAllChangeFeedInfo(gomock.Any()).Return(
 		map[model.ChangeFeedID]*model.ChangeFeedInfo{
 			model.DefaultChangeFeedID("cf1"): {
 				State: model.StateNormal,
@@ -567,7 +567,7 @@ func TestListChangeFeeds(t *testing.T) {
 			},
 		}, nil,
 	).Times(2)
-	controller.EXPECT().GetAllChangeFeedCheckpointTs(gomock.Any()).Return(
+	provider.EXPECT().GetAllChangeFeedCheckpointTs(gomock.Any()).Return(
 		map[model.ChangeFeedID]uint64{
 			model.DefaultChangeFeedID("cf1"): 1,
 			model.DefaultChangeFeedID("cf2"): 2,
@@ -629,7 +629,7 @@ func TestVerifyTable(t *testing.T) {
 	// statusProvider := &mockStatusProvider{}
 	// cp.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
 	cp.EXPECT().GetUpstreamManager().Return(upManager, nil).AnyTimes()
-	cp.EXPECT().IsController().Return(true).AnyTimes()
+	cp.EXPECT().IsOwner().Return(true).AnyTimes()
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
 
 	apiV2 := NewOpenAPIV2ForTest(cp, helpers)
@@ -730,7 +730,9 @@ func TestResumeChangefeed(t *testing.T) {
 	pdClient := &mockPDClient{}
 	etcdClient := mock_etcd.NewMockCDCEtcdClient(gomock.NewController(t))
 	mockUpManager := upstream.NewManager4Test(pdClient)
-	statusProvider := &mockStatusProvider{}
+	statusProvider := &mockStatusProvider{
+		changefeedStatus: &model.ChangeFeedStatusForAPI{},
+	}
 
 	etcdClient.EXPECT().
 		GetEnsureGCServiceID(gomock.Any()).
@@ -739,7 +741,7 @@ func TestResumeChangefeed(t *testing.T) {
 	cp.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 	cp.EXPECT().GetUpstreamManager().Return(mockUpManager, nil).AnyTimes()
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	cp.EXPECT().IsController().Return(true).AnyTimes()
+	cp.EXPECT().IsOwner().Return(true).AnyTimes()
 	cp.EXPECT().GetOwner().Return(owner, nil).AnyTimes()
 	owner.EXPECT().EnqueueJob(gomock.Any(), gomock.Any()).
 		Do(func(adminJob model.AdminJob, done chan<- error) {
@@ -845,13 +847,13 @@ func TestDeleteChangefeed(t *testing.T) {
 	etcdClient.EXPECT().
 		GetEnsureGCServiceID(gomock.Any()).
 		Return(etcd.GcServiceIDForTest()).AnyTimes()
-	ctrl := mock_controller.NewMockController(gomock.NewController(t))
 	cp.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 	cp.EXPECT().GetUpstreamManager().Return(mockUpManager, nil).AnyTimes()
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	cp.EXPECT().IsController().Return(true).AnyTimes()
+	cp.EXPECT().IsOwner().Return(true).AnyTimes()
 	cp.EXPECT().GetOwner().Return(owner, nil).AnyTimes()
-	cp.EXPECT().GetController().Return(ctrl, nil).AnyTimes()
+	provider := mock_owner.NewMockStatusProvider(gomock.NewController(t))
+	cp.EXPECT().StatusProvider().Return(provider).AnyTimes()
 	owner.EXPECT().EnqueueJob(gomock.Any(), gomock.Any()).
 		Do(func(adminJob model.AdminJob, done chan<- error) {
 			require.EqualValues(t, changeFeedID, adminJob.CfID)
@@ -872,7 +874,7 @@ func TestDeleteChangefeed(t *testing.T) {
 
 	// case 2: changefeed not exists
 	validID := changeFeedID.ID
-	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(false, nil)
+	provider.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(false, nil)
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), remove.method,
 		fmt.Sprintf(remove.url, validID), nil)
@@ -880,7 +882,7 @@ func TestDeleteChangefeed(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// case 3: query changefeed error
-	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(false,
+	provider.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(false,
 		cerrors.ErrChangefeedUpdateRefused.GenWithStackByArgs(validID))
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), remove.method,
@@ -892,8 +894,8 @@ func TestDeleteChangefeed(t *testing.T) {
 	require.Contains(t, respErr.Code, "ErrChangefeedUpdateRefused")
 
 	// case 4: remove changefeed
-	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(true, nil)
-	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(false,
+	provider.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(true, nil)
+	provider.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(false,
 		cerrors.ErrChangeFeedNotExists.GenWithStackByArgs(validID))
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), remove.method,
@@ -902,7 +904,7 @@ func TestDeleteChangefeed(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// case 5: remove changefeed failed
-	ctrl.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(true, nil).AnyTimes()
+	provider.EXPECT().IsChangefeedExists(gomock.Any(), changeFeedID).Return(true, nil).AnyTimes()
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequestWithContext(context.Background(), remove.method,
 		fmt.Sprintf(remove.url, validID), nil)
@@ -934,7 +936,7 @@ func TestPauseChangefeed(t *testing.T) {
 	cp.EXPECT().GetEtcdClient().Return(etcdClient).AnyTimes()
 	cp.EXPECT().GetUpstreamManager().Return(mockUpManager, nil).AnyTimes()
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	cp.EXPECT().IsController().Return(true).AnyTimes()
+	cp.EXPECT().IsOwner().Return(true).AnyTimes()
 	cp.EXPECT().GetOwner().Return(owner, nil).AnyTimes()
 	owner.EXPECT().EnqueueJob(gomock.Any(), gomock.Any()).
 		Do(func(adminJob model.AdminJob, done chan<- error) {
@@ -991,7 +993,7 @@ func TestChangefeedSynced(t *testing.T) {
 
 	cp.EXPECT().StatusProvider().Return(statusProvider).AnyTimes()
 	cp.EXPECT().IsReady().Return(true).AnyTimes()
-	cp.EXPECT().IsController().Return(true).AnyTimes()
+	cp.EXPECT().IsOwner().Return(true).AnyTimes()
 	cp.EXPECT().GetOwner().Return(owner, nil).AnyTimes()
 
 	pdClient := &mockPDClient{}
@@ -1133,8 +1135,8 @@ func TestChangefeedSynced(t *testing.T) {
 		require.Equal(t, false, resp.Synced)
 		require.Equal(t, "Please check whether PD is online and TiKV Regions are all available. "+
 			"If PD is offline or some TiKV regions are not available, it means that the data syncing process is complete. "+
-			"To check whether TiKV regions are all available, "+
-			"you can view 'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. "+
+			"To check whether TiKV regions are all available, you can view "+
+			"'TiKV-Details' > 'Resolved-Ts' > 'Max Leader Resolved TS gap' on Grafana. "+
 			"If the gap is large, such as a few minutes, it means that some regions in TiKV are unavailable. "+
 			"Otherwise, if the gap is small and PD is online, it means the data syncing is incomplete, so please wait", resp.Info)
 	}

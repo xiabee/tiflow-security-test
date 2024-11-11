@@ -20,7 +20,6 @@ import (
 
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/types"
-	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 )
 
@@ -217,7 +216,6 @@ var (
 			return make(map[string]interface{})
 		},
 	}
-
 	// rowMapPool return map for each row
 	rowMapPool = sync.Pool{
 		New: func() any {
@@ -225,8 +223,14 @@ var (
 		},
 	}
 
-	// dmlPayloadHolderPool return holder for the payload
-	dmlPayloadHolderPool = sync.Pool{
+	dmlMessagePayloadPool = sync.Pool{
+		New: func() any {
+			return make(map[string]interface{})
+		},
+	}
+
+	// dmlMessagePool return a map for the dml message
+	dmlMessagePool = sync.Pool{
 		New: func() any {
 			return make(map[string]interface{})
 		},
@@ -244,24 +248,23 @@ func (a *avroMarshaller) newDMLMessageMap(
 	onlyHandleKey bool,
 	claimCheckFileName string,
 ) map[string]interface{} {
-	m := map[string]interface{}{
-		"version":       defaultVersion,
-		"database":      event.TableInfo.GetSchemaName(),
-		"table":         event.TableInfo.GetTableName(),
-		"tableID":       event.TableInfo.ID,
-		"commitTs":      int64(event.CommitTs),
-		"buildTs":       time.Now().UnixMilli(),
-		"schemaVersion": int64(event.TableInfo.UpdateTS),
-	}
+	dmlMessagePayload := dmlMessagePayloadPool.Get().(map[string]interface{})
+	dmlMessagePayload["version"] = defaultVersion
+	dmlMessagePayload["database"] = event.TableInfo.GetSchemaName()
+	dmlMessagePayload["table"] = event.TableInfo.GetTableName()
+	dmlMessagePayload["tableID"] = event.TableInfo.ID
+	dmlMessagePayload["commitTs"] = int64(event.CommitTs)
+	dmlMessagePayload["buildTs"] = time.Now().UnixMilli()
+	dmlMessagePayload["schemaVersion"] = int64(event.TableInfo.UpdateTS)
 
 	if !a.config.LargeMessageHandle.Disabled() && onlyHandleKey {
-		m["handleKeyOnly"] = map[string]interface{}{
+		dmlMessagePayload["handleKeyOnly"] = map[string]interface{}{
 			"boolean": true,
 		}
 	}
 
 	if a.config.LargeMessageHandle.EnableClaimCheck() && claimCheckFileName != "" {
-		m["claimCheckLocation"] = map[string]interface{}{
+		dmlMessagePayload["claimCheckLocation"] = map[string]interface{}{
 			"string": claimCheckFileName,
 		}
 	}
@@ -276,52 +279,51 @@ func (a *avroMarshaller) newDMLMessageMap(
 
 		holder := genericMapPool.Get().(map[string]interface{})
 		holder["com.pingcap.simple.avro.Checksum"] = cc
-		m["checksum"] = holder
+		dmlMessagePayload["checksum"] = holder
 	}
 
 	if event.IsInsert() {
-		data := a.collectColumns(event.Columns, event.ColInfos, onlyHandleKey)
-		m["data"] = data
-		m["type"] = string(DMLTypeInsert)
+		data := a.collectColumns(event.Columns, event.TableInfo, onlyHandleKey)
+		dmlMessagePayload["data"] = data
+		dmlMessagePayload["type"] = string(DMLTypeInsert)
 	} else if event.IsDelete() {
-		old := a.collectColumns(event.PreColumns, event.ColInfos, onlyHandleKey)
-		m["old"] = old
-		m["type"] = string(DMLTypeDelete)
+		old := a.collectColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
+		dmlMessagePayload["old"] = old
+		dmlMessagePayload["type"] = string(DMLTypeDelete)
 	} else if event.IsUpdate() {
-		data := a.collectColumns(event.Columns, event.ColInfos, onlyHandleKey)
-		m["data"] = data
-		old := a.collectColumns(event.PreColumns, event.ColInfos, onlyHandleKey)
-		m["old"] = old
-		m["type"] = string(DMLTypeUpdate)
+		data := a.collectColumns(event.Columns, event.TableInfo, onlyHandleKey)
+		dmlMessagePayload["data"] = data
+		old := a.collectColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
+		dmlMessagePayload["old"] = old
+		dmlMessagePayload["type"] = string(DMLTypeUpdate)
 	}
 
-	m = map[string]interface{}{
-		"com.pingcap.simple.avro.DML": m,
+	dmlMessagePayload = map[string]interface{}{
+		"com.pingcap.simple.avro.DML": dmlMessagePayload,
 	}
 
-	holder := dmlPayloadHolderPool.Get().(map[string]interface{})
-	holder["type"] = string(MessageTypeDML)
-	holder["payload"] = m
+	dmlMessage := dmlMessagePool.Get().(map[string]interface{})
+	dmlMessage["type"] = string(MessageTypeDML)
+	dmlMessage["payload"] = dmlMessagePayload
 
 	messageHolder := messageHolderPool.Get().(map[string]interface{})
-	messageHolder["com.pingcap.simple.avro.Message"] = holder
+	messageHolder["com.pingcap.simple.avro.Message"] = dmlMessage
 
 	return messageHolder
 }
 
 func recycleMap(m map[string]interface{}) {
-	holder := m["com.pingcap.simple.avro.Message"].(map[string]interface{})
-	payload := holder["payload"].(map[string]interface{})
-	eventMap := payload["com.pingcap.simple.avro.DML"].(map[string]interface{})
+	dmlMessage := m["com.pingcap.simple.avro.Message"].(map[string]interface{})
+	dml := dmlMessage["payload"].(map[string]interface{})["com.pingcap.simple.avro.DML"].(map[string]interface{})
 
-	checksum := eventMap["checksum"]
+	checksum := dml["checksum"]
 	if checksum != nil {
 		checksum := checksum.(map[string]interface{})
 		clear(checksum)
 		genericMapPool.Put(checksum)
 	}
 
-	dataMap := eventMap["data"]
+	dataMap := dml["data"]
 	if dataMap != nil {
 		dataMap := dataMap.(map[string]interface{})["map"].(map[string]interface{})
 		for _, col := range dataMap {
@@ -333,7 +335,7 @@ func recycleMap(m map[string]interface{}) {
 		rowMapPool.Put(dataMap)
 	}
 
-	oldDataMap := eventMap["old"]
+	oldDataMap := dml["old"]
 	if oldDataMap != nil {
 		oldDataMap := oldDataMap.(map[string]interface{})["map"].(map[string]interface{})
 		for _, col := range oldDataMap {
@@ -344,28 +346,34 @@ func recycleMap(m map[string]interface{}) {
 		clear(oldDataMap)
 		rowMapPool.Put(oldDataMap)
 	}
-	holder["payload"] = nil
-	dmlPayloadHolderPool.Put(holder)
-	m["com.pingcap.simple.avro.Message"] = nil
+
+	clear(dml)
+	dmlMessagePayloadPool.Put(dml)
+
+	clear(dmlMessage)
+	dmlMessagePool.Put(dmlMessage)
+
+	clear(m)
 	messageHolderPool.Put(m)
 }
 
 func (a *avroMarshaller) collectColumns(
-	columns []*model.Column, columnInfos []rowcodec.ColInfo, onlyHandleKey bool,
+	columns []*model.ColumnData, tableInfo *model.TableInfo, onlyHandleKey bool,
 ) map[string]interface{} {
 	result := rowMapPool.Get().(map[string]interface{})
-	for idx, col := range columns {
+	for _, col := range columns {
 		if col != nil {
-			if onlyHandleKey && !col.Flag.IsHandleKey() {
+			colFlag := tableInfo.ForceGetColumnFlagType(col.ColumnID)
+			if onlyHandleKey && !colFlag.IsHandleKey() {
 				continue
 			}
-			value, avroType := a.encodeValue4Avro(col.Value, columnInfos[idx].Ft)
+			colInfo := tableInfo.ForceGetColumnInfo(col.ColumnID)
+			value, avroType := a.encodeValue4Avro(col.Value, &colInfo.FieldType)
 			holder := genericMapPool.Get().(map[string]interface{})
 			holder[avroType] = value
-			result[col.Name] = holder
+			result[colInfo.Name.O] = holder
 		}
 	}
-
 	return map[string]interface{}{
 		"map": result,
 	}

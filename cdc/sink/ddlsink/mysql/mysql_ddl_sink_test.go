@@ -37,7 +37,7 @@ func TestWriteDDLEvent(t *testing.T) {
 		}()
 		if dbIndex == 0 {
 			// test db
-			db, err := pmysql.MockTestDB(true)
+			db, err := pmysql.MockTestDB()
 			require.Nil(t, err)
 			return db, nil
 		}
@@ -46,12 +46,19 @@ func TestWriteDDLEvent(t *testing.T) {
 		require.Nil(t, err)
 		mock.ExpectQuery("select tidb_version()").
 			WillReturnRows(sqlmock.NewRows([]string{"tidb_version()"}).AddRow("5.7.25-TiDB-v4.0.0-beta-191-ga1b3e3b"))
+		mock.ExpectQuery("select tidb_version()").
+			WillReturnRows(sqlmock.NewRows([]string{"tidb_version()"}).AddRow("5.7.25-TiDB-v4.0.0-beta-191-ga1b3e3b"))
+		mock.ExpectExec("SET SESSION tidb_cdc_write_source = 1").WillReturnResult(sqlmock.NewResult(1, 0))
+
 		mock.ExpectBegin()
 		mock.ExpectExec("USE `test`;").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("SET SESSION tidb_cdc_write_source = 1").WillReturnResult(sqlmock.NewResult(1, 0))
 		mock.ExpectExec("ALTER TABLE test.t1 ADD COLUMN a int").WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
+
 		mock.ExpectBegin()
 		mock.ExpectExec("USE `test`;").WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec("SET SESSION tidb_cdc_write_source = 1").WillReturnResult(sqlmock.NewResult(1, 0))
 		mock.ExpectExec("ALTER TABLE test.t1 ADD COLUMN a int").
 			WillReturnError(&dmysql.MySQLError{
 				Number: uint16(infoschema.ErrColumnExists.Code()),

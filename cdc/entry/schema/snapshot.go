@@ -480,6 +480,15 @@ func (s *Snapshot) DoHandleDDL(job *timodel.Job) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
+	case timodel.ActionCreateTables:
+		multiTableInfos := job.BinlogInfo.MultipleTableInfos
+		for _, tableInfo := range multiTableInfos {
+			err := s.inner.createTable(model.WrapTableInfo(job.SchemaID, job.SchemaName,
+				job.BinlogInfo.FinishedTS, tableInfo), job.BinlogInfo.FinishedTS)
+			if err != nil {
+				return errors.Trace(err)
+			}
+		}
 	case timodel.ActionCreateTable, timodel.ActionCreateView, timodel.ActionRecoverTable:
 		err := s.inner.createTable(getWrapTableInfo(job), job.BinlogInfo.FinishedTS)
 		if err != nil {

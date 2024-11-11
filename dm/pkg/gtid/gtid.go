@@ -17,14 +17,18 @@ import (
 	"strings"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 )
 
 var (
-	zeroMySQLGTIDSet   = MustZeroGTIDSet(mysql.MySQLFlavor)
-	zeroMariaDBGTIDSet = MustZeroGTIDSet(mysql.MariaDBFlavor)
+	emptyMySQLGTIDSet, _   = mysql.ParseMysqlGTIDSet("")
+	emptyMariaDBGTIDSet, _ = mysql.ParseMariadbGTIDSet("")
 )
+
+// CheckGTIDSetEmpty is used to check whether a GTID set is zero.
+func CheckGTIDSetEmpty(gSet mysql.GTIDSet) bool {
+	return gSet == nil || gSet.Equal(emptyMySQLGTIDSet) || gSet.Equal(emptyMariaDBGTIDSet)
+}
 
 // ParserGTID parses GTID from string. If the flavor is not specified, it will
 // try mysql GTID first and then MariaDB GTID.
@@ -35,7 +39,8 @@ func ParserGTID(flavor, gtidStr string) (mysql.GTIDSet, error) {
 	)
 
 	if len(flavor) == 0 && len(gtidStr) == 0 {
-		return nil, errors.Errorf("empty flavor with empty gtid is invalid")
+		// regard as mysql, mariadb always enabled gtid
+		return mysql.ParseGTIDSet(mysql.MySQLFlavor, "")
 	}
 
 	fla := flavor
@@ -115,9 +120,4 @@ func IsZeroMariaDBGTIDSet(gStr string) bool {
 	}
 	interval := strings.TrimSpace(sep[2])
 	return interval == "0"
-}
-
-// IsZeroGTIDSet is used to check whether a GTID set is zero.
-func IsZeroGTIDSet(gSet mysql.GTIDSet) bool {
-	return gSet == nil || zeroMySQLGTIDSet.Equal(gSet) || zeroMariaDBGTIDSet.Equal(gSet)
 }

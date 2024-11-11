@@ -113,7 +113,7 @@ var (
 
 	// codec related errors
 	ErrEncodeFailed = errors.Normalize(
-		"encode failed: %s",
+		"encode failed",
 		errors.RFCCodeText("CDC:ErrEncodeFailed"),
 	)
 	ErrDecodeFailed = errors.Normalize(
@@ -201,7 +201,7 @@ var (
 		errors.RFCCodeText("CDC:ErrKafkaCreateTopic"),
 	)
 	ErrKafkaInvalidTopicExpression = errors.Normalize(
-		"invalid topic expression: %s ",
+		"invalid topic expression",
 		errors.RFCCodeText("CDC:ErrKafkaTopicExprInvalid"),
 	)
 	ErrKafkaConfigNotFound = errors.Normalize(
@@ -424,6 +424,10 @@ var (
 		"csv decode failed",
 		errors.RFCCodeText("CDC:ErrCSVDecodeFailed"),
 	)
+	ErrDebeziumEncodeFailed = errors.Normalize(
+		"debezium encode failed",
+		errors.RFCCodeText("CDC:ErrDebeziumEncodeFailed"),
+	)
 	ErrStorageSinkInvalidConfig = errors.Normalize(
 		"storage sink config invalid",
 		errors.RFCCodeText("CDC:ErrStorageSinkInvalidConfig"),
@@ -575,8 +579,7 @@ var (
 	)
 
 	ErrCorruptedDataMutation = errors.Normalize(
-		"Changefeed %s.%s stopped due to corrupted data mutation received. "+
-			"Corrupted mutation detail information %+v",
+		"Changefeed %s.%s stopped due to corrupted data mutation received",
 		errors.RFCCodeText("CDC:ErrCorruptedDataMutation"))
 
 	// server related errors
@@ -943,7 +946,7 @@ var (
 	)
 
 	ErrHandleDDLFailed = errors.Normalize(
-		"handle ddl failed, job: %s, query: %s, startTs: %d. "+
+		"handle ddl failed, query: %s, startTs: %d. "+
 			"If you want to skip this DDL and continue with replication, "+
 			"you can manually execute this DDL downstream. Afterwards, "+
 			"add `ignore-txn-start-ts=[%d]` to the changefeed in the filter configuration.",
@@ -980,5 +983,20 @@ var (
 	ErrInconsistentMetaCache = errors.Normalize(
 		"meta cache is inconsistent: %s",
 		errors.RFCCodeText("DFLOW:ErrInconsistentMetaCache"),
+	)
+
+	ErrUnexpected = errors.Normalize(
+		"cdc met unexpected error: %s",
+		errors.RFCCodeText("CDC:ErrUnexpected"),
+	)
+
+	// credential related errors
+	ErrCredentialNotFound = errors.Normalize(
+		"credential not found: %s",
+		errors.RFCCodeText("CDC:ErrCredentialNotFound"),
+	)
+	ErrUnauthorized = errors.Normalize(
+		"user %s unauthorized, error: %s",
+		errors.RFCCodeText("CDC:ErrUnauthorized"),
 	)
 )

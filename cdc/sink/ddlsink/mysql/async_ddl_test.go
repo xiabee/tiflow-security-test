@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	dmysql "github.com/go-sql-driver/mysql"
 	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -39,7 +40,7 @@ func TestWaitAsynExecDone(t *testing.T) {
 		}()
 		if atomic.LoadInt32(&dbIndex) == 0 {
 			// test db
-			db, err := pmysql.MockTestDB(true)
+			db, err := pmysql.MockTestDB()
 			require.Nil(t, err)
 			return db, nil
 		}
@@ -48,17 +49,15 @@ func TestWaitAsynExecDone(t *testing.T) {
 		require.Nil(t, err)
 		mock.ExpectQuery("select tidb_version()").
 			WillReturnRows(sqlmock.NewRows([]string{"tidb_version()"}).AddRow("5.7.25-TiDB-v4.0.0-beta-191-ga1b3e3b"))
+		mock.ExpectQuery("select tidb_version()").WillReturnError(&dmysql.MySQLError{
+			Number:  1305,
+			Message: "FUNCTION test.tidb_version does not exist",
+		})
 
 		// Case 1: there is a running add index job
 		mock.ExpectQuery(fmt.Sprintf(checkRunningAddIndexSQL, "test", "sbtest0")).WillReturnRows(
-			sqlmock.NewRows([]string{
-				"JOB_ID", "DB_NAME", "TABLE_NAME", "JOB_TYPE", "SCHEMA_STATE", "SCHEMA_ID", "TABLE_ID",
-				"ROW_COUNT", "CREATE_TIME", "START_TIME", "END_TIME", "STATE",
-			}).AddRow(
-				1, "test", "sbtest0", "add index", "write reorganization", 1, 1, 0, time.Now(), nil, time.Now(), "running",
-			).AddRow(
-				2, "test", "sbtest0", "add index", "write reorganization", 1, 1, 0, time.Now(), time.Now(), time.Now(), "queueing",
-			),
+			sqlmock.NewRows([]string{"JOB_ID", "JOB_TYPE", "SCHEMA_STATE", "SCHEMA_ID", "TABLE_ID", "STATE", "QUERY"}).
+				AddRow("1", "add index", "running", "1", "1", "running", "Create index idx1 on test.sbtest0(a)"),
 		)
 		// Case 2: there is no running add index job
 		// Case 3: no permission to query ddl_jobs, TiDB will return empty result
@@ -124,7 +123,7 @@ func TestAsyncExecAddIndex(t *testing.T) {
 		}()
 		if atomic.LoadInt32(&dbIndex) == 0 {
 			// test db
-			db, err := pmysql.MockTestDB(true)
+			db, err := pmysql.MockTestDB()
 			require.Nil(t, err)
 			return db, nil
 		}
@@ -133,6 +132,10 @@ func TestAsyncExecAddIndex(t *testing.T) {
 		require.Nil(t, err)
 		mock.ExpectQuery("select tidb_version()").
 			WillReturnRows(sqlmock.NewRows([]string{"tidb_version()"}).AddRow("5.7.25-TiDB-v4.0.0-beta-191-ga1b3e3b"))
+		mock.ExpectQuery("select tidb_version()").WillReturnError(&dmysql.MySQLError{
+			Number:  1305,
+			Message: "FUNCTION test.tidb_version does not exist",
+		})
 		mock.ExpectBegin()
 		mock.ExpectExec("USE `test`;").
 			WillReturnResult(sqlmock.NewResult(1, 1))
@@ -146,10 +149,11 @@ func TestAsyncExecAddIndex(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	changefeed := "test-changefeed"
 	sinkURI, err := url.Parse("mysql://127.0.0.1:4000")
 	require.Nil(t, err)
 	rc := config.GetDefaultReplicaConfig()
-	sink, err := NewDDLSink(ctx, model.DefaultChangeFeedID("test"), sinkURI, rc)
+	sink, err := NewDDLSink(ctx, model.DefaultChangeFeedID(changefeed), sinkURI, rc)
 
 	require.Nil(t, err)
 
@@ -171,22 +175,4 @@ func TestAsyncExecAddIndex(t *testing.T) {
 	require.True(t, time.Since(start) < ddlExecutionTime)
 	require.True(t, time.Since(start) >= 10*time.Second)
 	sink.Close()
-}
-
-func TestNeedWaitAsyncExecDone(t *testing.T) {
-	sink := &DDLSink{
-		cfg: &pmysql.Config{
-			IsTiDB: false,
-		},
-	}
-	require.False(t, sink.needWaitAsyncExecDone(timodel.ActionTruncateTable))
-
-	sink.cfg.IsTiDB = true
-	require.True(t, sink.needWaitAsyncExecDone(timodel.ActionTruncateTable))
-	require.True(t, sink.needWaitAsyncExecDone(timodel.ActionDropTable))
-	require.True(t, sink.needWaitAsyncExecDone(timodel.ActionDropIndex))
-
-	require.False(t, sink.needWaitAsyncExecDone(timodel.ActionCreateTable))
-	require.False(t, sink.needWaitAsyncExecDone(timodel.ActionCreateTables))
-	require.False(t, sink.needWaitAsyncExecDone(timodel.ActionCreateSchema))
 }

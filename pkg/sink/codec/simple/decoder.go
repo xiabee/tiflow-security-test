@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -57,7 +58,7 @@ func NewDecoder(ctx context.Context, config *common.Config, db *sql.DB) (*Decode
 	)
 	if config.LargeMessageHandle.EnableClaimCheck() {
 		storageURI := config.LargeMessageHandle.ClaimCheckStorageURI
-		externalStorage, err = util.GetExternalStorageFromURI(ctx, storageURI)
+		externalStorage, err = util.GetExternalStorage(ctx, storageURI, nil, util.NewS3Retryer(10, 10*time.Second, 10*time.Second))
 		if err != nil {
 			return nil, cerror.WrapError(cerror.ErrKafkaInvalidConfig, err)
 		}
@@ -106,7 +107,6 @@ func (d *Decoder) HasNext() (model.MessageType, bool, error) {
 	d.value = nil
 
 	if d.msg.Data != nil || d.msg.Old != nil {
-		log.Debug("row changed event message found", zap.Any("message", d.msg))
 		return model.MessageTypeRow, true, nil
 	}
 
@@ -157,7 +157,7 @@ func (d *Decoder) NextRowChangedEvent() (*model.RowChangedEvent, error) {
 		return nil, nil
 	}
 
-	event, err := buildRowChangedEvent(d.msg, tableInfo, d.config.EnableRowChecksum)
+	event, err := buildRowChangedEvent(d.msg, tableInfo, d.config.EnableRowChecksum, d.upstreamTiDB)
 	d.msg = nil
 
 	log.Debug("row changed event assembled", zap.Any("event", event))
@@ -272,12 +272,10 @@ func (d *Decoder) NextDDLEvent() (*model.DDLEvent, error) {
 		if err != nil {
 			return nil, err
 		}
+		d.CachedRowChangedEvents = append(d.CachedRowChangedEvents, event)
 
 		next := ele.Next()
-		if event != nil {
-			d.CachedRowChangedEvents = append(d.CachedRowChangedEvents, event)
-			d.cachedMessages.Remove(ele)
-		}
+		d.cachedMessages.Remove(ele)
 		ele = next
 	}
 	return ddl, nil
@@ -321,7 +319,7 @@ func (m *memoryTableInfoProvider) Write(info *model.TableInfo) {
 
 	_, ok := m.memo[key]
 	if ok {
-		log.Warn("table info not stored, since it already exists",
+		log.Debug("table info not stored, since it already exists",
 			zap.String("schema", info.TableName.Schema),
 			zap.String("table", info.TableName.Table),
 			zap.Uint64("version", info.UpdateTS))

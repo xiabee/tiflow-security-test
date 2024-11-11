@@ -21,6 +21,7 @@ const (
   "ignore-ineligible-table":false,
   "check-gc-safe-point": true,
   "enable-sync-point": false,
+  "enable-table-monitor": false,
   "bdr-mode": false,
   "sync-point-interval": 600000000000,
   "sync-point-retention": 86400000000000,
@@ -70,7 +71,11 @@ const (
     "send-bootstrap-in-msg-count": 10000,
     "send-bootstrap-to-all-partition": true,
     "send-all-bootstrap-at-start": false,
+    "debezium-disable-schema": false,
     "open": {
+      "output-old-value": true
+    },
+    "debezium": {
       "output-old-value": true
     }
   },
@@ -85,8 +90,7 @@ const (
     "storage": "",
     "use-file-backend": false,
     "memory-usage": {
-        "memory-quota-percentage": 50,
-        "event-cache-percentage": 0
+        "memory-quota-percentage": 50
     }
   },
   "scheduler": {
@@ -98,7 +102,6 @@ const (
     "corruption-handle-level": "warn"
  },
   "changefeed-error-stuck-duration": 1800000000000,
-  "sql-mode":"ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
   "synced-status": {
     "synced-check-interval": 300,
     "checkpoint-interval": 15
@@ -137,9 +140,11 @@ const (
     "ca-path": "",
     "cert-path": "",
     "key-path": "",
-    "cert-allowed-cn": null
+    "cert-allowed-cn": null,
+    "mtls": false,
+    "client-user-required": false,
+    "client-allowed-user": null
   },
-  "per-table-memory-quota": 0,
   "kv-client": {
     "enable-multiplexing": true,
     "worker-concurrent": 8,
@@ -162,12 +167,12 @@ const (
     },
     "messages": {
       "client-max-batch-interval": 10000000,
-      "client-max-batch-size": 8388608,
-      "client-max-batch-count": 128,
+      "client-max-batch-size": 67108864,
+      "client-max-batch-count": 1024,
       "client-retry-rate-limit": 1,
       "server-max-pending-message-count": 102400,
       "server-ack-interval": 100000000,
-      "server-worker-pool-size": 4,
+      "server-worker-pool-size": 8,
       "max-recv-msg-size": 268435456,
       "keep-alive-time": 30000000000,
       "keep-alive-timeout": 10000000000
@@ -179,15 +184,25 @@ const (
       "check-balance-interval": 60000000000,
       "add-table-batch-size": 50
     },
-    "enable-kv-connect-backoff": false,
+    "cdc-v2": {
+      "enable": false,
+      "meta-store": {
+        "uri": "",
+        "ssl-ca": "",
+        "ssl-cert": "",
+        "ssl-key": ""
+      }
+    },
     "puller": {
       "enable-resolved-ts-stuck-detection": false,
-      "resolved-ts-stuck-interval": 300000000000
+      "resolved-ts-stuck-interval": 300000000000,
+      "log-region-details": false
     }
   },
   "cluster-id": "default",
-  "max-memory-percentage": 0,
-  "gc-tuner-memory-threshold": 0
+  "gc-tuner-memory-threshold": 0,
+  "per-table-memory-quota": 0,
+  "max-memory-percentage": 0
 }`
 
 	testCfgTestReplicaConfigMarshal1 = `{
@@ -197,6 +212,7 @@ const (
   "ignore-ineligible-table":false,
   "check-gc-safe-point": true,
   "enable-sync-point": false,
+  "enable-table-monitor": false,
   "bdr-mode": false,
   "sync-point-interval": 600000000000,
   "sync-point-retention": 86400000000000,
@@ -229,7 +245,9 @@ const (
       "quote": "\"",
       "null": "\\N",
       "include-commit-ts": true,
-      "binary-encoding-method":"base64"
+      "binary-encoding-method":"base64",
+      "output-old-value": false,
+      "output-handle-key": false
     },
     "date-separator": "month",
     "enable-partition-separator": true,
@@ -272,7 +290,8 @@ const (
         "max-batch-size": 100000,
         "avro-enable-watermark": true,
         "avro-decimal-handling-mode": "string",
-        "avro-bigint-unsigned-handling-mode": "string"
+        "avro-bigint-unsigned-handling-mode": "string",
+		"encoding-format": "json"
       },
       "large-message-handle": {
         "large-message-handle-option": "handle-key-only",
@@ -320,7 +339,11 @@ const (
     "send-bootstrap-in-msg-count": 10000,
     "send-bootstrap-to-all-partition": true,
     "send-all-bootstrap-at-start": false,
+    "debezium-disable-schema": false,
     "open": {
+      "output-old-value": true
+    },
+    "debezium": {
       "output-old-value": true
     }
   },
@@ -335,8 +358,7 @@ const (
     "storage": "",
     "use-file-backend": false,
     "memory-usage": {
-        "memory-quota-percentage": 50,
-        "event-cache-percentage": 0
+        "memory-quota-percentage": 50
     }
   },
   "scheduler": {
@@ -351,11 +373,11 @@ const (
     "corruption-handle-level": "warn"
   },
   "changefeed-error-stuck-duration": 1800000000000,
-  "sql-mode":"ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
   "synced-status": {
     "synced-check-interval": 300,
     "checkpoint-interval": 15
-  }
+  },
+  "sql-mode":""
 }`
 
 	testCfgTestReplicaConfigMarshal2 = `{
@@ -365,6 +387,7 @@ const (
   "ignore-ineligible-table":false,
   "check-gc-safe-point": true,
   "enable-sync-point": false,
+  "enable-table-monitor": false,
   "bdr-mode": false,
   "sync-point-interval": 600000000000,
   "sync-point-retention": 86400000000000,
@@ -397,7 +420,9 @@ const (
       "quote": "\"",
       "null": "\\N",
       "include-commit-ts": true,
-      "binary-encoding-method":"base64"
+      "binary-encoding-method":"base64",
+      "output-old-value": false,
+      "output-handle-key": false
     },
     "terminator": "\r\n",
 	"transaction-atomicity": "",
@@ -440,7 +465,8 @@ const (
         "max-batch-size": 100000,
         "avro-enable-watermark": true,
         "avro-decimal-handling-mode": "string",
-        "avro-bigint-unsigned-handling-mode": "string"
+        "avro-bigint-unsigned-handling-mode": "string",
+        "encoding-format": "json"
       },
       "large-message-handle": {
         "large-message-handle-option": "handle-key-only",
@@ -488,7 +514,11 @@ const (
     "send-bootstrap-in-msg-count": 10000,
     "send-bootstrap-to-all-partition": true,
     "send-all-bootstrap-at-start": false,
+    "debezium-disable-schema": false,
     "open": {
+      "output-old-value": true
+    },
+    "debezium": {
       "output-old-value": true
     }
   },
@@ -503,8 +533,7 @@ const (
     "storage": "",
     "use-file-backend": false,
     "memory-usage": {
-        "memory-quota-percentage": 50,
-        "event-cache-percentage": 0
+        "memory-quota-percentage": 50
     }
   },
   "scheduler": {
@@ -517,10 +546,10 @@ const (
     "corruption-handle-level": "warn"
   },
   "changefeed-error-stuck-duration": 1800000000000,
-  "sql-mode":"ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION",
   "synced-status": {
     "synced-check-interval": 300,
     "checkpoint-interval": 15
-  }
+  },
+  "sql-mode":""
 }`
 )

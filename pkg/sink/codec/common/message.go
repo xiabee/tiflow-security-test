@@ -16,7 +16,6 @@ package common
 import (
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/pingcap/tiflow/cdc/model"
@@ -45,11 +44,6 @@ type Message struct {
 
 	// PartitionKey for pulsar, route messages to one or different partitions
 	PartitionKey *string
-}
-
-func (m *Message) String() string {
-	return fmt.Sprintf("Message{Ts: %d, Type: %d, Schema: %s, Table: %s, Key: %s, Value: %s, Protocol: %s}",
-		m.Ts, m.Type, m.GetSchema(), m.GetTable(), m.Key, m.Value, m.Protocol)
 }
 
 // Length returns the expected size of the Kafka message

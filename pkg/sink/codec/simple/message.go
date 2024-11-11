@@ -14,6 +14,7 @@
 package simple
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"sort"
@@ -380,80 +381,44 @@ func newDDLEvent(msg *message) *model.DDLEvent {
 
 // buildRowChangedEvent converts from message to RowChangedEvent.
 func buildRowChangedEvent(
-	msg *message, tableInfo *model.TableInfo, enableRowChecksum bool,
+	msg *message, tableInfo *model.TableInfo, enableRowChecksum bool, db *sql.DB,
 ) (*model.RowChangedEvent, error) {
 	result := &model.RowChangedEvent{
-		CommitTs:  msg.CommitTs,
-		TableInfo: tableInfo,
-		Table:     &tableInfo.TableName,
+		CommitTs:        msg.CommitTs,
+		PhysicalTableID: msg.TableID,
+		TableInfo:       tableInfo,
+		Columns:         decodeColumns(msg.Data, tableInfo),
+		PreColumns:      decodeColumns(msg.Old, tableInfo),
 	}
 
-	result.Columns = decodeColumns(msg.Data, tableInfo)
-	result.PreColumns = decodeColumns(msg.Old, tableInfo)
-
 	if enableRowChecksum && msg.Checksum != nil {
-		var (
-			previousCorrupted bool
-			currentCorrupted  bool
-		)
-		err := common.VerifyChecksum(result.PreColumns, tableInfo.Columns, msg.Checksum.Previous)
-		if err != nil {
-			log.Info("checksum corrupted on the previous columns", zap.Any("message", msg))
-			previousCorrupted = true
-		}
-		err = common.VerifyChecksum(result.Columns, tableInfo.Columns, msg.Checksum.Current)
-		if err != nil {
-			log.Info("checksum corrupted on the current columns", zap.Any("message", msg))
-			currentCorrupted = true
-		}
-
 		result.Checksum = &integrity.Checksum{
-			Previous:  msg.Checksum.Previous,
 			Current:   msg.Checksum.Current,
+			Previous:  msg.Checksum.Previous,
 			Corrupted: msg.Checksum.Corrupted,
 			Version:   msg.Checksum.Version,
 		}
 
-		corrupted := msg.Checksum.Corrupted || previousCorrupted || currentCorrupted
-		if corrupted {
+		err := common.VerifyChecksum(result, db)
+		if err != nil || msg.Checksum.Corrupted {
 			log.Warn("consumer detect checksum corrupted",
-				zap.String("schema", msg.Schema),
-				zap.String("table", msg.Table))
-			for idx, col := range result.PreColumns {
-				colInfo := tableInfo.Columns[idx]
-				log.Info("data corrupted, print each previous column for debugging",
-					zap.String("name", colInfo.Name.O),
-					zap.Any("type", colInfo.GetType()),
-					zap.Any("charset", colInfo.GetCharset()),
-					zap.Any("flag", colInfo.GetFlag()),
-					zap.Any("value", col.Value),
-					zap.Any("default", colInfo.GetDefaultValue()))
-			}
-			for idx, col := range result.Columns {
-				colInfo := tableInfo.Columns[idx]
-				log.Info("data corrupted, print each column for debugging",
-					zap.String("name", colInfo.Name.O),
-					zap.Any("type", colInfo.GetType()),
-					zap.Any("charset", colInfo.GetCharset()),
-					zap.Any("flag", colInfo.GetFlag()),
-					zap.Any("value", col.Value),
-					zap.Any("default", colInfo.GetDefaultValue()))
-			}
+				zap.String("schema", msg.Schema), zap.String("table", msg.Table))
 			return nil, cerror.ErrDecodeFailed.GenWithStackByArgs("checksum corrupted")
+
 		}
 	}
 
-	for idx, col := range result.Columns {
-		adjustTimestampValue(col, tableInfo.Columns[idx].FieldType)
+	for _, col := range result.Columns {
+		adjustTimestampValue(col, tableInfo.ForceGetColumnInfo(col.ColumnID).FieldType)
 	}
-	for idx, col := range result.PreColumns {
-		adjustTimestampValue(col, tableInfo.Columns[idx].FieldType)
+	for _, col := range result.PreColumns {
+		adjustTimestampValue(col, tableInfo.ForceGetColumnInfo(col.ColumnID).FieldType)
 	}
 
 	return result, nil
 }
 
-func adjustTimestampValue(column *model.Column, flag types.FieldType) {
+func adjustTimestampValue(column *model.ColumnData, flag types.FieldType) {
 	if flag.GetType() != mysql.TypeTimestamp {
 		return
 	}
@@ -471,11 +436,11 @@ func adjustTimestampValue(column *model.Column, flag types.FieldType) {
 
 func decodeColumns(
 	rawData map[string]interface{}, tableInfo *model.TableInfo,
-) []*model.Column {
+) []*model.ColumnData {
 	if rawData == nil {
 		return nil
 	}
-	var result []*model.Column
+	var result []*model.ColumnData
 	for _, info := range tableInfo.Columns {
 		value, ok := rawData[info.Name.O]
 		if !ok {
@@ -484,12 +449,13 @@ func decodeColumns(
 				zap.String("column", info.Name.O))
 			continue
 		}
-		col := decodeColumn(value, &info.FieldType)
+		columnID := tableInfo.ForceGetColumnIDByName(info.Name.O)
+		col := decodeColumn(value, columnID, &info.FieldType)
 		if col == nil {
 			log.Panic("cannot decode column",
 				zap.String("name", info.Name.O), zap.Any("data", value))
 		}
-		col.Name = info.Name.O
+
 		result = append(result, col)
 	}
 	return result
@@ -596,14 +562,14 @@ func (a *jsonMarshaller) newDMLMessage(
 	}
 	if event.IsInsert() {
 		m.Type = DMLTypeInsert
-		m.Data = a.formatColumns(event.Columns, event.TableInfo.Columns, onlyHandleKey)
+		m.Data = a.formatColumns(event.Columns, event.TableInfo, onlyHandleKey)
 	} else if event.IsDelete() {
 		m.Type = DMLTypeDelete
-		m.Old = a.formatColumns(event.PreColumns, event.TableInfo.Columns, onlyHandleKey)
+		m.Old = a.formatColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
 	} else if event.IsUpdate() {
 		m.Type = DMLTypeUpdate
-		m.Data = a.formatColumns(event.Columns, event.TableInfo.Columns, onlyHandleKey)
-		m.Old = a.formatColumns(event.PreColumns, event.TableInfo.Columns, onlyHandleKey)
+		m.Data = a.formatColumns(event.Columns, event.TableInfo, onlyHandleKey)
+		m.Old = a.formatColumns(event.PreColumns, event.TableInfo, onlyHandleKey)
 	}
 	if a.config.EnableRowChecksum && event.Checksum != nil {
 		m.Checksum = &checksum{
@@ -618,16 +584,18 @@ func (a *jsonMarshaller) newDMLMessage(
 }
 
 func (a *jsonMarshaller) formatColumns(
-	columns []*model.Column, colInfos []*timodel.ColumnInfo, onlyHandleKey bool,
+	columns []*model.ColumnData, tableInfo *model.TableInfo, onlyHandleKey bool,
 ) map[string]interface{} {
 	result := make(map[string]interface{}, len(columns))
-	for idx, col := range columns {
+	colInfos := tableInfo.GetColInfosForRowChangedEvent()
+	for i, col := range columns {
 		if col != nil {
-			if onlyHandleKey && !col.Flag.IsHandleKey() {
+			flag := tableInfo.ForceGetColumnFlagType(col.ColumnID)
+			if onlyHandleKey && !flag.IsHandleKey() {
 				continue
 			}
-			value := encodeValue(col.Value, &colInfos[idx].FieldType, a.config.TimeZone.String())
-			result[col.Name] = value
+			value := encodeValue(col.Value, colInfos[i].Ft, a.config.TimeZone.String())
+			result[tableInfo.ForceGetColumnName(col.ColumnID)] = value
 		}
 	}
 	return result
@@ -753,16 +721,13 @@ func encodeValue(
 	return result
 }
 
-func decodeColumn(value interface{}, fieldType *types.FieldType) *model.Column {
-	result := &model.Column{
-		Value: value,
+func decodeColumn(value interface{}, id int64, fieldType *types.FieldType) *model.ColumnData {
+	result := &model.ColumnData{
+		ColumnID: id,
+		Value:    value,
 	}
 	if value == nil {
 		return result
-	}
-
-	if mysql.HasPriKeyFlag(fieldType.GetFlag()) {
-		result.Flag.SetIsHandleKey()
 	}
 
 	var err error

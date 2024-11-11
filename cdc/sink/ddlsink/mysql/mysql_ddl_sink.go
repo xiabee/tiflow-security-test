@@ -96,6 +96,11 @@ func NewDDLSink(
 		return nil, err
 	}
 
+	cfg.IsWriteSourceExisted, err = pmysql.CheckIfBDRModeIsSupported(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+
 	lruCache, err := lru.New(1024)
 	if err != nil {
 		return nil, err
@@ -203,8 +208,8 @@ func (m *DDLSink) execDDL(pctx context.Context, ddl *model.DDLEvent) error {
 	})
 
 	start := time.Now()
-	log.Info("Start exec DDL", zap.Any("DDL", ddl), zap.String("namespace", m.id.Namespace),
-		zap.String("changefeed", m.id.ID))
+	log.Info("Start exec DDL", zap.String("DDL", ddl.Query), zap.Uint64("commitTs", ddl.CommitTs),
+		zap.String("namespace", m.id.Namespace), zap.String("changefeed", m.id.ID))
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -219,6 +224,18 @@ func (m *DDLSink) execDDL(pctx context.Context, ddl *model.DDLEvent) error {
 			}
 			return err
 		}
+	}
+
+	// we try to set cdc write source for the ddl
+	if err = pmysql.SetWriteSource(pctx, m.cfg, tx); err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			if errors.Cause(rbErr) != context.Canceled {
+				log.Error("Failed to rollback",
+					zap.String("namespace", m.id.Namespace),
+					zap.String("changefeed", m.id.ID), zap.Error(err))
+			}
+		}
+		return err
 	}
 
 	if _, err = tx.ExecContext(ctx, ddl.Query); err != nil {

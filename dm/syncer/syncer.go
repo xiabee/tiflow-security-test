@@ -49,6 +49,7 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	fr "github.com/pingcap/tiflow/dm/pkg/func-rollback"
+	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/ha"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	parserpkg "github.com/pingcap/tiflow/dm/pkg/parser"
@@ -2434,6 +2435,8 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 				case *replication.XIDEvent:
 					eventType = "XID"
 					needContinue, err2 = funcCommit()
+				case *replication.TableMapEvent:
+				case *replication.FormatDescriptionEvent:
 				default:
 					s.tctx.L().Warn("unhandled event from transaction payload", zap.String("type", fmt.Sprintf("%T", tpevt)))
 				}
@@ -2441,6 +2444,8 @@ func (s *Syncer) Run(ctx context.Context) (err error) {
 			if needContinue {
 				continue
 			}
+		case *replication.TableMapEvent:
+		case *replication.FormatDescriptionEvent:
 		default:
 			s.tctx.L().Warn("unhandled event", zap.String("type", fmt.Sprintf("%T", ev)))
 		}
@@ -2989,6 +2994,11 @@ func (s *Syncer) genRouter() error {
 
 func (s *Syncer) loadTableStructureFromDump(ctx context.Context) error {
 	logger := s.tctx.L()
+	// TODO: delete this check after we support parallel reading the files to improve load speed
+	if !storage.IsLocalDiskPath(s.cfg.LoaderConfig.Dir) {
+		logger.Warn("skip load table structure from dump files for non-local-dir loader because it may be slow", zap.String("loaderDir", s.cfg.LoaderConfig.Dir))
+		return nil
+	}
 	files, err := storage.CollectDirFiles(ctx, s.cfg.LoaderConfig.Dir, nil)
 	if err != nil {
 		logger.Warn("fail to get dump files", zap.Error(err))
@@ -3043,7 +3053,7 @@ func (s *Syncer) loadTableStructureFromDump(ctx context.Context) error {
 				zap.String("db", db),
 				zap.String("path", s.cfg.LoaderConfig.Dir),
 				zap.String("file", file),
-				zap.Error(err))
+				zap.Error(err2))
 			setFirstErr(err2)
 			continue
 		}
@@ -3064,20 +3074,38 @@ func (s *Syncer) loadTableStructureFromDump(ctx context.Context) error {
 				setFirstErr(err)
 				continue
 			}
-			err = s.schemaTracker.Exec(ctx, db, stmtNode)
-			if err != nil {
-				logger.Warn("fail to create table for dump files",
-					zap.Any("path", s.cfg.LoaderConfig.Dir),
-					zap.Any("file", file),
-					zap.ByteString("statement", stmt),
-					zap.Error(err))
-				setFirstErr(err)
-				continue
+			switch v := stmtNode.(type) {
+			case *ast.SetStmt:
+				logger.Warn("ignoring statement",
+					zap.String("type", fmt.Sprintf("%T", v)),
+					zap.ByteString("statement", stmt))
+			case *ast.CreateTableStmt:
+				err = s.schemaTracker.Exec(ctx, db, stmtNode)
+				if err != nil {
+					logger.Warn("fail to create table for dump files",
+						zap.Any("path", s.cfg.LoaderConfig.Dir),
+						zap.Any("file", file),
+						zap.ByteString("statement", stmt),
+						zap.Error(err))
+					setFirstErr(err)
+					continue
+				}
+				s.saveTablePoint(
+					&filter.Table{Schema: db, Name: v.Table.Name.O},
+					s.getFlushedGlobalPoint(),
+				)
+			default:
+				err = s.schemaTracker.Exec(ctx, db, stmtNode)
+				if err != nil {
+					logger.Warn("fail to create table for dump files",
+						zap.Any("path", s.cfg.LoaderConfig.Dir),
+						zap.Any("file", file),
+						zap.ByteString("statement", stmt),
+						zap.Error(err))
+					setFirstErr(err)
+					continue
+				}
 			}
-			s.saveTablePoint(
-				&filter.Table{Schema: db, Name: stmtNode.(*ast.CreateTableStmt).Table.Name.O},
-				s.getFlushedGlobalPoint(),
-			)
 		}
 	}
 	return firstErr
@@ -3504,7 +3532,7 @@ func (s *Syncer) adjustGlobalPointGTID(tctx *tcontext.Context) (bool, error) {
 	// 2. location already has GTID position
 	// 3. location is totally new, has no position info
 	// 4. location is too early thus not a COMMIT location, which happens when it's reset by other logic
-	if !s.cfg.EnableGTID || location.GTIDSetStr() != "" || location.Position.Name == "" || location.Position.Pos == 4 {
+	if !s.cfg.EnableGTID || !gtid.CheckGTIDSetEmpty(location.GetGTID()) || location.Position.Name == "" || location.Position.Pos == 4 {
 		return false, nil
 	}
 	// set enableGTID to false for new streamerController

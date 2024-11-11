@@ -15,48 +15,20 @@ package utils
 
 import (
 	"strings"
-
-	"github.com/pingcap/tidb/pkg/parser/charset"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
-	"github.com/pingcap/tiflow/cdc/model"
 )
 
-// SetBinChsClnFlag set the binary charset flag.
-func SetBinChsClnFlag(ft *types.FieldType) *types.FieldType {
-	ft.SetCharset(charset.CharsetBin)
-	ft.SetCollate(charset.CollationBin)
-	ft.AddFlag(mysql.BinaryFlag)
-	return ft
+// when encoding the canal format, for unsigned mysql type, add `unsigned` keyword.
+// it should have the form `t unsigned`, such as `int unsigned`
+func withUnsigned4MySQLType(mysqlType string, unsigned bool) string {
+	if unsigned && mysqlType != "bit" && mysqlType != "year" {
+		return mysqlType + " unsigned"
+	}
+	return mysqlType
 }
 
-// SetFlag set the flag
-func SetFlag(ft *types.FieldType, flag uint) *types.FieldType {
-	ft.SetFlag(flag)
-	return ft
-}
-
-// SetUnsigned set the unsigned flag.
-func SetUnsigned(ft *types.FieldType) *types.FieldType {
-	ft.SetFlag(uint(model.UnsignedFlag))
-	return ft
-}
-
-// SetElems set the elems to the ft
-func SetElems(ft *types.FieldType, elems []string) *types.FieldType {
-	ft.SetElems(elems)
-	return ft
-}
-
-// NewTextFieldType create a new text field type.
-func NewTextFieldType(tp byte) *types.FieldType {
-	ft := types.NewFieldType(tp)
-	ft.SetCollate(mysql.DefaultCollationName)
-	ft.SetCharset(mysql.DefaultCharset)
-	return ft
-}
-
-// IsBinaryMySQLType return true if the given mysqlType string is a binary type
-func IsBinaryMySQLType(mysqlType string) bool {
-	return strings.Contains(mysqlType, "blob") || strings.Contains(mysqlType, "binary")
+func withZerofill4MySQLType(mysqlType string, zerofill bool) string {
+	if zerofill && !strings.HasPrefix(mysqlType, "year") {
+		return mysqlType + " zerofill"
+	}
+	return mysqlType
 }

@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/metrics"
@@ -36,6 +37,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/sink/codec/builder"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	putil "github.com/pingcap/tiflow/pkg/util"
+	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -64,6 +66,11 @@ type eventFragment struct {
 
 // DMLSink is the cloud storage sink.
 // It will send the events to cloud storage systems.
+// Messages are encoded in the specific protocol and then sent to the defragmenter.
+// The data flow is as follows: **data** -> encodingWorkers -> defragmenter -> dmlWorkers -> external storage
+// The defragmenter will defragment the out-of-order encoded messages and sends encoded
+// messages to individual dmlWorkers.
+// The dmlWorkers will write the encoded messages to external storage in parallel between different tables.
 type DMLSink struct {
 	changefeedID         model.ChangeFeedID
 	scheme               string
@@ -81,6 +88,8 @@ type DMLSink struct {
 	alive struct {
 		sync.RWMutex
 		// msgCh is a channel to hold eventFragment.
+		// The caller of WriteEvents will write eventFragment to msgCh and
+		// the encodingWorkers will read eventFragment from msgCh to encode events.
 		msgCh  *chann.DrainableChann[eventFragment]
 		isDead bool
 	}
@@ -147,16 +156,15 @@ func NewDMLSink(ctx context.Context,
 	}
 	s.alive.msgCh = chann.NewAutoDrainChann[eventFragment]()
 
-	encodedCh := make(chan eventFragment, defaultChannelSize)
+	encodedOutCh := make(chan eventFragment, defaultChannelSize)
 	workerChannels := make([]*chann.DrainableChann[eventFragment], cfg.WorkerCount)
 
 	// create a group of encoding workers.
 	for i := 0; i < defaultEncodingConcurrency; i++ {
 		encoder := encoderBuilder.Build()
-		s.encodingWorkers[i] = newEncodingWorker(i, s.changefeedID, encoder, s.alive.msgCh.Out(), encodedCh)
+		s.encodingWorkers[i] = newEncodingWorker(i, s.changefeedID, encoder, s.alive.msgCh.Out(), encodedOutCh)
 	}
-	// create defragmenter.
-	s.defragmenter = newDefragmenter(encodedCh, workerChannels)
+
 	// create a group of dml workers.
 	for i := 0; i < cfg.WorkerCount; i++ {
 		inputCh := chann.NewAutoDrainChann[eventFragment]()
@@ -164,6 +172,12 @@ func NewDMLSink(ctx context.Context,
 			inputCh, pdClock, s.statistics)
 		workerChannels[i] = inputCh
 	}
+
+	// create defragmenter.
+	// The defragmenter is used to defragment the out-of-order encoded messages from encoding workers and
+	// sends encoded messages to related dmlWorkers in order. Messages of the same table will be sent to
+	// the same dmlWorker.
+	s.defragmenter = newDefragmenter(encodedOutCh, workerChannels)
 
 	s.wg.Add(1)
 	go func() {
@@ -211,6 +225,11 @@ func (s *DMLSink) run(ctx context.Context) error {
 		})
 	}
 
+	log.Info("dml worker started", zap.String("namespace", s.changefeedID.Namespace),
+		zap.String("changefeed", s.changefeedID.ID),
+		zap.Int("workerCount", len(s.workers)),
+		zap.Any("config", s.workers[0].config))
+
 	return eg.Wait()
 }
 
@@ -231,8 +250,13 @@ func (s *DMLSink) WriteEvents(txns ...*dmlsink.CallbackableEvent[*model.SingleTa
 		}
 
 		tbl := cloudstorage.VersionedTableName{
-			TableNameWithPhysicTableID: *txn.Event.Table,
-			TableInfoVersion:           txn.Event.TableInfoVersion,
+			TableNameWithPhysicTableID: model.TableName{
+				Schema:      txn.Event.TableInfo.GetSchemaName(),
+				Table:       txn.Event.TableInfo.GetTableName(),
+				TableID:     txn.Event.GetPhysicalTableID(),
+				IsPartition: txn.Event.TableInfo.IsPartitionTable(),
+			},
+			TableInfoVersion: txn.Event.TableInfoVersion,
 		}
 		seq := atomic.AddUint64(&s.lastSeqNum, 1)
 

@@ -15,26 +15,15 @@ package checker
 
 import (
 	"context"
-	"crypto/tls"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
-	"time"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-mysql-org/go-mysql/replication"
-	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
-	"github.com/pingcap/tiflow/dm/config"
-	"github.com/pingcap/tiflow/dm/config/dbconfig"
+	"github.com/pingcap/tidb/util/dbutil"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
-	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/log"
-	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
-	"github.com/pingcap/tiflow/pkg/errors"
 )
 
 // MySQLBinlogEnableChecker checks whether `log_bin` variable is enabled in MySQL.
@@ -105,7 +94,7 @@ func (pc *MySQLBinlogFormatChecker) Check(ctx context.Context) *Result {
 	}
 	if strings.ToUpper(value) != "ROW" {
 		result.Errors = append(result.Errors, NewError("binlog_format is %s, and should be ROW", value))
-		result.Instruction = "MySQL as source: please execute 'set global binlog_format=ROW;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_format=row: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html. Then modify the instance to use the new DB parameter group and restart the instance to take effect."
+		result.Instruction = "MySQL as source: please execute 'set global binlog_format=ROW;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_format=row: https://docs.aws.amazon.com/zh_cn/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html. Then modify the instance to use the new DB parameter group and restart the instance to take effect."
 		return result
 	}
 	result.State = StateSuccess
@@ -183,7 +172,7 @@ func (pc *MySQLBinlogRowImageChecker) Check(ctx context.Context) *Result {
 	}
 	if strings.ToUpper(value) != "FULL" {
 		result.Errors = append(result.Errors, NewError("binlog_row_image is %s, and should be FULL", value))
-		result.Instruction = "MySQL as source: please execute 'set global binlog_row_image = FULL;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_row_image = FULL: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html Then modify the instance to use the new DB parameter group and restart the instance to take effect."
+		result.Instruction = "MySQL as source: please execute 'set global binlog_row_image = FULL;'; AWS Aurora (MySQL)/RDS MySQL as source: please refer to the document to create a new DB parameter group and set the binlog_row_image = FULL: https://docs.aws.amazon.com/zh_cn/AmazonRDS/latest/AuroraUserGuide/USER_WorkingWithDBInstanceParamGroups.html Then modify the instance to use the new DB parameter group and restart the instance to take effect."
 		return result
 	}
 	result.State = StateSuccess
@@ -272,123 +261,4 @@ func (c *BinlogDBChecker) Check(ctx context.Context) *Result {
 // Name implements the RealChecker interface.
 func (c *BinlogDBChecker) Name() string {
 	return "binlog_do_db/binlog_ignore_db check"
-}
-
-// MetaPositionChecker checks if meta position for given source database is valid.
-type MetaPositionChecker struct {
-	db         *conn.BaseDB
-	sourceCfg  dbconfig.DBConfig
-	enableGTID bool
-	meta       *config.Meta
-}
-
-// NewBinlogDBChecker returns a RealChecker.
-func NewMetaPositionChecker(db *conn.BaseDB, sourceCfg dbconfig.DBConfig, enableGTID bool, meta *config.Meta) RealChecker {
-	return &MetaPositionChecker{db: db, sourceCfg: sourceCfg, enableGTID: enableGTID, meta: meta}
-}
-
-// Check implements the RealChecker interface.
-func (c *MetaPositionChecker) Check(ctx context.Context) *Result {
-	result := &Result{
-		Name:  c.Name(),
-		Desc:  "check whether meta position is valid for db",
-		State: StateFailure,
-		Extra: fmt.Sprintf("address of db instance - %s:%d", c.sourceCfg.Host, c.sourceCfg.Port),
-	}
-
-	var tlsConfig *tls.Config
-	var err error
-	if c.sourceCfg.Security != nil {
-		if loadErr := c.sourceCfg.Security.LoadTLSContent(); loadErr != nil {
-			markCheckError(result, loadErr)
-			result.Instruction = "please check upstream tls config"
-			return result
-		}
-		tlsConfig, err = util.NewTLSConfig(
-			util.WithCAContent(c.sourceCfg.Security.SSLCABytes),
-			util.WithCertAndKeyContent(c.sourceCfg.Security.SSLCertBytes, c.sourceCfg.Security.SSLKeyBytes),
-			util.WithVerifyCommonName(c.sourceCfg.Security.CertAllowedCN),
-			util.WithMinTLSVersion(tls.VersionTLS10),
-		)
-		if err != nil {
-			markCheckError(result, err)
-			result.Instruction = "please check upstream tls config"
-			return result
-		}
-	}
-
-	flavor, err := conn.GetFlavor(ctx, c.db)
-	if err != nil {
-		markCheckError(result, err)
-		result.Instruction = "please check upstream database config"
-		return result
-	}
-
-	// always use a new random serverID
-	randomServerID, err := conn.GetRandomServerID(tcontext.NewContext(ctx, log.L()), c.db)
-	if err != nil {
-		// should never happened unless the master has too many slave
-		markCheckError(result, terror.Annotate(err, "fail to get random server id for relay reader"))
-		return result
-	}
-
-	h, _ := os.Hostname()
-	h = "dm-checker-" + h
-	// https://github.com/mysql/mysql-server/blob/1bfe02bdad6604d54913c62614bde57a055c8332/include/my_hostname.h#L33-L42
-	if len(h) > 60 {
-		h = h[:60]
-	}
-
-	syncCfg := replication.BinlogSyncerConfig{
-		ServerID:  randomServerID,
-		Flavor:    flavor,
-		Host:      c.sourceCfg.Host,
-		Port:      uint16(c.sourceCfg.Port),
-		User:      c.sourceCfg.User,
-		Password:  c.sourceCfg.Password,
-		TLSConfig: tlsConfig,
-		Localhost: h,
-	}
-
-	syncer := replication.NewBinlogSyncer(syncCfg)
-	defer syncer.Close()
-	var streamer *replication.BinlogStreamer
-	if c.enableGTID {
-		gtidSet, err2 := gtid.ParserGTID(flavor, c.meta.BinLogGTID)
-		if err2 != nil {
-			markCheckError(result, err2)
-			result.Instruction = "you should check your BinlogGTID's format, "
-			if flavor == mysql.MariaDBFlavor {
-				result.Instruction += "it should consist of three numbers separated with dashes '-', see https://mariadb.com/kb/en/gtid/"
-			} else {
-				result.Instruction += "it should be any combination of single GTIDs and ranges of GTID, see https://dev.mysql.com/doc/refman/8.0/en/replication-gtids-concepts.html"
-			}
-			return result
-		}
-		streamer, err = syncer.StartSyncGTID(gtidSet)
-	} else {
-		streamer, err = syncer.StartSync(mysql.Position{Name: c.meta.BinLogName, Pos: c.meta.BinLogPos})
-	}
-	if err != nil {
-		markCheckError(result, err)
-		result.Instruction = "you should make sure your meta's binlog position is valid and not purged, and the user has REPLICATION SLAVE privilege"
-		return result
-	}
-	// if we don't get a new event after 15s, it means there is no new event in the binlog
-	ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	_, err = streamer.GetEvent(ctx2)
-	if err != nil && errors.Cause(err) != context.DeadlineExceeded {
-		markCheckError(result, err)
-		result.Instruction = "you should make sure your meta's binlog position is valid and not purged, and the user has REPLICATION SLAVE privilege"
-		return result
-	}
-
-	result.State = StateSuccess
-	return result
-}
-
-// Name implements the RealChecker interface.
-func (c *MetaPositionChecker) Name() string {
-	return "meta position check"
 }

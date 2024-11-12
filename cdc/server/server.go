@@ -28,10 +28,12 @@ import (
 	"github.com/pingcap/kvproto/pkg/diagnosticspb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/sysutil"
-	"github.com/pingcap/tidb/pkg/util/gctuner"
+	"github.com/pingcap/tidb/util/gctuner"
 	"github.com/pingcap/tiflow/cdc"
 	"github.com/pingcap/tiflow/cdc/capture"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter/factory"
+	"github.com/pingcap/tiflow/cdc/contextutil"
+	"github.com/pingcap/tiflow/cdc/kv"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine/factory"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
@@ -128,6 +130,11 @@ func New(pdEndpoints []string) (*server, error) {
 
 func (s *server) prepare(ctx context.Context) error {
 	conf := config.GetGlobalServerConfig()
+
+	tlsConfig, err := conf.Security.ToTLSConfig()
+	if err != nil {
+		return errors.Trace(err)
+	}
 	grpcTLSOption, err := conf.Security.ToGRPCDialOption()
 	if err != nil {
 		return errors.Trace(err)
@@ -150,8 +157,7 @@ func (s *server) prepare(ctx context.Context) error {
 				},
 				MinConnectTimeout: 3 * time.Second,
 			}),
-		),
-		pd.WithForwardingOption(config.EnablePDForwarding))
+		))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -168,7 +174,7 @@ func (s *server) prepare(ctx context.Context) error {
 	// the key will be kept for the lease TTL, which is 10 seconds,
 	// then cause the new owner cannot be elected immediately after the old owner offline.
 	// see https://github.com/etcd-io/etcd/blob/525d53bd41/client/v3/concurrency/election.go#L98
-	etcdCli, err := etcd.CreateRawEtcdClient(conf.Security, grpcTLSOption, s.pdEndpoints...)
+	etcdCli, err := etcd.CreateRawEtcdClient(tlsConfig, grpcTLSOption, s.pdEndpoints...)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -198,7 +204,6 @@ func (s *server) prepare(ctx context.Context) error {
 
 	s.capture = capture.NewCapture(s.pdEndpoints, cdcEtcdClient,
 		s.grpcService, s.sortEngineFactory, s.pdClient)
-
 	return nil
 }
 
@@ -207,7 +212,7 @@ func (s *server) setMemoryLimit() {
 	if conf.GcTunerMemoryThreshold > maxGcTunerMemory {
 		// If total memory is larger than 512GB, we will not set memory limit.
 		// Because the memory limit is not accurate, and it is not necessary to set memory limit.
-		log.Info("total memory is larger than 512GB, skip setting memory limit",
+		log.Warn("total memory is larger than 512GB, skip setting memory limit",
 			zap.Uint64("bytes", conf.GcTunerMemoryThreshold),
 			zap.String("memory", humanize.IBytes(conf.GcTunerMemoryThreshold)),
 		)
@@ -249,7 +254,7 @@ func (s *server) Run(serverCtx context.Context) error {
 		return err
 	}
 
-	err := s.startStatusHTTP(s.tcpServer.HTTP1Listener())
+	err := s.startStatusHTTP(serverCtx, s.tcpServer.HTTP1Listener())
 	if err != nil {
 		return err
 	}
@@ -260,7 +265,7 @@ func (s *server) Run(serverCtx context.Context) error {
 // startStatusHTTP starts the HTTP server.
 // `lis` is a listener that gives us plain-text HTTP requests.
 // TODO: can we decouple the HTTP server from the capture server?
-func (s *server) startStatusHTTP(lis net.Listener) error {
+func (s *server) startStatusHTTP(serverCtx context.Context, lis net.Listener) error {
 	// LimitListener returns a Listener that accepts at most n simultaneous
 	// connections from the provided Listener. Connections that exceed the
 	// limit will wait in a queue and no new goroutines will be created until
@@ -284,6 +289,10 @@ func (s *server) startStatusHTTP(lis net.Listener) error {
 		Handler:      router,
 		ReadTimeout:  httpConnectionTimeout,
 		WriteTimeout: httpConnectionTimeout,
+		BaseContext: func(listener net.Listener) context.Context {
+			return contextutil.PutTimezoneInCtx(context.Background(),
+				contextutil.TimezoneFromCtx(serverCtx))
+		},
 	}
 
 	go func() {
@@ -343,6 +352,10 @@ func (s *server) run(ctx context.Context) (err error) {
 	})
 
 	eg.Go(func() error {
+		return kv.RunWorkerPool(egCtx)
+	})
+
+	eg.Go(func() error {
 		return s.tcpServer.Run(egCtx)
 	})
 
@@ -369,23 +382,16 @@ func (s *server) run(ctx context.Context) (err error) {
 // Drain removes tables in the current TiCDC instance.
 // It's part of graceful shutdown, should be called before Close.
 func (s *server) Drain() <-chan struct{} {
-	if s.capture == nil {
-		done := make(chan struct{})
-		close(done)
-		return done
-	}
 	return s.capture.Drain()
 }
 
 // Close closes the server.
 func (s *server) Close() {
-	if s.capture != nil {
-		s.capture.Close()
-	}
-	// Close the sort engine factory after capture closed to avoid
-	// puller send data to closed sort engine.
 	s.closeSortEngineFactory()
 
+	if s.capture != nil {
+		s.capture.AsyncClose()
+	}
 	if s.statusServer != nil {
 		err := s.statusServer.Close()
 		if err != nil {

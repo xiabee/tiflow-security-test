@@ -67,11 +67,6 @@ func createRealUnits(cfg *config.SubTaskConfig, etcdClient *clientv3.Client, wor
 		us = append(us, loader.NewLightning(cfg, etcdClient, workerName))
 	case config.ModeIncrement:
 		us = append(us, syncer.NewSyncer(cfg, etcdClient, relay))
-	case config.ModeDump:
-		us = append(us, dumpling.NewDumpling(cfg))
-	case config.ModeLoadSync:
-		us = append(us, loader.NewLightning(cfg, etcdClient, workerName))
-		us = append(us, syncer.NewSyncer(cfg, etcdClient, relay))
 	default:
 		log.L().Error("unsupported task mode", zap.String("subtask", cfg.Name), zap.String("task mode", cfg.Mode))
 	}
@@ -652,15 +647,8 @@ func (st *SubTask) Update(ctx context.Context, cfg *config.SubTaskConfig) error 
 
 // OperateSchema operates schema for an upstream table.
 func (st *SubTask) OperateSchema(ctx context.Context, req *pb.OperateWorkerSchemaRequest) (schema string, err error) {
-	switch req.Op {
-	case pb.SchemaOp_ListMigrateTargets:
-		if st.Stage() != pb.Stage_Running && st.Stage() != pb.Stage_Paused {
-			return "", terror.ErrWorkerNotPausedStage.Generate(st.Stage().String())
-		}
-	default:
-		if st.Stage() != pb.Stage_Paused {
-			return "", terror.ErrWorkerNotPausedStage.Generate(st.Stage().String())
-		}
+	if st.Stage() != pb.Stage_Paused && req.Op != pb.SchemaOp_ListMigrateTargets {
+		return "", terror.ErrWorkerNotPausedStage.Generate(st.Stage().String())
 	}
 
 	syncUnit, ok := st.currUnit.(*syncer.Syncer)
@@ -879,14 +867,6 @@ func (st *SubTask) GetValidatorError(errState pb.ValidateErrorState) ([]*pb.Vali
 func (st *SubTask) OperateValidatorError(op pb.ValidationErrOp, errID uint64, isAll bool) error {
 	if validator := st.getValidator(); validator != nil {
 		return validator.OperateValidatorError(op, errID, isAll)
-	}
-	cfg := st.getCfg()
-	return terror.ErrValidatorNotFound.Generate(cfg.Name, cfg.SourceID)
-}
-
-func (st *SubTask) UpdateValidator(req *pb.UpdateValidationWorkerRequest) error {
-	if validator := st.getValidator(); validator != nil {
-		return validator.UpdateValidator(req)
 	}
 	cfg := st.getCfg()
 	return terror.ErrValidatorNotFound.Generate(cfg.Name, cfg.SourceID)

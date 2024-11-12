@@ -18,13 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
-	mock_owner "github.com/pingcap/tiflow/cdc/owner/mock"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,26 +29,30 @@ func TestVerifyCreateChangefeedConfig(t *testing.T) {
 	ctx := context.Background()
 	pdClient := &mockPDClient{}
 	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
 	helper.Tk().MustExec("use test;")
 	storage := helper.Storage()
-	provider := mock_owner.NewMockStatusProvider(gomock.NewController(t))
+	provider := &mockStatusProvider{}
 	cfg := &ChangefeedConfig{}
 	h := &APIV2HelpersImpl{}
 	cfInfo, err := h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.Nil(t, cfInfo)
 	require.NotNil(t, err)
 	cfg.SinkURI = "blackhole://"
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
 	// repliconfig is nil
 	require.Panics(t, func() {
 		_, _ = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	})
 	cfg.ReplicaConfig = GetDefaultReplicaConfig()
+	cfg.ReplicaConfig.ForceReplicate = true
+	cfg.ReplicaConfig.EnableOldValue = false
+	cfg.SinkURI = "mysql://"
+	// disable old value but force replicate, and using mysql sink.
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	require.NotNil(t, err)
+	require.Nil(t, cfInfo)
 	cfg.ReplicaConfig.ForceReplicate = false
 	cfg.ReplicaConfig.IgnoreIneligibleTable = true
 	cfg.SinkURI = "blackhole://"
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
 	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.Nil(t, err)
 	require.NotNil(t, cfInfo)
@@ -59,57 +60,49 @@ func TestVerifyCreateChangefeedConfig(t *testing.T) {
 	require.Equal(t, model.DefaultNamespace, cfInfo.Namespace)
 	require.NotEqual(t, 0, cfInfo.Epoch)
 
-	// invalid changefeed id or namespace id
 	cfg.ID = "abdc/sss"
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.NotNil(t, err)
 	cfg.ID = ""
 	cfg.Namespace = "abdc/sss"
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.NotNil(t, err)
 	cfg.ID = ""
 	cfg.Namespace = ""
 	// changefeed already exists
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(true, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	provider.changefeedStatus = &model.ChangeFeedStatusForAPI{}
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.NotNil(t, err)
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, cerror.ErrChangeFeedNotExists.GenWithStackByArgs("aaa"))
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	provider.changefeedStatus = nil
+	provider.err = cerror.ErrChangeFeedNotExists.GenWithStackByArgs("aaa")
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.Nil(t, err)
 	require.Equal(t, uint64(123), cfInfo.UpstreamID)
 	cfg.TargetTs = 3
 	cfg.StartTs = 4
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.NotNil(t, err)
 	cfg.TargetTs = 6
+	cfg.ReplicaConfig.EnableOldValue = false
 	cfg.SinkURI = "aaab://"
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.NotNil(t, err)
 	cfg.SinkURI = string([]byte{0x7f, ' '})
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.NotNil(t, err)
 
 	cfg.StartTs = 0
 	// use blackhole to workaround
 	cfg.SinkURI = "blackhole://127.0.0.1:9092/test?protocol=avro"
+	cfg.ReplicaConfig.EnableOldValue = true
 	cfg.ReplicaConfig.ForceReplicate = false
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.NoError(t, err)
+	require.False(t, cfInfo.Config.EnableOldValue)
 
 	cfg.ReplicaConfig.ForceReplicate = true
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
+	cfInfo, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
 	require.Error(t, cerror.ErrOldValueNotEnabled, err)
-
-	// invalid start-ts, in the future
-	cfg.StartTs = 1000000000000000000
-	provider.EXPECT().IsChangefeedExists(gomock.Any(), gomock.Any()).Return(false, nil)
-	_, err = h.verifyCreateChangefeedConfig(ctx, cfg, pdClient, provider, "en", storage)
-	require.Error(t, cerror.ErrAPIInvalidParam, err)
 }
 
 func TestVerifyUpdateChangefeedConfig(t *testing.T) {
@@ -147,9 +140,10 @@ func TestVerifyUpdateChangefeedConfig(t *testing.T) {
 	newCfInfo, newUpInfo, err = h.verifyUpdateChangefeedConfig(ctx, cfg, oldInfo, oldUpInfo, storage, 0)
 	require.Nil(t, err)
 	// startTs can not be updated
+	newCfInfo.Config.Sink.TxnAtomicity = ""
 	require.Equal(t, uint64(0), newCfInfo.StartTs)
 	require.Equal(t, uint64(10), newCfInfo.TargetTs)
-	require.Equal(t, 30*time.Second, util.GetOrZero(newCfInfo.Config.SyncPointInterval))
+	require.Equal(t, 30*time.Second, newCfInfo.Config.SyncPointInterval)
 	require.Equal(t, cfg.ReplicaConfig.ToInternalReplicaConfig(), newCfInfo.Config)
 	require.Equal(t, "a,b", newUpInfo.PDEndpoints)
 	require.Equal(t, "p1", newUpInfo.CertPath)
@@ -161,4 +155,16 @@ func TestVerifyUpdateChangefeedConfig(t *testing.T) {
 	cfg.TargetTs = 9
 	newCfInfo, newUpInfo, err = h.verifyUpdateChangefeedConfig(ctx, cfg, oldInfo, oldUpInfo, storage, 0)
 	require.NotNil(t, err)
+
+	cfg.StartTs = 0
+	cfg.TargetTs = 0
+	cfg.ReplicaConfig.EnableOldValue = true
+	cfg.SinkURI = "blackhole://127.0.0.1:9092/test?protocol=avro"
+	newCfInfo, newUpInfo, err = h.verifyUpdateChangefeedConfig(ctx, cfg, oldInfo, oldUpInfo, storage, 0)
+	require.NoError(t, err)
+	require.False(t, newCfInfo.Config.EnableOldValue)
+
+	cfg.ReplicaConfig.ForceReplicate = true
+	newCfInfo, newUpInfo, err = h.verifyUpdateChangefeedConfig(ctx, cfg, oldInfo, oldUpInfo, storage, 0)
+	require.Error(t, cerror.ErrOldValueNotEnabled, err)
 }

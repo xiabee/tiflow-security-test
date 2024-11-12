@@ -13,10 +13,7 @@
 
 package codec
 
-import (
-	"github.com/pingcap/tiflow/pkg/sink/codec/common"
-	"github.com/prometheus/client_golang/prometheus"
-)
+import "github.com/prometheus/client_golang/prometheus"
 
 var (
 	encoderGroupInputChanSizeGauge = prometheus.NewGaugeVec(
@@ -40,5 +37,4 @@ var (
 func InitMetrics(registry *prometheus.Registry) {
 	registry.MustRegister(encoderGroupInputChanSizeGauge)
 	registry.MustRegister(EncoderGroupOutputChanSizeGauge)
-	common.InitMetrics(registry)
 }

@@ -21,7 +21,6 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -57,96 +56,23 @@ func (h *ColumnsHolder) Length() int {
 	return len(h.Values)
 }
 
-// MustQueryTimezone query the timezone from the upstream database
-func MustQueryTimezone(ctx context.Context, db *sql.DB) string {
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		log.Panic("establish connection to the upstream tidb failed", zap.Error(err))
-	}
-	defer conn.Close()
-
-	var timezone string
-	query := "SELECT @@global.time_zone"
-	err = conn.QueryRowContext(ctx, query).Scan(&timezone)
-	if err != nil {
-		log.Panic("query timezone failed", zap.Error(err))
-	}
-
-	log.Info("query global timezone from the upstream tidb",
-		zap.Any("timezone", timezone))
-	return timezone
-}
-
-func queryRowChecksum(
-	ctx context.Context, db *sql.DB, event *model.RowChangedEvent,
-) error {
-	var (
-		schema   = event.TableInfo.GetSchemaName()
-		table    = event.TableInfo.GetTableName()
-		commitTs = event.GetCommitTs()
-	)
-
-	pkNames := event.TableInfo.GetPrimaryKeyColumnNames()
-	if len(pkNames) == 0 {
-		log.Warn("cannot query row checksum without primary key",
-			zap.String("schema", schema), zap.String("table", table))
-		return nil
-	}
-
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		log.Panic("establish connection to the upstream tidb failed",
-			zap.String("schema", schema), zap.String("table", table),
-			zap.Uint64("commitTs", commitTs), zap.Error(err))
-	}
-	defer conn.Close()
-
-	if event.Checksum.Current != 0 {
-		conditions := make(map[string]interface{})
-		for _, name := range pkNames {
-			for _, col := range event.Columns {
-				if event.TableInfo.ForceGetColumnName(col.ColumnID) == name {
-					conditions[name] = col.Value
-				}
-			}
-		}
-		result := queryRowChecksumAux(ctx, conn, commitTs, schema, table, conditions)
-		if result != 0 && result != event.Checksum.Current {
-			log.Error("verify upstream TiDB columns-level checksum, current checksum mismatch",
-				zap.Uint32("expected", event.Checksum.Current),
-				zap.Uint32("actual", result))
-			return errors.New("checksum mismatch")
-		}
-	}
-
-	if event.Checksum.Previous != 0 {
-		conditions := make(map[string]interface{})
-		for _, name := range pkNames {
-			for _, col := range event.PreColumns {
-				if event.TableInfo.ForceGetColumnName(col.ColumnID) == name {
-					conditions[name] = col.Value
-				}
-			}
-		}
-		result := queryRowChecksumAux(ctx, conn, commitTs-1, schema, table, conditions)
-		if result != 0 && result != event.Checksum.Previous {
-			log.Error("verify upstream TiDB columns-level checksum, previous checksum mismatch",
-				zap.Uint32("expected", event.Checksum.Previous),
-				zap.Uint32("actual", result))
-			return errors.New("checksum mismatch")
-		}
-	}
-
-	return nil
-}
-
-func queryRowChecksumAux(
-	ctx context.Context, conn *sql.Conn, commitTs uint64, schema string, table string, conditions map[string]interface{},
-) uint32 {
-	var result uint32
+// SnapshotQuery query the db by the snapshot read with the given commitTs
+func SnapshotQuery(
+	ctx context.Context, db *sql.DB, commitTs uint64, schema, table string, conditions map[string]interface{},
+) (*ColumnsHolder, error) {
 	// 1. set snapshot read
 	query := fmt.Sprintf("set @@tidb_snapshot=%d", commitTs)
-	_, err := conn.ExecContext(ctx, query)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		log.Error("establish connection to the upstream tidb failed",
+			zap.String("query", query),
+			zap.String("schema", schema), zap.String("table", table),
+			zap.Uint64("commitTs", commitTs), zap.Error(err))
+		return nil, errors.Trace(err)
+	}
+	defer conn.Close()
+
+	_, err = conn.ExecContext(ctx, query)
 	if err != nil {
 		mysqlErr, ok := errors.Cause(err).(*mysql.MySQLError)
 		if ok {
@@ -160,116 +86,65 @@ func queryRowChecksumAux(
 			zap.String("query", query),
 			zap.String("schema", schema), zap.String("table", table),
 			zap.Uint64("commitTs", commitTs), zap.Error(err))
-		return result
-	}
-
-	query = fmt.Sprintf("select tidb_row_checksum() from %s.%s where ", schema, table)
-	var whereClause string
-	for name, value := range conditions {
-		if whereClause != "" {
-			whereClause += " and "
-		}
-		switch value.(type) {
-		case []byte, string:
-			whereClause += fmt.Sprintf("%s = '%v'", name, value)
-		default:
-			whereClause += fmt.Sprintf("%s = %v", name, value)
-		}
-	}
-	query += whereClause
-
-	err = conn.QueryRowContext(ctx, query).Scan(&result)
-	if err != nil {
-		log.Panic("scan row failed",
-			zap.String("query", query),
-			zap.String("schema", schema), zap.String("table", table),
-			zap.Uint64("commitTs", commitTs), zap.Error(err))
-	}
-	return result
-}
-
-// MustSnapshotQuery query the db by the snapshot read with the given commitTs
-func MustSnapshotQuery(
-	ctx context.Context, db *sql.DB, commitTs uint64, schema, table string, conditions map[string]interface{},
-) *ColumnsHolder {
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		log.Panic("establish connection to the upstream tidb failed",
-			zap.String("schema", schema), zap.String("table", table),
-			zap.Uint64("commitTs", commitTs), zap.Error(err))
-	}
-	defer conn.Close()
-
-	// 1. set snapshot read
-	query := fmt.Sprintf("set @@tidb_snapshot=%d", commitTs)
-	_, err = conn.ExecContext(ctx, query)
-	if err != nil {
-		mysqlErr, ok := errors.Cause(err).(*mysql.MySQLError)
-		if ok {
-			// Error 8055 (HY000): snapshot is older than GC safe point
-			if mysqlErr.Number == 8055 {
-				log.Error("set snapshot read failed, since snapshot is older than GC safe point")
-			}
-		}
-
-		log.Panic("set snapshot read failed",
-			zap.String("query", query),
-			zap.String("schema", schema), zap.String("table", table),
-			zap.Uint64("commitTs", commitTs), zap.Error(err))
+		return nil, errors.Trace(err)
 	}
 
 	// 2. query the whole row
-	query = fmt.Sprintf("select * from %s.%s where ", schema, table)
+	query = fmt.Sprintf("select * from `%s`.`%s` where ", schema, table)
 	var whereClause string
 	for name, value := range conditions {
 		if whereClause != "" {
 			whereClause += " and "
 		}
-		whereClause += fmt.Sprintf("%s = %v", name, value)
+		whereClause += fmt.Sprintf("`%s` = '%v'", name, value)
 	}
 	query += whereClause
 
 	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
-		log.Panic("query row failed",
+		log.Error("query row failed",
 			zap.String("query", query),
 			zap.String("schema", schema), zap.String("table", table),
 			zap.Uint64("commitTs", commitTs), zap.Error(err))
+		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
 
 	holder, err := newColumnHolder(rows)
 	if err != nil {
-		log.Panic("obtain the columns holder failed",
+		log.Error("obtain the columns holder failed",
 			zap.String("query", query),
 			zap.String("schema", schema), zap.String("table", table),
 			zap.Uint64("commitTs", commitTs), zap.Error(err))
+		return nil, err
 	}
 	for rows.Next() {
 		err = rows.Scan(holder.ValuePointers...)
 		if err != nil {
-			log.Panic("scan row failed",
+			log.Error("scan row failed",
 				zap.String("query", query),
 				zap.String("schema", schema), zap.String("table", table),
 				zap.Uint64("commitTs", commitTs), zap.Error(err))
+			return nil, errors.Trace(err)
 		}
 	}
-	return holder
+
+	return holder, nil
 }
 
-// MustBinaryLiteralToInt convert bytes into uint64,
+// BinaryLiteralToInt convert bytes into uint64,
 // by follow https://github.com/pingcap/tidb/blob/e3417913f58cdd5a136259b902bf177eaf3aa637/types/binary_literal.go#L105
-func MustBinaryLiteralToInt(bytes []byte) uint64 {
+func BinaryLiteralToInt(bytes []byte) (uint64, error) {
 	bytes = trimLeadingZeroBytes(bytes)
 	length := len(bytes)
 
 	if length > 8 {
-		log.Panic("invalid bit value found", zap.ByteString("value", bytes))
-		return math.MaxUint64
+		log.Error("invalid bit value found", zap.ByteString("value", bytes))
+		return math.MaxUint64, errors.New("invalid bit value")
 	}
 
 	if length == 0 {
-		return 0
+		return 0, nil
 	}
 
 	// Note: the byte-order is BigEndian.
@@ -277,7 +152,7 @@ func MustBinaryLiteralToInt(bytes []byte) uint64 {
 	for i := 1; i < length; i++ {
 		val = (val << 8) | uint64(bytes[i])
 	}
-	return val
+	return val, nil
 }
 
 func trimLeadingZeroBytes(bytes []byte) []byte {

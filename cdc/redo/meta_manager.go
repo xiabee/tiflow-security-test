@@ -72,10 +72,9 @@ type metaManager struct {
 	startTs model.Ts
 
 	lastFlushTime          time.Time
+	flushIntervalInMs      int64
 	cfg                    *config.ConsistentConfig
 	metricFlushLogDuration prometheus.Observer
-
-	flushIntervalInMs int64
 }
 
 // NewDisabledMetaManager creates a disabled Meta Manager.
@@ -87,7 +86,8 @@ func NewDisabledMetaManager() *metaManager {
 
 // NewMetaManager creates a new meta Manager.
 func NewMetaManager(
-	changefeedID model.ChangeFeedID, cfg *config.ConsistentConfig, checkpoint model.Ts,
+	changefeedID model.ChangeFeedID,
+	cfg *config.ConsistentConfig, checkpoint model.Ts,
 ) *metaManager {
 	// return a disabled Manager if no consistent config or normal consistent level
 	if cfg == nil || !redo.IsConsistentEnabled(cfg.Level) {
@@ -111,6 +111,7 @@ func NewMetaManager(
 			zap.Int64("interval", m.flushIntervalInMs))
 		m.flushIntervalInMs = redo.DefaultMetaFlushIntervalInMs
 	}
+
 	return m
 }
 
@@ -136,7 +137,6 @@ func (m *metaManager) preStart(ctx context.Context) error {
 	if redo.IsBlackholeStorage(uri.Scheme) {
 		uri, _ = storage.ParseRawURL("noop://")
 	}
-
 	extStorage, err := redo.InitExternalStorage(ctx, *uri)
 	if err != nil {
 		return err
@@ -177,7 +177,6 @@ func (m *metaManager) Run(ctx context.Context, _ ...chan<- error) error {
 	eg.Go(func() error {
 		return m.bgGC(egCtx)
 	})
-
 	m.running.Store(true)
 	return eg.Wait()
 }
@@ -493,6 +492,7 @@ func (m *metaManager) bgFlushMeta(egCtx context.Context) (err error) {
 			zap.Error(err))
 	}()
 
+	m.lastFlushTime = time.Now()
 	for {
 		select {
 		case <-egCtx.Done():

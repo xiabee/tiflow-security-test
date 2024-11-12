@@ -23,11 +23,11 @@ import (
 // defragmenter is used to handle event fragments which can be registered
 // out of order.
 type defragmenter struct {
-	lastDispatchedSeq uint64
-	future            map[uint64]eventFragment
-	inputCh           <-chan eventFragment
-	outputChs         []*chann.DrainableChann[eventFragment]
-	hasher            *hash.PositionInertia
+	lastWritten uint64
+	future      map[uint64]eventFragment
+	inputCh     <-chan eventFragment
+	outputChs   []*chann.DrainableChann[eventFragment]
+	hasher      *hash.PositionInertia
 }
 
 func newDefragmenter(
@@ -54,7 +54,7 @@ func (d *defragmenter) run(ctx context.Context) error {
 				return nil
 			}
 			// check whether to write messages to output channel right now
-			next := d.lastDispatchedSeq + 1
+			next := d.lastWritten + 1
 			if frag.seqNumber == next {
 				d.writeMsgsConsecutive(ctx, frag)
 			} else if frag.seqNumber > next {
@@ -72,17 +72,19 @@ func (d *defragmenter) writeMsgsConsecutive(
 ) {
 	d.dispatchFragToDMLWorker(start)
 
-	// try to dispatch more fragments to DML workers
+	d.lastWritten++
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		next := d.lastDispatchedSeq + 1
+
+		next := d.lastWritten + 1
 		if frag, ok := d.future[next]; ok {
 			delete(d.future, next)
 			d.dispatchFragToDMLWorker(frag)
+			d.lastWritten = next
 		} else {
 			return
 		}
@@ -95,7 +97,6 @@ func (d *defragmenter) dispatchFragToDMLWorker(frag eventFragment) {
 	d.hasher.Write([]byte(tableName.Schema), []byte(tableName.Table))
 	workerID := d.hasher.Sum32() % uint32(len(d.outputChs))
 	d.outputChs[workerID].In() <- frag
-	d.lastDispatchedSeq = frag.seqNumber
 }
 
 func (d *defragmenter) close() {

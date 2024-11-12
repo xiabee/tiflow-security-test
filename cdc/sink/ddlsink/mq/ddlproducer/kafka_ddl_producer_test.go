@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/Shopify/sarama"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
@@ -51,7 +51,6 @@ func TestSyncBroadcastMessage(t *testing.T) {
 	require.NoError(t, err)
 
 	p := NewKafkaDDLProducer(ctx, changefeed, syncProducer)
-
 	for i := 0; i < kafka.DefaultMockPartitionNum; i++ {
 		syncProducer.(*kafka.MockSaramaSyncProducer).Producer.ExpectSendMessageAndSucceed()
 	}

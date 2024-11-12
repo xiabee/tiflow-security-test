@@ -67,7 +67,7 @@ func NewAgent(
 	liveness *model.Liveness,
 	messageServer *p2p.MessageServer,
 	messageRouter p2p.MessageRouter,
-	ownerInfoClient etcd.OwnerCaptureInfoClient,
+	etcdClient etcd.CDCEtcdClient,
 	executor TableExecutor,
 	changefeedID model.ChangeFeedID,
 	changefeedEpoch uint64,
@@ -75,7 +75,7 @@ func NewAgent(
 ) (Agent, error) {
 	return v3agent.NewAgent(
 		ctx, captureID, liveness, changefeedID,
-		messageServer, messageRouter, ownerInfoClient, executor, changefeedEpoch, cfg)
+		messageServer, messageRouter, etcdClient, executor, changefeedEpoch, cfg)
 }
 
 // NewScheduler returns two-phase scheduler.

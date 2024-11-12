@@ -70,7 +70,8 @@ func TestInfoProviderIsInitialized(t *testing.T) {
 		HeartbeatTick:      math.MaxInt,
 		MaxTaskConcurrency: 1,
 		ChangefeedSettings: config.GetDefaultReplicaConfig().Scheduler,
-	}, redo.NewDisabledMetaManager())
+	},
+		redo.NewDisabledMetaManager())
 	var ip internal.InfoProvider = coord
 
 	// Has not initialized yet.

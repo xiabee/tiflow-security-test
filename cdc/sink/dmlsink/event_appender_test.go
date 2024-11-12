@@ -23,13 +23,13 @@ import (
 func TestRowChangeEventAppender(t *testing.T) {
 	t.Parallel()
 
+	tableName := &model.TableName{
+		Schema:      "test",
+		Table:       "t1",
+		TableID:     1,
+		IsPartition: false,
+	}
 	tableInfo := &model.TableInfo{
-		TableName: model.TableName{
-			Schema:      "test",
-			Table:       "t1",
-			TableID:     1,
-			IsPartition: false,
-		},
 		Version: 1,
 	}
 
@@ -37,14 +37,17 @@ func TestRowChangeEventAppender(t *testing.T) {
 	var buffer []*model.RowChangedEvent
 	rows := []*model.RowChangedEvent{
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  1,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  2,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  2,
 		},
@@ -60,55 +63,63 @@ func TestRowChangeEventAppender(t *testing.T) {
 func TestTxnEventAppenderWithoutIgnoreStartTs(t *testing.T) {
 	t.Parallel()
 
+	tableame := &model.TableName{
+		Schema:      "test",
+		Table:       "t1",
+		TableID:     1,
+		IsPartition: false,
+	}
 	tableInfo := &model.TableInfo{
 		Version: 1,
-		TableName: model.TableName{
-			Schema:      "test",
-			Table:       "t1",
-			TableID:     1,
-			IsPartition: false,
-		},
 	}
 
 	appender := &TxnEventAppender{}
 	var buffer []*model.SingleTableTxn
 	rows := []*model.RowChangedEvent{
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  101,
 			StartTs:   98,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  102,
 			StartTs:   99,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  102,
 			StartTs:   100,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  102,
 			StartTs:   100,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  103,
 			StartTs:   101,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  103,
 			StartTs:   101,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  104,
 			StartTs:   102,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   103,
@@ -116,16 +127,19 @@ func TestTxnEventAppenderWithoutIgnoreStartTs(t *testing.T) {
 			SplitTxn: true,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   103,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   103,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   103,
@@ -133,6 +147,7 @@ func TestTxnEventAppenderWithoutIgnoreStartTs(t *testing.T) {
 			SplitTxn: true,
 		},
 		{
+			Table:     tableame,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   103,
@@ -166,14 +181,14 @@ func TestTxnEventAppenderWithoutIgnoreStartTs(t *testing.T) {
 	// Test the case which the commitTs is not strictly increasing.
 	rows = []*model.RowChangedEvent{
 		{
-			TableInfo: tableInfo,
-			CommitTs:  101,
-			StartTs:   98,
+			Table:    tableame,
+			CommitTs: 101,
+			StartTs:  98,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  100,
-			StartTs:   99,
+			Table:    tableame,
+			CommitTs: 100,
+			StartTs:  99,
 		},
 	}
 	buffer = buffer[:0]
@@ -184,14 +199,14 @@ func TestTxnEventAppenderWithoutIgnoreStartTs(t *testing.T) {
 	// Test the case which the startTs is not strictly increasing.
 	rows = []*model.RowChangedEvent{
 		{
-			TableInfo: tableInfo,
-			CommitTs:  101,
-			StartTs:   98,
+			Table:    tableame,
+			CommitTs: 101,
+			StartTs:  98,
 		},
 		{
-			TableInfo: tableInfo,
-			CommitTs:  101,
-			StartTs:   80,
+			Table:    tableame,
+			CommitTs: 101,
+			StartTs:  80,
 		},
 	}
 	buffer = buffer[:0]
@@ -203,55 +218,63 @@ func TestTxnEventAppenderWithoutIgnoreStartTs(t *testing.T) {
 func TestTxnEventAppenderWithIgnoreStartTs(t *testing.T) {
 	t.Parallel()
 
+	tableName := &model.TableName{
+		Schema:      "test",
+		Table:       "t1",
+		TableID:     1,
+		IsPartition: false,
+	}
 	tableInfo := &model.TableInfo{
 		Version: 1,
-		TableName: model.TableName{
-			Schema:      "test",
-			Table:       "t1",
-			TableID:     1,
-			IsPartition: false,
-		},
 	}
 
 	appender := &TxnEventAppender{IgnoreStartTs: true}
 	var buffer []*model.SingleTableTxn
 	rows := []*model.RowChangedEvent{
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  101,
 			StartTs:   0,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  101,
 			StartTs:   0,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  102,
 			StartTs:   90,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  102,
 			StartTs:   91,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  103,
 			StartTs:   0,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  103,
 			StartTs:   0,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  104,
 			StartTs:   0,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   0,
@@ -259,16 +282,19 @@ func TestTxnEventAppenderWithIgnoreStartTs(t *testing.T) {
 			SplitTxn: true,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   0,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   0,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   0,
@@ -276,6 +302,7 @@ func TestTxnEventAppenderWithIgnoreStartTs(t *testing.T) {
 			SplitTxn: true,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  105,
 			StartTs:   0,
@@ -311,11 +338,13 @@ func TestTxnEventAppenderWithIgnoreStartTs(t *testing.T) {
 	// Test the case which the commitTs is not strictly increasing.
 	rows = []*model.RowChangedEvent{
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  101,
 			StartTs:   98,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  100,
 			StartTs:   99,
@@ -329,11 +358,13 @@ func TestTxnEventAppenderWithIgnoreStartTs(t *testing.T) {
 	// Test the case which the startTs is not strictly increasing.
 	rows = []*model.RowChangedEvent{
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  101,
 			StartTs:   98,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  101,
 			StartTs:   80,
@@ -347,11 +378,13 @@ func TestTxnEventAppenderWithIgnoreStartTs(t *testing.T) {
 	// Test the case which the startTs all is 0.
 	rows = []*model.RowChangedEvent{
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  101,
 			StartTs:   0,
 		},
 		{
+			Table:     tableName,
 			TableInfo: tableInfo,
 			CommitTs:  101,
 			StartTs:   0,

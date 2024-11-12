@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/security"
-	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	pkafka "github.com/pingcap/tiflow/pkg/sink/kafka"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/segmentio/kafka-go"
@@ -276,13 +275,13 @@ type syncWriter struct {
 func (s *syncWriter) SendMessage(
 	ctx context.Context,
 	topic string, partitionNum int32,
-	message *common.Message,
+	key []byte, value []byte,
 ) error {
 	return s.w.WriteMessages(ctx, kafka.Message{
 		Topic:     topic,
 		Partition: int(partitionNum),
-		Key:       message.Key,
-		Value:     message.Value,
+		Key:       key,
+		Value:     value,
 	})
 }
 
@@ -290,13 +289,17 @@ func (s *syncWriter) SendMessage(
 // messages in the set have either succeeded or failed. Note that messages
 // can succeed and fail individually; if some succeed and some fail,
 // SendMessages will return an error.
-func (s *syncWriter) SendMessages(ctx context.Context, topic string, partitionNum int32, message *common.Message) error {
+func (s *syncWriter) SendMessages(
+	ctx context.Context,
+	topic string, partitionNum int32,
+	key []byte, value []byte,
+) error {
 	msgs := make([]kafka.Message, int(partitionNum))
 	for i := 0; i < int(partitionNum); i++ {
 		msgs[i] = kafka.Message{
 			Topic:     topic,
-			Key:       message.Key,
-			Value:     message.Value,
+			Key:       key,
+			Value:     value,
 			Partition: i,
 		}
 	}
@@ -360,7 +363,10 @@ func (a *asyncWriter) Close() {
 
 // AsyncSend is the input channel for the user to write messages to that they
 // wish to send.
-func (a *asyncWriter) AsyncSend(ctx context.Context, topic string, partition int32, message *common.Message) error {
+func (a *asyncWriter) AsyncSend(ctx context.Context, topic string,
+	partition int32, key []byte, value []byte,
+	callback func(),
+) error {
 	select {
 	case <-ctx.Done():
 		return errors.Trace(ctx.Err())
@@ -369,9 +375,9 @@ func (a *asyncWriter) AsyncSend(ctx context.Context, topic string, partition int
 	return a.w.WriteMessages(ctx, kafka.Message{
 		Topic:      topic,
 		Partition:  int(partition),
-		Key:        message.Key,
-		Value:      message.Value,
-		WriterData: message.Callback,
+		Key:        key,
+		Value:      value,
+		WriterData: callback,
 	})
 }
 

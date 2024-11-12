@@ -254,8 +254,7 @@ def get_processor():
     resp = rq.get(base_url, cert=CERT, verify=VERIFY)
     assert resp.status_code == rq.codes.ok
     data = resp.json()[0]
-    time.sleep(2)
-    url = base_url + "/changefeed-test1/" + data["capture_id"]
+    url = base_url + "/" + data["changefeed_id"] + "/" + data["capture_id"]
     resp = rq.get(url, cert=CERT, verify=VERIFY)
     # print error message for debug 
     if (resp.status_code != rq.codes.ok):
@@ -269,7 +268,7 @@ def get_processor():
     resp = rq.get(url, cert=CERT, verify=VERIFY)
     assert resp.status_code == rq.codes.bad_request
 
-    print("pass test: get processor")
+    print("pass test: get processors")
 
 
 def check_health():

@@ -32,7 +32,7 @@ const pdTimeUpdateInterval = 10 * time.Millisecond
 // Clock is a time source of PD cluster.
 type Clock interface {
 	// CurrentTime returns approximate current time from pd.
-	CurrentTime() time.Time
+	CurrentTime() (time.Time, error)
 	Run(ctx context.Context)
 	Stop()
 }
@@ -46,6 +46,7 @@ type clock struct {
 		tsEventTime time.Time
 		// The time we receive PD ts.
 		tsProcessingTime time.Time
+		err              error
 	}
 	updateInterval time.Duration
 	cancel         context.CancelFunc
@@ -91,26 +92,30 @@ func (c *clock) Run(ctx context.Context) {
 				c.mu.Lock()
 				c.mu.tsEventTime = oracle.GetTimeFromTS(oracle.ComposeTS(physical, 0))
 				c.mu.tsProcessingTime = time.Now()
+				c.mu.err = nil
 				c.mu.Unlock()
 				return nil
 			}, retry.WithBackoffBaseDelay(200), retry.WithMaxTries(10))
 			if err != nil {
-				log.Warn("get time from pd failed, do not update time cache",
-					zap.Time("cachedTime", c.mu.tsEventTime),
-					zap.Time("processingTime", c.mu.tsProcessingTime),
-					zap.Error(err))
+				log.Warn("get time from pd failed, will use local time as pd time")
+				c.mu.Lock()
+				now := time.Now()
+				c.mu.tsEventTime = now
+				c.mu.tsProcessingTime = now
+				c.mu.err = err
+				c.mu.Unlock()
 			}
 		}
 	}
 }
 
 // CurrentTime returns approximate current time from pd.
-func (c *clock) CurrentTime() time.Time {
+func (c *clock) CurrentTime() (time.Time, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	tsEventTime := c.mu.tsEventTime
 	current := tsEventTime.Add(time.Since(c.mu.tsProcessingTime))
-	return current
+	return current, errors.Trace(c.mu.err)
 }
 
 // Stop clock.
@@ -128,8 +133,8 @@ func NewClock4Test() Clock {
 	return &clock4Test{}
 }
 
-func (c *clock4Test) CurrentTime() time.Time {
-	return time.Now()
+func (c *clock4Test) CurrentTime() (time.Time, error) {
+	return time.Now(), nil
 }
 
 func (c *clock4Test) Run(ctx context.Context) {
@@ -149,8 +154,8 @@ func NewMonotonicClock(pClock pclock.Clock) Clock {
 	}
 }
 
-func (c *monotonicClock) CurrentTime() time.Time {
-	return c.clock.Now()
+func (c *monotonicClock) CurrentTime() (time.Time, error) {
+	return c.clock.Now(), nil
 }
 
 func (c *monotonicClock) Run(ctx context.Context) {

@@ -15,7 +15,6 @@ package sinkmanager
 
 import (
 	"context"
-	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -24,7 +23,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
@@ -48,7 +47,7 @@ type tableSinkWrapper struct {
 	// tableSpan used for logging.
 	span tablepb.Span
 
-	tableSinkCreator func() (tablesink.TableSink, uint64)
+	tableSinkCreater func() (tablesink.TableSink, uint64)
 
 	// tableSink is the underlying sink.
 	tableSink struct {
@@ -78,32 +77,27 @@ type tableSinkWrapper struct {
 	receivedSorterResolvedTs atomic.Uint64
 
 	// replicateTs is the ts that the table sink has started to replicate.
-	replicateTs    atomic.Uint64
+	replicateTs    model.Ts
 	genReplicateTs func(ctx context.Context) (model.Ts, error)
 
 	// lastCleanTime indicates the last time the table has been cleaned.
 	lastCleanTime time.Time
 
-	// rangeEventCounts is for clean the table sorter.
+	// rangeEventCounts is for clean the table engine.
 	// If rangeEventCounts[i].events is greater than 0, it means there must be
 	// events in the range (rangeEventCounts[i-1].lastPos, rangeEventCounts[i].lastPos].
 	rangeEventCounts   []rangeEventCount
 	rangeEventCountsMu sync.Mutex
 }
 
-// GetReplicaTs returns the replicate ts of the table sink.
-func (t *tableSinkWrapper) GetReplicaTs() model.Ts {
-	return t.replicateTs.Load()
-}
-
 type rangeEventCount struct {
 	// firstPos and lastPos are used to merge many rangeEventCount into one.
-	firstPos sorter.Position
-	lastPos  sorter.Position
+	firstPos engine.Position
+	lastPos  engine.Position
 	events   int
 }
 
-func newRangeEventCount(pos sorter.Position, events int) rangeEventCount {
+func newRangeEventCount(pos engine.Position, events int) rangeEventCount {
 	return rangeEventCount{
 		firstPos: pos,
 		lastPos:  pos,
@@ -124,7 +118,7 @@ func newTableSinkWrapper(
 		version:          atomic.AddUint64(&tableSinkWrapperVersion, 1),
 		changefeed:       changefeed,
 		span:             span,
-		tableSinkCreator: tableSinkCreater,
+		tableSinkCreater: tableSinkCreater,
 		state:            &state,
 		startTs:          startTs,
 		targetTs:         targetTs,
@@ -138,34 +132,31 @@ func newTableSinkWrapper(
 
 	res.receivedSorterResolvedTs.Store(startTs)
 	res.barrierTs.Store(startTs)
-	res.replicateTs.Store(math.MaxUint64)
 	return res
 }
 
 func (t *tableSinkWrapper) start(ctx context.Context, startTs model.Ts) (err error) {
-	if t.replicateTs.Load() != math.MaxUint64 {
+	if t.replicateTs != 0 {
 		log.Panic("The table sink has already started",
 			zap.String("namespace", t.changefeed.Namespace),
 			zap.String("changefeed", t.changefeed.ID),
 			zap.Stringer("span", &t.span),
 			zap.Uint64("startTs", startTs),
-			zap.Uint64("oldReplicateTs", t.replicateTs.Load()),
+			zap.Uint64("oldReplicateTs", t.replicateTs),
 		)
 	}
 
 	// FIXME(qupeng): it can be re-fetched later instead of fails.
-	ts, err := t.genReplicateTs(ctx)
-	if err != nil {
+	if t.replicateTs, err = t.genReplicateTs(ctx); err != nil {
 		return errors.Trace(err)
 	}
-	t.replicateTs.Store(ts)
 
 	log.Info("Sink is started",
 		zap.String("namespace", t.changefeed.Namespace),
 		zap.String("changefeed", t.changefeed.ID),
 		zap.Stringer("span", &t.span),
 		zap.Uint64("startTs", startTs),
-		zap.Uint64("replicateTs", ts),
+		zap.Uint64("replicateTs", t.replicateTs),
 	)
 
 	// This start ts maybe greater than the initial start ts of the table sink.
@@ -315,7 +306,7 @@ func (t *tableSinkWrapper) initTableSink() bool {
 	t.tableSink.Lock()
 	defer t.tableSink.Unlock()
 	if t.tableSink.s == nil {
-		t.tableSink.s, t.tableSink.version = t.tableSinkCreator()
+		t.tableSink.s, t.tableSink.version = t.tableSinkCreater()
 		if t.tableSink.s != nil {
 			t.tableSink.advanced = time.Now()
 			return true
@@ -388,16 +379,14 @@ func (t *tableSinkWrapper) checkTableSinkHealth() (err error) {
 // committed at downstream but we don't know. So we need to update `replicateTs`
 // of the table so that we can re-send those events later.
 func (t *tableSinkWrapper) restart(ctx context.Context) (err error) {
-	ts, err := t.genReplicateTs(ctx)
-	if err != nil {
+	if t.replicateTs, err = t.genReplicateTs(ctx); err != nil {
 		return errors.Trace(err)
 	}
-	t.replicateTs.Store(ts)
 	log.Info("Sink is restarted",
 		zap.String("namespace", t.changefeed.Namespace),
 		zap.String("changefeed", t.changefeed.ID),
 		zap.Stringer("span", &t.span),
-		zap.Uint64("replicateTs", ts))
+		zap.Uint64("replicateTs", t.replicateTs))
 	return nil
 }
 
@@ -426,7 +415,7 @@ func (t *tableSinkWrapper) updateRangeEventCounts(eventCount rangeEventCount) {
 	}
 }
 
-func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound sorter.Position, minEvents int) bool {
+func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound engine.Position, minEvents int) bool {
 	t.rangeEventCountsMu.Lock()
 	defer t.rangeEventCountsMu.Unlock()
 
@@ -444,7 +433,7 @@ func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound sorter.Position, min
 	shouldClean := count >= minEvents
 
 	if !shouldClean {
-		// To reduce sorter.CleanByTable calls.
+		// To reduce engine.CleanByTable calls.
 		t.rangeEventCounts[idx-1].events = count
 		t.rangeEventCounts = t.rangeEventCounts[idx-1:]
 	} else {
@@ -453,9 +442,27 @@ func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound sorter.Position, min
 	return shouldClean
 }
 
+func (t *tableSinkWrapper) sinkMaybeStuck(stuckCheck time.Duration) (bool, uint64) {
+	t.getCheckpointTs()
+
+	t.tableSink.RLock()
+	defer t.tableSink.RUnlock()
+	t.tableSink.innerMu.Lock()
+	defer t.tableSink.innerMu.Unlock()
+
+	// What these conditions mean:
+	// 1. the table sink has been associated with a valid sink;
+	// 2. its checkpoint hasn't been advanced for a while;
+	version := t.tableSink.version
+	advanced := t.tableSink.advanced
+	if version > 0 && time.Since(advanced) > stuckCheck {
+		return true, version
+	}
+	return false, uint64(0)
+}
+
 func handleRowChangedEvents(
-	changefeed model.ChangeFeedID, span tablepb.Span,
-	events ...*model.PolymorphicEvent,
+	changefeed model.ChangeFeedID, span tablepb.Span, events ...*model.PolymorphicEvent,
 ) ([]*model.RowChangedEvent, uint64) {
 	size := 0
 	rowChangedEvents := make([]*model.RowChangedEvent, 0, len(events))
@@ -469,11 +476,12 @@ func handleRowChangedEvents(
 			continue
 		}
 
-		rowEvent := e.Row
+		colLen := len(e.Row.Columns)
+		preColLen := len(e.Row.PreColumns)
 		// Some transactions could generate empty row change event, such as
 		// begin; insert into t (id) values (1); delete from t where id=1; commit;
 		// Just ignore these row changed events.
-		if len(rowEvent.Columns) == 0 && len(rowEvent.PreColumns) == 0 {
+		if colLen == 0 && preColLen == 0 {
 			log.Warn("skip emit empty row event",
 				zap.Stringer("span", &span),
 				zap.String("namespace", changefeed.Namespace),
@@ -482,8 +490,8 @@ func handleRowChangedEvents(
 			continue
 		}
 
-		size += rowEvent.ApproximateBytes()
-		rowChangedEvents = append(rowChangedEvents, rowEvent)
+		size += e.Row.ApproximateBytes()
+		rowChangedEvents = append(rowChangedEvents, e.Row)
 	}
 	return rowChangedEvents, uint64(size)
 }

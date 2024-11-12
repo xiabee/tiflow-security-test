@@ -36,11 +36,11 @@ func NewTableDispatcher() *TableDispatcher {
 
 // DispatchRowChangedEvent returns the target partition to which
 // a row changed event should be dispatched.
-func (t *TableDispatcher) DispatchRowChangedEvent(row *model.RowChangedEvent, partitionNum int32) (int32, string, error) {
+func (t *TableDispatcher) DispatchRowChangedEvent(row *model.RowChangedEvent, partitionNum int32) int32 {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 	t.hasher.Reset()
 	// distribute partition by table
-	t.hasher.Write([]byte(row.TableInfo.GetSchemaName()), []byte(row.TableInfo.GetTableName()))
-	return int32(t.hasher.Sum32() % uint32(partitionNum)), row.TableInfo.TableName.String(), nil
+	t.hasher.Write([]byte(row.Table.Schema), []byte(row.Table.Table))
+	return int32(t.hasher.Sum32() % uint32(partitionNum))
 }

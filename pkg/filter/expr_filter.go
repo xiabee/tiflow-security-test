@@ -14,18 +14,20 @@
 package filter
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/chunk"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
-	tfilter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/expression"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/planner/core"
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/chunk"
+	tfilter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -77,12 +79,16 @@ func newExprFilterRule(
 
 // verifyAndInitRule will verify and init the rule.
 // It should only be called in dmlExprFilter's verify method.
-// We ask users to set these expr only in default sql mode,
-// so we just need to  verify each expr in default sql mode
-func (r *dmlExprFilterRule) verify(tableInfos []*model.TableInfo) error {
+func (r *dmlExprFilterRule) verify(tableInfos []*model.TableInfo, sqlMode string) error {
 	// verify expression filter rule syntax.
 	p := parser.New()
-	_, _, err := p.ParseSQL(completeExpression(r.config.IgnoreInsertValueExpr))
+	mode, err := mysql.GetSQLMode(sqlMode)
+	if err != nil {
+		log.Error("failed to get sql mode", zap.Error(err))
+		return cerror.ErrInvalidReplicaConfig.FastGenByArgs(fmt.Sprintf("invalid sqlMode %s", sqlMode))
+	}
+	p.SetSQLMode(mode)
+	_, _, err = p.ParseSQL(completeExpression(r.config.IgnoreInsertValueExpr))
 	if err != nil {
 		log.Error("failed to parse expression", zap.Error(err))
 		return cerror.ErrExpressionParseFailed.
@@ -229,11 +235,11 @@ func (r *dmlExprFilterRule) getSimpleExprOfTable(
 	expr string,
 	ti *model.TableInfo,
 ) (expression.Expression, error) {
-	e, err := expression.ParseSimpleExprWithTableInfo(r.sessCtx.GetExprCtx(), expr, ti.TableInfo)
+	e, err := expression.ParseSimpleExprWithTableInfo(r.sessCtx, expr, ti.TableInfo)
 	if err != nil {
 		// If an expression contains an unknown column,
 		// we return an error and stop the changefeed.
-		if plannererrors.ErrUnknownColumn.Equal(err) {
+		if core.ErrUnknownColumn.Equal(err) {
 			log.Error("meet unknown column when generating expression",
 				zap.String("expression", expr),
 				zap.Error(err))
@@ -326,7 +332,7 @@ func (r *dmlExprFilterRule) skipDMLByExpression(
 
 	row := chunk.MutRowFromDatums(rowData).ToRow()
 
-	d, err := expr.Eval(r.sessCtx.GetExprCtx().GetEvalCtx(), row)
+	d, err := expr.Eval(row)
 	if err != nil {
 		log.Error("failed to eval expression", zap.Error(err))
 		return false, errors.Trace(err)
@@ -338,7 +344,7 @@ func (r *dmlExprFilterRule) skipDMLByExpression(
 }
 
 func getColumnFromError(err error) string {
-	if !plannererrors.ErrUnknownColumn.Equal(err) {
+	if !core.ErrUnknownColumn.Equal(err) {
 		return err.Error()
 	}
 	column := strings.TrimSpace(strings.TrimPrefix(err.Error(),
@@ -349,14 +355,18 @@ func getColumnFromError(err error) string {
 
 // dmlExprFilter is a filter that filters DML events by SQL expression.
 type dmlExprFilter struct {
-	rules []*dmlExprFilterRule
+	rules   []*dmlExprFilterRule
+	sqlMODE string
 }
 
 func newExprFilter(
 	timezone string,
 	cfg *config.FilterConfig,
+	sqlMODE string,
 ) (*dmlExprFilter, error) {
-	res := &dmlExprFilter{}
+	res := &dmlExprFilter{
+		sqlMODE: sqlMODE,
+	}
 	sessCtx := utils.NewSessionCtx(map[string]string{
 		"time_zone": timezone,
 	})
@@ -384,7 +394,7 @@ func (f *dmlExprFilter) addRule(
 // verify checks if all rules in this filter is valid.
 func (f *dmlExprFilter) verify(tableInfos []*model.TableInfo) error {
 	for _, rule := range f.rules {
-		err := rule.verify(tableInfos)
+		err := rule.verify(tableInfos, f.sqlMODE)
 		if err != nil {
 			log.Error("failed to verify expression filter rule", zap.Error(err))
 			return errors.Trace(err)
@@ -409,14 +419,11 @@ func (f *dmlExprFilter) shouldSkipDML(
 	rawRow model.RowChangedDatums,
 	ti *model.TableInfo,
 ) (bool, error) {
-	if len(f.rules) == 0 {
-		return false, nil
-	}
 	// for defense purpose, normally the row and ti should not be nil.
 	if ti == nil || row == nil || rawRow.IsEmpty() {
 		return false, nil
 	}
-	rules := f.getRules(row.TableInfo.GetSchemaName(), row.TableInfo.GetTableName())
+	rules := f.getRules(row.Table.Schema, row.Table.Table)
 	for _, rule := range rules {
 		ignore, err := rule.shouldSkipDML(row, rawRow, ti)
 		if err != nil {

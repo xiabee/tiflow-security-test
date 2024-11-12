@@ -17,22 +17,24 @@ import (
 	"context"
 	"testing"
 
-	"github.com/pingcap/tiflow/cdc/entry"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/stretchr/testify/require"
 )
 
 func TestMaxwellBatchCodec(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
+	t.Parallel()
+	newEncoder := newBatchEncoder
 
-	ddlEvent := helper.DDL2Event("create table test.t(col1 int primary key)")
-	dmlEvent := helper.DML2Event("insert into test.t values (10)", "test", "t")
-
-	rowCases := [][]*model.RowChangedEvent{{dmlEvent}, {}}
+	rowCases := [][]*model.RowChangedEvent{{{
+		CommitTs: 1,
+		Table:    &model.TableName{Schema: "a", Table: "b"},
+		Columns:  []*model.Column{{Name: "col1", Type: 3, Value: 10}},
+	}}, {}}
 	for _, cs := range rowCases {
-		encoder := newBatchEncoder(&common.Config{})
+		encoder := newEncoder(&common.Config{})
 		for _, row := range cs {
 			err := encoder.AppendRowChangedEvent(context.Background(), "", row, nil)
 			require.Nil(t, err)
@@ -46,9 +48,19 @@ func TestMaxwellBatchCodec(t *testing.T) {
 		require.Equal(t, len(cs), messages[0].GetRowsCount())
 	}
 
-	ddlCases := [][]*model.DDLEvent{{ddlEvent}}
+	ddlCases := [][]*model.DDLEvent{{{
+		CommitTs: 1,
+		TableInfo: &model.TableInfo{
+			TableName: model.TableName{
+				Schema: "a", Table: "b",
+			},
+			TableInfo: &timodel.TableInfo{},
+		},
+		Query: "create table a",
+		Type:  1,
+	}}}
 	for _, cs := range ddlCases {
-		encoder := newBatchEncoder(&common.Config{})
+		encoder := newEncoder(&common.Config{})
 		for _, ddl := range cs {
 			msg, err := encoder.EncodeDDLEvent(ddl)
 			require.Nil(t, err)
@@ -61,12 +73,17 @@ func TestMaxwellAppendRowChangedEventWithCallback(t *testing.T) {
 	encoder := newBatchEncoder(&common.Config{})
 	require.NotNil(t, encoder)
 
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	_ = helper.DDL2Event("create table test.t(col1 varchar(255) primary key)")
-	row := helper.DML2Event("insert into test.t values ('aa')", "test", "t")
 	count := 0
+
+	row := &model.RowChangedEvent{
+		CommitTs: 1,
+		Table:    &model.TableName{Schema: "a", Table: "b"},
+		Columns: []*model.Column{{
+			Name:  "col1",
+			Type:  mysql.TypeVarchar,
+			Value: []byte("aa"),
+		}},
+	}
 
 	tests := []struct {
 		row      *model.RowChangedEvent

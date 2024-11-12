@@ -27,13 +27,13 @@ import (
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/memquota"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/redo"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/factory"
 	tablesinkmetrics "github.com/pingcap/tiflow/cdc/sink/metrics/tablesink"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink"
-	pconfig "github.com/pingcap/tiflow/pkg/config"
+	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"github.com/pingcap/tiflow/pkg/spanz"
@@ -49,7 +49,7 @@ const (
 	sinkWorkerNum               = 8
 	redoWorkerNum               = 4
 	defaultGenerateTaskInterval = 100 * time.Millisecond
-	// sorter.CleanByTable can be expensive. So it's necessary to reduce useless calls.
+	// engine.CleanByTable can be expensive. So it's necessary to reduce useless calls.
 	cleanTableInterval  = 5 * time.Second
 	cleanTableMinEvents = 128
 )
@@ -66,8 +66,7 @@ type TableStats struct {
 type SinkManager struct {
 	changefeedID model.ChangeFeedID
 
-	sinkURI string
-	config  *pconfig.ReplicaConfig
+	changefeedInfo *model.ChangeFeedInfo
 
 	// up is the upstream and used to get the current pd time.
 	up *upstream.Upstream
@@ -80,6 +79,8 @@ type SinkManager struct {
 	// redoProgressHeap is the heap of the table progress for redo.
 	redoProgressHeap *tableProgresses
 
+	// eventCache caches events fetched from sort engine.
+	eventCache *redoEventCache
 	// redoDMLMgr is used to report the resolved ts of the table if redo log is enabled.
 	redoDMLMgr redo.DMLManager
 	// sourceManager is used by the sink manager to fetch data.
@@ -127,9 +128,6 @@ type SinkManager struct {
 	// wg is used to wait for all workers to exit.
 	wg sync.WaitGroup
 
-	// isMysqlBackend indicates whether the backend is MySQL compatible.
-	isMysqlBackend bool
-
 	// Metric for table sink.
 	metricsTableSinkTotalRows prometheus.Counter
 
@@ -139,27 +137,25 @@ type SinkManager struct {
 // New creates a new sink manager.
 func New(
 	changefeedID model.ChangeFeedID,
-	sinkURI string,
-	config *pconfig.ReplicaConfig,
+	changefeedInfo *model.ChangeFeedInfo,
 	up *upstream.Upstream,
 	schemaStorage entry.SchemaStorage,
 	redoDMLMgr redo.DMLManager,
 	sourceManager *sourcemanager.SourceManager,
-	isMysqlBackend bool,
 ) *SinkManager {
 	m := &SinkManager{
-		changefeedID:        changefeedID,
-		up:                  up,
-		schemaStorage:       schemaStorage,
-		sourceManager:       sourceManager,
-		sinkURI:             sinkURI,
-		config:              config,
+		changefeedID:   changefeedID,
+		changefeedInfo: changefeedInfo,
+		up:             up,
+		schemaStorage:  schemaStorage,
+		sourceManager:  sourceManager,
+
 		sinkProgressHeap:    newTableProgresses(),
 		sinkWorkers:         make([]*sinkWorker, 0, sinkWorkerNum),
 		sinkTaskChan:        make(chan *sinkTask),
 		sinkWorkerAvailable: make(chan struct{}, 1),
 		sinkRetry:           retry.NewInfiniteErrorRetry(),
-		isMysqlBackend:      isMysqlBackend,
+
 		metricsTableSinkTotalRows: tablesinkmetrics.TotalRowsCountCounter.
 			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
 
@@ -167,7 +163,7 @@ func New(
 			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
 	}
 
-	totalQuota := config.MemoryQuota
+	totalQuota := changefeedInfo.Config.MemoryQuota
 	if redoDMLMgr != nil && redoDMLMgr.Enabled() {
 		m.redoDMLMgr = redoDMLMgr
 		m.redoProgressHeap = newTableProgresses()
@@ -175,15 +171,20 @@ func New(
 		m.redoTaskChan = make(chan *redoTask)
 		m.redoWorkerAvailable = make(chan struct{}, 1)
 
-		consistentMemoryUsage := m.config.Consistent.MemoryUsage
+		consistentMemoryUsage := changefeedInfo.Config.Consistent.MemoryUsage
 		if consistentMemoryUsage == nil {
-			consistentMemoryUsage = pconfig.GetDefaultReplicaConfig().Consistent.MemoryUsage
+			consistentMemoryUsage = config.GetDefaultReplicaConfig().Consistent.MemoryUsage
 		}
 
 		redoQuota := totalQuota * consistentMemoryUsage.MemoryQuotaPercentage / 100
 		sinkQuota := totalQuota - redoQuota
 		m.sinkMemQuota = memquota.NewMemQuota(changefeedID, sinkQuota, "sink")
 		m.redoMemQuota = memquota.NewMemQuota(changefeedID, redoQuota, "redo")
+
+		eventCache := redoQuota * consistentMemoryUsage.EventCachePercentage / 100
+		if eventCache > 0 {
+			m.eventCache = newRedoEventCache(changefeedID, eventCache)
+		}
 	} else {
 		m.sinkMemQuota = memquota.NewMemQuota(changefeedID, totalQuota, "sink")
 		m.redoMemQuota = memquota.NewMemQuota(changefeedID, 0, "redo")
@@ -207,7 +208,7 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 			zap.Error(err))
 	}()
 
-	splitTxn := util.GetOrZero(m.config.Sink.TxnAtomicity).ShouldSplitTxn()
+	splitTxn := m.changefeedInfo.Config.Sink.TxnAtomicity.ShouldSplitTxn()
 
 	gcErrors := make(chan error, 16)
 	sinkErrors := make(chan error, 16)
@@ -296,16 +297,6 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 				zap.String("namespace", m.changefeedID.Namespace),
 				zap.String("changefeed", m.changefeedID.ID),
 				zap.Duration("cost", time.Since(start)))
-
-			// For duplicate entry error, we fast fail to restart changefeed.
-			if cerror.IsDupEntryError(err) {
-				return errors.Trace(err)
-			}
-
-			if m.isMysqlBackend {
-				// For MySQL backend, we should restart changefeed. Let owner to handle the error.
-				return errors.Trace(err)
-			}
 		}
 
 		// If the error is retryable, we should retry to re-establish the internal resources.
@@ -322,18 +313,23 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 		if err != nil {
 			return errors.New(fmt.Sprintf("GetRetryBackoff: %s", err.Error()))
 		}
-
 		if err = util.Hang(m.managerCtx, backoff); err != nil {
 			return errors.Trace(err)
 		}
 	}
 }
 
+func (m *SinkManager) needsStuckCheck() bool {
+	m.sinkFactory.Lock()
+	defer m.sinkFactory.Unlock()
+	return m.sinkFactory.f != nil && m.sinkFactory.f.Category() == factory.CategoryMQ
+}
+
 func (m *SinkManager) initSinkFactory() (chan error, uint64) {
 	m.sinkFactory.Lock()
 	defer m.sinkFactory.Unlock()
-	uri := m.sinkURI
-	cfg := m.config
+	uri := m.changefeedInfo.SinkURI
+	cfg := m.changefeedInfo.Config
 
 	if m.sinkFactory.f != nil {
 		return m.sinkFactory.errors, m.sinkFactory.version
@@ -360,7 +356,7 @@ func (m *SinkManager) initSinkFactory() (chan error, uint64) {
 		return m.sinkFactory.errors, m.sinkFactory.version
 	}
 
-	m.sinkFactory.f, err = factory.New(m.managerCtx, m.changefeedID, uri, cfg, m.sinkFactory.errors, m.up.PDClock)
+	m.sinkFactory.f, err = factory.New(m.managerCtx, uri, cfg, m.sinkFactory.errors, m.up.PDClock)
 	if err != nil {
 		emitError(err)
 		return m.sinkFactory.errors, m.sinkFactory.version
@@ -396,10 +392,24 @@ func (m *SinkManager) clearSinkFactory() {
 	}
 }
 
+func (m *SinkManager) putSinkFactoryError(err error, version uint64) (success bool) {
+	m.sinkFactory.Lock()
+	defer m.sinkFactory.Unlock()
+	if version == m.sinkFactory.version {
+		select {
+		case m.sinkFactory.errors <- err:
+		default:
+		}
+		return true
+	}
+	return false
+}
+
 func (m *SinkManager) startSinkWorkers(ctx context.Context, eg *errgroup.Group, splitTxn bool) {
 	for i := 0; i < sinkWorkerNum; i++ {
 		w := newSinkWorker(m.changefeedID, m.sourceManager,
-			m.sinkMemQuota, splitTxn)
+			m.sinkMemQuota, m.redoMemQuota,
+			m.eventCache, splitTxn)
 		m.sinkWorkers = append(m.sinkWorkers, w)
 		eg.Go(func() error { return w.handleTasks(ctx, m.sinkTaskChan) })
 	}
@@ -408,7 +418,7 @@ func (m *SinkManager) startSinkWorkers(ctx context.Context, eg *errgroup.Group, 
 func (m *SinkManager) startRedoWorkers(ctx context.Context, eg *errgroup.Group) {
 	for i := 0; i < redoWorkerNum; i++ {
 		w := newRedoWorker(m.changefeedID, m.sourceManager, m.redoMemQuota,
-			m.redoDMLMgr)
+			m.redoDMLMgr, m.eventCache)
 		m.redoWorkers = append(m.redoWorkers, w)
 		eg.Go(func() error { return w.handleTasks(ctx, m.redoTaskChan) })
 	}
@@ -424,7 +434,7 @@ func (m *SinkManager) backgroundGC(errors chan<- error) {
 		for {
 			select {
 			case <-m.managerCtx.Done():
-				log.Info("Background GC is stopped because context is canceled",
+				log.Info("Background GC is stoped because context is canceled",
 					zap.String("namespace", m.changefeedID.Namespace),
 					zap.String("changefeed", m.changefeedID.ID))
 				return
@@ -446,7 +456,7 @@ func (m *SinkManager) backgroundGC(errors chan<- error) {
 						return true
 					}
 
-					cleanPos := sorter.Position{StartTs: resolvedMark - 1, CommitTs: resolvedMark}
+					cleanPos := engine.Position{StartTs: resolvedMark - 1, CommitTs: resolvedMark}
 					if !sink.cleanRangeEventCounts(cleanPos, cleanTableMinEvents) {
 						return true
 					}
@@ -476,13 +486,13 @@ func (m *SinkManager) backgroundGC(errors chan<- error) {
 	}()
 }
 
-func (m *SinkManager) getUpperBound(tableSinkUpperBoundTs model.Ts) sorter.Position {
+func (m *SinkManager) getUpperBound(tableSinkUpperBoundTs model.Ts) engine.Position {
 	schemaTs := m.schemaStorage.ResolvedTs()
 	if schemaTs != math.MaxUint64 && tableSinkUpperBoundTs > schemaTs+1 {
 		// schemaTs == math.MaxUint64 means it's in tests.
 		tableSinkUpperBoundTs = schemaTs + 1
 	}
-	return sorter.Position{StartTs: tableSinkUpperBoundTs - 1, CommitTs: tableSinkUpperBoundTs}
+	return engine.Position{StartTs: tableSinkUpperBoundTs - 1, CommitTs: tableSinkUpperBoundTs}
 }
 
 // generateSinkTasks generates tasks to fetch data from the source manager.
@@ -549,7 +559,7 @@ func (m *SinkManager) generateSinkTasks(ctx context.Context) error {
 					if restartErr := tableSink.restart(ctx); restartErr == nil {
 						// Restart the table sink based on the checkpoint position.
 						ckpt := tableSink.getCheckpointTs().ResolvedMark()
-						lastWrittenPos := sorter.Position{StartTs: ckpt - 1, CommitTs: ckpt}
+						lastWrittenPos := engine.Position{StartTs: ckpt - 1, CommitTs: ckpt}
 						p := &progress{
 							span:              tableSink.span,
 							nextLowerBoundPos: lastWrittenPos.Next(),
@@ -599,7 +609,7 @@ func (m *SinkManager) generateSinkTasks(ctx context.Context) error {
 				lowerBound:    lowerBound,
 				getUpperBound: m.getUpperBound,
 				tableSink:     tableSink,
-				callback: func(lastWrittenPos sorter.Position) {
+				callback: func(lastWrittenPos engine.Position) {
 					p := &progress{
 						span:              tableSink.span,
 						nextLowerBoundPos: lastWrittenPos.Next(),
@@ -731,7 +741,7 @@ func (m *SinkManager) generateRedoTasks(ctx context.Context) error {
 				lowerBound:    lowerBound,
 				getUpperBound: m.getUpperBound,
 				tableSink:     tableSink,
-				callback: func(lastWrittenPos sorter.Position) {
+				callback: func(lastWrittenPos engine.Position) {
 					p := &progress{
 						span:              tableSink.span,
 						nextLowerBoundPos: lastWrittenPos.Next(),
@@ -821,7 +831,7 @@ func (m *SinkManager) UpdateBarrierTs(globalBarrierTs model.Ts, tableBarrier map
 }
 
 // AddTable adds a table(TableSink) to the sink manager.
-func (m *SinkManager) AddTable(span tablepb.Span, startTs model.Ts, targetTs model.Ts) *tableSinkWrapper {
+func (m *SinkManager) AddTable(span tablepb.Span, startTs model.Ts, targetTs model.Ts) {
 	sinkWrapper := newTableSinkWrapper(
 		m.changefeedID,
 		span,
@@ -849,6 +859,7 @@ func (m *SinkManager) AddTable(span tablepb.Span, startTs model.Ts, targetTs mod
 			zap.String("namespace", m.changefeedID.Namespace),
 			zap.String("changefeed", m.changefeedID.ID),
 			zap.Stringer("span", &span))
+		return
 	}
 	m.sinkMemQuota.AddTable(span)
 	m.redoMemQuota.AddTable(span)
@@ -858,7 +869,6 @@ func (m *SinkManager) AddTable(span tablepb.Span, startTs model.Ts, targetTs mod
 		zap.Stringer("span", &span),
 		zap.Uint64("startTs", startTs),
 		zap.Uint64("version", sinkWrapper.version))
-	return sinkWrapper
 }
 
 // StartTable sets the table(TableSink) state to replicating.
@@ -883,13 +893,13 @@ func (m *SinkManager) StartTable(span tablepb.Span, startTs model.Ts) error {
 
 	m.sinkProgressHeap.push(&progress{
 		span:              span,
-		nextLowerBoundPos: sorter.Position{StartTs: 0, CommitTs: startTs + 1},
+		nextLowerBoundPos: engine.Position{StartTs: 0, CommitTs: startTs + 1},
 		version:           tableSink.(*tableSinkWrapper).version,
 	})
 	if m.redoDMLMgr != nil {
 		m.redoProgressHeap.push(&progress{
 			span:              span,
-			nextLowerBoundPos: sorter.Position{StartTs: 0, CommitTs: startTs + 1},
+			nextLowerBoundPos: engine.Position{StartTs: 0, CommitTs: startTs + 1},
 			version:           tableSink.(*tableSinkWrapper).version,
 		})
 	}
@@ -938,6 +948,9 @@ func (m *SinkManager) RemoveTable(span tablepb.Span) {
 		zap.String("changefeed", m.changefeedID.ID),
 		zap.Stringer("span", &span),
 		zap.Uint64("checkpointTs", checkpointTs.Ts))
+	if m.eventCache != nil {
+		m.eventCache.removeTable(span)
+	}
 }
 
 // GetAllCurrentTableSpans returns all spans in the sinkManager.
@@ -1003,6 +1016,25 @@ func (m *SinkManager) GetTableStats(span tablepb.Span) TableStats {
 	m.sinkMemQuota.Release(span, checkpointTs)
 	m.redoMemQuota.Release(span, checkpointTs)
 
+	advanceTimeoutInSec := util.GetOrZero(m.changefeedInfo.Config.Sink.AdvanceTimeoutInSec)
+	if advanceTimeoutInSec <= 0 {
+		advanceTimeoutInSec = config.DefaultAdvanceTimeoutInSec
+	}
+	stuckCheck := time.Duration(advanceTimeoutInSec) * time.Second
+
+	if m.needsStuckCheck() {
+		isStuck, sinkVersion := tableSink.sinkMaybeStuck(stuckCheck)
+		if isStuck && m.putSinkFactoryError(errors.New("table sink stuck"), sinkVersion) {
+			log.Warn("Table checkpoint is stuck too long, will restart the sink backend",
+				zap.String("namespace", m.changefeedID.Namespace),
+				zap.String("changefeed", m.changefeedID.ID),
+				zap.Stringer("span", &span),
+				zap.Any("checkpointTs", checkpointTs),
+				zap.Float64("stuckCheck", stuckCheck.Seconds()),
+				zap.Uint64("factoryVersion", sinkVersion))
+		}
+	}
+
 	var resolvedTs model.Ts
 	// If redo log is enabled, we have to use redo log's resolved ts to calculate processor's min resolved ts.
 	if m.redoDMLMgr != nil {
@@ -1057,6 +1089,9 @@ func (m *SinkManager) Close() {
 	m.waitSubroutines()
 	// NOTE: It's unnecceary to close table sinks before clear sink factory.
 	m.clearSinkFactory()
+	if m.eventCache != nil {
+		m.eventCache.clear()
+	}
 
 	log.Info("Closed sink manager",
 		zap.String("namespace", m.changefeedID.Namespace),

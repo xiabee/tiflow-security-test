@@ -97,22 +97,17 @@ func MigrateBackupKey(version int, backupKey string) string {
 	return fmt.Sprintf("%s/%d/%s", migrateBackupPrefix, version, backupKey)
 }
 
-// OwnerCaptureInfoClient is the sub interface of CDCEtcdClient that used for get owner capture information
-type OwnerCaptureInfoClient interface {
+// CDCEtcdClient extracts CDCEtcdClients's method used for apiv2.
+type CDCEtcdClient interface {
+	GetClusterID() string
+
+	GetEtcdClient() *Client
+
 	GetOwnerID(context.Context) (model.CaptureID, error)
 
 	GetOwnerRevision(context.Context, model.CaptureID) (int64, error)
 
 	GetCaptures(context.Context) (int64, []*model.CaptureInfo, error)
-}
-
-// CDCEtcdClient extracts CDCEtcdClients's method used for apiv2.
-type CDCEtcdClient interface {
-	OwnerCaptureInfoClient
-
-	GetClusterID() string
-
-	GetEtcdClient() *Client
 
 	GetAllCDCInfo(ctx context.Context) ([]*mvccpb.KeyValue, error)
 
@@ -674,8 +669,8 @@ func SetupEmbedEtcd(dir string) (clientURL *url.URL, e *embed.Etcd, err error) {
 	if err != nil {
 		return
 	}
-	cfg.ListenPeerUrls = []url.URL{*urls[0]}
-	cfg.ListenClientUrls = []url.URL{*urls[1]}
+	cfg.LPUrls = []url.URL{*urls[0]}
+	cfg.LCUrls = []url.URL{*urls[1]}
 	cfg.Logger = "zap"
 	cfg.LogLevel = "error"
 	clientURL = urls[1]

@@ -107,23 +107,25 @@ func TestRemoveErrorUpstream(t *testing.T) {
 }
 
 func TestAddDefaultUpstream(t *testing.T) {
-	m := NewManager(context.Background(), CaptureTopologyCfg{GCServiceID: "id"})
-	m.initUpstreamFunc = func(context.Context, *Upstream, CaptureTopologyCfg) error {
+	m := NewManager(context.Background(), "id")
+	m.initUpstreamFunc = func(ctx context.Context,
+		up *Upstream, gcID string,
+	) error {
 		return errors.New("test")
 	}
-
 	pdClient := &gc.MockPDClient{}
-
-	_, err := m.AddDefaultUpstream([]string{}, &security.Credential{}, pdClient, nil)
+	_, err := m.AddDefaultUpstream([]string{}, &security.Credential{}, pdClient)
 	require.NotNil(t, err)
 	up, err := m.GetDefaultUpstream()
 	require.Nil(t, up)
 	require.NotNil(t, err)
-	m.initUpstreamFunc = func(_ context.Context, up *Upstream, _ CaptureTopologyCfg) error {
+	m.initUpstreamFunc = func(ctx context.Context,
+		up *Upstream, gcID string,
+	) error {
 		up.ID = uint64(2)
 		return nil
 	}
-	_, err = m.AddDefaultUpstream([]string{}, &security.Credential{}, pdClient, nil)
+	_, err = m.AddDefaultUpstream([]string{}, &security.Credential{}, pdClient)
 	require.Nil(t, err)
 	up, err = m.GetDefaultUpstream()
 	require.NotNil(t, up)
@@ -134,8 +136,10 @@ func TestAddDefaultUpstream(t *testing.T) {
 }
 
 func TestAddUpstream(t *testing.T) {
-	m := NewManager(context.Background(), CaptureTopologyCfg{GCServiceID: "id"})
-	m.initUpstreamFunc = func(context.Context, *Upstream, CaptureTopologyCfg) error {
+	m := NewManager(context.Background(), "id")
+	m.initUpstreamFunc = func(ctx context.Context,
+		up *Upstream, gcID string,
+	) error {
 		return errors.New("test")
 	}
 	up := m.AddUpstream(&model.UpstreamInfo{ID: uint64(3)})
@@ -170,8 +174,10 @@ func TestCloseManager(t *testing.T) {
 }
 
 func TestRemoveThenAddAgain(t *testing.T) {
-	m := NewManager(context.Background(), CaptureTopologyCfg{GCServiceID: "id"})
-	m.initUpstreamFunc = func(context.Context, *Upstream, CaptureTopologyCfg) error {
+	m := NewManager(context.Background(), "id")
+	m.initUpstreamFunc = func(ctx context.Context,
+		up *Upstream, gcID string,
+	) error {
 		return nil
 	}
 	up := m.AddUpstream(&model.UpstreamInfo{ID: uint64(3)})

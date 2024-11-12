@@ -25,34 +25,29 @@ function run() {
 
 	run_sql_file $CUR_DIR/data/db1.prepare.sql
 
-	# TODO we add retry on CreateWorker failed, but now IsRetryableError of DM always
-	# return true, so we skip the following test cases. since engine is only used on
-	# cloud, we have validate the config already before submit it, so it's ok now.
-	# enable it later.
-	#
-	#	# test a ill-formatted job should fail
-	#
-	#	cp $CUR_DIR/conf/job.yaml $WORK_DIR/job.yaml
-	#	sed -i "20,23d" $WORK_DIR/job.yaml
-	#	job_id=$(create_job "DM" "$WORK_DIR/job.yaml" "dm_full_mode")
-	#
-	#	exec_with_retry "curl \"http://127.0.0.1:10245/api/v1/jobs/$job_id\" | tee /dev/stderr | grep -q 'route-rules global not exist in routes'"
-	#
-	#	curl -X POST "http://127.0.0.1:10245/api/v1/jobs/$job_id/cancel"
-	#	curl -X DELETE "http://127.0.0.1:10245/api/v1/jobs/$job_id"
-	#	curl "http://127.0.0.1:10245/api/v1/jobs/$job_id" | grep -q "ErrJobNotFound"
-	#
-	#	# test stop a wrongly configuration job
-	#
-	#	cp $CUR_DIR/conf/job.yaml $WORK_DIR/job.yaml
-	#	sed -i "s/dm_full/wrong_user/g" $WORK_DIR/job.yaml
-	#
-	#	job_id=$(create_job "DM" "$WORK_DIR/job.yaml" "dm_full_mode1")
-	#
-	#	exec_with_retry "curl \"http://127.0.0.1:10245/api/v1/jobs/$job_id\" | tee /dev/stderr | grep -q 'Access denied'"
-	#
-	#	curl -X POST "http://127.0.0.1:10245/api/v1/jobs/$job_id/cancel"
-	#	curl -X DELETE "http://127.0.0.1:10245/api/v1/jobs/$job_id"
+	# test a ill-formatted job should fail
+
+	cp $CUR_DIR/conf/job.yaml $WORK_DIR/job.yaml
+	sed -i "20,23d" $WORK_DIR/job.yaml
+	job_id=$(create_job "DM" "$WORK_DIR/job.yaml" "dm_full_mode")
+
+	exec_with_retry "curl \"http://127.0.0.1:10245/api/v1/jobs/$job_id\" | tee /dev/stderr | grep -q 'route-rules global not exist in routes'"
+
+	curl -X POST "http://127.0.0.1:10245/api/v1/jobs/$job_id/cancel"
+	curl -X DELETE "http://127.0.0.1:10245/api/v1/jobs/$job_id"
+	curl "http://127.0.0.1:10245/api/v1/jobs/$job_id" | grep -q "ErrJobNotFound"
+
+	# test stop a wrongly configuration job
+
+	cp $CUR_DIR/conf/job.yaml $WORK_DIR/job.yaml
+	sed -i "s/dm_full/wrong_user/g" $WORK_DIR/job.yaml
+
+	job_id=$(create_job "DM" "$WORK_DIR/job.yaml" "dm_full_mode1")
+
+	exec_with_retry "curl \"http://127.0.0.1:10245/api/v1/jobs/$job_id\" | tee /dev/stderr | grep -q 'Access denied'"
+
+	curl -X POST "http://127.0.0.1:10245/api/v1/jobs/$job_id/cancel"
+	curl -X DELETE "http://127.0.0.1:10245/api/v1/jobs/$job_id"
 
 	# test downstream has no ALTER privilege
 	run_sql "create table dm_full.auto(c int primary key auto_increment);"
@@ -69,7 +64,7 @@ function run() {
 	curl -X PUT "http://127.0.0.1:10245/api/v1/jobs/$job_id/status" -H 'Content-Type: application/json' -d '{"op": "resume"}'
 
 	exec_with_retry --count 30 "curl \"http://127.0.0.1:10245/api/v1/jobs/$job_id\" | tee /dev/stderr | jq -e '.state == \"Finished\"'"
-	# curl http://127.0.0.1:10245/api/v1/jobs/$job_id | tee /dev/stderr | jq -r '.detail' | base64 --decode | jq -e '.finished_unit_status."mysql-01"[1].Status.finishedBytes == 614'
+	curl http://127.0.0.1:10245/api/v1/jobs/$job_id | tee /dev/stderr | jq -r '.detail' | base64 --decode | jq -e '.finished_unit_status."mysql-01"[1].Status.finishedBytes == 614'
 
 	# check data
 

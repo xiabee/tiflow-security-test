@@ -20,16 +20,16 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tiflow/cdc/capture"
+	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/owner"
 	"github.com/pingcap/tiflow/cdc/sink/validator"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
-	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/pingcap/tiflow/pkg/version"
 	"github.com/r3labs/diff"
@@ -40,10 +40,17 @@ import (
 func verifyCreateChangefeedConfig(
 	ctx context.Context,
 	changefeedConfig model.ChangefeedConfig,
-	up *upstream.Upstream,
-	provider owner.StatusProvider,
-	ectdClient etcd.CDCEtcdClient,
+	capture capture.Capture,
 ) (*model.ChangeFeedInfo, error) {
+	upManager, err := capture.GetUpstreamManager()
+	if err != nil {
+		return nil, err
+	}
+	up, err := upManager.GetDefaultUpstream()
+	if err != nil {
+		return nil, err
+	}
+
 	// verify sinkURI
 	if changefeedConfig.SinkURI == "" {
 		return nil, cerror.ErrSinkURIInvalid.GenWithStackByArgs("sink-uri is empty, can't not create a changefeed without sink-uri")
@@ -54,25 +61,22 @@ func verifyCreateChangefeedConfig(
 		return nil, cerror.ErrAPIInvalidParam.GenWithStack("invalid changefeed_id: %s", changefeedConfig.ID)
 	}
 	// check if the changefeed exists
-	ok, err := provider.IsChangefeedExists(ctx, model.DefaultChangeFeedID(changefeedConfig.ID))
+	cfStatus, err := capture.StatusProvider().GetChangeFeedStatus(ctx,
+		model.DefaultChangeFeedID(changefeedConfig.ID))
 	if err != nil && cerror.ErrChangeFeedNotExists.NotEqual(err) {
 		return nil, err
 	}
-	if ok {
+	if cfStatus != nil {
 		return nil, cerror.ErrChangeFeedAlreadyExists.GenWithStackByArgs(changefeedConfig.ID)
 	}
 
-	ts, logical, err := up.PDClient.GetTS(ctx)
-	if err != nil {
-		return nil, cerror.ErrPDEtcdAPIError.GenWithStackByArgs("fail to get ts from pd client")
-	}
-	currentTSO := oracle.ComposeTS(ts, logical)
 	// verify start-ts
 	if changefeedConfig.StartTS == 0 {
-		changefeedConfig.StartTS = currentTSO
-	} else if changefeedConfig.StartTS > currentTSO {
-		return nil, cerror.ErrAPIInvalidParam.GenWithStack(
-			"invalid start-ts %v, larger than current tso %v", changefeedConfig.StartTS, currentTSO)
+		ts, logical, err := up.PDClient.GetTS(ctx)
+		if err != nil {
+			return nil, cerror.ErrPDEtcdAPIError.GenWithStackByArgs("fail to get ts from pd client")
+		}
+		changefeedConfig.StartTS = oracle.ComposeTS(ts, logical)
 	}
 
 	// Ensure the start ts is valid in the next 1 hour.
@@ -80,7 +84,7 @@ func verifyCreateChangefeedConfig(
 	if err := gc.EnsureChangefeedStartTsSafety(
 		ctx,
 		up.PDClient,
-		ectdClient.GetEnsureGCServiceID(gc.EnsureGCServiceCreating),
+		capture.GetEtcdClient().GetEnsureGCServiceID(gc.EnsureGCServiceCreating),
 		model.DefaultChangeFeedID(changefeedConfig.ID),
 		ensureTTL, changefeedConfig.StartTS); err != nil {
 		if !cerror.ErrStartTsBeforeGC.Equal(err) {
@@ -119,17 +123,18 @@ func verifyCreateChangefeedConfig(
 		return nil, err
 	}
 
-	captureInfos, err := provider.GetCaptures(ctx)
+	captureInfos, err := capture.StatusProvider().GetCaptures(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// set sortEngine
+	// set sortEngine and EnableOldValue
 	cdcClusterVer, err := version.GetTiCDCClusterVersion(model.ListVersionsFromCaptureInfos(captureInfos))
 	if err != nil {
 		return nil, err
 	}
 	sortEngine := model.SortUnified
-	if !cdcClusterVer.LessThan500RC() {
+	if !cdcClusterVer.ShouldEnableOldValueByDefault() {
+		replicaConfig.EnableOldValue = false
 		log.Warn("The TiCDC cluster is built from unknown branch or less than 5.0.0-rc, the old-value are disabled by default.")
 		if !cdcClusterVer.ShouldEnableUnifiedSorterByDefault() {
 			sortEngine = model.SortInMemory
@@ -170,14 +175,12 @@ func verifyCreateChangefeedConfig(
 		}
 	}
 
-	_, err = util.GetTimezone(changefeedConfig.TimeZone)
+	tz, err := util.GetTimezone(changefeedConfig.TimeZone)
 	if err != nil {
 		return nil, cerror.ErrAPIInvalidParam.Wrap(errors.Annotatef(err, "invalid timezone:%s", changefeedConfig.TimeZone))
 	}
-	if err := validator.Validate(ctx,
-		model.ChangeFeedID{Namespace: changefeedConfig.Namespace, ID: changefeedConfig.ID},
-		info.SinkURI, info.Config, up.PDClock,
-	); err != nil {
+	ctx = contextutil.PutTimezoneInCtx(ctx, tz)
+	if err := validator.Validate(ctx, info.SinkURI, info.Config, up.PDClock); err != nil {
 		return nil, err
 	}
 
@@ -235,9 +238,7 @@ func VerifyUpdateChangefeedConfig(ctx context.Context,
 			return nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 
-		if err := validator.Validate(ctx,
-			model.ChangeFeedID{Namespace: changefeedConfig.Namespace, ID: changefeedConfig.ID},
-			newInfo.SinkURI, newInfo.Config, nil); err != nil {
+		if err := validator.Validate(ctx, newInfo.SinkURI, newInfo.Config, nil); err != nil {
 			return nil, cerror.ErrChangefeedUpdateRefused.GenWithStackByCause(err)
 		}
 	}

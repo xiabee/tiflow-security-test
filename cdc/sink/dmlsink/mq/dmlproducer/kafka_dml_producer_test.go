@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/Shopify/sarama"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
@@ -64,8 +64,7 @@ func TestProducerAck(t *testing.T) {
 	asyncProducer, err := factory.AsyncProducer(ctx, failpointCh)
 	require.NoError(t, err)
 
-	producer := NewKafkaDMLProducer(ctx, changefeed,
-		asyncProducer, metricsCollector, errCh, failpointCh)
+	producer := NewKafkaDMLProducer(ctx, changefeed, asyncProducer, metricsCollector, errCh, failpointCh)
 	require.NotNil(t, producer)
 
 	messageCount := 20
@@ -137,9 +136,7 @@ func TestProducerSendMsgFailed(t *testing.T) {
 	asyncProducer, err := factory.AsyncProducer(ctx, failpointCh)
 	require.NoError(t, err)
 
-	producer := NewKafkaDMLProducer(ctx, changefeed,
-		asyncProducer, metricsCollector, errCh, failpointCh)
-	require.NoError(t, err)
+	producer := NewKafkaDMLProducer(ctx, changefeed, asyncProducer, metricsCollector, errCh, failpointCh)
 	require.NotNil(t, producer)
 
 	defer func() {
@@ -203,8 +200,7 @@ func TestProducerDoubleClose(t *testing.T) {
 	asyncProducer, err := factory.AsyncProducer(ctx, failpointCh)
 	require.NoError(t, err)
 
-	producer := NewKafkaDMLProducer(ctx, changefeed,
-		asyncProducer, metricsCollector, errCh, failpointCh)
+	producer := NewKafkaDMLProducer(ctx, changefeed, asyncProducer, metricsCollector, errCh, failpointCh)
 	require.NoError(t, err)
 	require.NotNil(t, producer)
 

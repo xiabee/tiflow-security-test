@@ -16,7 +16,8 @@ package maxwell
 import (
 	"testing"
 
-	"github.com/pingcap/tiflow/cdc/entry"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,11 +42,17 @@ func TestMaxwellFormatCol(t *testing.T) {
 }
 
 func TestEncodeBinaryToMaxwell(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
+	t.Parallel()
 
-	_ = helper.DDL2Event("create table test.t(col1 varbinary(255) primary key)")
-	e := helper.DML2Event("insert into test.t values ('测试varbinary')", "test", "t")
+	column := &model.Column{
+		Name: "varbinary", Type: mysql.TypeVarchar, Value: []uint8("测试varbinary"),
+		Flag: model.BinaryFlag,
+	}
+
+	e := &model.RowChangedEvent{
+		Table:   &model.TableName{Schema: "a", Table: "b"},
+		Columns: []*model.Column{column},
+	}
 
 	key, msg := rowChangeToMaxwellMsg(e, false)
 	require.NotNil(t, key)

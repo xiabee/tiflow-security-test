@@ -370,7 +370,7 @@ func (s *Server) checkTask(ctx context.Context, subtaskCfgList []*config.SubTask
 func (s *Server) checkOpenAPITaskBeforeOperate(ctx context.Context, task *openapi.Task) ([]*config.SubTaskConfig, string, error) {
 	// prepare target db config
 	toDBCfg := config.GetTargetDBCfgFromOpenAPITask(task)
-	if err := AdjustTargetDBSessionCfg(ctx, toDBCfg); err != nil {
+	if err := AdjustTargetDB(ctx, toDBCfg); err != nil {
 		return nil, "", err
 	}
 	// prepare source db config source name -> source config
@@ -387,12 +387,8 @@ func (s *Server) checkOpenAPITaskBeforeOperate(ctx context.Context, task *openap
 	if err != nil {
 		return nil, "", err
 	}
-	stCfgsForCheck, err := s.generateSubTasksForCheck(subTaskConfigList)
-	if err != nil {
-		return nil, "", err
-	}
 	// check subtask config
-	msg, err := s.checkTask(ctx, stCfgsForCheck, common.DefaultErrorCnt, common.DefaultWarnCnt)
+	msg, err := s.checkTask(ctx, subTaskConfigList, common.DefaultErrorCnt, common.DefaultWarnCnt)
 	if err != nil {
 		return nil, "", terror.WithClass(err, terror.ClassDMMaster)
 	}
@@ -473,7 +469,7 @@ func (s *Server) deleteTask(ctx context.Context, taskName string, force bool) er
 	}
 
 	toDBCfg := config.GetTargetDBCfgFromOpenAPITask(task)
-	if adjustErr := AdjustTargetDBSessionCfg(ctx, toDBCfg); adjustErr != nil {
+	if adjustErr := AdjustTargetDB(ctx, toDBCfg); adjustErr != nil {
 		if !ignoreCannotConnectError(adjustErr) {
 			return adjustErr
 		}
@@ -502,7 +498,7 @@ func (s *Server) getTask(ctx context.Context, taskName string, req openapi.DMAPI
 	}
 	task := config.SubTaskConfigsToOpenAPITask(subTaskConfigList)
 	if req.WithStatus != nil && *req.WithStatus {
-		subTaskStatusList, err := s.getTaskStatus(ctx, task.Name)
+		subTaskStatusList, err := s.getTaskStatus(ctx, task.Name, openapi.DMAPIGetTaskStatusParams{})
 		if err != nil {
 			return nil, err
 		}
@@ -511,8 +507,7 @@ func (s *Server) getTask(ctx context.Context, taskName string, req openapi.DMAPI
 	return task, nil
 }
 
-func (s *Server) getTaskStatus(ctx context.Context, taskName string) ([]openapi.SubTaskStatus, error) {
-	req := openapi.DMAPIGetTaskStatusParams{}
+func (s *Server) getTaskStatus(ctx context.Context, taskName string, req openapi.DMAPIGetTaskStatusParams) ([]openapi.SubTaskStatus, error) {
 	if req.SourceNameList == nil || len(*req.SourceNameList) == 0 {
 		sourceNameList := openapi.SourceNameList(s.getTaskSourceNameList(taskName))
 		req.SourceNameList = &sourceNameList
@@ -628,7 +623,7 @@ func (s *Server) listTask(ctx context.Context, req openapi.DMAPIGetTaskListParam
 
 	if req.Stage != nil || (req.WithStatus != nil && *req.WithStatus) {
 		for idx := range taskList {
-			subTaskStatusList, err := s.getTaskStatus(ctx, taskList[idx].Name)
+			subTaskStatusList, err := s.getTaskStatus(ctx, taskList[idx].Name, openapi.DMAPIGetTaskStatusParams{})
 			if err != nil {
 				return taskArray, err
 			}

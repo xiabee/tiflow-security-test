@@ -17,12 +17,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/Shopify/sarama"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
-	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 )
@@ -49,13 +48,15 @@ type SyncProducer interface {
 	// of the produced message, or an error if the message failed to produce.
 	SendMessage(ctx context.Context,
 		topic string, partitionNum int32,
-		message *common.Message) error
+		key []byte, value []byte) error
 
 	// SendMessages produces a given set of messages, and returns only when all
 	// messages in the set have either succeeded or failed. Note that messages
 	// can succeed and fail individually; if some succeed and some fail,
 	// SendMessages will return an error.
-	SendMessages(ctx context.Context, topic string, partitionNum int32, message *common.Message) error
+	SendMessages(ctx context.Context,
+		topic string, partitionNum int32,
+		key []byte, value []byte) error
 
 	// Close shuts down the producer; you must call this function before a producer
 	// object passes out of scope, as it may otherwise leak memory.
@@ -74,7 +75,9 @@ type AsyncProducer interface {
 
 	// AsyncSend is the input channel for the user to write messages to that they
 	// wish to send.
-	AsyncSend(ctx context.Context, topic string, partition int32, message *common.Message) error
+	AsyncSend(ctx context.Context, topic string,
+		partition int32, key []byte, value []byte,
+		callback func()) error
 
 	// AsyncRunCallback process the messages that has sent to kafka,
 	// and run tha attached callback. the caller should call this
@@ -89,26 +92,29 @@ type saramaSyncProducer struct {
 }
 
 func (p *saramaSyncProducer) SendMessage(
-	_ context.Context,
+	ctx context.Context,
 	topic string, partitionNum int32,
-	message *common.Message,
+	key []byte, value []byte,
 ) error {
 	_, _, err := p.producer.SendMessage(&sarama.ProducerMessage{
 		Topic:     topic,
-		Key:       sarama.ByteEncoder(message.Key),
-		Value:     sarama.ByteEncoder(message.Value),
+		Key:       sarama.ByteEncoder(key),
+		Value:     sarama.ByteEncoder(value),
 		Partition: partitionNum,
 	})
 	return err
 }
 
-func (p *saramaSyncProducer) SendMessages(ctx context.Context, topic string, partitionNum int32, message *common.Message) error {
+func (p *saramaSyncProducer) SendMessages(ctx context.Context,
+	topic string, partitionNum int32,
+	key []byte, value []byte,
+) error {
 	msgs := make([]*sarama.ProducerMessage, partitionNum)
 	for i := 0; i < int(partitionNum); i++ {
 		msgs[i] = &sarama.ProducerMessage{
 			Topic:     topic,
-			Key:       sarama.ByteEncoder(message.Key),
-			Value:     sarama.ByteEncoder(message.Value),
+			Key:       sarama.ByteEncoder(key),
+			Value:     sarama.ByteEncoder(value),
 			Partition: int32(i),
 		}
 	}
@@ -220,12 +226,10 @@ func (p *saramaAsyncProducer) AsyncRunCallback(
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info("async producer exit since context is done",
-				zap.String("namespace", p.changefeedID.Namespace),
-				zap.String("changefeed", p.changefeedID.ID))
 			return errors.Trace(ctx.Err())
 		case err := <-p.failpointCh:
-			log.Warn("Receive from failpoint chan in kafka DML producer",
+			log.Warn("Receive from failpoint chan in kafka "+
+				"DML producer",
 				zap.String("namespace", p.changefeedID.Namespace),
 				zap.String("changefeed", p.changefeedID.ID),
 				zap.Error(err))
@@ -253,13 +257,19 @@ func (p *saramaAsyncProducer) AsyncRunCallback(
 
 // AsyncSend is the input channel for the user to write messages to that they
 // wish to send.
-func (p *saramaAsyncProducer) AsyncSend(ctx context.Context, topic string, partition int32, message *common.Message) error {
+func (p *saramaAsyncProducer) AsyncSend(ctx context.Context,
+	topic string,
+	partition int32,
+	key []byte,
+	value []byte,
+	callback func(),
+) error {
 	msg := &sarama.ProducerMessage{
 		Topic:     topic,
 		Partition: partition,
-		Key:       sarama.StringEncoder(message.Key),
-		Value:     sarama.ByteEncoder(message.Value),
-		Metadata:  message.Callback,
+		Key:       sarama.StringEncoder(key),
+		Value:     sarama.ByteEncoder(value),
+		Metadata:  callback,
 	}
 	select {
 	case <-ctx.Done():

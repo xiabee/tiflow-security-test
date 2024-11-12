@@ -611,6 +611,7 @@ func (m *mockRedoMetaManager) Running() bool {
 
 func TestReplicationManagerAdvanceCheckpoint(t *testing.T) {
 	t.Parallel()
+
 	r := NewReplicationManager(1, model.ChangeFeedID{})
 	span := spanz.TableIDToComparableSpan(1)
 	rs, err := NewReplicationSet(span, model.Ts(10),

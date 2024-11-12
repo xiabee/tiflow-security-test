@@ -29,10 +29,10 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/httputil"
 	"github.com/pingcap/tiflow/pkg/retry"
-	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/pkg/spanz"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
@@ -50,7 +50,7 @@ const (
 	// * `6e000000000000000000f8`, keys starts with "m".
 	// * `748000fffffffffffffe00000000000000f8`, the table prefix of
 	//   `tidb_ddl_job` table, which has the table ID 281474976710654,
-	//   see "github.com/pingcap/tidb/pkg/ddl.JobTableID"
+	//   see "github.com/pingcap/tidb/ddl.JobTableID"
 	addMetaJSON = `{
 		"sets": [
 			{
@@ -111,7 +111,7 @@ type pdAPIClient struct {
 }
 
 // NewPDAPIClient create a new pdAPIClient.
-func NewPDAPIClient(pdClient pd.Client, conf *security.Credential) (PDAPIClient, error) {
+func NewPDAPIClient(pdClient pd.Client, conf *config.SecurityConfig) (PDAPIClient, error) {
 	dialClient, err := httputil.NewClient(conf)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -314,7 +314,7 @@ func (pc *pdAPIClient) ListGcServiceSafePoint(
 }
 
 func (pc *pdAPIClient) patchMetaLabel(ctx context.Context) error {
-	url := pc.grpcClient.GetLeaderURL() + regionLabelPrefix
+	url := pc.grpcClient.GetLeaderAddr() + regionLabelPrefix
 	header := http.Header{"Content-Type": {"application/json"}}
 	content := []byte(addMetaJSON)
 
@@ -326,7 +326,7 @@ func (pc *pdAPIClient) patchMetaLabel(ctx context.Context) error {
 func (pc *pdAPIClient) listGcServiceSafePoint(
 	ctx context.Context,
 ) (*ListServiceGCSafepoint, error) {
-	url := pc.grpcClient.GetLeaderURL() + gcServiceSafePointURL
+	url := pc.grpcClient.GetLeaderAddr() + gcServiceSafePointURL
 
 	respData, err := pc.httpClient.DoRequest(ctx, url, http.MethodGet,
 		nil, nil)

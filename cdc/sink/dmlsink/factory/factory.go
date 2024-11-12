@@ -16,6 +16,7 @@ package factory
 import (
 	"context"
 	"net/url"
+	"strings"
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -25,7 +26,6 @@ import (
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/cloudstorage"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dmlproducer"
-	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/manager"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/txn"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -34,8 +34,6 @@ import (
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/sink/kafka"
 	v2 "github.com/pingcap/tiflow/pkg/sink/kafka/v2"
-	pulsarConfig "github.com/pingcap/tiflow/pkg/sink/pulsar"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -64,10 +62,9 @@ type SinkFactory struct {
 	category Category
 }
 
-// New creates a new SinkFactory by scheme.
+// New creates a new SinkFactory by schema.
 func New(
 	ctx context.Context,
-	changefeedID model.ChangeFeedID,
 	sinkURIStr string,
 	cfg *config.ReplicaConfig,
 	errCh chan error,
@@ -79,11 +76,10 @@ func New(
 	}
 
 	s := &SinkFactory{}
-	scheme := sink.GetScheme(sinkURI)
-	switch scheme {
+	schema := strings.ToLower(sinkURI.Scheme)
+	switch schema {
 	case sink.MySQLScheme, sink.MySQLSSLScheme, sink.TiDBScheme, sink.TiDBSSLScheme:
-		txnSink, err := txn.NewMySQLSink(ctx, changefeedID, sinkURI, cfg, errCh,
-			txn.DefaultConflictDetectorSlots)
+		txnSink, err := txn.NewMySQLSink(ctx, sinkURI, cfg, errCh, txn.DefaultConflictDetectorSlots)
 		if err != nil {
 			return nil, err
 		}
@@ -91,10 +87,10 @@ func New(
 		s.category = CategoryTxn
 	case sink.KafkaScheme, sink.KafkaSSLScheme:
 		factoryCreator := kafka.NewSaramaFactory
-		if util.GetOrZero(cfg.Sink.EnableKafkaSinkV2) {
+		if cfg.Sink.EnableKafkaSinkV2 {
 			factoryCreator = v2.NewFactory
 		}
-		mqs, err := mq.NewKafkaDMLSink(ctx, changefeedID, sinkURI, cfg, errCh,
+		mqs, err := mq.NewKafkaDMLSink(ctx, sinkURI, cfg, errCh,
 			factoryCreator, dmlproducer.NewKafkaDMLProducer)
 		if err != nil {
 			return nil, err
@@ -102,7 +98,7 @@ func New(
 		s.txnSink = mqs
 		s.category = CategoryMQ
 	case sink.S3Scheme, sink.FileScheme, sink.GCSScheme, sink.GSScheme, sink.AzblobScheme, sink.AzureScheme, sink.CloudStorageNoopScheme:
-		storageSink, err := cloudstorage.NewDMLSink(ctx, changefeedID, pdClock, sinkURI, cfg, errCh)
+		storageSink, err := cloudstorage.NewDMLSink(ctx, pdClock, sinkURI, cfg, errCh)
 		if err != nil {
 			return nil, err
 		}
@@ -112,18 +108,9 @@ func New(
 		bs := blackhole.NewDMLSink()
 		s.rowSink = bs
 		s.category = CategoryBlackhole
-	case sink.PulsarScheme, sink.PulsarSSLScheme, sink.PulsarHTTPScheme, sink.PulsarHTTPSScheme:
-		mqs, err := mq.NewPulsarDMLSink(ctx, changefeedID, sinkURI, cfg, errCh,
-			manager.NewPulsarTopicManager,
-			pulsarConfig.NewCreatorFactory, dmlproducer.NewPulsarDMLProducer)
-		if err != nil {
-			return nil, err
-		}
-		s.txnSink = mqs
-		s.category = CategoryMQ
 	default:
 		return nil,
-			cerror.ErrSinkURIInvalid.GenWithStack("the sink scheme (%s) is not supported", scheme)
+			cerror.ErrSinkURIInvalid.GenWithStack("the sink scheme (%s) is not supported", schema)
 	}
 
 	return s, nil

@@ -17,14 +17,13 @@ import (
 	"context"
 	"time"
 
-	"github.com/pingcap/tidb/pkg/util"
+	toolutils "github.com/pingcap/tidb-tools/pkg/utils"
 	"github.com/pingcap/tiflow/dm/config/security"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"go.uber.org/atomic"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
-	"google.golang.org/grpc/credentials"
 )
 
 // GRPCClient stores raw grpc connection and worker client.
@@ -44,20 +43,12 @@ func NewGRPCClientWrap(conn *grpc.ClientConn, client pb.WorkerClient) (*GRPCClie
 
 // NewGRPCClient initializes a new grpc client from worker address.
 func NewGRPCClient(addr string, securityCfg security.Security) (*GRPCClient, error) {
-	tlsConfig, err := util.NewTLSConfig(
-		util.WithCAPath(securityCfg.SSLCA),
-		util.WithCertAndKeyPath(securityCfg.SSLCert, securityCfg.SSLKey),
-		util.WithVerifyCommonName(securityCfg.CertAllowedCN),
-	)
+	tls, err := toolutils.NewTLS(securityCfg.SSLCA, securityCfg.SSLCert, securityCfg.SSLKey, addr, securityCfg.CertAllowedCN)
 	if err != nil {
 		return nil, terror.ErrMasterGRPCCreateConn.Delegate(err)
 	}
-	grpcTLS := grpc.WithInsecure()
-	if tlsConfig != nil {
-		grpcTLS = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
-	}
 
-	conn, err := grpc.Dial(addr, grpcTLS,
+	conn, err := grpc.Dial(addr, tls.ToGRPCDialOption(),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff: backoff.Config{
 				BaseDelay:  100 * time.Millisecond,
@@ -133,8 +124,6 @@ func callRPC(ctx context.Context, client pb.WorkerClient, req *Request) (*Respon
 		resp.GetValidationError, err = client.GetValidatorError(ctx, req.GetValidationError)
 	case CmdOperateValidationError:
 		resp.OperateValidationError, err = client.OperateValidatorError(ctx, req.OperateValidationError)
-	case CmdUpdateValidation:
-		resp.UpdateValidation, err = client.UpdateValidator(ctx, req.UpdateValidation)
 	default:
 		return nil, terror.ErrMasterGRPCInvalidReqType.Generate(req.Type)
 	}

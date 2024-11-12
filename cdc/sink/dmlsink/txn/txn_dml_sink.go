@@ -16,6 +16,7 @@ package txn
 import (
 	"context"
 	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/pingcap/errors"
@@ -26,7 +27,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
 	"github.com/pingcap/tiflow/pkg/causality"
 	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/sink"
+	psink "github.com/pingcap/tiflow/pkg/sink"
 	pmysql "github.com/pingcap/tiflow/pkg/sink/mysql"
 	"golang.org/x/sync/errgroup"
 )
@@ -43,9 +44,11 @@ var _ dmlsink.EventSink[*model.SingleTableTxn] = (*dmlSink)(nil)
 type dmlSink struct {
 	alive struct {
 		sync.RWMutex
-		conflictDetector *causality.ConflictDetector[*txnEvent]
+		conflictDetector *causality.ConflictDetector[*worker, *txnEvent]
 		isDead           bool
 	}
+
+	scheme string
 
 	workers []*worker
 	cancel  func()
@@ -54,8 +57,6 @@ type dmlSink struct {
 	dead chan struct{}
 
 	statistics *metrics.Statistics
-
-	scheme string
 }
 
 // GetDBConnImpl is the implementation of pmysql.Factory.
@@ -67,16 +68,15 @@ var GetDBConnImpl pmysql.Factory = pmysql.CreateMySQLDBConn
 // NewMySQLSink creates a mysql dmlSink with given parameters.
 func NewMySQLSink(
 	ctx context.Context,
-	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
 	errCh chan<- error,
 	conflictDetectorSlots uint64,
 ) (*dmlSink, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	statistics := metrics.NewStatistics(ctx, changefeedID, sink.TxnSink)
+	statistics := metrics.NewStatistics(ctx, psink.TxnSink)
 
-	backendImpls, err := mysql.NewMySQLBackends(ctx, changefeedID, sinkURI, replicaConfig, GetDBConnImpl, statistics)
+	backendImpls, err := mysql.NewMySQLBackends(ctx, sinkURI, replicaConfig, GetDBConnImpl, statistics)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -86,18 +86,15 @@ func NewMySQLSink(
 	for _, impl := range backendImpls {
 		backends = append(backends, impl)
 	}
+	sink := newSink(ctx, backends, errCh, conflictDetectorSlots)
+	sink.scheme = strings.ToLower(sinkURI.Scheme)
+	sink.statistics = statistics
+	sink.cancel = cancel
 
-	s := newSink(ctx, changefeedID, backends, errCh, conflictDetectorSlots)
-	s.statistics = statistics
-	s.cancel = cancel
-	s.scheme = sink.GetScheme(sinkURI)
-
-	return s, nil
+	return sink, nil
 }
 
-func newSink(ctx context.Context,
-	changefeedID model.ChangeFeedID,
-	backends []backend,
+func newSink(ctx context.Context, backends []backend,
 	errCh chan<- error, conflictDetectorSlots uint64,
 ) *dmlSink {
 	ctx, cancel := context.WithCancel(ctx)
@@ -107,19 +104,14 @@ func newSink(ctx context.Context,
 		dead:    make(chan struct{}),
 	}
 
-	sink.alive.conflictDetector = causality.NewConflictDetector[*txnEvent](conflictDetectorSlots, causality.TxnCacheOption{
-		Count:         len(backends),
-		Size:          1024,
-		BlockStrategy: causality.BlockStrategyWaitEmpty,
-	})
-
 	g, ctx1 := errgroup.WithContext(ctx)
 	for i, backend := range backends {
-		w := newWorker(ctx1, changefeedID, i, backend, len(backends))
-		txnCh := sink.alive.conflictDetector.GetOutChByCacheID(int64(i))
-		g.Go(func() error { return w.runLoop(txnCh) })
+		w := newWorker(ctx1, i, backend, len(backends))
+		g.Go(func() error { return w.runLoop() })
 		sink.workers = append(sink.workers, w)
 	}
+
+	sink.alive.conflictDetector = causality.NewConflictDetector[*worker, *txnEvent](sink.workers, conflictDetectorSlots)
 
 	sink.wg.Add(1)
 	go func() {
@@ -163,6 +155,11 @@ func (s *dmlSink) WriteEvents(txnEvents ...*dmlsink.TxnCallbackableEvent) error 
 	return nil
 }
 
+// Scheme returns the sink scheme.
+func (s *dmlSink) Scheme() string {
+	return s.scheme
+}
+
 // Close closes the dmlSink. It won't wait for all pending items backend handled.
 func (s *dmlSink) Close() {
 	if s.cancel != nil {
@@ -170,6 +167,9 @@ func (s *dmlSink) Close() {
 	}
 	s.wg.Wait()
 
+	for _, w := range s.workers {
+		w.close()
+	}
 	if s.statistics != nil {
 		s.statistics.Close()
 	}
@@ -178,8 +178,4 @@ func (s *dmlSink) Close() {
 // Dead checks whether it's dead or not.
 func (s *dmlSink) Dead() <-chan struct{} {
 	return s.dead
-}
-
-func (s *dmlSink) SchemeOption() (string, bool) {
-	return s.scheme, false
 }

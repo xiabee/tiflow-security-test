@@ -29,11 +29,11 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/dumpling/export"
-	"github.com/pingcap/tidb/pkg/parser"
-	tmysql "github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
-	"github.com/pingcap/tidb/pkg/util/filter"
-	regexprrouter "github.com/pingcap/tidb/pkg/util/regexpr-router"
+	"github.com/pingcap/tidb/parser"
+	tmysql "github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/util/filter"
+	"github.com/pingcap/tidb/util/regexpr-router"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -109,10 +109,7 @@ func GetSlaveServerID(ctx *tcontext.Context, db *BaseDB) (map[uint32]struct{}, e
 	if err != nil {
 		return nil, terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)
 	}
-	defer func() {
-		_ = rows.Close()
-		_ = rows.Err()
-	}()
+	defer rows.Close()
 
 	/*
 		in MySQL:
@@ -469,6 +466,7 @@ func FetchAllDoTables(ctx context.Context, db *BaseDB, bw *filter.Filter) (map[s
 	schemaToTables := make(map[string][]string)
 	for _, ftSchema := range ftSchemas {
 		schema := ftSchema.Schema
+		// use `GetTables` from tidb-tools, no view included
 		tables, err := dbutil.GetTables(ctx, db.DB, schema)
 		if err != nil {
 			return nil, terror.DBErrorAdapt(err, db.Scope, terror.ErrDBDriverError)

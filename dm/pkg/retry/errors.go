@@ -19,7 +19,7 @@ import (
 	gmysql "github.com/go-mysql-org/go-mysql/mysql"
 	dmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
-	tmysql "github.com/pingcap/tidb/pkg/parser/mysql"
+	tmysql "github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 )
 
@@ -69,6 +69,7 @@ var (
 		int32(terror.ErrDumpUnitRuntime.Code()):             {},
 		int32(terror.ErrSyncerUnitDMLColumnNotMatch.Code()): {},
 		int32(terror.ErrSyncerCancelledDDL.Code()):          {},
+		int32(terror.ErrLoadLightningRuntime.Code()):        {},
 		int32(terror.ErrLoadLightningHasDup.Code()):         {},
 		int32(terror.ErrLoadLightningChecksum.Code()):       {},
 	}

@@ -11,6 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build intest
+// +build intest
+
 package entry
 
 import (
@@ -21,18 +24,18 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	ticonfig "github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/domain"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
-	timeta "github.com/pingcap/tidb/pkg/meta"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/store/mockstore"
-	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/types"
+	ticonfig "github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/domain"
+	tidbkv "github.com/pingcap/tidb/kv"
+	timeta "github.com/pingcap/tidb/meta"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/store/mockstore"
+	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tiflow/cdc/entry/schema"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -546,7 +549,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	jobs = append(jobs, job)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	storage, err := NewSchemaStorage(nil, 0, false, model.DefaultChangeFeedID("dummy"), util.RoleTester, f)
+	storage, err := NewSchemaStorage(nil, 0, false, dummyChangeFeedID, util.RoleTester, f)
 	require.Nil(t, err)
 	for _, job := range jobs {
 		err := storage.HandleDDLJob(job)
@@ -578,7 +581,7 @@ func TestMultiVersionStorage(t *testing.T) {
 	err = storage.HandleDDLJob(job)
 	require.Nil(t, err)
 
-	require.Equal(t, storage.(*schemaStorage).resolvedTs, uint64(140))
+	require.Equal(t, storage.(*schemaStorageImpl).resolvedTs, uint64(140))
 	snap, err := storage.GetSnapshot(ctx, 100)
 	require.Nil(t, err)
 	_, exist := snap.SchemaByID(11)
@@ -688,10 +691,11 @@ func TestCreateSnapFromMeta(t *testing.T) {
 	tk.MustExec("create table test2.simple_test5 (a bigint)")
 	ver, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
-	meta := kv.GetSnapshotMeta(store, ver.Ver)
+	meta, err := kv.GetSnapshotMeta(store, ver.Ver)
+	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ver.Ver, false, f)
+	snap, err := schema.NewSnapshotFromMeta(meta, ver.Ver, false, f)
 	require.Nil(t, err)
 	_, ok := snap.TableByName("test", "simple_test1")
 	require.True(t, ok)
@@ -725,15 +729,17 @@ func TestExplicitTables(t *testing.T) {
 	tk.MustExec("create table test2.simple_test5 (a varchar(20))")
 	ver2, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
-	meta1 := kv.GetSnapshotMeta(store, ver1.Ver)
+	meta1, err := kv.GetSnapshotMeta(store, ver1.Ver)
+	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap1, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta1, ver1.Ver, true /* forceReplicate */, f)
+	snap1, err := schema.NewSnapshotFromMeta(meta1, ver1.Ver, true /* forceReplicate */, f)
 	require.Nil(t, err)
-	meta2 := kv.GetSnapshotMeta(store, ver2.Ver)
-	snap2, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta2, ver2.Ver, false /* forceReplicate */, f)
+	meta2, err := kv.GetSnapshotMeta(store, ver2.Ver)
 	require.Nil(t, err)
-	snap3, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta2, ver2.Ver, true /* forceReplicate */, f)
+	snap2, err := schema.NewSnapshotFromMeta(meta2, ver2.Ver, false /* forceReplicate */, f)
+	require.Nil(t, err)
+	snap3, err := schema.NewSnapshotFromMeta(meta2, ver2.Ver, true /* forceReplicate */, f)
 	require.Nil(t, err)
 
 	// we don't need to count system tables since TiCDC
@@ -877,17 +883,18 @@ func TestSchemaStorage(t *testing.T) {
 		jobs, err := getAllHistoryDDLJob(store, f)
 		require.Nil(t, err)
 
-		schemaStorage, err := NewSchemaStorage(nil, 0, false, model.DefaultChangeFeedID("dummy"), util.RoleTester, f)
-		require.NoError(t, err)
+		schemaStorage, err := NewSchemaStorage(nil, 0, false, dummyChangeFeedID, util.RoleTester, f)
+		require.Nil(t, err)
 		for _, job := range jobs {
 			err := schemaStorage.HandleDDLJob(job)
-			require.NoError(t, err)
+			require.Nil(t, err)
 		}
 
 		for _, job := range jobs {
 			ts := job.BinlogInfo.FinishedTS
-			meta := kv.GetSnapshotMeta(store, ts)
-			snapFromMeta, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ts, false, f)
+			meta, err := kv.GetSnapshotMeta(store, ts)
+			require.Nil(t, err)
+			snapFromMeta, err := schema.NewSnapshotFromMeta(meta, ts, false, f)
 			require.Nil(t, err)
 			snapFromSchemaStore, err := schemaStorage.GetSnapshot(ctx, ts)
 			require.Nil(t, err)
@@ -966,10 +973,11 @@ func TestHandleKey(t *testing.T) {
 	tk.MustExec("create table test.simple_test3 (id bigint, age int)")
 	ver, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
-	meta := kv.GetSnapshotMeta(store, ver.Ver)
+	meta, err := kv.GetSnapshotMeta(store, ver.Ver)
+	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ver.Ver, false, f)
+	snap, err := schema.NewSnapshotFromMeta(meta, ver.Ver, false, f)
 	require.Nil(t, err)
 	tb1, ok := snap.TableByName("test", "simple_test1")
 	require.True(t, ok)
@@ -1000,27 +1008,4 @@ func TestHandleKey(t *testing.T) {
 	tb3, ok := snap.TableByName("test", "simple_test3")
 	require.True(t, ok)
 	require.Equal(t, int64(-2), tb3.HandleIndexID)
-}
-
-func TestGetPrimaryKey(t *testing.T) {
-	helper := NewSchemaTestHelper(t)
-	defer helper.Close()
-	// PKISHandle is true, primary key is also the handle, since it's integer type.
-	sql := `create table test.t1(a int primary key, b int)`
-	event := helper.DDL2Event(sql)
-
-	names := event.TableInfo.GetPrimaryKeyColumnNames()
-	require.Equal(t, names, []string{"a"})
-
-	// IsCommonHandle is true, primary key is not the handle, since it contains multiple fields.
-	sql = `create table test.t2(a int, b int, c int, primary key(a, b))`
-	event = helper.DDL2Event(sql)
-	names = event.TableInfo.GetPrimaryKeyColumnNames()
-	require.Equal(t, names, []string{"a", "b"})
-
-	// IsCommonHandle is true, primary key is not the handle, since it's not integer type.
-	sql = `create table test.t3(a varchar(10) primary key, b int)`
-	event = helper.DDL2Event(sql)
-	names = event.TableInfo.GetPrimaryKeyColumnNames()
-	require.Equal(t, names, []string{"a"})
 }

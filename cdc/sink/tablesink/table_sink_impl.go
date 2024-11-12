@@ -138,7 +138,7 @@ func (e *EventTableSink[E, P]) UpdateResolvedTs(resolvedTs model.ResolvedTs) err
 
 	resolvedCallbackableEvents := make([]*dmlsink.CallbackableEvent[E], 0, len(resolvedEvents))
 	for _, ev := range resolvedEvents {
-		if err := ev.TrySplitAndSortUpdateEvent(e.backendSink.SchemeOption()); err != nil {
+		if err := ev.TrySplitAndSortUpdateEvent(e.backendSink.Scheme()); err != nil {
 			return SinkInternalError{err}
 		}
 		// We have to record the event ID for the callback.
@@ -159,10 +159,12 @@ func (e *EventTableSink[E, P]) UpdateResolvedTs(resolvedTs model.ResolvedTs) err
 						e.lastSyncedTs.lastSyncedTs = evCommitTs
 					}
 				}
-				pdTime := e.pdClock.CurrentTime()
-				currentTs := oracle.GetPhysical(pdTime)
-				flushLag := float64(currentTs-phyCommitTs) / 1e3
-				e.metricsTableSinkFlushLagDuration.Observe(flushLag)
+				pdTime, err := e.pdClock.CurrentTime()
+				if err != nil {
+					currentTs := oracle.GetPhysical(pdTime)
+					flushLag := float64(currentTs-phyCommitTs) / 1e3
+					e.metricsTableSinkFlushLagDuration.Observe(flushLag)
+				}
 				postEventFlushFunc()
 			},
 			SinkState: &e.state,

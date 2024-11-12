@@ -19,7 +19,7 @@ import (
 	"net/url"
 	"testing"
 
-	mm "github.com/pingcap/tidb/pkg/parser/model"
+	mm "github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/ddlsink/mq/ddlproducer"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -30,7 +30,6 @@ import (
 func TestNewKafkaDDLSinkFailed(t *testing.T) {
 	t.Parallel()
 
-	changefeedID := model.DefaultChangeFeedID("test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -45,7 +44,7 @@ func TestNewKafkaDDLSinkFailed(t *testing.T) {
 	require.NoError(t, replicaConfig.ValidateAndAdjust(sinkURI))
 
 	ctx = context.WithValue(ctx, "testing.T", t)
-	s, err := NewKafkaDDLSink(ctx, changefeedID, sinkURI, replicaConfig,
+	s, err := NewKafkaDDLSink(ctx, sinkURI, replicaConfig,
 		kafka.NewMockFactory, ddlproducer.NewMockDDLProducer)
 	require.ErrorContains(t, err, "Avro protocol requires parameter \"schema-registry\"",
 		"should report error when protocol is avro but schema-registry is not set")
@@ -55,7 +54,6 @@ func TestNewKafkaDDLSinkFailed(t *testing.T) {
 func TestWriteDDLEventToAllPartitions(t *testing.T) {
 	t.Parallel()
 
-	changefeedID := model.DefaultChangeFeedID("test")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -71,7 +69,7 @@ func TestWriteDDLEventToAllPartitions(t *testing.T) {
 	require.NoError(t, replicaConfig.ValidateAndAdjust(sinkURI))
 
 	ctx = context.WithValue(ctx, "testing.T", t)
-	s, err := NewKafkaDDLSink(ctx, changefeedID, sinkURI, replicaConfig,
+	s, err := NewKafkaDDLSink(ctx, sinkURI, replicaConfig,
 		kafka.NewMockFactory,
 		ddlproducer.NewMockDDLProducer)
 	require.NoError(t, err)
@@ -112,7 +110,7 @@ func TestWriteDDLEventToZeroPartition(t *testing.T) {
 	require.NoError(t, replicaConfig.ValidateAndAdjust(sinkURI))
 
 	ctx = context.WithValue(ctx, "testing.T", t)
-	s, err := NewKafkaDDLSink(ctx, model.DefaultChangeFeedID("test"),
+	s, err := NewKafkaDDLSink(ctx,
 		sinkURI, replicaConfig,
 		kafka.NewMockFactory,
 		ddlproducer.NewMockDDLProducer)
@@ -157,7 +155,7 @@ func TestWriteCheckpointTsToDefaultTopic(t *testing.T) {
 	require.Nil(t, replicaConfig.ValidateAndAdjust(sinkURI))
 
 	ctx = context.WithValue(ctx, "testing.T", t)
-	s, err := NewKafkaDDLSink(ctx, model.DefaultChangeFeedID("test"),
+	s, err := NewKafkaDDLSink(ctx,
 		sinkURI, replicaConfig,
 		kafka.NewMockFactory,
 		ddlproducer.NewMockDDLProducer)
@@ -200,7 +198,7 @@ func TestWriteCheckpointTsToTableTopics(t *testing.T) {
 	}
 
 	ctx = context.WithValue(ctx, "testing.T", t)
-	s, err := NewKafkaDDLSink(ctx, model.DefaultChangeFeedID("test"),
+	s, err := NewKafkaDDLSink(ctx,
 		sinkURI, replicaConfig,
 		kafka.NewMockFactory,
 		ddlproducer.NewMockDDLProducer)
@@ -256,13 +254,10 @@ func TestWriteCheckpointTsWhenCanalJsonTiDBExtensionIsDisable(t *testing.T) {
 	sinkURI, err := url.Parse(uri)
 	require.NoError(t, err)
 	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Sink.KafkaConfig = &config.KafkaConfig{
-		LargeMessageHandle: config.NewDefaultLargeMessageHandleConfig(),
-	}
 	require.NoError(t, replicaConfig.ValidateAndAdjust(sinkURI))
 
 	ctx = context.WithValue(ctx, "testing.T", t)
-	s, err := NewKafkaDDLSink(ctx, model.DefaultChangeFeedID("test"),
+	s, err := NewKafkaDDLSink(ctx,
 		sinkURI, replicaConfig,
 		kafka.NewMockFactory,
 		ddlproducer.NewMockDDLProducer)
@@ -276,18 +271,4 @@ func TestWriteCheckpointTsWhenCanalJsonTiDBExtensionIsDisable(t *testing.T) {
 
 	require.Len(t, s.producer.(*ddlproducer.MockDDLProducer).GetAllEvents(),
 		0, "No topic and partition should be broadcast")
-}
-
-func TestGetDLLDispatchRuleByProtocol(t *testing.T) {
-	t.Parallel()
-
-	require.Equal(t, PartitionZero, getDDLDispatchRule(config.ProtocolCanal))
-	require.Equal(t, PartitionZero, getDDLDispatchRule(config.ProtocolCanalJSON))
-
-	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolOpen))
-	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolDefault))
-	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolAvro))
-	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolMaxwell))
-	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolCraft))
-	require.Equal(t, PartitionAll, getDDLDispatchRule(config.ProtocolSimple))
 }

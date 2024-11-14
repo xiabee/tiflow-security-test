@@ -128,6 +128,9 @@ type SinkManager struct {
 	// wg is used to wait for all workers to exit.
 	wg sync.WaitGroup
 
+	// isMysqlBackend indicates whether the backend is MySQL compatible.
+	isMysqlBackend bool
+
 	// Metric for table sink.
 	metricsTableSinkTotalRows prometheus.Counter
 
@@ -142,6 +145,7 @@ func New(
 	schemaStorage entry.SchemaStorage,
 	redoDMLMgr redo.DMLManager,
 	sourceManager *sourcemanager.SourceManager,
+	isMysqlBackend bool,
 ) *SinkManager {
 	m := &SinkManager{
 		changefeedID:   changefeedID,
@@ -155,7 +159,7 @@ func New(
 		sinkTaskChan:        make(chan *sinkTask),
 		sinkWorkerAvailable: make(chan struct{}, 1),
 		sinkRetry:           retry.NewInfiniteErrorRetry(),
-
+		isMysqlBackend:      isMysqlBackend,
 		metricsTableSinkTotalRows: tablesinkmetrics.TotalRowsCountCounter.
 			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
 
@@ -297,6 +301,16 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 				zap.String("namespace", m.changefeedID.Namespace),
 				zap.String("changefeed", m.changefeedID.ID),
 				zap.Duration("cost", time.Since(start)))
+
+			// For duplicate entry error, we fast fail to restart changefeed.
+			if cerror.IsDupEntryError(err) {
+				return errors.Trace(err)
+			}
+
+			if m.isMysqlBackend {
+				// For MySQL backend, we should restart sink. Let owner to handle the error.
+				return errors.Trace(err)
+			}
 		}
 
 		// If the error is retryable, we should retry to re-establish the internal resources.
@@ -317,12 +331,6 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 			return errors.Trace(err)
 		}
 	}
-}
-
-func (m *SinkManager) needsStuckCheck() bool {
-	m.sinkFactory.Lock()
-	defer m.sinkFactory.Unlock()
-	return m.sinkFactory.f != nil && m.sinkFactory.f.Category() == factory.CategoryMQ
 }
 
 func (m *SinkManager) initSinkFactory() (chan error, uint64) {
@@ -390,19 +398,6 @@ func (m *SinkManager) clearSinkFactory() {
 		}
 		m.sinkFactory.errors = nil
 	}
-}
-
-func (m *SinkManager) putSinkFactoryError(err error, version uint64) (success bool) {
-	m.sinkFactory.Lock()
-	defer m.sinkFactory.Unlock()
-	if version == m.sinkFactory.version {
-		select {
-		case m.sinkFactory.errors <- err:
-		default:
-		}
-		return true
-	}
-	return false
 }
 
 func (m *SinkManager) startSinkWorkers(ctx context.Context, eg *errgroup.Group, splitTxn bool) {
@@ -831,7 +826,7 @@ func (m *SinkManager) UpdateBarrierTs(globalBarrierTs model.Ts, tableBarrier map
 }
 
 // AddTable adds a table(TableSink) to the sink manager.
-func (m *SinkManager) AddTable(span tablepb.Span, startTs model.Ts, targetTs model.Ts) {
+func (m *SinkManager) AddTable(span tablepb.Span, startTs model.Ts, targetTs model.Ts) *tableSinkWrapper {
 	sinkWrapper := newTableSinkWrapper(
 		m.changefeedID,
 		span,
@@ -859,7 +854,6 @@ func (m *SinkManager) AddTable(span tablepb.Span, startTs model.Ts, targetTs mod
 			zap.String("namespace", m.changefeedID.Namespace),
 			zap.String("changefeed", m.changefeedID.ID),
 			zap.Stringer("span", &span))
-		return
 	}
 	m.sinkMemQuota.AddTable(span)
 	m.redoMemQuota.AddTable(span)
@@ -869,6 +863,7 @@ func (m *SinkManager) AddTable(span tablepb.Span, startTs model.Ts, targetTs mod
 		zap.Stringer("span", &span),
 		zap.Uint64("startTs", startTs),
 		zap.Uint64("version", sinkWrapper.version))
+	return sinkWrapper
 }
 
 // StartTable sets the table(TableSink) state to replicating.
@@ -1015,25 +1010,6 @@ func (m *SinkManager) GetTableStats(span tablepb.Span) TableStats {
 	lastSyncedTs := tableSink.getLastSyncedTs()
 	m.sinkMemQuota.Release(span, checkpointTs)
 	m.redoMemQuota.Release(span, checkpointTs)
-
-	advanceTimeoutInSec := util.GetOrZero(m.changefeedInfo.Config.Sink.AdvanceTimeoutInSec)
-	if advanceTimeoutInSec <= 0 {
-		advanceTimeoutInSec = config.DefaultAdvanceTimeoutInSec
-	}
-	stuckCheck := time.Duration(advanceTimeoutInSec) * time.Second
-
-	if m.needsStuckCheck() {
-		isStuck, sinkVersion := tableSink.sinkMaybeStuck(stuckCheck)
-		if isStuck && m.putSinkFactoryError(errors.New("table sink stuck"), sinkVersion) {
-			log.Warn("Table checkpoint is stuck too long, will restart the sink backend",
-				zap.String("namespace", m.changefeedID.Namespace),
-				zap.String("changefeed", m.changefeedID.ID),
-				zap.Stringer("span", &span),
-				zap.Any("checkpointTs", checkpointTs),
-				zap.Float64("stuckCheck", stuckCheck.Seconds()),
-				zap.Uint64("factoryVersion", sinkVersion))
-		}
-	}
 
 	var resolvedTs model.Ts
 	// If redo log is enabled, we have to use redo log's resolved ts to calculate processor's min resolved ts.

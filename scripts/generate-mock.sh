@@ -25,6 +25,7 @@ fi
 
 # CDC mock
 "$MOCKGEN" -source cdc/owner/owner.go -destination cdc/owner/mock/owner_mock.go
+"$MOCKGEN" -source cdc/controller/controller.go -destination cdc/controller/mock/controller_mock.go
 "$MOCKGEN" -source cdc/owner/status_provider.go -destination cdc/owner/mock/status_provider_mock.go
 "$MOCKGEN" -source cdc/api/v2/api_helpers.go -destination cdc/api/v2/api_helpers_mock.go -package v2
 "$MOCKGEN" -source pkg/etcd/etcd.go -destination pkg/etcd/mock/etcd_client_mock.go
@@ -41,6 +42,7 @@ fi
 "$MOCKGEN" -source pkg/sink/kafka/v2/client.go -destination pkg/sink/kafka/v2/mock/client_mock.go
 "$MOCKGEN" -source pkg/sink/kafka/v2/gssapi.go -destination pkg/sink/kafka/v2/mock/gssapi_mock.go
 "$MOCKGEN" -source pkg/sink/kafka/v2/writer.go -destination pkg/sink/kafka/v2/mock/writer_mock.go
+"$MOCKGEN" -source pkg/sink/codec/simple/marshaller.go -destination pkg/sink/codec/simple/mock/marshaller.go
 
 # DM mock
 "$MOCKGEN" -package pbmock -destination dm/pbmock/dmmaster.go github.com/pingcap/tiflow/dm/pb MasterClient,MasterServer
@@ -54,10 +56,12 @@ fi
 "$MOCKGEN" -package mock -destination engine/enginepb/mock/resource_mock.go github.com/pingcap/tiflow/engine/enginepb ResourceManagerClient
 "$MOCKGEN" -package mock -destination engine/pkg/httputil/mock/jobhttpclient_mock.go github.com/pingcap/tiflow/engine/pkg/httputil JobHTTPClient
 "$MOCKGEN" -package mock -destination engine/servermaster/jobop/mock/joboperator_mock.go github.com/pingcap/tiflow/engine/servermaster/jobop JobOperator
-"$MOCKGEN" -package mock -destination engine/pkg/election/mock/storage_mock.go github.com/pingcap/tiflow/engine/pkg/election Storage
-"$MOCKGEN" -package mock -destination engine/pkg/election/mock/elector_mock.go github.com/pingcap/tiflow/engine/pkg/election Elector
 "$MOCKGEN" -package mock -destination engine/pkg/orm/mock/client_mock.go github.com/pingcap/tiflow/engine/pkg/orm Client
 "$MOCKGEN" -package mock -destination engine/servermaster/jobop/mock/backoffmanager_mock.go github.com/pingcap/tiflow/engine/servermaster/jobop BackoffManager
 "$MOCKGEN" -package mock -source engine/pkg/rpcutil/checker.go -destination engine/pkg/rpcutil/mock/checker_mock.go
 "$MOCKGEN" -package client -self_package github.com/pingcap/tiflow/engine/pkg/client \
 	-destination engine/pkg/client/client_mock.go github.com/pingcap/tiflow/engine/pkg/client ExecutorClient,ServerMasterClient
+
+# PKG mock
+"$MOCKGEN" -package mock -destination pkg/election/mock/storage_mock.go github.com/pingcap/tiflow/pkg/election Storage
+"$MOCKGEN" -package mock -destination pkg/election/mock/elector_mock.go github.com/pingcap/tiflow/pkg/election Elector

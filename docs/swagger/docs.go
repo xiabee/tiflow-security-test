@@ -552,7 +552,7 @@ var doc = `{
         },
         "/api/v1/owner/resign": {
             "post": {
-                "description": "notify the current owner to resign",
+                "description": "notify the current controller to resign",
                 "consumes": [
                     "application/json"
                 ],
@@ -562,7 +562,7 @@ var doc = `{
                 "tags": [
                     "owner"
                 ],
-                "summary": "notify the owner to resign",
+                "summary": "notify the ticdc cluster controller to resign",
                 "responses": {
                     "202": {
                         "description": ""
@@ -762,6 +762,12 @@ var doc = `{
                         "description": "state",
                         "name": "state",
                         "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "default",
+                        "name": "namespace",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -849,6 +855,12 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "default",
+                        "name": "namespace",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -892,6 +904,12 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "default",
+                        "name": "namespace",
+                        "in": "query"
                     },
                     {
                         "description": "changefeed config",
@@ -944,6 +962,12 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "default",
+                        "name": "namespace",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -989,6 +1013,12 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "default",
+                        "name": "namespace",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -1034,6 +1064,12 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "default",
+                        "name": "namespace",
+                        "in": "query"
                     },
                     {
                         "description": "resume config",
@@ -1194,7 +1230,7 @@ var doc = `{
         },
         "/api/v2/owner/resign": {
             "post": {
-                "description": "Notify the current owner to resign",
+                "description": "Notify the current controller to resign",
                 "consumes": [
                     "application/json"
                 ],
@@ -1205,7 +1241,7 @@ var doc = `{
                     "owner",
                     "v2"
                 ],
-                "summary": "Notify the owner to resign",
+                "summary": "Notify the controller to resign",
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -1282,6 +1318,12 @@ var doc = `{
                         "name": "changefeed_id",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "default",
+                        "name": "namespace",
+                        "in": "query"
                     },
                     {
                         "type": "string",
@@ -1421,6 +1463,9 @@ var doc = `{
                 "enable-tidb-extension": {
                     "type": "boolean"
                 },
+                "encoding-format": {
+                    "type": "string"
+                },
                 "max-batch-size": {
                     "type": "integer"
                 }
@@ -1446,8 +1491,19 @@ var doc = `{
         "config.DispatchRule": {
             "type": "object",
             "properties": {
+                "columns": {
+                    "description": "Columns are set when using columns dispatcher.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "dispatcher": {
                     "description": "Deprecated, please use PartitionRule.",
+                    "type": "string"
+                },
+                "index": {
+                    "description": "IndexName is set when using index-value dispatcher with specified index.",
                     "type": "string"
                 },
                 "matcher": {
@@ -1461,6 +1517,30 @@ var doc = `{
                     "type": "string"
                 },
                 "topic": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.GlueSchemaRegistryConfig": {
+            "type": "object",
+            "properties": {
+                "access-key": {
+                    "description": "AccessKey of the schema registry",
+                    "type": "string"
+                },
+                "region": {
+                    "description": "Region of the schema registry",
+                    "type": "string"
+                },
+                "registry-name": {
+                    "description": "Name of the schema registry",
+                    "type": "string"
+                },
+                "secret-access-key": {
+                    "description": "SecretAccessKey of the schema registry",
+                    "type": "string"
+                },
+                "token": {
                     "type": "string"
                 }
             }
@@ -1488,6 +1568,9 @@ var doc = `{
                 },
                 "enable-tls": {
                     "type": "boolean"
+                },
+                "glue-schema-registry-config": {
+                    "$ref": "#/definitions/config.GlueSchemaRegistryConfig"
                 },
                 "insecure-skip-verify": {
                     "type": "boolean"
@@ -1585,6 +1668,12 @@ var doc = `{
         "config.LargeMessageHandleConfig": {
             "type": "object",
             "properties": {
+                "claim-check-storage-uri": {
+                    "type": "string"
+                },
+                "large-message-handle-compression": {
+                    "type": "string"
+                },
                 "large-message-handle-option": {
                     "type": "string"
                 }
@@ -1640,6 +1729,117 @@ var doc = `{
                 }
             }
         },
+        "config.OAuth2": {
+            "type": "object",
+            "properties": {
+                "oauth2-audience": {
+                    "description": "OAuth2Audience  the URL of the resource server.",
+                    "type": "string"
+                },
+                "oauth2-client-id": {
+                    "description": "OAuth2ClientID  the client ID of the application.",
+                    "type": "string"
+                },
+                "oauth2-issuer-url": {
+                    "description": "OAuth2IssuerURL  the URL of the authorization server.",
+                    "type": "string"
+                },
+                "oauth2-private-key": {
+                    "description": "OAuth2PrivateKey the private key used to sign the server.",
+                    "type": "string"
+                },
+                "oauth2-scope": {
+                    "description": "OAuth2Scope scope",
+                    "type": "string"
+                }
+            }
+        },
+        "config.OpenProtocolConfig": {
+            "type": "object",
+            "properties": {
+                "output-old-value": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "config.PulsarConfig": {
+            "type": "object",
+            "properties": {
+                "auth-tls-certificate-path": {
+                    "description": "AuthTLSCertificatePath  create new pulsar authentication provider with specified TLS certificate and private key",
+                    "type": "string"
+                },
+                "auth-tls-private-key-path": {
+                    "description": "AuthTLSPrivateKeyPath private key",
+                    "type": "string"
+                },
+                "authentication-token": {
+                    "description": "AuthenticationToken the token for the Pulsar server",
+                    "type": "string"
+                },
+                "basic-password": {
+                    "description": "BasicPassword with account",
+                    "type": "string"
+                },
+                "basic-user-name": {
+                    "description": "BasicUserName Account name for pulsar basic authentication (the second priority authentication method)",
+                    "type": "string"
+                },
+                "batching-max-messages": {
+                    "description": "BatchingMaxMessages specifies the maximum number of messages permitted in a batch. (default: 1000)",
+                    "type": "integer"
+                },
+                "batching-max-publish-delay": {
+                    "description": "BatchingMaxPublishDelay specifies the time period within which the messages sent will be batched (default: 10ms)\nif batch messages are enabled. If set to a non zero value, messages will be queued until this time\ninterval or until",
+                    "type": "integer"
+                },
+                "compression-type": {
+                    "description": "pulsar client compression",
+                    "type": "string"
+                },
+                "connection-timeout": {
+                    "description": "ConnectionTimeout Timeout for the establishment of a TCP connection (default: 5 seconds)",
+                    "type": "integer"
+                },
+                "oauth2": {
+                    "description": "Oauth2 include  oauth2-issuer-url oauth2-audience oauth2-private-key oauth2-client-id\nand 'type' always use 'client_credentials'",
+                    "$ref": "#/definitions/config.OAuth2"
+                },
+                "operation-timeout": {
+                    "description": "Set the operation timeout (default: 30 seconds)\nProducer-create, subscribe and unsubscribe operations will be retried until this interval, after which the\noperation will be marked as failed",
+                    "type": "integer"
+                },
+                "output-raw-change-event": {
+                    "description": "OutputRawChangeEvent controls whether to split the update pk/uk events.",
+                    "type": "boolean"
+                },
+                "pulsar-producer-cache-size": {
+                    "description": "PulsarProducerCacheSize is the size of the cache of pulsar producers",
+                    "type": "integer"
+                },
+                "pulsar-version": {
+                    "description": "PulsarVersion print the version of pulsar",
+                    "type": "string"
+                },
+                "send-timeout": {
+                    "description": "SendTimeout specifies the timeout for a message that has not been acknowledged by the server since sent.\nSend and SendAsync returns an error after timeout.\ndefault: 30s",
+                    "type": "integer"
+                },
+                "tls-certificate-file": {
+                    "type": "string"
+                },
+                "tls-key-file-path": {
+                    "type": "string"
+                },
+                "tls-trust-certs-file-path": {
+                    "type": "string"
+                },
+                "token-from-file": {
+                    "description": "TokenFromFile Authentication from the file token,\nthe path name of the file (the third priority authentication method)",
+                    "type": "string"
+                }
+            }
+        },
         "config.SinkConfig": {
             "type": "object",
             "properties": {
@@ -1656,33 +1856,39 @@ var doc = `{
                         "$ref": "#/definitions/config.ColumnSelector"
                     }
                 },
-                "content-compatible": {
-                    "description": "ContentCompatible is only available when the downstream is MQ.",
-                    "type": "boolean"
-                },
                 "csv": {
+                    "description": "CSVConfig is only available when the downstream is Storage.",
                     "$ref": "#/definitions/config.CSVConfig"
                 },
                 "date-separator": {
+                    "description": "DateSeparator is only available when the downstream is Storage.",
                     "type": "string"
                 },
+                "delete-only-output-handle-key-columns": {
+                    "description": "DeleteOnlyOutputHandleKeyColumns is only available when the downstream is MQ.",
+                    "type": "boolean"
+                },
                 "dispatchers": {
+                    "description": "DispatchRules is only available when the downstream is MQ.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/config.DispatchRule"
                     }
                 },
                 "enable-kafka-sink-v2": {
-                    "description": "EnableKafkaSinkV2 enabled then the kafka-go sink will be used.",
+                    "description": "EnableKafkaSinkV2 enabled then the kafka-go sink will be used.\nIt is only available when the downstream is MQ.",
                     "type": "boolean"
                 },
                 "enable-partition-separator": {
+                    "description": "EnablePartitionSeparator is only available when the downstream is Storage.",
                     "type": "boolean"
                 },
                 "encoder-concurrency": {
+                    "description": "EncoderConcurrency is only available when the downstream is MQ.",
                     "type": "integer"
                 },
                 "file-index-digit": {
+                    "description": "FileIndexWidth is only available when the downstream is Storage",
                     "type": "integer"
                 },
                 "kafka-config": {
@@ -1692,18 +1898,42 @@ var doc = `{
                     "$ref": "#/definitions/config.MySQLConfig"
                 },
                 "only-output-updated-columns": {
+                    "description": "OnlyOutputUpdatedColumns is only available when the downstream is MQ.",
                     "type": "boolean"
                 },
+                "open": {
+                    "description": "OpenProtocol related configurations",
+                    "$ref": "#/definitions/config.OpenProtocolConfig"
+                },
                 "protocol": {
+                    "description": "Protocol is NOT available when the downstream is DB.",
                     "type": "string"
                 },
+                "pulsar-config": {
+                    "$ref": "#/definitions/config.PulsarConfig"
+                },
                 "safe-mode": {
+                    "description": "SafeMode is only available when the downstream is DB.",
                     "type": "boolean"
                 },
                 "schema-registry": {
+                    "description": "SchemaRegistry is only available when the downstream is MQ using avro protocol.",
                     "type": "string"
                 },
+                "send-bootstrap-in-msg-count": {
+                    "description": "SendBootstrapInMsgCount means bootstrap messages are being sent every SendBootstrapInMsgCount row change messages.",
+                    "type": "integer"
+                },
+                "send-bootstrap-interval-in-sec": {
+                    "description": "Simple Protocol only config, use to control the behavior of sending bootstrap message.\nNote: When one of the following conditions is set to negative value,\nbootstrap sending function will be disabled.\nSendBootstrapIntervalInSec is the interval in seconds to send bootstrap message.",
+                    "type": "integer"
+                },
+                "send-bootstrap-to-all-partition": {
+                    "description": "SendBootstrapToAllPartition determines whether to send bootstrap message to all partitions.\nIf set to false, bootstrap message will only be sent to the first partition of each topic.\nDefault value is true.",
+                    "type": "boolean"
+                },
                 "terminator": {
+                    "description": "Terminator is NOT available when the downstream is DB.",
                     "type": "string"
                 },
                 "transaction-atomicity": {
@@ -2223,6 +2453,9 @@ var doc = `{
                 "enable_tidb_extension": {
                     "type": "boolean"
                 },
+                "encoding_format": {
+                    "type": "string"
+                },
                 "max_batch_size": {
                     "type": "integer"
                 }
@@ -2297,6 +2530,15 @@ var doc = `{
         "v2.DispatchRule": {
             "type": "object",
             "properties": {
+                "columns": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "index": {
+                    "type": "string"
+                },
                 "matcher": {
                     "type": "array",
                     "items": {
@@ -2402,6 +2644,30 @@ var doc = `{
                 }
             }
         },
+        "v2.GlueSchemaRegistryConfig": {
+            "type": "object",
+            "properties": {
+                "access_key": {
+                    "description": "AccessKey of the schema registry",
+                    "type": "string"
+                },
+                "region": {
+                    "description": "Region of the schema registry",
+                    "type": "string"
+                },
+                "registry_name": {
+                    "description": "Name of the schema registry",
+                    "type": "string"
+                },
+                "secret_access_key": {
+                    "description": "SecretAccessKey of the schema registry",
+                    "type": "string"
+                },
+                "token": {
+                    "type": "string"
+                }
+            }
+        },
         "v2.IntegrityConfig": {
             "type": "object",
             "properties": {
@@ -2439,6 +2705,9 @@ var doc = `{
                 },
                 "enable_tls": {
                     "type": "boolean"
+                },
+                "glue_schema_registry_config": {
+                    "$ref": "#/definitions/v2.GlueSchemaRegistryConfig"
                 },
                 "insecure_skip_verify": {
                     "type": "boolean"
@@ -2535,6 +2804,12 @@ var doc = `{
         "v2.LargeMessageHandleConfig": {
             "type": "object",
             "properties": {
+                "claim_check_storage_uri": {
+                    "type": "string"
+                },
+                "large_message_handle_compression": {
+                    "type": "string"
+                },
                 "large_message_handle_option": {
                     "type": "string"
                 }
@@ -2606,6 +2881,14 @@ var doc = `{
                 }
             }
         },
+        "v2.OpenProtocolConfig": {
+            "type": "object",
+            "properties": {
+                "output_old_value": {
+                    "type": "boolean"
+                }
+            }
+        },
         "v2.ProcessorCommonInfo": {
             "type": "object",
             "properties": {
@@ -2632,6 +2915,88 @@ var doc = `{
                 }
             }
         },
+        "v2.PulsarConfig": {
+            "type": "object",
+            "properties": {
+                "auth-tls-certificate-path": {
+                    "type": "string"
+                },
+                "auth-tls-private-key-path": {
+                    "type": "string"
+                },
+                "authentication-token": {
+                    "type": "string"
+                },
+                "basic-password": {
+                    "type": "string"
+                },
+                "basic-user-name": {
+                    "type": "string"
+                },
+                "batching-max-messages": {
+                    "type": "integer"
+                },
+                "batching-max-publish-delay": {
+                    "type": "integer"
+                },
+                "compression-type": {
+                    "type": "string"
+                },
+                "connection-timeout": {
+                    "type": "integer"
+                },
+                "oauth2": {
+                    "$ref": "#/definitions/v2.PulsarOAuth2"
+                },
+                "operation-timeout": {
+                    "type": "integer"
+                },
+                "output-raw-change-event": {
+                    "type": "boolean"
+                },
+                "pulsar-producer-cache-size": {
+                    "type": "integer"
+                },
+                "pulsar-version": {
+                    "type": "string"
+                },
+                "send-timeout": {
+                    "type": "integer"
+                },
+                "tls-certificate-path": {
+                    "type": "string"
+                },
+                "tls-private-key-path": {
+                    "type": "string"
+                },
+                "tls-trust-certs-file-path": {
+                    "type": "string"
+                },
+                "token-from-file": {
+                    "type": "string"
+                }
+            }
+        },
+        "v2.PulsarOAuth2": {
+            "type": "object",
+            "properties": {
+                "oauth2-audience": {
+                    "type": "string"
+                },
+                "oauth2-client-id": {
+                    "type": "string"
+                },
+                "oauth2-issuer-url": {
+                    "type": "string"
+                },
+                "oauth2-private-key": {
+                    "type": "string"
+                },
+                "oauth2-scope": {
+                    "type": "string"
+                }
+            }
+        },
         "v2.ReplicaConfig": {
             "type": "object",
             "properties": {
@@ -2649,9 +3014,6 @@ var doc = `{
                 },
                 "consistent": {
                     "$ref": "#/definitions/v2.ConsistentConfig"
-                },
-                "enable_old_value": {
-                    "type": "boolean"
                 },
                 "enable_sync_point": {
                     "type": "boolean"
@@ -2781,14 +3143,14 @@ var doc = `{
                         "$ref": "#/definitions/v2.ColumnSelector"
                     }
                 },
-                "content_compatible": {
-                    "type": "boolean"
-                },
                 "csv": {
                     "$ref": "#/definitions/v2.CSVConfig"
                 },
                 "date_separator": {
                     "type": "string"
+                },
+                "delete_only_output_handle_key_columns": {
+                    "type": "boolean"
                 },
                 "dispatchers": {
                     "type": "array",
@@ -2805,7 +3167,7 @@ var doc = `{
                 "encoder_concurrency": {
                     "type": "integer"
                 },
-                "file_index_digit": {
+                "file_index_width": {
                     "type": "integer"
                 },
                 "kafka_config": {
@@ -2817,14 +3179,29 @@ var doc = `{
                 "only_output_updated_columns": {
                     "type": "boolean"
                 },
+                "open": {
+                    "$ref": "#/definitions/v2.OpenProtocolConfig"
+                },
                 "protocol": {
                     "type": "string"
+                },
+                "pulsar_config": {
+                    "$ref": "#/definitions/v2.PulsarConfig"
                 },
                 "safe_mode": {
                     "type": "boolean"
                 },
                 "schema_registry": {
                     "type": "string"
+                },
+                "send_bootstrap_in_msg_count": {
+                    "type": "integer"
+                },
+                "send_bootstrap_interval_in_sec": {
+                    "type": "integer"
+                },
+                "send_bootstrap_to_all_partition": {
+                    "type": "boolean"
                 },
                 "terminator": {
                     "type": "string"

@@ -14,7 +14,6 @@
 package mysql
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -26,7 +25,6 @@ import (
 	"github.com/imdario/mergo"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
@@ -114,7 +112,6 @@ type Config struct {
 	Timezone               string
 	TLS                    string
 	ForceReplicate         bool
-	EnableOldValue         bool
 
 	IsTiDB bool // IsTiDB is true if the downstream is TiDB
 	// IsBDRModeSupported is true if the downstream is TiDB and write source is existed.
@@ -142,12 +139,13 @@ func NewConfig() *Config {
 		BatchDMLEnable:         defaultBatchDMLEnable,
 		MultiStmtEnable:        defaultMultiStmtEnable,
 		CachePrepStmts:         defaultCachePrepStmts,
+		SourceID:               config.DefaultTiDBSourceID,
 	}
 }
 
 // Apply applies the sink URI parameters to the config.
 func (c *Config) Apply(
-	ctx context.Context,
+	serverTimezone string,
 	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
@@ -185,7 +183,7 @@ func (c *Config) Apply(
 		return err
 	}
 	getSafeMode(urlParameter, &c.SafeMode)
-	if err = getTimezone(ctx, urlParameter, &c.Timezone); err != nil {
+	if err = getTimezone(serverTimezone, urlParameter, &c.Timezone); err != nil {
 		return err
 	}
 	if err = getDuration(urlParameter.ReadTimeout, &c.ReadTimeout); err != nil {
@@ -200,9 +198,21 @@ func (c *Config) Apply(
 	getBatchDMLEnable(urlParameter, &c.BatchDMLEnable)
 	getMultiStmtEnable(urlParameter, &c.MultiStmtEnable)
 	getCachePrepStmts(urlParameter, &c.CachePrepStmts)
-	c.EnableOldValue = replicaConfig.EnableOldValue
 	c.ForceReplicate = replicaConfig.ForceReplicate
-	c.SourceID = replicaConfig.Sink.TiDBSourceID
+
+	// Note(dongmen): The TiDBSourceID should never be 0 here, but we have found that
+	// in some problematic cases, the TiDBSourceID is 0 since something went wrong in the
+	// configuration process. So we need to check it here again.
+	// We do this is because it can cause the data to be inconsistent if the TiDBSourceID is 0
+	// in BDR Mode cluster.
+	if replicaConfig.Sink.TiDBSourceID == 0 {
+		log.Error("The TiDB source ID should never be set to 0. Please report it as a bug. The default value will be used: 1.",
+			zap.Uint64("tidbSourceID", replicaConfig.Sink.TiDBSourceID))
+		c.SourceID = config.DefaultTiDBSourceID
+	} else {
+		c.SourceID = replicaConfig.Sink.TiDBSourceID
+		log.Info("TiDB source ID is set", zap.Uint64("sourceID", c.SourceID))
+	}
 
 	return nil
 }
@@ -212,56 +222,29 @@ func mergeConfig(
 	urlParameters *urlConfig,
 ) (*urlConfig, error) {
 	dest := &urlConfig{}
-	if replicaConfig != nil && replicaConfig.Sink != nil {
-		dest.SafeMode = replicaConfig.Sink.SafeMode
-		if replicaConfig.Sink.MySQLConfig != nil {
-			mConfig := replicaConfig.Sink.MySQLConfig
-			dest.WorkerCount = mConfig.WorkerCount
-			dest.MaxTxnRow = mConfig.MaxTxnRow
-			dest.MaxMultiUpdateRowCount = mConfig.MaxMultiUpdateRowCount
-			dest.MaxMultiUpdateRowSize = mConfig.MaxMultiUpdateRowSize
-			dest.TiDBTxnMode = mConfig.TiDBTxnMode
-			dest.SSLCa = mConfig.SSLCa
-			dest.SSLCert = mConfig.SSLCert
-			dest.SSLKey = mConfig.SSLKey
-			dest.TimeZone = mConfig.TimeZone
-			dest.WriteTimeout = mConfig.WriteTimeout
-			dest.ReadTimeout = mConfig.ReadTimeout
-			dest.Timeout = mConfig.Timeout
-			dest.EnableBatchDML = mConfig.EnableBatchDML
-			dest.EnableMultiStatement = mConfig.EnableMultiStatement
-			dest.EnableCachePreparedStatement = mConfig.EnableCachePreparedStatement
-		}
+	dest.SafeMode = replicaConfig.Sink.SafeMode
+	if replicaConfig.Sink != nil && replicaConfig.Sink.MySQLConfig != nil {
+		mConfig := replicaConfig.Sink.MySQLConfig
+		dest.WorkerCount = mConfig.WorkerCount
+		dest.MaxTxnRow = mConfig.MaxTxnRow
+		dest.MaxMultiUpdateRowCount = mConfig.MaxMultiUpdateRowCount
+		dest.MaxMultiUpdateRowSize = mConfig.MaxMultiUpdateRowSize
+		dest.TiDBTxnMode = mConfig.TiDBTxnMode
+		dest.SSLCa = mConfig.SSLCa
+		dest.SSLCert = mConfig.SSLCert
+		dest.SSLKey = mConfig.SSLKey
+		dest.TimeZone = mConfig.TimeZone
+		dest.WriteTimeout = mConfig.WriteTimeout
+		dest.ReadTimeout = mConfig.ReadTimeout
+		dest.Timeout = mConfig.Timeout
+		dest.EnableBatchDML = mConfig.EnableBatchDML
+		dest.EnableMultiStatement = mConfig.EnableMultiStatement
+		dest.EnableCachePreparedStatement = mConfig.EnableCachePreparedStatement
 	}
 	if err := mergo.Merge(dest, urlParameters, mergo.WithOverride); err != nil {
 		return nil, cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
 	}
 	return dest, nil
-}
-
-// IsSinkSafeMode returns whether the sink is in safe mode.
-func IsSinkSafeMode(sinkURI *url.URL, replicaConfig *config.ReplicaConfig) (bool, error) {
-	if sinkURI == nil {
-		return false, cerror.ErrMySQLInvalidConfig.GenWithStack("fail to open MySQL sink, empty SinkURI")
-	}
-
-	scheme := strings.ToLower(sinkURI.Scheme)
-	if !sink.IsMySQLCompatibleScheme(scheme) {
-		return false, cerror.ErrMySQLInvalidConfig.GenWithStack("can't create MySQL sink with unsupported scheme: %s", scheme)
-	}
-	req := &http.Request{URL: sinkURI}
-	urlParameter := &urlConfig{}
-	if err := binding.Query.Bind(req, urlParameter); err != nil {
-		return false, cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
-	}
-	var err error
-	if urlParameter, err = mergeConfig(replicaConfig, urlParameter); err != nil {
-		return false, err
-	}
-	if urlParameter.SafeMode == nil {
-		return defaultSafeMode, nil
-	}
-	return *urlParameter.SafeMode, nil
 }
 
 func getWorkerCount(values *urlConfig, workerCount *int) error {
@@ -394,13 +377,18 @@ func getSafeMode(values *urlConfig, safeMode *bool) {
 	}
 }
 
-func getTimezone(ctxWithTimezone context.Context, values *urlConfig, timezone *string) error {
+func getTimezone(serverTimezoneStr string,
+	values *urlConfig, timezone *string,
+) error {
 	const pleaseSpecifyTimezone = "We recommend that you specify the time-zone explicitly. " +
 		"Please make sure that the timezone of the TiCDC server, " +
 		"sink-uri and the downstream database are consistent. " +
 		"If the downstream database does not load the timezone information, " +
 		"you can refer to https://dev.mysql.com/doc/refman/8.0/en/mysql-tzinfo-to-sql.html."
-	serverTimezone := contextutil.TimezoneFromCtx(ctxWithTimezone)
+	serverTimezone, err := util.GetTimezone(serverTimezoneStr)
+	if err != nil {
+		return cerror.WrapError(cerror.ErrMySQLInvalidConfig, err)
+	}
 	if values.TimeZone == nil {
 		// If time-zone is not specified, use the timezone of the server.
 		log.Warn("Because time-zone is not specified, "+

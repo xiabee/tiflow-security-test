@@ -17,40 +17,27 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
-	mm "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tiflow/cdc/entry"
+	mm "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/codec/internal"
+	"github.com/pingcap/tiflow/pkg/sink/codec/utils"
 	canal "github.com/pingcap/tiflow/proto/canal"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/text/encoding/charmap"
 )
 
 func TestInsert(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(
-		id int primary key,
-		name varchar(32),
-		tiny tinyint unsigned,
-		comment text,
-		bb blob)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-
-	_, _, colInfos := tableInfo.GetRowColInfos()
-
 	event := &model.RowChangedEvent{
 		CommitTs: 417318403368288260,
 		Table: &model.TableName{
 			Schema: "cdc",
 			Table:  "person",
 		},
-		TableInfo: tableInfo,
 		Columns: []*model.Column{
 			{Name: "id", Type: mysql.TypeLong, Flag: model.PrimaryKeyFlag, Value: 1},
 			{Name: "name", Type: mysql.TypeVarchar, Value: "Bob"},
@@ -58,7 +45,13 @@ func TestInsert(t *testing.T) {
 			{Name: "comment", Type: mysql.TypeBlob, Value: []byte("测试")},
 			{Name: "blob", Type: mysql.TypeBlob, Value: []byte("测试blob"), Flag: model.BinaryFlag},
 		},
-		ColInfos: colInfos,
+		ColInfos: []rowcodec.ColInfo{
+			{ID: 1, IsPKHandle: true, Ft: utils.SetFlag(types.NewFieldType(mysql.TypeLong), uint(model.PrimaryKeyFlag))},
+			{ID: 2, Ft: types.NewFieldType(mysql.TypeVarchar)},
+			{ID: 3, Ft: types.NewFieldType(mysql.TypeTiny)},
+			{ID: 4, Ft: utils.NewTextFieldType(mysql.TypeBlob)},
+			{ID: 5, Ft: utils.SetBinChsClnFlag(types.NewFieldType(mysql.TypeBlob))},
+		},
 	}
 
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
@@ -110,7 +103,7 @@ func TestInsert(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "测试", col.GetValue())
 			require.Equal(t, "text", col.GetMysqlType())
-		case "bb":
+		case "blob":
 			require.Equal(t, int32(internal.JavaSQLTypeBLOB), col.GetSqlType())
 			require.False(t, col.GetIsKey())
 			require.False(t, col.GetIsNull())
@@ -123,22 +116,12 @@ func TestInsert(t *testing.T) {
 }
 
 func TestUpdate(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(id int primary key, name varchar(32))`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-
-	_, _, colInfos := tableInfo.GetRowColInfos()
-
 	event := &model.RowChangedEvent{
 		CommitTs: 417318403368288260,
 		Table: &model.TableName{
-			Schema: "test",
-			Table:  "t",
+			Schema: "cdc",
+			Table:  "person",
 		},
-		TableInfo: tableInfo,
 		Columns: []*model.Column{
 			{Name: "id", Type: mysql.TypeLong, Flag: model.PrimaryKeyFlag, Value: 1},
 			{Name: "name", Type: mysql.TypeVarchar, Value: "Bob"},
@@ -147,7 +130,10 @@ func TestUpdate(t *testing.T) {
 			{Name: "id", Type: mysql.TypeLong, Flag: model.PrimaryKeyFlag, Value: 2},
 			{Name: "name", Type: mysql.TypeVarchar, Value: "Nancy"},
 		},
-		ColInfos: colInfos,
+		ColInfos: []rowcodec.ColInfo{
+			{ID: 1, IsPKHandle: true, Ft: utils.SetFlag(types.NewFieldType(mysql.TypeLong), uint(model.PrimaryKeyFlag))},
+			{ID: 2, Ft: types.NewFieldType(mysql.TypeVarchar)},
+		},
 	}
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 	builder := newCanalEntryBuilder(codecConfig)
@@ -212,26 +198,18 @@ func TestUpdate(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(id int primary key)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-
-	_, _, colInfos := tableInfo.GetRowColInfos()
-
 	event := &model.RowChangedEvent{
 		CommitTs: 417318403368288260,
 		Table: &model.TableName{
-			Schema: "test",
-			Table:  "t",
+			Schema: "cdc",
+			Table:  "person",
 		},
-		TableInfo: tableInfo,
 		PreColumns: []*model.Column{
 			{Name: "id", Type: mysql.TypeLong, Flag: model.PrimaryKeyFlag, Value: 1},
 		},
-		ColInfos: colInfos,
+		ColInfos: []rowcodec.ColInfo{
+			{ID: 1, IsPKHandle: true, Ft: utils.SetFlag(types.NewFieldType(mysql.TypeLong), uint(model.PrimaryKeyFlag))},
+		},
 	}
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 	builder := newCanalEntryBuilder(codecConfig)

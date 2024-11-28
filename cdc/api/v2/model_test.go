@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	filter "github.com/pingcap/tidb/util/table-filter"
+	filter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/redo"
 	"github.com/pingcap/tiflow/pkg/util"
@@ -32,9 +32,9 @@ import (
 var defaultAPIConfig = &ReplicaConfig{
 	MemoryQuota:        config.DefaultChangefeedMemoryQuota,
 	CaseSensitive:      false,
-	EnableOldValue:     true,
 	CheckGCSafePoint:   true,
-	EnableSyncPoint:    false,
+	BDRMode:            util.AddressOf(false),
+	EnableSyncPoint:    util.AddressOf(false),
 	SyncPointInterval:  &JSONDuration{10 * time.Minute},
 	SyncPointRetention: &JSONDuration{24 * time.Hour},
 	Filter: &FilterConfig{
@@ -50,12 +50,20 @@ var defaultAPIConfig = &ReplicaConfig{
 			NullString:           config.NULL,
 			BinaryEncodingMethod: config.BinaryEncodingBase64,
 		},
-		EncoderConcurrency:       16,
-		Terminator:               config.CRLF,
-		DateSeparator:            config.DateSeparatorDay.String(),
-		EnablePartitionSeparator: true,
-		EnableKafkaSinkV2:        false,
-		AdvanceTimeoutInSec:      util.AddressOf(uint(150)),
+		EncoderConcurrency:               util.AddressOf(config.DefaultEncoderGroupConcurrency),
+		Terminator:                       util.AddressOf(config.CRLF),
+		DateSeparator:                    util.AddressOf(config.DateSeparatorDay.String()),
+		EnablePartitionSeparator:         util.AddressOf(true),
+		EnableKafkaSinkV2:                util.AddressOf(false),
+		OnlyOutputUpdatedColumns:         util.AddressOf(false),
+		DeleteOnlyOutputHandleKeyColumns: util.AddressOf(false),
+		ContentCompatible:                util.AddressOf(false),
+		AdvanceTimeoutInSec:              util.AddressOf(uint(150)),
+		SendBootstrapIntervalInSec:       util.AddressOf(int64(120)),
+		SendBootstrapInMsgCount:          util.AddressOf(int32(10000)),
+		SendBootstrapToAllPartition:      util.AddressOf(true),
+		SendAllBootstrapAtStart:          util.AddressOf(false),
+		OpenProtocolConfig:               &OpenProtocolConfig{OutputOldValue: true},
 	},
 	Consistent: &ConsistentConfig{
 		Level:                 "none",
@@ -103,7 +111,6 @@ func TestDefaultReplicaConfig(t *testing.T) {
 
 func TestToAPIReplicaConfig(t *testing.T) {
 	cfg := config.GetDefaultReplicaConfig()
-	cfg.EnableOldValue = false
 	cfg.CheckGCSafePoint = false
 	cfg.Sink = &config.SinkConfig{
 		DispatchRules: []*config.DispatchRule{
@@ -114,15 +121,15 @@ func TestToAPIReplicaConfig(t *testing.T) {
 				TopicRule:      "topic",
 			},
 		},
-		Protocol: "aaa",
+		Protocol: util.AddressOf("aaa"),
 		ColumnSelectors: []*config.ColumnSelector{
 			{
 				Matcher: []string{"a", "b", "c"},
 				Columns: []string{"a", "b"},
 			},
 		},
-		SchemaRegistry: "bbb",
-		TxnAtomicity:   "aa",
+		SchemaRegistry: util.AddressOf("bbb"),
+		TxnAtomicity:   util.AddressOf(config.AtomicityLevel("aa")),
 	}
 	cfg.Consistent = &config.ConsistentConfig{
 		Level:             "1",

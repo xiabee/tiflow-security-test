@@ -20,8 +20,8 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	gmysql "github.com/go-sql-driver/mysql"
-	"github.com/pingcap/tidb/parser/mysql"
-	router "github.com/pingcap/tidb/util/table-router"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	router "github.com/pingcap/tidb/pkg/util/table-router"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/ctl/common"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
@@ -51,11 +51,14 @@ func ignoreExcept(itemMap map[string]struct{}) []string {
 		config.ShardAutoIncrementIDChecking,
 		config.OnlineDDLChecking,
 		config.BinlogDBChecking,
+		config.MetaPositionChecking,
+		config.ConnNumberChecking,
 		config.TargetDBPrivilegeChecking,
-		config.LightningFreeSpaceChecking,
-		config.LightningDownstreamVersionChecking,
-		config.LightningRegionDistributionChecking,
 		config.LightningEmptyRegionChecking,
+		config.LightningRegionDistributionChecking,
+		config.LightningDownstreamVersionChecking,
+		config.LightningFreeSpaceChecking,
+		config.LightningMutexFeatureChecking,
 	}
 	ignoreCheckingItems := make([]string, 0, len(items)-len(itemMap))
 	for _, i := range items {
@@ -77,6 +80,7 @@ func TestIgnoreAllCheckingItems(t *testing.T) {
 
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: []string{config.AllChecking},
 		},
 	}
@@ -92,6 +96,7 @@ func TestIgnoreAllCheckingItems(t *testing.T) {
 func TestDumpPrivilegeChecking(t *testing.T) {
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.DumpPrivilegeChecking: {}}),
 		},
 	}
@@ -135,6 +140,7 @@ func TestDumpPrivilegeChecking(t *testing.T) {
 func TestReplicationPrivilegeChecking(t *testing.T) {
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.ReplicationPrivilegeChecking: {}}),
 		},
 	}
@@ -170,6 +176,7 @@ func TestReplicationPrivilegeChecking(t *testing.T) {
 func TestTargetDBPrivilegeChecking(t *testing.T) {
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.TargetDBPrivilegeChecking: {}}),
 		},
 	}
@@ -210,6 +217,7 @@ func TestTargetDBPrivilegeChecking(t *testing.T) {
 func TestVersionChecking(t *testing.T) {
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.VersionChecking: {}}),
 		},
 	}
@@ -262,6 +270,7 @@ func TestVersionChecking(t *testing.T) {
 func TestServerIDChecking(t *testing.T) {
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.ServerIDChecking: {}}),
 		},
 	}
@@ -295,6 +304,7 @@ func TestServerIDChecking(t *testing.T) {
 func TestBinlogEnableChecking(t *testing.T) {
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.BinlogEnableChecking: {}}),
 		},
 	}
@@ -328,6 +338,7 @@ func TestBinlogEnableChecking(t *testing.T) {
 func TestBinlogFormatChecking(t *testing.T) {
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.BinlogFormatChecking: {}}),
 		},
 	}
@@ -360,6 +371,7 @@ func TestBinlogFormatChecking(t *testing.T) {
 func TestBinlogRowImageChecking(t *testing.T) {
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.BinlogRowImageChecking: {}}),
 		},
 	}
@@ -398,6 +410,7 @@ func TestBinlogRowImageChecking(t *testing.T) {
 func TestTableSchemaChecking(t *testing.T) {
 	cfgs := []*config.SubTaskConfig{
 		{
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.TableSchemaChecking: {}}),
 		},
 	}
@@ -478,6 +491,7 @@ func TestShardTableSchemaChecking(t *testing.T) {
 					TargetTable:   "t",
 				},
 			},
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.ShardTableSchemaChecking: {}}),
 		},
 	}
@@ -566,6 +580,7 @@ func TestShardAutoIncrementIDChecking(t *testing.T) {
 					TargetTable:   "t",
 				},
 			},
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.ShardTableSchemaChecking: {}, config.ShardAutoIncrementIDChecking: {}}),
 		},
 	}
@@ -649,6 +664,7 @@ func TestSameTargetTableDetection(t *testing.T) {
 					TargetTable:   "T",
 				},
 			},
+			Mode:                config.ModeAll,
 			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.TableSchemaChecking: {}}),
 		},
 	}
@@ -688,6 +704,69 @@ func TestSameTargetTableDetection(t *testing.T) {
 	mock.ExpectQuery("SHOW CREATE TABLE .*").WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).AddRow(tb1, fmt.Sprintf(createTable1, tb2)))
 	_, err = RunCheckOnConfigs(context.Background(), cfgs, false)
 	require.ErrorContains(t, err, "same table name in case-insensitive")
+}
+
+func TestMetaPositionChecking(t *testing.T) {
+	cfgs := []*config.SubTaskConfig{
+		{
+			Mode:                config.ModeIncrement,
+			UseRelay:            false,
+			Meta:                nil,
+			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.MetaPositionChecking: {}}),
+		},
+	}
+	checkHappyPath(t, func() {
+		_ = initMockDB(t)
+	}, cfgs)
+
+	cfgs = []*config.SubTaskConfig{
+		{
+			Mode:                config.ModeIncrement,
+			UseRelay:            false,
+			SyncerConfig:        config.SyncerConfig{EnableGTID: true},
+			Meta:                &config.Meta{},
+			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.MetaPositionChecking: {}}),
+		},
+	}
+	checkHappyPath(t, func() {
+		_ = initMockDB(t)
+	}, cfgs)
+
+	cfgs = []*config.SubTaskConfig{
+		{
+			Mode:                config.ModeIncrement,
+			UseRelay:            false,
+			Meta:                &config.Meta{BinLogGTID: "938bc44f-4acc-11ed-a147-0242ac110003:1-8"},
+			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.MetaPositionChecking: {}}),
+		},
+	}
+	checkHappyPath(t, func() {
+		_ = initMockDB(t)
+	}, cfgs)
+
+	cfgs = []*config.SubTaskConfig{
+		{
+			Mode:                config.ModeIncrement,
+			UseRelay:            true,
+			Meta:                &config.Meta{BinLogName: "mysql-bin.000001", BinLogPos: 123},
+			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.MetaPositionChecking: {}}),
+		},
+	}
+	checkHappyPath(t, func() {
+		_ = initMockDB(t)
+	}, cfgs)
+
+	cfgs = []*config.SubTaskConfig{
+		{
+			Mode:                config.ModeAll,
+			UseRelay:            false,
+			Meta:                &config.Meta{BinLogName: "mysql-bin.000001", BinLogPos: 123},
+			IgnoreCheckingItems: ignoreExcept(map[string]struct{}{config.MetaPositionChecking: {}}),
+		},
+	}
+	checkHappyPath(t, func() {
+		_ = initMockDB(t)
+	}, cfgs)
 }
 
 func initMockDB(t *testing.T) sqlmock.Sqlmock {

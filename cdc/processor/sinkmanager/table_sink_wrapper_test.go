@@ -117,7 +117,7 @@ func createTableSinkWrapper(
 		100,
 		func(_ context.Context) (model.Ts, error) { return math.MaxUint64, nil },
 	)
-	wrapper.tableSink.s, wrapper.tableSink.version = wrapper.tableSinkCreater()
+	wrapper.tableSink.s, wrapper.tableSink.version = wrapper.tableSinkCreator()
 	return wrapper, sink
 }
 
@@ -154,7 +154,7 @@ func TestUpdateReceivedSorterResolvedTs(t *testing.T) {
 	require.Equal(t, tablepb.TableStatePrepared, wrapper.getState())
 }
 
-func TestConvertNilRowChangedEvents(t *testing.T) {
+func TestHandleNilRowChangedEvents(t *testing.T) {
 	t.Parallel()
 
 	events := []*model.PolymorphicEvent{nil}
@@ -165,13 +165,14 @@ func TestConvertNilRowChangedEvents(t *testing.T) {
 	require.Equal(t, uint64(0), size)
 }
 
-func TestConvertEmptyRowChangedEvents(t *testing.T) {
+func TestHandleEmptyRowChangedEvents(t *testing.T) {
 	t.Parallel()
 
 	events := []*model.PolymorphicEvent{
 		{
 			StartTs: 1,
 			CRTs:    2,
+			// the row had no columns
 			Row: &model.RowChangedEvent{
 				StartTs:  1,
 				CommitTs: 2,
@@ -180,23 +181,25 @@ func TestConvertEmptyRowChangedEvents(t *testing.T) {
 	}
 	changefeedID := model.DefaultChangeFeedID("1")
 	span := spanz.TableIDToComparableSpan(1)
+
 	result, size := handleRowChangedEvents(changefeedID, span, events...)
 	require.Equal(t, 0, len(result))
 	require.Equal(t, uint64(0), size)
 }
 
-func TestConvertRowChangedEventsWhenEnableOldValue(t *testing.T) {
+func TestHandleRowChangedEventNormalEvent(t *testing.T) {
 	t.Parallel()
 
+	// Update non-unique key.
 	columns := []*model.Column{
 		{
 			Name:  "col1",
 			Flag:  model.BinaryFlag,
-			Value: "col1-value-updated",
+			Value: "col1-value",
 		},
 		{
 			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
+			Flag:  model.HandleKeyFlag | model.UniqueKeyFlag,
 			Value: "col2-value-updated",
 		},
 	}
@@ -208,7 +211,7 @@ func TestConvertRowChangedEventsWhenEnableOldValue(t *testing.T) {
 		},
 		{
 			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
+			Flag:  model.HandleKeyFlag | model.UniqueKeyFlag,
 			Value: "col2-value",
 		},
 	}
@@ -231,102 +234,6 @@ func TestConvertRowChangedEventsWhenEnableOldValue(t *testing.T) {
 	changefeedID := model.DefaultChangeFeedID("1")
 	span := spanz.TableIDToComparableSpan(1)
 	result, size := handleRowChangedEvents(changefeedID, span, events...)
-	require.Equal(t, 1, len(result))
-	require.Equal(t, uint64(224), size)
-}
-
-func TestConvertRowChangedEventsWhenDisableOldValue(t *testing.T) {
-	t.Parallel()
-
-	// Update handle key.
-	columns := []*model.Column{
-		{
-			Name:  "col1",
-			Flag:  model.BinaryFlag,
-			Value: "col1-value-updated",
-		},
-		{
-			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
-			Value: "col2-value-updated",
-		},
-	}
-	preColumns := []*model.Column{
-		{
-			Name:  "col1",
-			Flag:  model.BinaryFlag,
-			Value: "col1-value",
-		},
-		{
-			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
-			Value: "col2-value",
-		},
-	}
-
-	events := []*model.PolymorphicEvent{
-		{
-			CRTs:  1,
-			RawKV: &model.RawKVEntry{OpType: model.OpTypePut},
-			Row: &model.RowChangedEvent{
-				CommitTs:   1,
-				Columns:    columns,
-				PreColumns: preColumns,
-				Table: &model.TableName{
-					Schema: "test",
-					Table:  "test",
-				},
-			},
-		},
-	}
-	changefeedID := model.DefaultChangeFeedID("1")
-	span := spanz.TableIDToComparableSpan(1)
-	result, size := handleRowChangedEvents(changefeedID, span, events...)
-	require.Equal(t, 1, len(result))
-	require.Equal(t, uint64(224), size)
-
-	// Update non-handle key.
-	columns = []*model.Column{
-		{
-			Name:  "col1",
-			Flag:  model.BinaryFlag,
-			Value: "col1-value-updated",
-		},
-		{
-			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
-			Value: "col2-value",
-		},
-	}
-	preColumns = []*model.Column{
-		{
-			Name:  "col1",
-			Flag:  model.BinaryFlag,
-			Value: "col1-value",
-		},
-		{
-			Name:  "col2",
-			Flag:  model.HandleKeyFlag,
-			Value: "col2-value",
-		},
-	}
-
-	events = []*model.PolymorphicEvent{
-		{
-			CRTs:  1,
-			RawKV: &model.RawKVEntry{OpType: model.OpTypePut},
-			Row: &model.RowChangedEvent{
-				CommitTs:   1,
-				Columns:    columns,
-				PreColumns: preColumns,
-				Table: &model.TableName{
-					Schema: "test",
-					Table:  "test",
-				},
-			},
-		},
-	}
-	result, size = handleRowChangedEvents(changefeedID, span, events...)
 	require.Equal(t, 1, len(result))
 	require.Equal(t, uint64(224), size)
 }
@@ -386,7 +293,7 @@ func TestTableSinkWrapperSinkVersion(t *testing.T) {
 
 	require.False(t, wrapper.initTableSink())
 
-	wrapper.tableSinkCreater = func() (tablesink.TableSink, uint64) {
+	wrapper.tableSinkCreator = func() (tablesink.TableSink, uint64) {
 		*version += 1
 		return innerTableSink, *version
 	}

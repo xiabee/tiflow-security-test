@@ -28,19 +28,19 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb-tools/pkg/column-mapping"
 	extstorage "github.com/pingcap/tidb/br/pkg/storage"
-	"github.com/pingcap/tidb/util/dbutil"
-	"github.com/pingcap/tidb/util/filter"
-	regexprrouter "github.com/pingcap/tidb/util/regexpr-router"
-	router "github.com/pingcap/tidb/util/table-router"
+	"github.com/pingcap/tidb/pkg/util/dbutil"
+	"github.com/pingcap/tidb/pkg/util/filter"
+	regexprrouter "github.com/pingcap/tidb/pkg/util/regexpr-router"
+	router "github.com/pingcap/tidb/pkg/util/table-router"
 	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/storage"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/engine/pkg/promutil"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
+	"github.com/pingcap/tiflow/pkg/column-mapping"
 	"github.com/pingcap/tiflow/pkg/version"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -51,6 +51,8 @@ const (
 	ModeAll       = "all"
 	ModeFull      = "full"
 	ModeIncrement = "incremental"
+	ModeDump      = "dump"
+	ModeLoadSync  = "load&sync"
 
 	DefaultShadowTableRules = "^_(.+)_(?:new|gho)$"
 	DefaultTrashTableRules  = "^_(.+)_(?:ghc|del|old)$"
@@ -327,8 +329,8 @@ func (c *SubTaskConfig) Adjust(verifyDecryptPassword bool) error {
 		c.MetaSchema = defaultMetaSchema
 	}
 
-	// adjust dir
-	if c.Mode == ModeAll || c.Mode == ModeFull {
+	// adjust dir, no need to do for load&sync mode because it needs its own s3 repository
+	if HasLoad(c.Mode) && c.Mode != ModeLoadSync {
 		// check
 		isS3 := storage.IsS3Path(c.LoaderConfig.Dir)
 		if isS3 && c.ImportMode == LoadModeLoader {
@@ -348,7 +350,11 @@ func (c *SubTaskConfig) Adjust(verifyDecryptPassword bool) error {
 			return terror.ErrConfigLoaderDirInvalid.Delegate(err, c.LoaderConfig.Dir)
 		}
 		c.LoaderConfig.Dir = newDir
+	}
 
+	// adjust sorting dir
+	if HasLoad(c.Mode) {
+		newDir := c.LoaderConfig.Dir
 		if c.LoaderConfig.SortingDirPhysical == "" {
 			if storage.IsLocalDiskPath(newDir) {
 				// lightning will not recursively create directories, so we use same level dir

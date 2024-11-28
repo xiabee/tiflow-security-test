@@ -28,11 +28,10 @@ import (
 	"github.com/benbjohnson/clock"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/codec"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tiflow/cdc/entry"
-	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
@@ -120,22 +119,22 @@ func newMockDDLJobPuller(
 	needSchemaStorage bool,
 ) (DDLJobPuller, *entry.SchemaTestHelper) {
 	res := &ddlJobPullerImpl{
-		puller: puller,
 		outputCh: make(
 			chan *model.DDLJobEntry,
 			defaultPullerOutputChanSize),
 	}
+	res.multiplexing = false
+	res.puller.Puller = puller
+
 	var helper *entry.SchemaTestHelper
 	if needSchemaStorage {
 		helper = entry.NewSchemaTestHelper(t)
 		kvStorage := helper.Storage()
 		ts := helper.GetCurrentMeta().StartTS
-		meta, err := kv.GetSnapshotMeta(kvStorage, ts)
-		require.Nil(t, err)
 		f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 		require.Nil(t, err)
 		schemaStorage, err := entry.NewSchemaStorage(
-			meta,
+			kvStorage,
 			ts,
 			false,
 			model.DefaultChangeFeedID("test"),
@@ -343,9 +342,8 @@ func TestHandleRenameTable(t *testing.T) {
 
 		// since test1.t100 is in filter rule, replicate it
 		job = helper.DDL2Job("rename table test1.t1000 to test1.t100")
-		skip, err = ddlJobPullerImpl.handleJob(job)
+		_, err = ddlJobPullerImpl.handleJob(job)
 		require.Error(t, err)
-		require.True(t, skip)
 		require.Contains(t, err.Error(), fmt.Sprintf("table's old name is not in filter rule, and its new name in filter rule "+
 			"table id '%d', ddl query: [%s], it's an unexpected behavior, "+
 			"if you want to replicate this table, please add its old name to filter rule.", job.TableID, job.Query))
@@ -367,9 +365,8 @@ func TestHandleRenameTable(t *testing.T) {
 		// but now it will throw an error since schema ignore1 are not in schemaStorage
 		// ref: https://github.com/pingcap/tiflow/issues/9488
 		job = helper.DDL2Job("rename table test1.t202308081 to ignore1.ignore1, test1.t202308082 to ignore1.dongmen")
-		skip, err = ddlJobPullerImpl.handleJob(job)
+		_, err = ddlJobPullerImpl.handleJob(job)
 		require.NotNil(t, err)
-		require.True(t, skip)
 		require.Contains(t, err.Error(), "ErrSnapshotSchemaNotFound")
 	}
 }
@@ -801,7 +798,7 @@ func waitResolvedTsGrowing(t *testing.T, p DDLPuller, targetTs model.Ts) {
 	require.Nil(t, err)
 }
 
-func TestCheckIneligibleTableDDL(t *testing.T) {
+func TestCcheckIneligibleTableDDL(t *testing.T) {
 	startTs := uint64(10)
 	mockPuller := newMockPuller(t, startTs)
 	ddlJobPuller, helper := newMockDDLJobPuller(t, mockPuller, true)

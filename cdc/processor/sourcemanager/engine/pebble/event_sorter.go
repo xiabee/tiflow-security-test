@@ -14,8 +14,6 @@
 package pebble
 
 import (
-	"encoding/binary"
-	"hash/fnv"
 	"math"
 	"strconv"
 	"sync"
@@ -313,14 +311,21 @@ func (s *EventSorter) Close() error {
 	return err
 }
 
+// SlotsAndHasher implements engine.SortEngine.
+func (s *EventSorter) SlotsAndHasher() (slotCount int, hasher func(tablepb.Span, int) int) {
+	return len(s.dbs), spanz.HashTableSpan
+}
+
 // Next implements sorter.EventIterator.
 func (s *EventIter) Next() (event *model.PolymorphicEvent, pos engine.Position, err error) {
 	valid := s.iter != nil && s.iter.Valid()
-	var value []byte
+
+	// We need to decide whether the current event is the last event in this transactions
+	// If the current event is the last one, we need to set txnFinished
+	// Thus, we need to fetch the next event and compare the commitTs and startTs with it
 	for valid {
-		value = s.iter.Value()
 		event = &model.PolymorphicEvent{}
-		if _, err = s.serde.Unmarshal(event, value); err != nil {
+		if _, err = s.serde.Unmarshal(event, s.iter.Value()); err != nil {
 			return
 		}
 
@@ -539,11 +544,6 @@ func genUniqueID() uint32 {
 	return atomic.AddUint32(&uniqueIDGen, 1)
 }
 
-// TODO: add test for this function.
 func getDB(span tablepb.Span, dbCount int) int {
-	h := fnv.New64()
-	b := [8]byte{}
-	binary.LittleEndian.PutUint64(b[:], uint64(span.TableID))
-	h.Write(b[:])
-	return int(h.Sum64() % uint64(dbCount))
+	return spanz.HashTableSpan(span, dbCount)
 }

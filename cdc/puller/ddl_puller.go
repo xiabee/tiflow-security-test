@@ -24,36 +24,34 @@ import (
 	"github.com/benbjohnson/clock"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	tidbkv "github.com/pingcap/tidb/kv"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tiflow/cdc/contextutil"
+	tidbkv "github.com/pingcap/tidb/pkg/kv"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/entry/schema"
 	"github.com/pingcap/tiflow/cdc/kv"
+	"github.com/pingcap/tiflow/cdc/kv/sharedconn"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/puller/memorysorter"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/filter"
-	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/spanz"
+	"github.com/pingcap/tiflow/pkg/txnutil"
 	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/tikv/client-go/v2/tikv"
-	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
 const (
 	ddlPullerStuckWarnDuration = 30 * time.Second
-	// DDLPullerTableName is the fake table name for ddl puller
-	DDLPullerTableName = "DDL_PULLER"
 	// ddl puller should never filter any DDL jobs even if
 	// the changefeed is in BDR mode, because the DDL jobs should
 	// be filtered before they are sent to the sink
-	ddLPullerFilterLoop = false
+	ddlPullerFilterLoop = false
 )
 
 // DDLJobPuller is used to pull ddl job from TiKV.
@@ -68,8 +66,17 @@ type DDLJobPuller interface {
 // Note: All unexported methods of `ddlJobPullerImpl` should
 // be called in the same one goroutine.
 type ddlJobPullerImpl struct {
-	changefeedID  model.ChangeFeedID
-	puller        Puller
+	changefeedID model.ChangeFeedID
+
+	multiplexing bool
+	puller       struct {
+		Puller
+	}
+	multiplexingPuller struct {
+		*MultiplexingPuller
+		sortedDDLCh <-chan *model.RawKVEntry
+	}
+
 	kvStorage     tidbkv.Storage
 	schemaStorage entry.SchemaStorage
 	resolvedTs    uint64
@@ -85,68 +92,97 @@ type ddlJobPullerImpl struct {
 
 // Run starts the DDLJobPuller.
 func (p *ddlJobPullerImpl) Run(ctx context.Context, _ ...chan<- error) error {
+	if p.multiplexing {
+		return p.runMultiplexing(ctx)
+	}
+	return p.run(ctx)
+}
+
+func (p *ddlJobPullerImpl) handleRawKVEntry(ctx context.Context, ddlRawKV *model.RawKVEntry) error {
+	if ddlRawKV == nil {
+		return nil
+	}
+
+	if ddlRawKV.OpType == model.OpTypeResolved {
+		// Only nil in unit test case.
+		if p.schemaStorage != nil {
+			p.schemaStorage.AdvanceResolvedTs(ddlRawKV.CRTs)
+		}
+		if ddlRawKV.CRTs > p.getResolvedTs() {
+			p.setResolvedTs(ddlRawKV.CRTs)
+		}
+	}
+
+	job, err := p.unmarshalDDL(ddlRawKV)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	if job != nil {
+		skip, err := p.handleJob(job)
+		if err != nil {
+			return err
+		}
+		log.Info("handle ddl job",
+			zap.String("namespace", p.changefeedID.Namespace),
+			zap.String("changefeed", p.changefeedID.ID),
+			zap.String("query", job.Query),
+			zap.Stringer("job", job), zap.Bool("skip", skip))
+		if skip {
+			return nil
+		}
+	}
+
+	jobEntry := &model.DDLJobEntry{
+		Job:    job,
+		OpType: ddlRawKV.OpType,
+		CRTs:   ddlRawKV.CRTs,
+		Err:    err,
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case p.outputCh <- jobEntry:
+	}
+	return nil
+}
+
+func (p *ddlJobPullerImpl) run(ctx context.Context) error {
 	eg, ctx := errgroup.WithContext(ctx)
-
+	eg.Go(func() error { return errors.Trace(p.puller.Run(ctx)) })
 	eg.Go(func() error {
-		return errors.Trace(p.puller.Run(ctx))
-	})
-
-	rawDDLCh := memorysorter.SortOutput(ctx, p.puller.Output())
-	eg.Go(
-		func() error {
-			for {
-				var ddlRawKV *model.RawKVEntry
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case ddlRawKV = <-rawDDLCh:
-				}
-				if ddlRawKV == nil {
-					continue
-				}
-				if ddlRawKV.OpType == model.OpTypeResolved {
-					// Only nil in unit test case.
-					if p.schemaStorage != nil {
-						p.schemaStorage.AdvanceResolvedTs(ddlRawKV.CRTs)
-					}
-					if ddlRawKV.CRTs > p.getResolvedTs() {
-						p.setResolvedTs(ddlRawKV.CRTs)
-					}
-				}
-
-				job, err := p.unmarshalDDL(ddlRawKV)
-				if err != nil {
-					return errors.Trace(err)
-				}
-
-				if job != nil {
-					skip, err := p.handleJob(job)
-					if err != nil {
-						return err
-					}
-					log.Info("handle ddl job",
-						zap.String("namespace", p.changefeedID.Namespace),
-						zap.String("changefeed", p.changefeedID.ID),
-						zap.String("query", job.Query),
-						zap.Stringer("job", job), zap.Bool("skip", skip))
-					if skip {
-						continue
-					}
-				}
-
-				jobEntry := &model.DDLJobEntry{
-					Job:    job,
-					OpType: ddlRawKV.OpType,
-					CRTs:   ddlRawKV.CRTs,
-					Err:    err,
-				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case p.outputCh <- jobEntry:
-				}
+		rawDDLCh := memorysorter.SortOutput(ctx, p.changefeedID, p.puller.Output())
+		for {
+			var ddlRawKV *model.RawKVEntry
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case ddlRawKV = <-rawDDLCh:
 			}
-		})
+			if err := p.handleRawKVEntry(ctx, ddlRawKV); err != nil {
+				return errors.Trace(err)
+			}
+		}
+	})
+	return eg.Wait()
+}
+
+func (p *ddlJobPullerImpl) runMultiplexing(ctx context.Context) error {
+	eg, ctx := errgroup.WithContext(ctx)
+	eg.Go(func() error { return p.multiplexingPuller.Run(ctx) })
+	eg.Go(func() error {
+		for {
+			var ddlRawKV *model.RawKVEntry
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case ddlRawKV = <-p.multiplexingPuller.sortedDDLCh:
+			}
+			if err := p.handleRawKVEntry(ctx, ddlRawKV); err != nil {
+				return errors.Trace(err)
+			}
+		}
+	})
 	return eg.Wait()
 }
 
@@ -174,10 +210,7 @@ func (p *ddlJobPullerImpl) initJobTableMeta() error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	snap, err := kv.GetSnapshotMeta(p.kvStorage, version.Ver)
-	if err != nil {
-		return errors.Trace(err)
-	}
+	snap := kv.GetSnapshotMeta(p.kvStorage, version.Ver)
 
 	dbInfos, err := snap.ListDatabases()
 	if err != nil {
@@ -385,8 +418,7 @@ func (p *ddlJobPullerImpl) handleJob(job *timodel.Job) (skip bool, err error) {
 		if p.filter.ShouldDiscardDDL(job.Type, job.SchemaName, job.TableName) {
 			return true, nil
 		}
-		return true, cerror.WrapError(cerror.ErrHandleDDLFailed,
-			errors.Trace(err), job.Query, job.StartTS, job.StartTS)
+		return true, errors.Trace(err)
 	}
 
 	switch job.Type {
@@ -450,8 +482,7 @@ func (p *ddlJobPullerImpl) handleJob(job *timodel.Job) (skip bool, err error) {
 			zap.String("table", job.BinlogInfo.TableInfo.Name.O),
 			zap.String("job", job.String()),
 			zap.Error(err))
-		return true, cerror.WrapError(cerror.ErrHandleDDLFailed,
-			errors.Trace(err), job.Query, job.StartTS, job.StartTS)
+		return true, errors.Trace(err)
 	}
 
 	p.setResolvedTs(job.BinlogInfo.FinishedTS)
@@ -536,43 +567,73 @@ func findColumnByName(cols []*timodel.ColumnInfo, name string) (*timodel.ColumnI
 // which fetches ddl events starting from checkpointTs.
 func NewDDLJobPuller(
 	ctx context.Context,
-	pdCli pd.Client,
-	grpcPool kv.GrpcPool,
-	regionCache *tikv.RegionCache,
-	kvStorage tidbkv.Storage,
-	pdClock pdutil.Clock,
+	up *upstream.Upstream,
 	checkpointTs uint64,
 	cfg *config.ServerConfig,
 	changefeed model.ChangeFeedID,
 	schemaStorage entry.SchemaStorage,
 	filter filter.Filter,
+	isOwner bool,
 ) (DDLJobPuller, error) {
+	pdCli := up.PDClient
+	regionCache := up.RegionCache
+	kvStorage := up.KVStorage
+	pdClock := up.PDClock
+
+	if isOwner {
+		changefeed.ID += "_owner_ddl_puller"
+	} else {
+		changefeed.ID += "_processor_ddl_puller"
+	}
+
 	spans := spanz.GetAllDDLSpan()
 	for i := range spans {
-		spans[i].TableID = -1
+		// NOTE: kv.SharedClient thinks it's better to use different table ids.
+		spans[i].TableID = int64(-1) - int64(i)
 	}
-	return &ddlJobPullerImpl{
+
+	jobPuller := &ddlJobPullerImpl{
 		changefeedID:  changefeed,
-		filter:        filter,
+		multiplexing:  cfg.KVClient.EnableMultiplexing,
 		schemaStorage: schemaStorage,
-		puller: New(
-			ctx,
-			pdCli,
-			grpcPool,
-			regionCache,
-			kvStorage,
-			pdClock,
-			checkpointTs,
-			spans,
-			cfg,
-			changefeed,
-			-1, DDLPullerTableName,
-			ddLPullerFilterLoop,
-			true,
-		),
-		kvStorage: kvStorage,
-		outputCh:  make(chan *model.DDLJobEntry, defaultPullerOutputChanSize),
-	}, nil
+		kvStorage:     kvStorage,
+		filter:        filter,
+		outputCh:      make(chan *model.DDLJobEntry, defaultPullerOutputChanSize),
+	}
+	if jobPuller.multiplexing {
+		mp := &jobPuller.multiplexingPuller
+
+		rawDDLCh := make(chan *model.RawKVEntry, defaultPullerOutputChanSize)
+		mp.sortedDDLCh = memorysorter.SortOutput(ctx, changefeed, rawDDLCh)
+		grpcPool := sharedconn.NewConnAndClientPool(up.SecurityConfig, kv.GetGlobalGrpcMetrics())
+
+		client := kv.NewSharedClient(
+			changefeed, cfg, ddlPullerFilterLoop,
+			pdCli, grpcPool, regionCache, pdClock,
+			txnutil.NewLockerResolver(kvStorage.(tikv.Storage), changefeed),
+		)
+
+		consume := func(ctx context.Context, raw *model.RawKVEntry, _ []tablepb.Span, _ model.ShouldSplitKVEntry) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case rawDDLCh <- raw:
+				return nil
+			}
+		}
+		slots, hasher := 1, func(tablepb.Span, int) int { return 0 }
+		mp.MultiplexingPuller = NewMultiplexingPuller(changefeed, client, consume, slots, hasher, 1)
+
+		mp.Subscribe(spans, checkpointTs, memorysorter.DDLPullerTableName, func(_ *model.RawKVEntry) bool { return false })
+	} else {
+		jobPuller.puller.Puller = New(
+			ctx, pdCli, up.GrpcPool, regionCache, kvStorage, pdClock,
+			checkpointTs, spans, cfg, changefeed, -1, memorysorter.DDLPullerTableName,
+			ddlPullerFilterLoop,
+		)
+	}
+
+	return jobPuller, nil
 }
 
 // DDLPuller is the interface for DDL Puller, used by owner only.
@@ -611,23 +672,15 @@ func NewDDLPuller(ctx context.Context,
 	schemaStorage entry.SchemaStorage,
 	filter filter.Filter,
 ) (DDLPuller, error) {
-	// add "_ddl_puller" to make it different from table pullers.
-	changefeed.ID += "_ddl_puller"
-
 	var puller DDLJobPuller
 	var err error
-	storage := up.KVStorage
+
 	// storage can be nil only in the test
-	if storage != nil {
+	if up.KVStorage != nil {
 		puller, err = NewDDLJobPuller(
-			ctx,
-			up.PDClient,
-			up.GrpcPool,
-			up.RegionCache,
-			storage,
-			up.PDClock,
-			startTs, config.GetGlobalServerConfig(),
+			ctx, up, startTs, config.GetGlobalServerConfig(),
 			changefeed, schemaStorage, filter,
+			true, /* isOwner */
 		)
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -688,15 +741,11 @@ func (h *ddlPullerImpl) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	h.cancel = cancel
 
-	ctx = contextutil.PutRoleInCtx(ctx, util.RoleOwner)
-	g.Go(func() error {
-		return h.ddlJobPuller.Run(ctx)
-	})
-
-	ticker := h.clock.Ticker(ddlPullerStuckWarnDuration)
-	defer ticker.Stop()
+	g.Go(func() error { return h.ddlJobPuller.Run(ctx) })
 
 	g.Go(func() error {
+		ticker := h.clock.Ticker(ddlPullerStuckWarnDuration)
+		defer ticker.Stop()
 		h.lastResolvedTsAdvancedTime = h.clock.Now()
 		for {
 			select {
@@ -744,22 +793,6 @@ func (h *ddlPullerImpl) Close() {
 	log.Info("close the ddl puller",
 		zap.String("namespace", h.changefeedID.Namespace),
 		zap.String("changefeed", h.changefeedID.ID))
-
-	ok := PullerEventCounter.DeleteLabelValues(h.changefeedID.Namespace, h.changefeedID.ID, "kv")
-	if !ok {
-		log.Warn("delete puller event counter metrics failed",
-			zap.String("namespace", h.changefeedID.Namespace),
-			zap.String("changefeed", h.changefeedID.ID),
-			zap.String("type", "kv"))
-	}
-	ok = PullerEventCounter.DeleteLabelValues(h.changefeedID.Namespace, h.changefeedID.ID, "resolved")
-	if !ok {
-		log.Warn("delete puller event counter metrics failed",
-			zap.String("namespace", h.changefeedID.Namespace),
-			zap.String("changefeed", h.changefeedID.ID),
-			zap.String("type", "resolved"))
-	}
-
 	h.cancel()
 }
 

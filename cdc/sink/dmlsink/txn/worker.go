@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tiflow/cdc/contextutil"
+	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/metrics/txn"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
 	"github.com/pingcap/tiflow/pkg/causality"
@@ -48,9 +48,11 @@ type worker struct {
 	postTxnExecutedCallbacks []func()
 }
 
-func newWorker(ctx context.Context, ID int, backend backend, workerCount int) *worker {
+func newWorker(ctx context.Context, changefeedID model.ChangeFeedID,
+	ID int, backend backend, workerCount int,
+) *worker {
 	wid := fmt.Sprintf("%d", ID)
-	changefeedID := contextutil.ChangefeedIDFromCtx(ctx)
+
 	return &worker{
 		ctx:         ctx,
 		changefeed:  fmt.Sprintf("%s.%s", changefeedID.Namespace, changefeedID.ID),
@@ -71,7 +73,7 @@ func newWorker(ctx context.Context, ID int, backend backend, workerCount int) *w
 	}
 }
 
-// Run a loop.
+// Continuously get events from txnCh and call backend flush based on conditions.
 func (w *worker) run(txnCh <-chan causality.TxnWithNotifier[*txnEvent]) error {
 	defer func() {
 		if err := w.backend.Close(); err != nil {

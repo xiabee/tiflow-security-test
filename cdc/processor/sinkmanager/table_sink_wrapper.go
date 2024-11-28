@@ -48,7 +48,7 @@ type tableSinkWrapper struct {
 	// tableSpan used for logging.
 	span tablepb.Span
 
-	tableSinkCreater func() (tablesink.TableSink, uint64)
+	tableSinkCreator func() (tablesink.TableSink, uint64)
 
 	// tableSink is the underlying sink.
 	tableSink struct {
@@ -124,7 +124,7 @@ func newTableSinkWrapper(
 		version:          atomic.AddUint64(&tableSinkWrapperVersion, 1),
 		changefeed:       changefeed,
 		span:             span,
-		tableSinkCreater: tableSinkCreater,
+		tableSinkCreator: tableSinkCreater,
 		state:            &state,
 		startTs:          startTs,
 		targetTs:         targetTs,
@@ -315,7 +315,7 @@ func (t *tableSinkWrapper) initTableSink() bool {
 	t.tableSink.Lock()
 	defer t.tableSink.Unlock()
 	if t.tableSink.s == nil {
-		t.tableSink.s, t.tableSink.version = t.tableSinkCreater()
+		t.tableSink.s, t.tableSink.version = t.tableSinkCreator()
 		if t.tableSink.s != nil {
 			t.tableSink.advanced = time.Now()
 			return true
@@ -454,7 +454,8 @@ func (t *tableSinkWrapper) cleanRangeEventCounts(upperBound engine.Position, min
 }
 
 func handleRowChangedEvents(
-	changefeed model.ChangeFeedID, span tablepb.Span, events ...*model.PolymorphicEvent,
+	changefeed model.ChangeFeedID, span tablepb.Span,
+	events ...*model.PolymorphicEvent,
 ) ([]*model.RowChangedEvent, uint64) {
 	size := 0
 	rowChangedEvents := make([]*model.RowChangedEvent, 0, len(events))
@@ -468,12 +469,11 @@ func handleRowChangedEvents(
 			continue
 		}
 
-		colLen := len(e.Row.Columns)
-		preColLen := len(e.Row.PreColumns)
+		rowEvent := e.Row
 		// Some transactions could generate empty row change event, such as
 		// begin; insert into t (id) values (1); delete from t where id=1; commit;
 		// Just ignore these row changed events.
-		if colLen == 0 && preColLen == 0 {
+		if len(rowEvent.Columns) == 0 && len(rowEvent.PreColumns) == 0 {
 			log.Warn("skip emit empty row event",
 				zap.Stringer("span", &span),
 				zap.String("namespace", changefeed.Namespace),
@@ -482,8 +482,8 @@ func handleRowChangedEvents(
 			continue
 		}
 
-		size += e.Row.ApproximateBytes()
-		rowChangedEvents = append(rowChangedEvents, e.Row)
+		size += rowEvent.ApproximateBytes()
+		rowChangedEvents = append(rowChangedEvents, rowEvent)
 	}
 	return rowChangedEvents, uint64(size)
 }

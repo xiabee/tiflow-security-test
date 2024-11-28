@@ -23,7 +23,6 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
@@ -35,6 +34,7 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/streamer"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/relay"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -1361,4 +1361,12 @@ func (w *SourceWorker) GetValidatorTableStatus(taskName string, filterStatus pb.
 		return nil, terror.ErrWorkerSubTaskNotFound.Generate(taskName)
 	}
 	return st.GetValidatorTableStatus(filterStatus)
+}
+
+func (w *SourceWorker) UpdateWorkerValidator(req *pb.UpdateValidationWorkerRequest) error {
+	st := w.subTaskHolder.findSubTask(req.TaskName)
+	if st == nil {
+		return terror.ErrWorkerSubTaskNotFound.Generate(req.TaskName)
+	}
+	return st.UpdateValidator(req)
 }

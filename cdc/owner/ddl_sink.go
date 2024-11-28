@@ -23,10 +23,9 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/format"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tiflow/cdc/contextutil"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/format"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/ddlsink"
 	"github.com/pingcap/tiflow/cdc/sink/ddlsink/factory"
@@ -56,6 +55,9 @@ type DDLSink interface {
 	// the caller of this function can call again and again until a true returned
 	emitDDLEvent(ctx context.Context, ddl *model.DDLEvent) (bool, error)
 	emitSyncPoint(ctx context.Context, checkpointTs uint64) error
+	// emitBootstrap emits the table bootstrap event in a blocking way.
+	// It will return after the bootstrap event is sent.
+	emitBootstrap(ctx context.Context, bootstrap *model.DDLEvent) error
 	// close the ddlsink, cancel running goroutine.
 	close(ctx context.Context) error
 }
@@ -115,26 +117,21 @@ func newDDLSink(
 type ddlSinkInitHandler func(ctx context.Context, a *ddlSinkImpl) error
 
 func ddlSinkInitializer(ctx context.Context, a *ddlSinkImpl) error {
-	ctx = contextutil.PutRoleInCtx(ctx, util.RoleOwner)
 	log.Info("Try to create ddlSink based on sink",
 		zap.String("namespace", a.changefeedID.Namespace),
 		zap.String("changefeed", a.changefeedID.ID))
-	s, err := factory.New(ctx, a.info.SinkURI, a.info.Config)
+	s, err := factory.New(ctx, a.changefeedID, a.info.SinkURI, a.info.Config)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	a.sink = s
-
-	if !a.info.Config.EnableSyncPoint {
-		return nil
-	}
 	return nil
 }
 
 func (s *ddlSinkImpl) makeSyncPointStoreReady(ctx context.Context) error {
-	if s.info.Config.EnableSyncPoint && s.syncPointStore == nil {
+	if util.GetOrZero(s.info.Config.EnableSyncPoint) && s.syncPointStore == nil {
 		syncPointStore, err := syncpointstore.NewSyncPointStore(
-			ctx, s.changefeedID, s.info.SinkURI, s.info.Config.SyncPointRetention)
+			ctx, s.changefeedID, s.info.SinkURI, util.GetOrZero(s.info.Config.SyncPointRetention))
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -272,7 +269,6 @@ func (s *ddlSinkImpl) writeDDLEvent(ctx context.Context, ddl *model.DDLEvent) er
 
 func (s *ddlSinkImpl) run(ctx context.Context) {
 	ctx, s.cancel = context.WithCancel(ctx)
-	ctx = contextutil.PutChangefeedIDInCtx(ctx, s.changefeedID)
 
 	s.wg.Add(1)
 	go func() {
@@ -478,4 +474,11 @@ func (s *ddlSinkImpl) addSpecialComment(ddl *model.DDLEvent) (string, error) {
 		zap.String("result", result))
 
 	return result, nil
+}
+
+func (s *ddlSinkImpl) emitBootstrap(ctx context.Context, bootstrap *model.DDLEvent) error {
+	if err := s.makeSinkReady(ctx); err != nil {
+		return errors.Trace(err)
+	}
+	return s.sink.WriteDDLEvent(ctx, bootstrap)
 }

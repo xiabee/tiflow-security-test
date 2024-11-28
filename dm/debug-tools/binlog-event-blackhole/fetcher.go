@@ -26,7 +26,8 @@ import (
 
 // registerSlave register a slave connection on the master.
 func registerSlave(addr, username, password string, serverID uint32) (*client.Conn, error) {
-	conn, err := client.Connect(addr, username, password, "")
+	conn, err := client.Connect(addr, username, password, "", func(c *client.Conn) {
+	})
 	if err != nil {
 		return nil, errors.Annotate(err, "connect to the master")
 	}

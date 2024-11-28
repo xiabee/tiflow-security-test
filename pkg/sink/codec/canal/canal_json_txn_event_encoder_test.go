@@ -11,16 +11,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build intest
-// +build intest
-
 package canal
 
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tiflow/cdc/entry"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
@@ -38,29 +36,26 @@ func TestBuildCanalJSONTxnEventEncoder(t *testing.T) {
 }
 
 func TestCanalJSONTxnEventEncoderMaxMessageBytes(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(a varchar(255) primary key)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-
-	_, _, colInfos := tableInfo.GetRowColInfos()
+	t.Parallel()
 
 	// the size of `testEvent` after being encoded by canal-json is 200
 	testEvent := &model.SingleTableTxn{
-		Table: &model.TableName{Schema: "test", Table: "t"},
+		Table: &model.TableName{Schema: "a", Table: "b"},
 		Rows: []*model.RowChangedEvent{
 			{
-				CommitTs:  1,
-				Table:     &model.TableName{Schema: "test", Table: "t"},
-				TableInfo: tableInfo,
+				CommitTs: 1,
+				Table:    &model.TableName{Schema: "a", Table: "b"},
 				Columns: []*model.Column{{
 					Name:  "col1",
 					Type:  mysql.TypeVarchar,
 					Value: []byte("aa"),
 				}},
-				ColInfos: colInfos,
+				ColInfos: []rowcodec.ColInfo{
+					{
+						ID: 1,
+						Ft: types.NewFieldType(mysql.TypeVarchar),
+					},
+				},
 			},
 		},
 	}
@@ -80,14 +75,7 @@ func TestCanalJSONTxnEventEncoderMaxMessageBytes(t *testing.T) {
 }
 
 func TestCanalJSONAppendTxnEventEncoderWithCallback(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(a varchar(255) primary key)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-
-	_, _, colInfos := tableInfo.GetRowColInfos()
+	t.Parallel()
 
 	cfg := common.NewConfig(config.ProtocolCanalJSON)
 	encoder := NewJSONTxnEventEncoderBuilder(cfg).Build()
@@ -96,29 +84,37 @@ func TestCanalJSONAppendTxnEventEncoderWithCallback(t *testing.T) {
 	count := 0
 
 	txn := &model.SingleTableTxn{
-		Table: &model.TableName{Schema: "test", Table: "t"},
+		Table: &model.TableName{Schema: "a", Table: "b"},
 		Rows: []*model.RowChangedEvent{
 			{
-				CommitTs:  1,
-				Table:     &model.TableName{Schema: "test", Table: "t"},
-				TableInfo: tableInfo,
+				CommitTs: 1,
+				Table:    &model.TableName{Schema: "a", Table: "b"},
 				Columns: []*model.Column{{
-					Name:  "a",
+					Name:  "col1",
 					Type:  mysql.TypeVarchar,
 					Value: []byte("aa"),
 				}},
-				ColInfos: colInfos,
+				ColInfos: []rowcodec.ColInfo{
+					{
+						ID: 1,
+						Ft: types.NewFieldType(mysql.TypeVarchar),
+					},
+				},
 			},
 			{
-				CommitTs:  2,
-				Table:     &model.TableName{Schema: "test", Table: "t"},
-				TableInfo: tableInfo,
+				CommitTs: 2,
+				Table:    &model.TableName{Schema: "a", Table: "b"},
 				Columns: []*model.Column{{
-					Name:  "a",
+					Name:  "col1",
 					Type:  mysql.TypeVarchar,
 					Value: []byte("bb"),
 				}},
-				ColInfos: colInfos,
+				ColInfos: []rowcodec.ColInfo{
+					{
+						ID: 1,
+						Ft: types.NewFieldType(mysql.TypeVarchar),
+					},
+				},
 			},
 		},
 	}

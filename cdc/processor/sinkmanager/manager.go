@@ -33,7 +33,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/factory"
 	tablesinkmetrics "github.com/pingcap/tiflow/cdc/sink/metrics/tablesink"
 	"github.com/pingcap/tiflow/cdc/sink/tablesink"
-	"github.com/pingcap/tiflow/pkg/config"
+	pconfig "github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"github.com/pingcap/tiflow/pkg/spanz"
@@ -66,7 +66,8 @@ type TableStats struct {
 type SinkManager struct {
 	changefeedID model.ChangeFeedID
 
-	changefeedInfo *model.ChangeFeedInfo
+	sinkURI string
+	config  *pconfig.ReplicaConfig
 
 	// up is the upstream and used to get the current pd time.
 	up *upstream.Upstream
@@ -140,7 +141,8 @@ type SinkManager struct {
 // New creates a new sink manager.
 func New(
 	changefeedID model.ChangeFeedID,
-	changefeedInfo *model.ChangeFeedInfo,
+	sinkURI string,
+	config *pconfig.ReplicaConfig,
 	up *upstream.Upstream,
 	schemaStorage entry.SchemaStorage,
 	redoDMLMgr redo.DMLManager,
@@ -148,12 +150,12 @@ func New(
 	isMysqlBackend bool,
 ) *SinkManager {
 	m := &SinkManager{
-		changefeedID:   changefeedID,
-		changefeedInfo: changefeedInfo,
-		up:             up,
-		schemaStorage:  schemaStorage,
-		sourceManager:  sourceManager,
-
+		changefeedID:        changefeedID,
+		up:                  up,
+		schemaStorage:       schemaStorage,
+		sourceManager:       sourceManager,
+		sinkURI:             sinkURI,
+		config:              config,
 		sinkProgressHeap:    newTableProgresses(),
 		sinkWorkers:         make([]*sinkWorker, 0, sinkWorkerNum),
 		sinkTaskChan:        make(chan *sinkTask),
@@ -167,7 +169,7 @@ func New(
 			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
 	}
 
-	totalQuota := changefeedInfo.Config.MemoryQuota
+	totalQuota := config.MemoryQuota
 	if redoDMLMgr != nil && redoDMLMgr.Enabled() {
 		m.redoDMLMgr = redoDMLMgr
 		m.redoProgressHeap = newTableProgresses()
@@ -175,9 +177,9 @@ func New(
 		m.redoTaskChan = make(chan *redoTask)
 		m.redoWorkerAvailable = make(chan struct{}, 1)
 
-		consistentMemoryUsage := changefeedInfo.Config.Consistent.MemoryUsage
+		consistentMemoryUsage := m.config.Consistent.MemoryUsage
 		if consistentMemoryUsage == nil {
-			consistentMemoryUsage = config.GetDefaultReplicaConfig().Consistent.MemoryUsage
+			consistentMemoryUsage = pconfig.GetDefaultReplicaConfig().Consistent.MemoryUsage
 		}
 
 		redoQuota := totalQuota * consistentMemoryUsage.MemoryQuotaPercentage / 100
@@ -212,7 +214,7 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 			zap.Error(err))
 	}()
 
-	splitTxn := m.changefeedInfo.Config.Sink.TxnAtomicity.ShouldSplitTxn()
+	splitTxn := util.GetOrZero(m.config.Sink.TxnAtomicity).ShouldSplitTxn()
 
 	gcErrors := make(chan error, 16)
 	sinkErrors := make(chan error, 16)
@@ -327,6 +329,7 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 		if err != nil {
 			return errors.New(fmt.Sprintf("GetRetryBackoff: %s", err.Error()))
 		}
+
 		if err = util.Hang(m.managerCtx, backoff); err != nil {
 			return errors.Trace(err)
 		}
@@ -336,8 +339,8 @@ func (m *SinkManager) Run(ctx context.Context, warnings ...chan<- error) (err er
 func (m *SinkManager) initSinkFactory() (chan error, uint64) {
 	m.sinkFactory.Lock()
 	defer m.sinkFactory.Unlock()
-	uri := m.changefeedInfo.SinkURI
-	cfg := m.changefeedInfo.Config
+	uri := m.sinkURI
+	cfg := m.config
 
 	if m.sinkFactory.f != nil {
 		return m.sinkFactory.errors, m.sinkFactory.version
@@ -364,7 +367,7 @@ func (m *SinkManager) initSinkFactory() (chan error, uint64) {
 		return m.sinkFactory.errors, m.sinkFactory.version
 	}
 
-	m.sinkFactory.f, err = factory.New(m.managerCtx, uri, cfg, m.sinkFactory.errors, m.up.PDClock)
+	m.sinkFactory.f, err = factory.New(m.managerCtx, m.changefeedID, uri, cfg, m.sinkFactory.errors, m.up.PDClock)
 	if err != nil {
 		emitError(err)
 		return m.sinkFactory.errors, m.sinkFactory.version
@@ -429,7 +432,7 @@ func (m *SinkManager) backgroundGC(errors chan<- error) {
 		for {
 			select {
 			case <-m.managerCtx.Done():
-				log.Info("Background GC is stoped because context is canceled",
+				log.Info("Background GC is stopped because context is canceled",
 					zap.String("namespace", m.changefeedID.Namespace),
 					zap.String("changefeed", m.changefeedID.ID))
 				return

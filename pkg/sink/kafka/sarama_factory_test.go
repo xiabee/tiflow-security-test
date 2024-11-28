@@ -17,7 +17,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/stretchr/testify/require"
 )
@@ -54,8 +54,11 @@ func TestSyncProducer(t *testing.T) {
 
 	o := NewOptions()
 	o.Version = "0.9.0.0"
+	o.IsAssignedVersion = true
 	o.BrokerEndpoints = []string{leader.Addr()}
 	o.ClientID = "sarama-test"
+	// specify request version for mock broker
+	o.RequestVersion = 3
 
 	f, err := NewSaramaFactory(o, model.DefaultChangeFeedID("sarama-test"))
 	require.NoError(t, err)
@@ -83,8 +86,11 @@ func TestAsyncProducer(t *testing.T) {
 
 	o := NewOptions()
 	o.Version = "0.9.0.0"
+	o.IsAssignedVersion = true
 	o.BrokerEndpoints = []string{leader.Addr()}
 	o.ClientID = "sarama-test"
+	// specify request version for mock broker
+	o.RequestVersion = 3
 
 	f, err := NewSaramaFactory(o, model.DefaultChangeFeedID("sarama-test"))
 	require.NoError(t, err)

@@ -19,11 +19,11 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/mysql"
-	tfilter "github.com/pingcap/tidb/util/table-filter"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	tfilter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/pingcap/tiflow/cdc/model"
+	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	"github.com/pingcap/tiflow/pkg/config"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"go.uber.org/zap"
@@ -120,7 +120,6 @@ func newSQLEventFilter(cfg *config.FilterConfig, sqlMode string) (*sqlEventFilte
 	res := &sqlEventFilter{
 		ddlParser: p,
 	}
-
 	for _, rule := range cfg.EventFilters {
 		if err := res.addRule(rule); err != nil {
 			return nil, errors.Trace(err)
@@ -164,7 +163,6 @@ func (f *sqlEventFilter) shouldSkipDDL(ddl *model.DDLEvent) (bool, error) {
 	f.pLock.Lock()
 	evenType, err := ddlToEventType(f.ddlParser, ddl.Query, ddl.Type)
 	f.pLock.Unlock()
-
 	if err != nil {
 		return false, err
 	}

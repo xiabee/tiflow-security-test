@@ -228,7 +228,8 @@ func TestCreateChangefeed(t *testing.T) {
 	}
 
 	upstreamInfo := &model.UpstreamInfo{ID: 1}
-	err := s.client.CreateChangefeedInfo(ctx, upstreamInfo, detail)
+	err := s.client.CreateChangefeedInfo(ctx,
+		upstreamInfo, detail)
 	require.NoError(t, err)
 
 	err = s.client.CreateChangefeedInfo(ctx,

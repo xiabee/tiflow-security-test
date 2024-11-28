@@ -48,6 +48,11 @@ const (
 	// DisableMemoryLimit is the default max memory percentage for TiCDC server.
 	// 0 means no memory limit.
 	DisableMemoryLimit = 0
+
+	// EnablePDForwarding is the value of whether to enable PD client forwarding function.
+	// The PD client will forward the requests throughthe follower
+	// If there is a network partition problem between TiCDC and PD leader.
+	EnablePDForwarding = true
 )
 
 var (
@@ -65,9 +70,6 @@ var (
 func init() {
 	StoreGlobalServerConfig(GetDefaultServerConfig())
 }
-
-// SecurityConfig represents security config for server
-type SecurityConfig = security.Credential
 
 // LogFileConfig represents log file config for server
 type LogFileConfig struct {
@@ -106,15 +108,18 @@ var defaultServerConfig = &ServerConfig{
 	OwnerFlushInterval:     TomlDuration(50 * time.Millisecond),
 	ProcessorFlushInterval: TomlDuration(50 * time.Millisecond),
 	Sorter: &SorterConfig{
-		SortDir:             DefaultSortDir,
-		CacheSizeInMB:       128, // By default use 128M memory as sorter cache.
-		MaxMemoryPercentage: 10,  // Deprecated.
+		SortDir:       DefaultSortDir,
+		CacheSizeInMB: 128, // By default, use 128M memory as sorter cache.
 	},
-	Security: &SecurityConfig{},
+	Security: &security.Credential{},
 	KVClient: &KVClientConfig{
-		WorkerConcurrent: 8,
-		WorkerPoolSize:   0, // 0 will use NumCPU() * 2
-		RegionScanLimit:  40,
+		EnableMultiplexing:   true,
+		WorkerConcurrent:     8,
+		GrpcStreamConcurrent: 1,
+		AdvanceIntervalInMs:  300,
+		FrontierConcurrent:   8,
+		WorkerPoolSize:       0, // 0 will use NumCPU() * 2
+		RegionScanLimit:      40,
 		// The default TiKV region election timeout is [10s, 20s],
 		// Use 1 minute to cover region leader missing.
 		RegionRetryDuration: TomlDuration(time.Minute),
@@ -124,17 +129,12 @@ var defaultServerConfig = &ServerConfig{
 			Count: 8,
 			// Following configs are optimized for write/read throughput.
 			// Users should not change them.
-			Concurrency:                 128,
-			MaxOpenFiles:                10000,
-			BlockSize:                   65536,
-			WriterBufferSize:            8388608,
-			Compression:                 "snappy",
-			WriteL0PauseTrigger:         math.MaxInt32,
-			CompactionL0Trigger:         16,
-			CompactionDeletionThreshold: 10485760,
-			CompactionPeriod:            1800,
-			IteratorMaxAliveDuration:    10000,
-			IteratorSlowReadDuration:    256,
+			MaxOpenFiles:        10000,
+			BlockSize:           65536,
+			WriterBufferSize:    8388608,
+			Compression:         "snappy",
+			WriteL0PauseTrigger: math.MaxInt32,
+			CompactionL0Trigger: 16, // Based on a performance test on 4K tables.
 		},
 		Messages: defaultMessageConfig.Clone(),
 
@@ -168,10 +168,9 @@ type ServerConfig struct {
 	OwnerFlushInterval     TomlDuration `toml:"owner-flush-interval" json:"owner-flush-interval"`
 	ProcessorFlushInterval TomlDuration `toml:"processor-flush-interval" json:"processor-flush-interval"`
 
-	Sorter   *SorterConfig   `toml:"sorter" json:"sorter"`
-	Security *SecurityConfig `toml:"security" json:"security"`
-	// DEPRECATED: after using pull based sink, this config is useless.
-	// Because we do not control the memory usage by table anymore.
+	Sorter   *SorterConfig        `toml:"sorter" json:"sorter"`
+	Security *security.Credential `toml:"security" json:"security"`
+	// Deprecated: we don't use this field anymore.
 	PerTableMemoryQuota uint64          `toml:"per-table-memory-quota" json:"per-table-memory-quota"`
 	KVClient            *KVClientConfig `toml:"kv-client" json:"kv-client"`
 	Debug               *DebugConfig    `toml:"debug" json:"debug"`

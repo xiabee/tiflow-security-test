@@ -29,6 +29,12 @@ CURDIR := $(shell pwd)
 path_to_add := $(addsuffix /bin,$(subst :,/bin:,$(GOPATH)))
 export PATH := $(CURDIR)/bin:$(CURDIR)/tools/bin:$(path_to_add):$(PATH)
 
+# DBUS_SESSION_BUS_ADDRESS pulsar client use dbus to detect the connection status,
+# but it will not exit when the connection is closed.
+# I try to use leak_helper to detect goroutine leak,but it does not work.
+# https://github.com/benthosdev/benthos/issues/1184 suggest to use environment variable to disable dbus.
+export DBUS_SESSION_BUS_ADDRESS := /dev/null
+
 SHELL := /usr/bin/env bash
 
 TEST_DIR := /tmp/tidb_cdc_test
@@ -66,7 +72,9 @@ DM_PACKAGE_LIST := go list github.com/pingcap/tiflow/dm/... | grep -vE 'pb|pbmoc
 PACKAGES := $$($(PACKAGE_LIST))
 PACKAGES_TICDC := $$($(PACKAGE_LIST_WITHOUT_DM_ENGINE))
 DM_PACKAGES := $$($(DM_PACKAGE_LIST))
-ENGINE_PACKAGE_LIST := go list github.com/pingcap/tiflow/engine/... | grep -vE 'pb|proto|engine/test/e2e'
+# NOTE: ignore engine/framework because of a race in testify. See #9619
+# ENGINE_PACKAGE_LIST := go list github.com/pingcap/tiflow/engine/... | grep -vE 'pb|proto|engine/test/e2e'
+ENGINE_PACKAGE_LIST := go list github.com/pingcap/tiflow/engine/... | grep -vE "pb|proto|engine/test/e2e|engine/framework$$"
 ENGINE_PACKAGES := $$($(ENGINE_PACKAGE_LIST))
 FILES := $$(find . -name '*.go' -type f | grep -vE 'vendor|_gen|proto|pb\.go|pb\.gw\.go|_mock.go')
 TEST_FILES := $$(find . -name '*_test.go' -type f | grep -vE 'vendor|kv_gen|integration|testing_utils')
@@ -86,7 +94,7 @@ MAKE_FILES = $(shell find . \( -name 'Makefile' -o -name '*.mk' \) -print)
 
 RELEASE_VERSION =
 ifeq ($(RELEASE_VERSION),)
-	RELEASE_VERSION := v7.1.0-master
+	RELEASE_VERSION := v7.5.0-master
 	release_version_regex := ^v[0-9]\..*$$
 	release_branch_regex := "^release-[0-9]\.[0-9].*$$|^HEAD$$|^.*/*tags/v[0-9]\.[0-9]\..*$$"
 	ifneq ($(shell git rev-parse --abbrev-ref HEAD | grep -E $(release_branch_regex)),)
@@ -111,7 +119,11 @@ LDFLAGS += -X "$(CDC_PKG)/pkg/version.BuildTS=$(BUILDTS)"
 LDFLAGS += -X "$(CDC_PKG)/pkg/version.GitHash=$(GITHASH)"
 LDFLAGS += -X "$(CDC_PKG)/pkg/version.GitBranch=$(GITBRANCH)"
 LDFLAGS += -X "$(CDC_PKG)/pkg/version.GoVersion=$(GOVERSION)"
-LDFLAGS += -X "github.com/pingcap/tidb/parser/mysql.TiDBReleaseVersion=$(RELEASE_VERSION)"
+LDFLAGS += -X "github.com/pingcap/tidb/pkg/parser/mysql.TiDBReleaseVersion=$(RELEASE_VERSION)"
+
+# Disable the conflict policy of protoregistry to avoid the conflict error.
+#LDFLAGS += -X "google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn"
+
 
 include tools/Makefile
 include Makefile.engine
@@ -155,13 +167,23 @@ kafka_consumer:
 storage_consumer:
 	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/cdc_storage_consumer ./cmd/storage-consumer/main.go
 
-kafka_consumer_image: 
+pulsar_consumer:
+	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/cdc_pulsar_consumer ./cmd/pulsar-consumer/main.go
+
+kafka_consumer_image:
 	@which docker || (echo "docker not found in ${PATH}"; exit 1)
 	DOCKER_BUILDKIT=1 docker build -f ./deployments/ticdc/docker/kafka-consumer.Dockerfile . -t ticdc:kafka-consumer  --platform linux/amd64
 
-storage_consumer_image: 
+storage_consumer_image:
 	@which docker || (echo "docker not found in ${PATH}"; exit 1)
 	DOCKER_BUILDKIT=1 docker build -f ./deployments/ticdc/docker/storage-consumer.Dockerfile . -t ticdc:storage-consumer  --platform linux/amd64
+
+pulsar_consumer_image:
+	@which docker || (echo "docker not found in ${PATH}"; exit 1)
+	DOCKER_BUILDKIT=1 docker build -f ./deployments/ticdc/docker/pulsar-consumer.Dockerfile . -t ticdc:pulsar-consumer  --platform linux/amd64
+
+filter_helper:
+	$(GOBUILD) -ldflags '$(LDFLAGS)' -o bin/cdc_filter_helper ./cmd/filter-helper/main.go
 
 install:
 	go install ./...
@@ -183,7 +205,7 @@ unit_test_in_verify_ci: check_failpoint_ctl tools/bin/gotestsum tools/bin/gocov 
 	|| { $(FAILPOINT_DISABLE); exit 1; }
 	tools/bin/gocov convert "$(TEST_DIR)/cov.unit.out" | tools/bin/gocov-xml > cdc-coverage.xml
 	$(FAILPOINT_DISABLE)
-	@bash <(curl -s https://codecov.io/bash) -F cdc -f $(TEST_DIR)/cov.unit.out -t $(TICDC_CODECOV_TOKEN)
+	@bash <(curl -s https://codecov.io/bash) -F unit,cdc -f $(TEST_DIR)/cov.unit.out -t $(TICDC_CODECOV_TOKEN)
 
 leak_test: check_failpoint_ctl
 	$(FAILPOINT_ENABLE)
@@ -202,8 +224,9 @@ check_third_party_binary:
 	@which bin/etcdctl
 	@which bin/jq
 	@which bin/minio
+	@which bin/bin/schema-registry-start
 
-integration_test_build: check_failpoint_ctl storage_consumer kafka_consumer
+integration_test_build: check_failpoint_ctl storage_consumer kafka_consumer pulsar_consumer
 	$(FAILPOINT_ENABLE)
 	$(GOTEST) -ldflags '$(LDFLAGS)' -c -cover -covermode=atomic \
 		-coverpkg=github.com/pingcap/tiflow/... \
@@ -235,6 +258,9 @@ integration_test_kafka: check_third_party_binary
 
 integration_test_storage:
 	tests/integration_tests/run.sh storage "$(CASE)" "$(START_AT)"
+
+integration_test_pulsar:
+	tests/integration_tests/run.sh pulsar "$(CASE)" "$(START_AT)"
 
 kafka_docker_integration_test: ## Run TiCDC Kafka all integration tests in Docker.
 kafka_docker_integration_test: clean_integration_test_containers
@@ -315,17 +341,17 @@ tidy:
 
 # TODO: Unified cdc and dm config.
 check-static: tools/bin/golangci-lint
-	tools/bin/golangci-lint run --timeout 10m0s --skip-dirs "^dm/","^tests/"
+	tools/bin/golangci-lint run --timeout 10m0s --skip-dirs "^dm/","^tests/","^cmd/"
 	cd dm && ../tools/bin/golangci-lint run --timeout 10m0s
 
 check: check-copyright generate_mock go-generate fmt check-static tidy terror_check errdoc \
 	check-merge-conflicts check-ticdc-dashboard check-diff-line-width check-makefiles \
-	check_cdc_integration_test check_dm_integration_test check_engine_integration_test 
+	check_cdc_integration_test check_dm_integration_test check_engine_integration_test
 	@git --no-pager diff --exit-code || (echo "Please add changed files!" && false)
 
 fast_check: check-copyright fmt check-static tidy terror_check errdoc \
-	check-merge-conflicts check-ticdc-dashboard check-diff-line-width check-makefiles \
-	check_cdc_integration_test check_dm_integration_test check_engine_integration_test 
+	check-merge-conflicts check-ticdc-dashboard check-diff-line-width swagger-spec check-makefiles \
+	check_cdc_integration_test check_dm_integration_test check_engine_integration_test
 	@git --no-pager diff --exit-code || (echo "Please add changed files!" && false)
 
 integration_test_coverage: tools/bin/gocovmerge tools/bin/goveralls
@@ -336,6 +362,9 @@ ifeq ("$(JenkinsCI)", "1")
 else
 	go tool cover -html "$(TEST_DIR)/all_cov.out" -o "$(TEST_DIR)/all_cov.html"
 endif
+
+swagger-spec: tools/bin/swag
+	tools/bin/swag init --exclude dm,engine --parseVendor -generalInfo cdc/api/v1/api.go --output docs/swagger
 
 unit_test_coverage:
 	grep -vE ".*.pb.go|$(CDC_PKG)/testing_utils/.*|$(CDC_PKG)/cdc/sink/simple_mysql_tester.go|.*.__failpoint_binding__.go" "$(TEST_DIR)/cov.unit.out" > "$(TEST_DIR)/unit_cov.out"
@@ -413,7 +442,7 @@ dm_unit_test_in_verify_ci: check_failpoint_ctl tools/bin/gotestsum tools/bin/goc
 	|| { $(FAILPOINT_DISABLE); exit 1; }
 	tools/bin/gocov convert "$(DM_TEST_DIR)/cov.unit_test.out" | tools/bin/gocov-xml > dm-coverage.xml
 	$(FAILPOINT_DISABLE)
-	@bash <(curl -s https://codecov.io/bash) -F dm -f $(DM_TEST_DIR)/cov.unit_test.out -t $(TICDC_CODECOV_TOKEN)
+	@bash <(curl -s https://codecov.io/bash) -F unit,dm -f $(DM_TEST_DIR)/cov.unit_test.out -t $(TICDC_CODECOV_TOKEN)
 
 dm_integration_test_build: check_failpoint_ctl
 	$(FAILPOINT_ENABLE)
@@ -575,7 +604,7 @@ engine_unit_test_in_verify_ci: check_failpoint_ctl tools/bin/gotestsum tools/bin
 	|| { $(FAILPOINT_DISABLE); exit 1; }
 	tools/bin/gocov convert "$(ENGINE_TEST_DIR)/cov.unit_test.out" | tools/bin/gocov-xml > engine-coverage.xml
 	$(FAILPOINT_DISABLE)
-	@bash <(curl -s https://codecov.io/bash) -F engine -f $(ENGINE_TEST_DIR)/cov.unit_test.out -t $(TICDC_CODECOV_TOKEN)
+	@bash <(curl -s https://codecov.io/bash) -F unit,engine -f $(ENGINE_TEST_DIR)/cov.unit_test.out -t $(TICDC_CODECOV_TOKEN)
 
 prepare_test_binaries:
 	cd scripts && ./download-integration-test-binaries.sh master && cd ..

@@ -11,9 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build intest
-// +build intest
-
 package mq
 
 import (
@@ -22,8 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tiflow/cdc/entry"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink/mq/dmlproducer"
@@ -31,44 +29,49 @@ import (
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink"
+	"github.com/pingcap/tiflow/pkg/sink/codec"
 	"github.com/pingcap/tiflow/pkg/sink/codec/builder"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/stretchr/testify/require"
 )
 
 func newBatchEncodeWorker(ctx context.Context, t *testing.T) (*worker, dmlproducer.DMLProducer) {
-	// 200 is about the size of a rowEvent change.
 	id := model.DefaultChangeFeedID("test")
-	encoderConfig := common.NewConfig(config.ProtocolOpen).WithMaxMessageBytes(200)
-	builder, err := builder.NewRowEventEncoderBuilder(context.Background(), encoderConfig)
+	// 200 is about the size of a rowEvent change.
+	encoderConfig := common.NewConfig(config.ProtocolOpen).WithMaxMessageBytes(200).WithChangefeedID(id)
+	encoderBuilder, err := builder.NewRowEventEncoderBuilder(context.Background(), encoderConfig)
 	require.NoError(t, err)
-
 	p := dmlproducer.NewDMLMockProducer(context.Background(), id, nil, nil, nil, nil)
+	require.NoError(t, err)
 	encoderConcurrency := 4
-	statistics := metrics.NewStatistics(ctx, sink.RowSink)
-	return newWorker(id, config.ProtocolOpen, builder, encoderConcurrency, p, statistics), p
+	statistics := metrics.NewStatistics(ctx, id, sink.RowSink)
+
+	cfg := config.GetDefaultReplicaConfig()
+	cfg.Sink.EncoderConcurrency = &encoderConcurrency
+	encoderGroup := codec.NewEncoderGroup(cfg.Sink, encoderBuilder, id)
+	return newWorker(id, config.ProtocolOpen, p, encoderGroup, statistics), p
 }
 
 func newNonBatchEncodeWorker(ctx context.Context, t *testing.T) (*worker, dmlproducer.DMLProducer) {
-	// 300 is about the size of a rowEvent change.
-	encoderConfig := common.NewConfig(config.ProtocolCanalJSON).WithMaxMessageBytes(300)
 	id := model.DefaultChangeFeedID("test")
-	builder, err := builder.NewRowEventEncoderBuilder(context.Background(), encoderConfig)
+	// 300 is about the size of a rowEvent change.
+	encoderConfig := common.NewConfig(config.ProtocolCanalJSON).WithMaxMessageBytes(300).WithChangefeedID(id)
+	encoderBuilder, err := builder.NewRowEventEncoderBuilder(context.Background(), encoderConfig)
 	require.NoError(t, err)
 	p := dmlproducer.NewDMLMockProducer(context.Background(), id, nil, nil, nil, nil)
+	require.NoError(t, err)
 	encoderConcurrency := 4
-	statistics := metrics.NewStatistics(ctx, sink.RowSink)
-	return newWorker(id, config.ProtocolCanalJSON, builder, encoderConcurrency, p, statistics), p
+	statistics := metrics.NewStatistics(ctx, id, sink.RowSink)
+
+	cfg := config.GetDefaultReplicaConfig()
+	cfg.Sink.EncoderConcurrency = &encoderConcurrency
+	encoderGroup := codec.NewEncoderGroup(cfg.Sink, encoderBuilder, id)
+
+	return newWorker(id, config.ProtocolOpen, p, encoderGroup, statistics), p
 }
 
 func TestNonBatchEncode_SendMessages(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(a varchar(255) primary key)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-	_, _, colInfo := tableInfo.GetRowColInfos()
+	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -76,16 +79,15 @@ func TestNonBatchEncode_SendMessages(t *testing.T) {
 	worker, p := newNonBatchEncodeWorker(ctx, t)
 	defer worker.close()
 
-	key := TopicPartitionKey{
+	key := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 1,
 	}
 	row := &model.RowChangedEvent{
-		CommitTs:  1,
-		Table:     &model.TableName{Schema: "test", Table: "t"},
-		TableInfo: tableInfo,
-		Columns:   []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "aa"}},
-		ColInfos:  colInfo,
+		CommitTs: 1,
+		Table:    &model.TableName{Schema: "a", Table: "b"},
+		Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "aa"}},
+		ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 	}
 	tableStatus := state.TableSinkSinking
 
@@ -135,7 +137,7 @@ func TestBatchEncode_Batch(t *testing.T) {
 	defer cancel()
 	worker, _ := newBatchEncodeWorker(ctx, t)
 	defer worker.close()
-	key := TopicPartitionKey{
+	key := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 1,
 	}
@@ -167,15 +169,15 @@ func TestBatchEncode_Batch(t *testing.T) {
 func TestBatchEncode_Group(t *testing.T) {
 	t.Parallel()
 
-	key1 := TopicPartitionKey{
+	key1 := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 1,
 	}
-	key2 := TopicPartitionKey{
+	key2 := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 2,
 	}
-	key3 := TopicPartitionKey{
+	key3 := model.TopicPartitionKey{
 		Topic:     "test1",
 		Partition: 2,
 	}
@@ -263,19 +265,13 @@ func TestBatchEncode_Group(t *testing.T) {
 }
 
 func TestBatchEncode_GroupWhenTableStopping(t *testing.T) {
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
+	t.Parallel()
 
-	sql := `create table test.t(a varchar(255) primary key)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-	_, _, colInfo := tableInfo.GetRowColInfos()
-
-	key1 := TopicPartitionKey{
+	key1 := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 1,
 	}
-	key2 := TopicPartitionKey{
+	key2 := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 2,
 	}
@@ -289,11 +285,9 @@ func TestBatchEncode_GroupWhenTableStopping(t *testing.T) {
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  1,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "col1", Type: 1, Value: "aa"}},
-					ColInfos:  colInfo,
+					CommitTs: 1,
+					Table:    &model.TableName{Schema: "a", Table: "b"},
+					Columns:  []*model.Column{{Name: "col1", Type: 1, Value: "aa"}},
 				},
 				Callback:  func() {},
 				SinkState: &replicatingStatus,
@@ -338,15 +332,17 @@ func TestBatchEncode_GroupWhenTableStopping(t *testing.T) {
 }
 
 func TestBatchEncode_SendMessages(t *testing.T) {
-	key1 := TopicPartitionKey{
+	t.Parallel()
+
+	key1 := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 1,
 	}
-	key2 := TopicPartitionKey{
+	key2 := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 2,
 	}
-	key3 := TopicPartitionKey{
+	key3 := model.TopicPartitionKey{
 		Topic:     "test1",
 		Partition: 2,
 	}
@@ -356,24 +352,14 @@ func TestBatchEncode_SendMessages(t *testing.T) {
 	defer cancel()
 	worker, p := newBatchEncodeWorker(ctx, t)
 	defer worker.close()
-
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(a varchar(255) primary key)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-	_, _, colInfo := tableInfo.GetRowColInfos()
-
 	events := []mqEvent{
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  1,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "a", Type: mysql.TypeVarchar, Value: "aa"}},
-					ColInfos:  colInfo,
+					CommitTs: 1,
+					Table:    &model.TableName{Schema: "a", Table: "b"},
+					Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "aa"}},
+					ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 				},
 				Callback:  func() {},
 				SinkState: &tableStatus,
@@ -383,11 +369,10 @@ func TestBatchEncode_SendMessages(t *testing.T) {
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  2,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "a", Type: mysql.TypeVarchar, Value: "bb"}},
-					ColInfos:  colInfo,
+					CommitTs: 2,
+					Table:    &model.TableName{Schema: "a", Table: "b"},
+					Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "bb"}},
+					ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 				},
 				Callback:  func() {},
 				SinkState: &tableStatus,
@@ -397,11 +382,10 @@ func TestBatchEncode_SendMessages(t *testing.T) {
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  3,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "a", Type: mysql.TypeVarchar, Value: "cc"}},
-					ColInfos:  colInfo,
+					CommitTs: 3,
+					Table:    &model.TableName{Schema: "a", Table: "b"},
+					Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "cc"}},
+					ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 				},
 				Callback:  func() {},
 				SinkState: &tableStatus,
@@ -411,11 +395,10 @@ func TestBatchEncode_SendMessages(t *testing.T) {
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  2,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "a", Type: mysql.TypeVarchar, Value: "bb"}},
-					ColInfos:  colInfo,
+					CommitTs: 2,
+					Table:    &model.TableName{Schema: "aa", Table: "bb"},
+					Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "bb"}},
+					ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 				},
 				Callback:  func() {},
 				SinkState: &tableStatus,
@@ -425,11 +408,10 @@ func TestBatchEncode_SendMessages(t *testing.T) {
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  2,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "a", Type: mysql.TypeVarchar, Value: "bb"}},
-					ColInfos:  colInfo,
+					CommitTs: 2,
+					Table:    &model.TableName{Schema: "aaa", Table: "bbb"},
+					Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "bb"}},
+					ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 				},
 				Callback:  func() {},
 				SinkState: &tableStatus,
@@ -439,11 +421,10 @@ func TestBatchEncode_SendMessages(t *testing.T) {
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  3,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "bb"}},
-					ColInfos:  colInfo,
+					CommitTs: 3,
+					Table:    &model.TableName{Schema: "aaa", Table: "bbb"},
+					Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "bb"}},
+					ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 				},
 				Callback:  func() {},
 				SinkState: &tableStatus,
@@ -501,11 +482,13 @@ func TestBatchEncodeWorker_Abort(t *testing.T) {
 }
 
 func TestNonBatchEncode_SendMessagesWhenTableStopping(t *testing.T) {
-	key1 := TopicPartitionKey{
+	t.Parallel()
+
+	key1 := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 1,
 	}
-	key2 := TopicPartitionKey{
+	key2 := model.TopicPartitionKey{
 		Topic:     "test",
 		Partition: 2,
 	}
@@ -515,24 +498,14 @@ func TestNonBatchEncode_SendMessagesWhenTableStopping(t *testing.T) {
 	defer worker.close()
 	replicatingStatus := state.TableSinkSinking
 	stoppedStatus := state.TableSinkStopping
-
-	helper := entry.NewSchemaTestHelper(t)
-	defer helper.Close()
-
-	sql := `create table test.t(a varchar(255) primary key)`
-	job := helper.DDL2Job(sql)
-	tableInfo := model.WrapTableInfo(0, "test", 1, job.BinlogInfo.TableInfo)
-	_, _, colInfo := tableInfo.GetRowColInfos()
-
 	events := []mqEvent{
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  1,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "a", Type: mysql.TypeVarchar, Value: "aa"}},
-					ColInfos:  colInfo,
+					CommitTs: 1,
+					Table:    &model.TableName{Schema: "a", Table: "b"},
+					Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "aa"}},
+					ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 				},
 				Callback:  func() {},
 				SinkState: &replicatingStatus,
@@ -542,11 +515,10 @@ func TestNonBatchEncode_SendMessagesWhenTableStopping(t *testing.T) {
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  2,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "a", Type: mysql.TypeVarchar, Value: "bb"}},
-					ColInfos:  colInfo,
+					CommitTs: 2,
+					Table:    &model.TableName{Schema: "a", Table: "b"},
+					Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "bb"}},
+					ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 				},
 				Callback:  func() {},
 				SinkState: &replicatingStatus,
@@ -556,11 +528,10 @@ func TestNonBatchEncode_SendMessagesWhenTableStopping(t *testing.T) {
 		{
 			rowEvent: &dmlsink.RowChangeCallbackableEvent{
 				Event: &model.RowChangedEvent{
-					CommitTs:  3,
-					Table:     &model.TableName{Schema: "test", Table: "t"},
-					TableInfo: tableInfo,
-					Columns:   []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "cc"}},
-					ColInfos:  colInfo,
+					CommitTs: 3,
+					Table:    &model.TableName{Schema: "a", Table: "b"},
+					Columns:  []*model.Column{{Name: "col1", Type: mysql.TypeVarchar, Value: "cc"}},
+					ColInfos: []rowcodec.ColInfo{{ID: 1, Ft: types.NewFieldType(mysql.TypeVarchar)}},
 				},
 				Callback:  func() {},
 				SinkState: &stoppedStatus,

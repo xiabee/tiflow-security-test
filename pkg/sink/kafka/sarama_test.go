@@ -19,7 +19,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 	"github.com/gin-gonic/gin/binding"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -30,6 +30,7 @@ import (
 func TestNewSaramaConfig(t *testing.T) {
 	options := NewOptions()
 	options.Version = "invalid"
+	options.IsAssignedVersion = true
 	ctx := context.Background()
 	_, err := NewSaramaConfig(ctx, options)
 	require.Regexp(t, "invalid version.*", errors.Cause(err))

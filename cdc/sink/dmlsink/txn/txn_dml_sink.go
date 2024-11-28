@@ -16,7 +16,6 @@ package txn
 import (
 	"context"
 	"net/url"
-	"strings"
 	"sync"
 
 	"github.com/pingcap/errors"
@@ -27,7 +26,7 @@ import (
 	"github.com/pingcap/tiflow/cdc/sink/tablesink/state"
 	"github.com/pingcap/tiflow/pkg/causality"
 	"github.com/pingcap/tiflow/pkg/config"
-	psink "github.com/pingcap/tiflow/pkg/sink"
+	"github.com/pingcap/tiflow/pkg/sink"
 	pmysql "github.com/pingcap/tiflow/pkg/sink/mysql"
 	"golang.org/x/sync/errgroup"
 )
@@ -48,8 +47,6 @@ type dmlSink struct {
 		isDead           bool
 	}
 
-	scheme string
-
 	workers []*worker
 	cancel  func()
 
@@ -57,6 +54,8 @@ type dmlSink struct {
 	dead chan struct{}
 
 	statistics *metrics.Statistics
+
+	scheme string
 }
 
 // GetDBConnImpl is the implementation of pmysql.Factory.
@@ -68,15 +67,16 @@ var GetDBConnImpl pmysql.Factory = pmysql.CreateMySQLDBConn
 // NewMySQLSink creates a mysql dmlSink with given parameters.
 func NewMySQLSink(
 	ctx context.Context,
+	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
 	errCh chan<- error,
 	conflictDetectorSlots uint64,
 ) (*dmlSink, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	statistics := metrics.NewStatistics(ctx, psink.TxnSink)
+	statistics := metrics.NewStatistics(ctx, changefeedID, sink.TxnSink)
 
-	backendImpls, err := mysql.NewMySQLBackends(ctx, sinkURI, replicaConfig, GetDBConnImpl, statistics)
+	backendImpls, err := mysql.NewMySQLBackends(ctx, changefeedID, sinkURI, replicaConfig, GetDBConnImpl, statistics)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -86,15 +86,18 @@ func NewMySQLSink(
 	for _, impl := range backendImpls {
 		backends = append(backends, impl)
 	}
-	sink := newSink(ctx, backends, errCh, conflictDetectorSlots)
-	sink.scheme = strings.ToLower(sinkURI.Scheme)
-	sink.statistics = statistics
-	sink.cancel = cancel
 
-	return sink, nil
+	s := newSink(ctx, changefeedID, backends, errCh, conflictDetectorSlots)
+	s.statistics = statistics
+	s.cancel = cancel
+	s.scheme = sink.GetScheme(sinkURI)
+
+	return s, nil
 }
 
-func newSink(ctx context.Context, backends []backend,
+func newSink(ctx context.Context,
+	changefeedID model.ChangeFeedID,
+	backends []backend,
 	errCh chan<- error, conflictDetectorSlots uint64,
 ) *dmlSink {
 	ctx, cancel := context.WithCancel(ctx)
@@ -112,7 +115,7 @@ func newSink(ctx context.Context, backends []backend,
 
 	g, ctx1 := errgroup.WithContext(ctx)
 	for i, backend := range backends {
-		w := newWorker(ctx1, i, backend, len(backends))
+		w := newWorker(ctx1, changefeedID, i, backend, len(backends))
 		txnCh := sink.alive.conflictDetector.GetOutChByCacheID(int64(i))
 		g.Go(func() error { return w.run(txnCh) })
 		sink.workers = append(sink.workers, w)

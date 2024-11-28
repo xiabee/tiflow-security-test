@@ -11,9 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build intest
-// +build intest
-
 package canal
 
 import (
@@ -27,18 +24,20 @@ import (
 )
 
 func TestNewCanalJSONBatchDecoder4RowMessage(t *testing.T) {
-	insertEvent, _, _ := newLargeEvent4Test(t)
+	t.Parallel()
+
 	ctx := context.Background()
 	expectedDecodedValue := collectExpectedDecodedValue(testColumnsTable)
 	for _, encodeEnable := range []bool{false, true} {
-		encoder := newJSONRowEventEncoder(&common.Config{
-			EnableTiDBExtension: encodeEnable,
-			Terminator:          config.CRLF,
-			MaxMessageBytes:     config.DefaultMaxMessageBytes,
-		})
-		require.NotNil(t, encoder)
+		codecConfig := common.NewConfig(config.ProtocolCanalJSON)
+		codecConfig.EnableTiDBExtension = encodeEnable
+		codecConfig.Terminator = config.CRLF
 
-		err := encoder.AppendRowChangedEvent(context.Background(), "", insertEvent, nil)
+		builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
+		require.NoError(t, err)
+		encoder := builder.Build()
+
+		err = encoder.AppendRowChangedEvent(ctx, "", testCaseInsert, nil)
 		require.NoError(t, err)
 
 		messages := encoder.Build()
@@ -59,11 +58,11 @@ func TestNewCanalJSONBatchDecoder4RowMessage(t *testing.T) {
 			require.Equal(t, model.MessageTypeRow, ty)
 
 			consumed, err := decoder.NextRowChangedEvent()
-			require.Nil(t, err)
+			require.NoError(t, err)
 
-			require.Equal(t, insertEvent.Table, consumed.Table)
+			require.Equal(t, testCaseInsert.Table, consumed.Table)
 			if encodeEnable && decodeEnable {
-				require.Equal(t, insertEvent.CommitTs, consumed.CommitTs)
+				require.Equal(t, testCaseInsert.CommitTs, consumed.CommitTs)
 			} else {
 				require.Equal(t, uint64(0), consumed.CommitTs)
 			}
@@ -73,7 +72,7 @@ func TestNewCanalJSONBatchDecoder4RowMessage(t *testing.T) {
 				require.True(t, ok)
 				require.Equal(t, expected, col.Value)
 
-				for _, item := range insertEvent.Columns {
+				for _, item := range testCaseInsert.Columns {
 					if item.Name == col.Name {
 						require.Equal(t, item.Type, col.Type)
 					}
@@ -84,7 +83,7 @@ func TestNewCanalJSONBatchDecoder4RowMessage(t *testing.T) {
 			require.False(t, hasNext)
 
 			consumed, err = decoder.NextRowChangedEvent()
-			require.NotNil(t, err)
+			require.Error(t, err)
 			require.Nil(t, consumed)
 		}
 	}
@@ -97,11 +96,13 @@ func TestNewCanalJSONBatchDecoder4DDLMessage(t *testing.T) {
 	for _, encodeEnable := range []bool{false, true} {
 		codecConfig := common.NewConfig(config.ProtocolCanalJSON)
 		codecConfig.EnableTiDBExtension = encodeEnable
-		encoder := newJSONRowEventEncoder(codecConfig)
-		require.NotNil(t, encoder)
+
+		builder, err := NewJSONRowEventEncoderBuilder(ctx, codecConfig)
+		require.NoError(t, err)
+		encoder := builder.Build()
 
 		result, err := encoder.EncodeDDLEvent(testCaseDDL)
-		require.Nil(t, err)
+		require.NoError(t, err)
 		require.NotNil(t, result)
 
 		for _, decodeEnable := range []bool{false, true} {
@@ -147,25 +148,24 @@ func TestCanalJSONBatchDecoderWithTerminator(t *testing.T) {
 {"id":0,"database":"test","table":"employee","pkNames":["id"],"isDdl":false,"type":"DELETE","es":1668067230388,"ts":1668067231725,"sql":"","sqlType":{"FirstName":12,"HireDate":91,"LastName":12,"OfficeLocation":12,"id":4},"mysqlType":{"FirstName":"varchar","HireDate":"date","LastName":"varchar","OfficeLocation":"varchar","id":"int"},"data":[{"FirstName":"Bob","HireDate":"2015-10-08","LastName":"Smith","OfficeLocation":"Los Angeles","id":"101"}],"old":null}`
 	ctx := context.Background()
 	codecConfig := common.NewConfig(config.ProtocolCanalJSON)
-	codecConfig.LargeMessageHandle = config.NewDefaultLargeMessageHandleConfig()
 	codecConfig.Terminator = "\n"
-
 	decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
 	require.NoError(t, err)
 
 	err = decoder.AddKeyValue(nil, []byte(encodedValue))
 	require.NoError(t, err)
+
 	cnt := 0
 	for {
 		tp, hasNext, err := decoder.HasNext()
 		if !hasNext {
 			break
 		}
-		require.Nil(t, err)
+		require.NoError(t, err)
 		require.Equal(t, model.MessageTypeRow, tp)
 		cnt++
 		event, err := decoder.NextRowChangedEvent()
-		require.Nil(t, err)
+		require.NoError(t, err)
 		require.NotNil(t, event)
 	}
 	require.Equal(t, 3, cnt)

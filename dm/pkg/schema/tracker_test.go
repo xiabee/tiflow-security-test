@@ -22,13 +22,13 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/util/filter"
-	timock "github.com/pingcap/tidb/util/mock"
+	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/util/filter"
+	timock "github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
@@ -834,13 +834,4 @@ func TestNeedRestrictedSQLExecutor(t *testing.T) {
 
 	err = tracker.Exec(ctx, "testdb", parseSQL(t, p, `alter table testdb.t modify column a int not null;`))
 	require.NoError(t, err)
-}
-
-func TestMustNotUseMockStore(t *testing.T) {
-	ctx := context.Background()
-	tracker, err := NewTestTracker(ctx, "test-tracker", nil, dlog.L())
-	require.NoError(t, err)
-	defer tracker.Close()
-
-	require.Nil(t, tracker.se.GetStore(), "see https://github.com/pingcap/tiflow/issues/5334")
 }

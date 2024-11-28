@@ -129,9 +129,9 @@ func (c *Config) Apply(
 		return err
 	}
 
-	c.DateSeparator = replicaConfig.Sink.DateSeparator
-	c.EnablePartitionSeparator = replicaConfig.Sink.EnablePartitionSeparator
-	c.FileIndexWidth = replicaConfig.Sink.FileIndexWidth
+	c.DateSeparator = util.GetOrZero(replicaConfig.Sink.DateSeparator)
+	c.EnablePartitionSeparator = util.GetOrZero(replicaConfig.Sink.EnablePartitionSeparator)
+	c.FileIndexWidth = util.GetOrZero(replicaConfig.Sink.FileIndexWidth)
 	if replicaConfig.Sink.CloudStorageConfig != nil {
 		c.OutputColumnID = util.GetOrZero(replicaConfig.Sink.CloudStorageConfig.OutputColumnID)
 		if replicaConfig.Sink.CloudStorageConfig.FileExpirationDays != nil {

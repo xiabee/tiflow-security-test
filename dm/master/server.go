@@ -30,8 +30,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	toolutils "github.com/pingcap/tidb-tools/pkg/utils"
-	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/pkg/util/dbutil"
 	"github.com/pingcap/tiflow/dm/checker"
 	dmcommon "github.com/pingcap/tiflow/dm/common"
 	"github.com/pingcap/tiflow/dm/config"
@@ -61,6 +61,7 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 const (
@@ -174,18 +175,20 @@ func (s *Server) Start(ctx context.Context) (err error) {
 		return
 	}
 
-	tls, err := toolutils.NewTLS(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.AdvertiseAddr, s.cfg.CertAllowedCN)
+	tlsConfig, err := util.NewTLSConfig(
+		util.WithCAPath(s.cfg.SSLCA),
+		util.WithCertAndKeyPath(s.cfg.SSLCert, s.cfg.SSLKey),
+		util.WithVerifyCommonName(s.cfg.CertAllowedCN),
+	)
 	if err != nil {
 		return terror.ErrMasterTLSConfigNotValid.Delegate(err)
 	}
 
-	// tls2 is used for grpc client in grpc gateway
-	tls2, err := toolutils.NewTLS(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.AdvertiseAddr, s.cfg.CertAllowedCN)
-	if err != nil {
-		return terror.ErrMasterTLSConfigNotValid.Delegate(err)
+	grpcTLS := grpc.WithInsecure()
+	if tlsConfig != nil {
+		grpcTLS = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
-
-	apiHandler, err := getHTTPAPIHandler(ctx, s.cfg.AdvertiseAddr, tls2.ToGRPCDialOption())
+	apiHandler, err := getHTTPAPIHandler(ctx, s.cfg.AdvertiseAddr, grpcTLS)
 	if err != nil {
 		return
 	}
@@ -206,18 +209,13 @@ func (s *Server) Start(ctx context.Context) (err error) {
 		"/debug/": getDebugHandler(),
 	}
 	if s.cfg.OpenAPI {
-		// tls3 is used to openapi reverse proxy
-		tls3, err1 := toolutils.NewTLS(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.AdvertiseAddr, s.cfg.CertAllowedCN)
-		if err1 != nil {
-			return terror.ErrMasterTLSConfigNotValid.Delegate(err1)
-		}
-		if initOpenAPIErr := s.InitOpenAPIHandles(tls3.TLSConfig()); initOpenAPIErr != nil {
+		if initOpenAPIErr := s.InitOpenAPIHandles(tlsConfig); initOpenAPIErr != nil {
 			return terror.ErrOpenAPICommonError.Delegate(initOpenAPIErr)
 		}
 
 		const dashboardPrefix = "/dashboard/"
 		scheme := "http://"
-		if tls3.TLSConfig() != nil {
+		if tlsConfig != nil {
 			scheme = "https://"
 		}
 		log.L().Info("Web UI enabled", zap.String("dashboard", scheme+s.cfg.AdvertiseAddr+dashboardPrefix))
@@ -238,7 +236,7 @@ func (s *Server) Start(ctx context.Context) (err error) {
 
 	// create an etcd client used in the whole server instance.
 	// NOTE: we only use the local member's address now, but we can use all endpoints of the cluster if needed.
-	s.etcdClient, err = etcdutil.CreateClient([]string{withHost(s.cfg.AdvertiseAddr)}, tls.TLSConfig())
+	s.etcdClient, err = etcdutil.CreateClient([]string{withHost(s.cfg.AdvertiseAddr)}, tlsConfig)
 	if err != nil {
 		return
 	}
@@ -511,7 +509,11 @@ func (s *Server) StartTask(ctx context.Context, req *pb.StartTaskRequest) (*pb.S
 	if err != nil {
 		return respWithErr(err)
 	}
-	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgs, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
+	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
+	if err != nil {
+		return respWithErr(err)
+	}
+	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
 	if err != nil {
 		resp.CheckResult = terror.WithClass(err, terror.ClassDMMaster).Error()
 		return resp, nil
@@ -729,8 +731,14 @@ func (s *Server) UpdateTask(ctx context.Context, req *pb.UpdateTaskRequest) (*pb
 		// nolint:nilerr
 		return resp, nil
 	}
+	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
+	if err != nil {
+		resp.Msg = err.Error()
+		// nolint:nilerr
+		return resp, nil
+	}
 
-	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgs, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
+	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, ctlcommon.DefaultErrorCnt, ctlcommon.DefaultWarnCnt)
 	if err != nil {
 		resp.CheckResult = terror.WithClass(err, terror.ClassDMMaster).Error()
 		return resp, nil
@@ -1274,13 +1282,13 @@ func (s *Server) getStatusFromWorkers(
 }
 
 // TODO: refine the call stack of this API, query worker configs that we needed only.
-func (s *Server) getSourceConfigs(sources []*config.MySQLInstance) map[string]*config.SourceConfig {
+func (s *Server) getSourceConfigs(sources []string) map[string]*config.SourceConfig {
 	cfgs := make(map[string]*config.SourceConfig)
 	for _, source := range sources {
-		if cfg := s.scheduler.GetSourceCfgByID(source.SourceID); cfg != nil {
+		if cfg := s.scheduler.GetSourceCfgByID(source); cfg != nil {
 			// check the password
 			cfg.DecryptPassword()
-			cfgs[source.SourceID] = cfg
+			cfgs[source] = cfg
 		}
 	}
 	return cfgs
@@ -1314,8 +1322,14 @@ func (s *Server) CheckTask(ctx context.Context, req *pb.CheckTaskRequest) (*pb.C
 		// nolint:nilerr
 		return resp, nil
 	}
+	stCfgsForCheck, err := s.generateSubTasksForCheck(stCfgs)
+	if err != nil {
+		resp.Msg = err.Error()
+		// nolint:nilerr
+		return resp, nil
+	}
 
-	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgs, req.ErrCnt, req.WarnCnt)
+	msg, err := checker.CheckSyncConfigFunc(ctx, stCfgsForCheck, req.ErrCnt, req.WarnCnt)
 	if err != nil {
 		resp.Msg = terror.WithClass(err, terror.ClassDMMaster).Error()
 		return resp, nil
@@ -1646,7 +1660,11 @@ func (s *Server) generateSubTask(
 		return nil, nil, terror.WithClass(err, terror.ClassDMMaster)
 	}
 
-	sourceCfgs := s.getSourceConfigs(cfg.MySQLInstances)
+	sourceIDs := make([]string, 0, len(cfg.MySQLInstances))
+	for _, inst := range cfg.MySQLInstances {
+		sourceIDs = append(sourceIDs, inst.SourceID)
+	}
+	sourceCfgs := s.getSourceConfigs(sourceIDs)
 	dbConfigs := make(map[string]dbconfig.DBConfig, len(sourceCfgs))
 	for _, sourceCfg := range sourceCfgs {
 		dbConfigs[sourceCfg.SourceID] = sourceCfg.From
@@ -1679,6 +1697,39 @@ func (s *Server) generateSubTask(
 		}
 	}
 	return cfg, stCfgs, nil
+}
+
+func (s *Server) generateSubTasksForCheck(stCfgs []*config.SubTaskConfig) ([]*config.SubTaskConfig, error) {
+	sourceIDs := make([]string, 0, len(stCfgs))
+	for _, stCfg := range stCfgs {
+		sourceIDs = append(sourceIDs, stCfg.SourceID)
+	}
+
+	sourceCfgs := s.getSourceConfigs(sourceIDs)
+	stCfgsForCheck := make([]*config.SubTaskConfig, 0, len(stCfgs))
+	for i, stCfg := range stCfgs {
+		stCfgForCheck, err := stCfg.Clone()
+		if err != nil {
+			return nil, err
+		}
+		stCfgsForCheck = append(stCfgsForCheck, stCfgForCheck)
+		if sourceCfg, ok := sourceCfgs[stCfgForCheck.SourceID]; ok {
+			stCfgsForCheck[i].Flavor = sourceCfg.Flavor
+			stCfgsForCheck[i].ServerID = sourceCfg.ServerID
+			stCfgsForCheck[i].EnableGTID = sourceCfg.EnableGTID
+
+			if sourceCfg.EnableRelay {
+				stCfgsForCheck[i].UseRelay = true
+				continue // skip the following check
+			}
+		}
+		workers, err := s.scheduler.GetRelayWorkers(stCfgForCheck.SourceID)
+		if err != nil {
+			return nil, err
+		}
+		stCfgsForCheck[i].UseRelay = len(workers) > 0
+	}
+	return stCfgsForCheck, nil
 }
 
 func setUseTLS(tlsCfg *security.Security) {
@@ -2100,11 +2151,15 @@ func (s *Server) listMemberMaster(ctx context.Context, names []string) (*pb.Memb
 
 	client := &http.Client{}
 	if len(s.cfg.SSLCA) != 0 {
-		inner, err := toolutils.ToTLSConfigWithVerify(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.CertAllowedCN)
+		tlsConfig, err := util.NewTLSConfig(
+			util.WithCAPath(s.cfg.SSLCA),
+			util.WithCertAndKeyPath(s.cfg.SSLCert, s.cfg.SSLKey),
+			util.WithVerifyCommonName(s.cfg.CertAllowedCN),
+		)
 		if err != nil {
 			return resp, err
 		}
-		client = toolutils.ClientWithTLS(inner)
+		client = util.ClientWithTLS(tlsConfig)
 	}
 	client.Timeout = 1 * time.Second
 
@@ -2349,15 +2404,25 @@ func (s *Server) createMasterClientByName(ctx context.Context, name string) (pb.
 	if len(clientURLs) == 0 {
 		return nil, nil, errors.New("master not found")
 	}
-	tls, err := toolutils.NewTLS(s.cfg.SSLCA, s.cfg.SSLCert, s.cfg.SSLKey, s.cfg.AdvertiseAddr, s.cfg.CertAllowedCN)
+
+	tlsConfig, err := util.NewTLSConfig(
+		util.WithCAPath(s.cfg.SSLCA),
+		util.WithCertAndKeyPath(s.cfg.SSLCert, s.cfg.SSLKey),
+		util.WithVerifyCommonName(s.cfg.CertAllowedCN),
+	)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	grpcTLS := grpc.WithInsecure()
+	if tlsConfig != nil {
+		grpcTLS = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
 
 	var conn *grpc.ClientConn
 	for _, clientURL := range clientURLs {
 		//nolint:staticcheck
-		conn, err = grpc.Dial(clientURL, tls.ToGRPCDialOption(), grpc.WithBackoffMaxDelay(3*time.Second))
+		conn, err = grpc.Dial(clientURL, grpcTLS, grpc.WithBackoffMaxDelay(3*time.Second))
 		if err == nil {
 			masterClient := pb.NewMasterClient(conn)
 			return masterClient, conn, nil
@@ -3164,4 +3229,93 @@ func genValidationWorkerErrorResp(req *workerrpc.Request, err error, logMsg, wor
 	default:
 		return nil
 	}
+}
+
+func (s *Server) UpdateValidation(ctx context.Context, req *pb.UpdateValidationRequest) (*pb.UpdateValidationResponse, error) {
+	var (
+		resp2 *pb.UpdateValidationResponse
+		err   error
+	)
+	shouldRet := s.sharedLogic(ctx, req, &resp2, &err)
+	if shouldRet {
+		return resp2, err
+	}
+	resp := &pb.UpdateValidationResponse{
+		Result: false,
+	}
+	subTaskCfgs := s.scheduler.GetSubTaskCfgsByTaskAndSource(req.TaskName, req.Sources)
+	if len(subTaskCfgs) == 0 {
+		if len(req.Sources) > 0 {
+			resp.Msg = fmt.Sprintf("cannot get subtask by task name `%s` and sources `%v`",
+				req.TaskName, req.Sources)
+		} else {
+			resp.Msg = fmt.Sprintf("cannot get subtask by task name `%s`", req.TaskName)
+		}
+		return resp, nil
+	}
+
+	workerReq := workerrpc.Request{
+		Type: workerrpc.CmdUpdateValidation,
+		UpdateValidation: &pb.UpdateValidationWorkerRequest{
+			TaskName:   req.TaskName,
+			BinlogPos:  req.BinlogPos,
+			BinlogGTID: req.BinlogGTID,
+		},
+	}
+
+	sourcesLen := 0
+	for _, subTaskCfg := range subTaskCfgs {
+		sourcesLen += len(subTaskCfg)
+	}
+	workerRespCh := make(chan *pb.CommonWorkerResponse, sourcesLen)
+	var wg sync.WaitGroup
+	for _, subTaskCfg := range subTaskCfgs {
+		for sourceID := range subTaskCfg {
+			wg.Add(1)
+			go func(source string) {
+				defer wg.Done()
+				sourceCfg := s.scheduler.GetSourceCfgByID(source)
+				// can't directly use subtaskCfg here, because it will be overwritten by sourceCfg
+				if sourceCfg.EnableGTID {
+					if len(req.BinlogGTID) == 0 {
+						workerRespCh <- errorCommonWorkerResponse(fmt.Sprintf("source %s didn't specify cutover-binlog-gtid when enableGTID is true", source), source, "")
+						return
+					}
+				} else if len(req.BinlogPos) == 0 {
+					workerRespCh <- errorCommonWorkerResponse(fmt.Sprintf("source %s didn't specify cutover-binlog-pos when enableGTID is false", source), source, "")
+					return
+				}
+				worker := s.scheduler.GetWorkerBySource(source)
+				if worker == nil {
+					workerRespCh <- errorCommonWorkerResponse(fmt.Sprintf("source %s relevant worker-client not found", source), source, "")
+					return
+				}
+				var workerResp *pb.CommonWorkerResponse
+				resp, err := worker.SendRequest(ctx, &workerReq, s.cfg.RPCTimeout)
+				if err != nil {
+					workerResp = errorCommonWorkerResponse(err.Error(), source, worker.BaseInfo().Name)
+				} else {
+					workerResp = resp.UpdateValidation
+				}
+				workerResp.Source = source
+				workerRespCh <- workerResp
+			}(sourceID)
+		}
+	}
+	wg.Wait()
+
+	workerResps := make([]*pb.CommonWorkerResponse, 0, sourcesLen)
+	for len(workerRespCh) > 0 {
+		workerResp := <-workerRespCh
+		workerResps = append(workerResps, workerResp)
+	}
+
+	sort.Slice(workerResps, func(i, j int) bool {
+		return workerResps[i].Source < workerResps[j].Source
+	})
+
+	return &pb.UpdateValidationResponse{
+		Result:  true,
+		Sources: workerResps,
+	}, nil
 }

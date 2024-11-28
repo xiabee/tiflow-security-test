@@ -22,7 +22,6 @@ import (
 	"sync/atomic"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tiflow/cdc/contextutil"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/metrics"
@@ -95,6 +94,7 @@ type DMLSink struct {
 
 // NewDMLSink creates a cloud storage sink.
 func NewDMLSink(ctx context.Context,
+	changefeedID model.ChangeFeedID,
 	pdClock pdutil.Clock,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
@@ -114,7 +114,9 @@ func NewDMLSink(ctx context.Context,
 	}
 
 	// fetch protocol from replicaConfig defined by changefeed config file.
-	protocol, err := util.GetProtocol(replicaConfig.Sink.Protocol)
+	protocol, err := util.GetProtocol(
+		putil.GetOrZero(replicaConfig.Sink.Protocol),
+	)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -123,7 +125,7 @@ func NewDMLSink(ctx context.Context,
 	ext := util.GetFileExtension(protocol)
 	// the last param maxMsgBytes is mainly to limit the size of a single message for
 	// batch protocols in mq scenario. In cloud storage sink, we just set it to max int.
-	encoderConfig, err := util.GetEncoderConfig(sinkURI, protocol, replicaConfig, math.MaxInt)
+	encoderConfig, err := util.GetEncoderConfig(changefeedID, sinkURI, protocol, replicaConfig, math.MaxInt)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -134,12 +136,12 @@ func NewDMLSink(ctx context.Context,
 
 	wgCtx, wgCancel := context.WithCancel(ctx)
 	s := &DMLSink{
-		changefeedID:         contextutil.ChangefeedIDFromCtx(wgCtx),
+		changefeedID:         changefeedID,
 		scheme:               strings.ToLower(sinkURI.Scheme),
 		outputRawChangeEvent: replicaConfig.Sink.CloudStorageConfig.GetOutputRawChangeEvent(),
 		encodingWorkers:      make([]*encodingWorker, defaultEncodingConcurrency),
 		workers:              make([]*dmlWorker, cfg.WorkerCount),
-		statistics:           metrics.NewStatistics(wgCtx, sink.TxnSink),
+		statistics:           metrics.NewStatistics(wgCtx, changefeedID, sink.TxnSink),
 		cancel:               wgCancel,
 		dead:                 make(chan struct{}),
 	}

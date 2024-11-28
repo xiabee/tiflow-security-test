@@ -28,11 +28,10 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser/charset"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tiflow/cdc/contextutil"
+	"github.com/pingcap/tidb/pkg/parser/charset"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/sink/dmlsink"
 	"github.com/pingcap/tiflow/cdc/sink/metrics"
@@ -85,16 +84,16 @@ type mysqlBackend struct {
 // NewMySQLBackends creates a new MySQL sink using schema storage
 func NewMySQLBackends(
 	ctx context.Context,
+	changefeedID model.ChangeFeedID,
 	sinkURI *url.URL,
 	replicaConfig *config.ReplicaConfig,
 	dbConnFactory pmysql.Factory,
 	statistics *metrics.Statistics,
 ) ([]*mysqlBackend, error) {
-	changefeedID := contextutil.ChangefeedIDFromCtx(ctx)
 	changefeed := fmt.Sprintf("%s.%s", changefeedID.Namespace, changefeedID.ID)
 
 	cfg := pmysql.NewConfig()
-	err := cfg.Apply(ctx, changefeedID, sinkURI, replicaConfig)
+	err := cfg.Apply(config.GetGlobalServerConfig().TZ, changefeedID, sinkURI, replicaConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -199,8 +198,7 @@ func NewMySQLBackends(
 	log.Info("MySQL backends is created",
 		zap.String("changefeed", changefeed),
 		zap.Int("workerCount", cfg.WorkerCount),
-		zap.Bool("forceReplicate", cfg.ForceReplicate),
-		zap.Bool("enableOldValue", cfg.EnableOldValue))
+		zap.Bool("forceReplicate", cfg.ForceReplicate))
 	return backends, nil
 }
 
@@ -482,7 +480,7 @@ func (s *mysqlBackend) genUpdateSQL(rows ...*sqlmodel.RowChange) ([]string, [][]
 	}
 	if size < s.cfg.MaxMultiUpdateRowSize*count {
 		// use multi update in one SQL
-		sql, value := sqlmodel.GenUpdateSQLFast(rows...)
+		sql, value := sqlmodel.GenUpdateSQL(rows...)
 		return []string{sql}, [][]interface{}{value}
 	}
 	// each row has one independent update SQL.
@@ -516,9 +514,8 @@ func (s *mysqlBackend) prepareDMLs() *preparedDMLs {
 	values := make([][]interface{}, 0, s.rows)
 	callbacks := make([]dmlsink.CallbackFunc, 0, len(s.events))
 
-	// translateToInsert control the update and insert behavior
-	// we only translate into insert when old value is enabled and safe mode is disabled
-	translateToInsert := s.cfg.EnableOldValue && !s.cfg.SafeMode
+	// translateToInsert control the update and insert behavior.
+	translateToInsert := !s.cfg.SafeMode
 
 	rowCount := 0
 	approximateSize := int64(0)
@@ -542,7 +539,6 @@ func (s *mysqlBackend) prepareDMLs() *preparedDMLs {
 			zap.Bool("translateToInsert", translateToInsert),
 			zap.Uint64("firstRowCommitTs", firstRow.CommitTs),
 			zap.Uint64("firstRowReplicatingTs", firstRow.ReplicatingTs),
-			zap.Bool("enableOldValue", s.cfg.EnableOldValue),
 			zap.Bool("safeMode", s.cfg.SafeMode))
 
 		if event.Callback != nil {
@@ -581,7 +577,11 @@ func (s *mysqlBackend) prepareDMLs() *preparedDMLs {
 			var args []interface{}
 			// Update Event
 			if len(row.PreColumns) != 0 && len(row.Columns) != 0 {
-				query, args = prepareUpdate(quoteTable, row.PreColumns, row.Columns, s.cfg.ForceReplicate)
+				query, args = prepareUpdate(
+					quoteTable,
+					row.PreColumns,
+					row.Columns,
+					s.cfg.ForceReplicate)
 				if query != "" {
 					sqls = append(sqls, query)
 					values = append(values, args)

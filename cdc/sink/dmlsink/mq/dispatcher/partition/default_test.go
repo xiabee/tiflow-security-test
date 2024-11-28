@@ -23,178 +23,22 @@ import (
 func TestDefaultDispatcher(t *testing.T) {
 	t.Parallel()
 
-	testCases := []struct {
-		row             *model.RowChangedEvent
-		expectPartition int32
-	}{
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t1",
+	row := &model.RowChangedEvent{
+		Table: &model.TableName{
+			Schema: "test",
+			Table:  "t1",
+		},
+		Columns: []*model.Column{
+			{
+				Name:  "id",
+				Value: 1,
+				Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
 			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 1,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				},
-			},
-			IndexColumns: [][]int{{0}},
-		}, expectPartition: 15},
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t1",
-			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 2,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				},
-			},
-			IndexColumns: [][]int{{0}},
-		}, expectPartition: 15},
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t1",
-			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 3,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				},
-			},
-			IndexColumns: [][]int{{0}},
-		}, expectPartition: 15},
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t2",
-			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 1,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				}, {
-					Name:  "a",
-					Value: 1,
-				},
-			},
-			IndexColumns: [][]int{{0}},
-		}, expectPartition: 5},
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t2",
-			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 2,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				}, {
-					Name:  "a",
-					Value: 2,
-				},
-			},
-			IndexColumns: [][]int{{0}},
-		}, expectPartition: 5},
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t2",
-			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 3,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				}, {
-					Name:  "a",
-					Value: 3,
-				},
-			},
-			IndexColumns: [][]int{{0}},
-		}, expectPartition: 5},
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t2",
-			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 3,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				}, {
-					Name:  "a",
-					Value: 4,
-				},
-			},
-			IndexColumns: [][]int{{0}},
-		}, expectPartition: 5},
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t3",
-			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 1,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				},
-				{
-					Name:  "a",
-					Value: 2,
-					Flag:  model.UniqueKeyFlag,
-				},
-			},
-			IndexColumns: [][]int{{0}, {1}},
-		}, expectPartition: 3},
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t3",
-			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 2,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				}, {
-					Name:  "a",
-					Value: 3,
-					Flag:  model.UniqueKeyFlag,
-				},
-			},
-			IndexColumns: [][]int{{0}, {1}},
-		}, expectPartition: 3},
-		{row: &model.RowChangedEvent{
-			Table: &model.TableName{
-				Schema: "test",
-				Table:  "t3",
-			},
-			Columns: []*model.Column{
-				{
-					Name:  "id",
-					Value: 3,
-					Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-				}, {
-					Name:  "a",
-					Value: 4,
-					Flag:  model.UniqueKeyFlag,
-				},
-			},
-			IndexColumns: [][]int{{0}, {1}},
-		}, expectPartition: 3},
+		},
+		IndexColumns: [][]int{{0}},
 	}
-	p := NewDefaultDispatcher()
-	for _, tc := range testCases {
-		require.Equal(t, tc.expectPartition, p.DispatchRowChangedEvent(tc.row, 16))
-	}
+
+	targetPartition, _, err := NewDefaultDispatcher().DispatchRowChangedEvent(row, 3)
+	require.NoError(t, err)
+	require.Equal(t, int32(0), targetPartition)
 }

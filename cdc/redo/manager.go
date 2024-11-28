@@ -112,8 +112,8 @@ type DMLManager interface {
 }
 
 // NewDMLManager creates a new dml Manager.
-func NewDMLManager(
-	changefeedID model.ChangeFeedID, cfg *config.ConsistentConfig,
+func NewDMLManager(changefeedID model.ChangeFeedID,
+	cfg *config.ConsistentConfig,
 ) *dmlManager {
 	return &dmlManager{
 		logManager: newLogManager(changefeedID, cfg, redo.RedoRowLogFileType),

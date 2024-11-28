@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	timodel "github.com/pingcap/tidb/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	pmysql "github.com/pingcap/tiflow/pkg/sink/mysql"
@@ -79,7 +79,7 @@ func TestWaitAsynExecDone(t *testing.T) {
 	sinkURI, err := url.Parse("mysql://root:@127.0.0.1:4000")
 	require.NoError(t, err)
 	replicateCfg := config.GetDefaultReplicaConfig()
-	ddlSink, err := NewDDLSink(ctx, sinkURI, replicateCfg)
+	ddlSink, err := NewDDLSink(ctx, model.DefaultChangeFeedID("test"), sinkURI, replicateCfg)
 	require.NoError(t, err)
 
 	table := model.TableName{Schema: "test", Table: "sbtest0"}
@@ -149,7 +149,7 @@ func TestAsyncExecAddIndex(t *testing.T) {
 	sinkURI, err := url.Parse("mysql://127.0.0.1:4000")
 	require.Nil(t, err)
 	rc := config.GetDefaultReplicaConfig()
-	sink, err := NewDDLSink(ctx, sinkURI, rc)
+	sink, err := NewDDLSink(ctx, model.DefaultChangeFeedID("test"), sinkURI, rc)
 
 	require.Nil(t, err)
 

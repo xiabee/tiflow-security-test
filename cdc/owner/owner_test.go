@@ -16,11 +16,10 @@ package owner
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"math/rand"
 	"testing"
 	"time"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -29,11 +28,10 @@ import (
 	"github.com/pingcap/tiflow/cdc/scheduler"
 	"github.com/pingcap/tiflow/pkg/config"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
-	"github.com/pingcap/tiflow/pkg/errors"
+	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
-	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/sink/observer"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
 	"github.com/pingcap/tiflow/pkg/upstream"
@@ -51,7 +49,7 @@ type mockManager struct {
 func (m *mockManager) CheckStaleCheckpointTs(
 	ctx context.Context, changefeedID model.ChangeFeedID, checkpointTs model.Ts,
 ) error {
-	return errors.ErrStartTsBeforeGC.GenWithStackByArgs()
+	return cerror.ErrStartTsBeforeGC.GenWithStackByArgs()
 }
 
 var _ gc.Manager = (*mockManager)(nil)
@@ -72,15 +70,13 @@ func newOwner4Test(
 		cfg *config.SchedulerConfig, redoMetaManager redo.MetaManager,
 	) (scheduler.Scheduler, error),
 	newDownstreamObserver func(
-		ctx context.Context, sinkURIStr string, replCfg *config.ReplicaConfig,
+		ctx context.Context, changefeedID model.ChangeFeedID, sinkURIStr string, replCfg *config.ReplicaConfig,
 		opts ...observer.NewObserverOption,
 	) (observer.Observer, error),
 	pdClient pd.Client,
 ) Owner {
 	m := upstream.NewManager4Test(pdClient)
 	o := NewOwner(m, config.NewDefaultSchedulerConfig()).(*ownerImpl)
-	// Most tests do not need to test bootstrap.
-	o.bootstrapped = true
 	o.newChangefeed = func(
 		id model.ChangeFeedID,
 		state *orchestrator.ChangefeedReactorState,
@@ -125,7 +121,8 @@ func createOwner4Test(ctx cdcContext.Context, t *testing.T) (*ownerImpl, *orches
 		},
 		// new downstream observer
 		func(
-			ctx context.Context, sinkURIStr string, replCfg *config.ReplicaConfig,
+			ctx context.Context, chnagefeedID model.ChangeFeedID,
+			sinkURIStr string, replCfg *config.ReplicaConfig,
 			opts ...observer.NewObserverOption,
 		) (observer.Observer, error) {
 			return observer.NewDummyObserver(), nil
@@ -266,127 +263,6 @@ func TestStopChangefeed(t *testing.T) {
 	require.NotContains(t, state.Changefeeds, changefeedID)
 }
 
-func TestFixChangefeedState(t *testing.T) {
-	ctx := cdcContext.NewBackendContext4Test(false)
-	owner, state, tester := createOwner4Test(ctx, t)
-	// We need to do bootstrap.
-	owner.bootstrapped = false
-	changefeedID := model.DefaultChangeFeedID("test-changefeed")
-	// Mismatched state and admin job.
-	changefeedInfo := &model.ChangeFeedInfo{
-		State:        model.StateNormal,
-		AdminJobType: model.AdminStop,
-		StartTs:      oracle.GoTimeToTS(time.Now()),
-		Config:       config.GetDefaultReplicaConfig(),
-	}
-	changefeedStr, err := changefeedInfo.Marshal()
-	require.Nil(t, err)
-	cdcKey := etcd.CDCKey{
-		ClusterID:    state.ClusterID,
-		Tp:           etcd.CDCKeyTypeChangefeedInfo,
-		ChangefeedID: changefeedID,
-	}
-	tester.MustUpdate(cdcKey.String(), []byte(changefeedStr))
-	// For the first tick, we do a bootstrap, and it tries to fix the meta information.
-	_, err = owner.Tick(ctx, state)
-	tester.MustApplyPatches()
-	require.Nil(t, err)
-	require.True(t, owner.bootstrapped)
-	require.NotContains(t, owner.changefeeds, changefeedID)
-	// Start tick normally.
-	_, err = owner.Tick(ctx, state)
-	tester.MustApplyPatches()
-	require.Nil(t, err)
-	require.Contains(t, owner.changefeeds, changefeedID)
-	// The meta information is fixed correctly.
-	require.Equal(t, owner.changefeeds[changefeedID].state.Info.State, model.StateStopped)
-}
-
-func TestFixChangefeedSinkProtocol(t *testing.T) {
-	ctx := cdcContext.NewBackendContext4Test(false)
-	owner, state, tester := createOwner4Test(ctx, t)
-	// We need to do bootstrap.
-	owner.bootstrapped = false
-	changefeedID := model.DefaultChangeFeedID("test-changefeed")
-	// Unknown protocol.
-	changefeedInfo := &model.ChangeFeedInfo{
-		State:          model.StateNormal,
-		AdminJobType:   model.AdminStop,
-		StartTs:        oracle.GoTimeToTS(time.Now()),
-		CreatorVersion: "5.3.0",
-		SinkURI:        "kafka://127.0.0.1:9092/ticdc-test2?protocol=random",
-		Config: &config.ReplicaConfig{
-			Sink: &config.SinkConfig{Protocol: config.ProtocolDefault.String()},
-		},
-	}
-	changefeedStr, err := changefeedInfo.Marshal()
-	require.Nil(t, err)
-	cdcKey := etcd.CDCKey{
-		ClusterID:    state.ClusterID,
-		Tp:           etcd.CDCKeyTypeChangefeedInfo,
-		ChangefeedID: changefeedID,
-	}
-	tester.MustUpdate(cdcKey.String(), []byte(changefeedStr))
-	// For the first tick, we do a bootstrap, and it tries to fix the meta information.
-	_, err = owner.Tick(ctx, state)
-	tester.MustApplyPatches()
-	require.Nil(t, err)
-	require.True(t, owner.bootstrapped)
-	require.NotContains(t, owner.changefeeds, changefeedID)
-
-	// Start tick normally.
-	_, err = owner.Tick(ctx, state)
-	tester.MustApplyPatches()
-	require.Nil(t, err)
-	require.Contains(t, owner.changefeeds, changefeedID)
-	// The meta information is fixed correctly.
-	require.Equal(t, owner.changefeeds[changefeedID].state.Info.SinkURI,
-		"kafka://127.0.0.1:9092/ticdc-test2?protocol=open-protocol")
-}
-
-func TestCheckClusterVersion(t *testing.T) {
-	ctx := cdcContext.NewBackendContext4Test(false)
-	owner, state, tester := createOwner4Test(ctx, t)
-	ctx, cancel := cdcContext.WithCancel(ctx)
-	defer cancel()
-
-	tester.MustUpdate(fmt.Sprintf("%s/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
-		etcd.DefaultClusterAndMetaPrefix),
-		[]byte(`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225",
-"address":"127.0.0.1:8300","version":"v6.0.0"}`))
-
-	changefeedID := model.DefaultChangeFeedID("test-changefeed")
-	changefeedInfo := &model.ChangeFeedInfo{
-		StartTs: oracle.GoTimeToTS(time.Now()),
-		Config:  config.GetDefaultReplicaConfig(),
-	}
-	changefeedStr, err := changefeedInfo.Marshal()
-	require.Nil(t, err)
-	cdcKey := etcd.CDCKey{
-		ClusterID:    state.ClusterID,
-		Tp:           etcd.CDCKeyTypeChangefeedInfo,
-		ChangefeedID: changefeedID,
-	}
-	tester.MustUpdate(cdcKey.String(), []byte(changefeedStr))
-
-	// check the tick is skipped and the changefeed will not be handled
-	_, err = owner.Tick(ctx, state)
-	tester.MustApplyPatches()
-	require.Nil(t, err)
-	require.NotContains(t, owner.changefeeds, changefeedID)
-
-	tester.MustUpdate(fmt.Sprintf("%s/capture/6bbc01c8-0605-4f86-a0f9-b3119109b225",
-		etcd.DefaultClusterAndMetaPrefix,
-	),
-		[]byte(`{"id":"6bbc01c8-0605-4f86-a0f9-b3119109b225","address":"127.0.0.1:8300","version":"`+ctx.GlobalVars().CaptureInfo.Version+`"}`))
-
-	// check the tick is not skipped and the changefeed will be handled normally
-	_, err = owner.Tick(ctx, state)
-	tester.MustApplyPatches()
-	require.Nil(t, err)
-	require.Contains(t, owner.changefeeds, changefeedID)
-}
-
 func TestAdminJob(t *testing.T) {
 	ctx := cdcContext.NewBackendContext4Test(false)
 	ctx, cancel := cdcContext.WithCancel(ctx)
@@ -436,121 +312,6 @@ func TestAdminJob(t *testing.T) {
 		},
 	})
 	require.Len(t, owner.takeOwnerJobs(), 0)
-}
-
-func TestUpdateGCSafePoint(t *testing.T) {
-	mockPDClient := &gc.MockPDClient{}
-	m := upstream.NewManager4Test(mockPDClient)
-	o := NewOwner(m, config.NewDefaultSchedulerConfig()).(*ownerImpl)
-	ctx := cdcContext.NewBackendContext4Test(true)
-	ctx, cancel := cdcContext.WithCancel(ctx)
-	defer cancel()
-	state := orchestrator.NewGlobalState(etcd.DefaultCDCClusterID, 0)
-	tester := orchestrator.NewReactorStateTester(t, state, nil)
-
-	// no changefeed, the gc safe point should be max uint64
-	mockPDClient.UpdateServiceGCSafePointFunc = func(
-		ctx context.Context, serviceID string, ttl int64, safePoint uint64,
-	) (uint64, error) {
-		return 0, nil
-	}
-	err := o.updateGCSafepoint(ctx, state)
-	require.Nil(t, err)
-
-	// add a failed changefeed, it must not trigger update GC safepoint.
-	mockPDClient.UpdateServiceGCSafePointFunc = func(
-		ctx context.Context, serviceID string, ttl int64, safePoint uint64,
-	) (uint64, error) {
-		t.Fatal("must not update")
-		return 0, nil
-	}
-	changefeedID1 := model.DefaultChangeFeedID("test-changefeed1")
-	tester.MustUpdate(
-		fmt.Sprintf("%s/changefeed/info/%s",
-			etcd.DefaultClusterAndNamespacePrefix,
-			changefeedID1.ID),
-		[]byte(`{"config":{},"state":"failed"}`))
-	tester.MustApplyPatches()
-	gcErr := errors.ChangeFeedGCFastFailError[rand.Intn(len(errors.ChangeFeedGCFastFailError))]
-	errCode, ok := errors.RFCCode(gcErr)
-	require.True(t, ok)
-	state.Changefeeds[changefeedID1].PatchInfo(
-		func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
-			if info == nil {
-				return nil, false, nil
-			}
-			info.Error = &model.RunningError{Code: string(errCode), Message: gcErr.Error()}
-			return info, true, nil
-		})
-	state.Changefeeds[changefeedID1].PatchStatus(
-		func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-			return &model.ChangeFeedStatus{CheckpointTs: 2}, true, nil
-		})
-	tester.MustApplyPatches()
-	err = o.updateGCSafepoint(ctx, state)
-	require.Nil(t, err)
-
-	// switch the state of changefeed to normal, it must update GC safepoint to
-	// 1 (checkpoint Ts of changefeed-test1).
-	ch := make(chan struct{}, 1)
-	mockPDClient.UpdateServiceGCSafePointFunc = func(
-		ctx context.Context, serviceID string, ttl int64, safePoint uint64,
-	) (uint64, error) {
-		// Owner will do a snapshot read at (checkpointTs - 1) from TiKV,
-		// set GC safepoint to (checkpointTs - 1)
-		require.Equal(t, safePoint, uint64(1))
-		require.Equal(t, serviceID, etcd.GcServiceIDForTest())
-		ch <- struct{}{}
-		return 0, nil
-	}
-	state.Changefeeds[changefeedID1].PatchInfo(
-		func(info *model.ChangeFeedInfo) (*model.ChangeFeedInfo, bool, error) {
-			info.State = model.StateNormal
-			return info, true, nil
-		})
-	tester.MustApplyPatches()
-	err = o.updateGCSafepoint(ctx, state)
-	require.Nil(t, err)
-	select {
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout")
-	case <-ch:
-	}
-
-	// add another changefeed, it must update GC safepoint.
-	changefeedID2 := model.DefaultChangeFeedID("test-changefeed2")
-	tester.MustUpdate(
-		fmt.Sprintf("%s/changefeed/info/%s",
-			etcd.DefaultClusterAndNamespacePrefix,
-			changefeedID2.ID),
-		[]byte(`{"config":{},"state":"normal"}`))
-	tester.MustApplyPatches()
-	state.Changefeeds[changefeedID1].PatchStatus(
-		func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-			return &model.ChangeFeedStatus{CheckpointTs: 20}, true, nil
-		})
-	state.Changefeeds[changefeedID2].PatchStatus(
-		func(status *model.ChangeFeedStatus) (*model.ChangeFeedStatus, bool, error) {
-			return &model.ChangeFeedStatus{CheckpointTs: 30}, true, nil
-		})
-	tester.MustApplyPatches()
-	mockPDClient.UpdateServiceGCSafePointFunc = func(
-		ctx context.Context, serviceID string, ttl int64, safePoint uint64,
-	) (uint64, error) {
-		// Owner will do a snapshot read at (checkpointTs - 1) from TiKV,
-		// set GC safepoint to (checkpointTs - 1)
-		require.Equal(t, safePoint, uint64(19))
-		require.Equal(t, serviceID, etcd.GcServiceIDForTest())
-		ch <- struct{}{}
-		return 0, nil
-	}
-	err = o.updateGCSafepoint(ctx, state)
-	require.Nil(t, err)
-	select {
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout")
-	case <-ch:
-	}
 }
 
 // make sure handleJobs works well even if there is two different
@@ -654,8 +415,7 @@ func TestHandleJobsDontBlock(t *testing.T) {
 	_, err = owner.Tick(ctx, state)
 	tester.MustApplyPatches()
 	require.NoError(t, err)
-	// add changefeed failed, since 3 different version instances in the cluster.
-	require.Nil(t, owner.changefeeds[cf3])
+	require.NotNil(t, owner.changefeeds[cf3])
 
 	// make sure statusProvider works well
 	ctx1, cancel := context.WithTimeout(context.Background(), time.Second*5)
@@ -686,91 +446,7 @@ WorkLoop:
 	require.Nil(t, errIn)
 	require.NotNil(t, infos[cf1])
 	require.NotNil(t, infos[cf2])
-	require.Nil(t, infos[cf3])
-}
-
-func TestCalculateGCSafepointTs(t *testing.T) {
-	state := orchestrator.NewGlobalState(etcd.DefaultCDCClusterID, 0)
-	expectMinTsMap := make(map[uint64]uint64)
-	expectForceUpdateMap := make(map[uint64]interface{})
-	o := ownerImpl{changefeeds: make(map[model.ChangeFeedID]*changefeed)}
-	o.upstreamManager = upstream.NewManager4Test(nil)
-
-	stateMap := []model.FeedState{
-		model.StateNormal, model.StateStopped, model.StateWarning, model.StatePending,
-		model.StateFailed, /* failed changefeed with normal error should not be ignored */
-	}
-	for i := 0; i < 100; i++ {
-		cfID := model.DefaultChangeFeedID(fmt.Sprintf("testChangefeed-%d", i))
-		upstreamID := uint64(i / 10)
-		cfStatus := &model.ChangeFeedStatus{CheckpointTs: uint64(i) + 100}
-		cfInfo := &model.ChangeFeedInfo{UpstreamID: upstreamID, State: stateMap[rand.Intn(4)]}
-		if cfInfo.State == model.StateFailed {
-			cfInfo.Error = &model.RunningError{
-				Addr:    "test",
-				Code:    "test",
-				Message: "test",
-			}
-		}
-		changefeed := &orchestrator.ChangefeedReactorState{
-			ID:     cfID,
-			Info:   cfInfo,
-			Status: cfStatus,
-		}
-		state.Changefeeds[cfID] = changefeed
-
-		// expectMinTsMap will be like map[upstreamID]{0, 10, 20, ..., 90}
-		if i%10 == 0 {
-			expectMinTsMap[upstreamID] = uint64(i) + 100
-		}
-
-		// If a changefeed does not exist in ownerImpl.changefeeds,
-		// forceUpdate should be true.
-		if upstreamID%2 == 0 {
-			expectForceUpdateMap[upstreamID] = nil
-		} else {
-			o.changefeeds[cfID] = nil
-		}
-	}
-
-	for i := 0; i < 10; i++ {
-		cfID := model.DefaultChangeFeedID(fmt.Sprintf("testChangefeed-ignored-%d", i))
-		upstreamID := uint64(i)
-		cfStatus := &model.ChangeFeedStatus{CheckpointTs: uint64(i)}
-		err := errors.ChangeFeedGCFastFailError[rand.Intn(len(errors.ChangeFeedGCFastFailError))]
-		errCode, ok := errors.RFCCode(err)
-		require.True(t, ok)
-		cfInfo := &model.ChangeFeedInfo{
-			UpstreamID: upstreamID,
-			State:      model.StateFailed,
-			Error:      &model.RunningError{Code: string(errCode), Message: err.Error()},
-		}
-		changefeed := &orchestrator.ChangefeedReactorState{
-			ID:     cfID,
-			Info:   cfInfo,
-			Status: cfStatus,
-		}
-		state.Changefeeds[cfID] = changefeed
-	}
-
-	minCheckpoinTsMap, forceUpdateMap := o.calculateGCSafepoint(state)
-
-	require.Equal(t, expectMinTsMap, minCheckpoinTsMap)
-	require.Equal(t, expectForceUpdateMap, forceUpdateMap)
-}
-
-func TestCalculateGCSafepointTsNoChangefeed(t *testing.T) {
-	state := orchestrator.NewGlobalState(etcd.DefaultCDCClusterID, 0)
-	expectForceUpdateMap := make(map[uint64]interface{})
-	o := ownerImpl{changefeeds: make(map[model.ChangeFeedID]*changefeed)}
-	o.upstreamManager = upstream.NewManager4Test(nil)
-	up, err := o.upstreamManager.GetDefaultUpstream()
-	require.Nil(t, err)
-	up.PDClock = pdutil.NewClock4Test()
-
-	minCheckpoinTsMap, forceUpdateMap := o.calculateGCSafepoint(state)
-	require.Equal(t, 1, len(minCheckpoinTsMap))
-	require.Equal(t, expectForceUpdateMap, forceUpdateMap)
+	require.NotNil(t, infos[cf3])
 }
 
 // AsyncStop should cleanup jobs and reject.

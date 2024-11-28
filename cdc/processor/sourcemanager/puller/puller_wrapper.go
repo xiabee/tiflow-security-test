@@ -27,12 +27,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// ShouldSplitKVEntry checks whether the raw kv entry should be splitted.
-type ShouldSplitKVEntry func(raw *model.RawKVEntry) bool
-
-// SplitUpdateKVEntry splits the raw kv entry into a delete entry and an insert entry.
-type SplitUpdateKVEntry func(raw *model.RawKVEntry) (*model.RawKVEntry, *model.RawKVEntry, error)
-
 // Wrapper is a wrapper of puller used by source manager.
 type Wrapper interface {
 	// Start the puller and send internal errors into `errChan`.
@@ -118,7 +112,6 @@ func (n *WrapperImpl) Start(
 		n.span.TableID,
 		n.tableName,
 		n.bdrMode,
-		false,
 	)
 
 	// Use errgroup to ensure all sub goroutines can exit without calling Close.

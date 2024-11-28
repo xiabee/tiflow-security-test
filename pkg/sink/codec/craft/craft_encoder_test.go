@@ -17,7 +17,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec"
@@ -88,7 +88,7 @@ func TestCraftMaxBatchSize(t *testing.T) {
 
 			require.Equal(t, model.MessageTypeRow, v)
 			_, err = decoder.NextRowChangedEvent()
-			require.Nil(t, err)
+			require.NoError(t, err)
 			count++
 		}
 		require.LessOrEqual(t, count, 64)
@@ -122,7 +122,7 @@ func testBatchCodec(
 			}
 			require.Equal(t, model.MessageTypeRow, tp)
 			row, err := decoder.NextRowChangedEvent()
-			require.Nil(t, err)
+			require.NoError(t, err)
 			require.Equal(t, cs[index], row)
 			index++
 		}

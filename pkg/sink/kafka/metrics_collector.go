@@ -39,10 +39,12 @@ const (
 	refreshClusterMetaInterval = 30 * time.Minute
 )
 
-// Sarama metrics names, see https://pkg.go.dev/github.com/Shopify/sarama#pkg-overview.
+// Sarama metrics names, see https://pkg.go.dev/github.com/IBM/sarama#pkg-overview.
 const (
 	// Producer level.
-	compressionRatioMetricName = "compression-ratio"
+	compressionRatioMetricName  = "compression-ratio"
+	recordsPerRequestMetricName = "records-per-request"
+
 	// Broker level.
 	outgoingByteRateMetricNamePrefix   = "outgoing-byte-rate-for-broker-"
 	requestRateMetricNamePrefix        = "request-rate-for-broker-"
@@ -91,6 +93,9 @@ func (m *saramaMetricsCollector) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			log.Info("Kafka metrics collector stopped",
+				zap.String("namespace", m.changefeedID.Namespace),
+				zap.String("changefeed", m.changefeedID.ID))
 			return
 		case <-refreshMetricsTicker.C:
 			m.collectBrokerMetrics()
@@ -127,6 +132,13 @@ func (m *saramaMetricsCollector) collectProducerMetrics() {
 	compressionRatioMetric := m.registry.Get(compressionRatioMetricName)
 	if histogram, ok := compressionRatioMetric.(metrics.Histogram); ok {
 		compressionRatioGauge.
+			WithLabelValues(namespace, changefeedID).
+			Set(histogram.Snapshot().Mean())
+	}
+
+	recordsPerRequestMetric := m.registry.Get(recordsPerRequestMetricName)
+	if histogram, ok := recordsPerRequestMetric.(metrics.Histogram); ok {
+		recordsPerRequestGauge.
 			WithLabelValues(namespace, changefeedID).
 			Set(histogram.Snapshot().Mean())
 	}
@@ -186,6 +198,8 @@ func getBrokerMetricName(prefix, brokerID string) string {
 
 func (m *saramaMetricsCollector) cleanupProducerMetrics() {
 	compressionRatioGauge.
+		DeleteLabelValues(m.changefeedID.Namespace, m.changefeedID.ID)
+	recordsPerRequestGauge.
 		DeleteLabelValues(m.changefeedID.Namespace, m.changefeedID.ID)
 }
 

@@ -22,8 +22,8 @@ import (
 	"testing"
 
 	"github.com/pingcap/errors"
-	tidbkv "github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/store/mockstore"
+	tidbkv "github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/tablepb"
@@ -134,7 +134,7 @@ func newPullerForTest(
 		ctx, pdCli, grpcPool, regionCache, store, pdutil.NewClock4Test(),
 		checkpointTs, spans, config.GetDefaultServerConfig(),
 		model.DefaultChangeFeedID("changefeed-id-test"), 0,
-		"table-test", false, false)
+		"table-test", false)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

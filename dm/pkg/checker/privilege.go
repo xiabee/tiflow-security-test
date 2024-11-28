@@ -220,7 +220,6 @@ func verifyPrivilegesWithResult(
 ) *Error {
 	lackedPriv, err := VerifyPrivileges(grants, requiredPriv)
 	if err != nil {
-		// nolint
 		return NewError(err.Error())
 	}
 	if len(lackedPriv) == 0 {
@@ -230,7 +229,6 @@ func verifyPrivilegesWithResult(
 	lackedPrivStr := LackedPrivilegesAsStr(lackedPriv)
 	result.Instruction = "You need grant related privileges."
 	log.L().Info("lack privilege", zap.String("err msg", lackedPrivStr))
-	// nolint
 	return NewError(lackedPrivStr)
 }
 

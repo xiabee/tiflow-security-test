@@ -414,7 +414,6 @@ LOOP:
 				err = errors.New("go-mysql returned an error")
 			})
 			if err != nil {
-				// nolint:nakedret
 				return
 			}
 		}
@@ -423,7 +422,6 @@ LOOP:
 		if c.lastEventFromUpstream.Header.LogPos == 0 {
 			event = c.lastEventFromUpstream
 			c.lastEventFromUpstream = nil
-			// nolint:nakedret
 			return
 		}
 
@@ -516,7 +514,6 @@ LOOP:
 	}
 
 	if event != nil {
-		// nolint:nakedret
 		return
 	}
 
@@ -526,7 +523,6 @@ LOOP:
 	if c.lastEventFromUpstream != nil {
 		event = c.lastEventFromUpstream
 		c.lastEventFromUpstream = nil
-		// nolint:nakedret
 		return
 	}
 

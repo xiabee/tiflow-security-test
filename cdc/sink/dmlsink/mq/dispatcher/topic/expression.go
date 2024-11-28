@@ -104,8 +104,9 @@ func (e Expression) Substitute(schema, table string) string {
 		return "_"
 	} else if topicName == ".." {
 		return "__"
+	} else {
+		return topicName
 	}
-	return topicName
 }
 
 // PulsarValidate checks whether a pulsar topic name is valid or not.

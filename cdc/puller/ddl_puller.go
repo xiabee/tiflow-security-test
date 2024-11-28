@@ -73,6 +73,7 @@ type ddlJobPullerImpl struct {
 	kvStorage     tidbkv.Storage
 	schemaStorage entry.SchemaStorage
 	resolvedTs    uint64
+	schemaVersion int64
 	filter        filter.Filter
 	// ddlTableInfo is initialized when receive the first concurrent DDL job.
 	ddlTableInfo *entry.DDLTableInfo
@@ -83,6 +84,7 @@ type ddlJobPullerImpl struct {
 // NewDDLJobPuller creates a new NewDDLJobPuller,
 // which fetches ddl events starting from checkpointTs.
 func NewDDLJobPuller(
+	ctx context.Context,
 	up *upstream.Upstream,
 	checkpointTs uint64,
 	cfg *config.ServerConfig,
@@ -316,7 +318,8 @@ func (p *ddlJobPullerImpl) handleJob(job *timodel.Job) (skip bool, err error) {
 		return false, nil
 	}
 
-	if job.BinlogInfo.FinishedTS <= p.getResolvedTs() {
+	if job.BinlogInfo.FinishedTS <= p.getResolvedTs() ||
+		job.BinlogInfo.SchemaVersion <= p.schemaVersion {
 		log.Info("ddl job finishedTs less than puller resolvedTs,"+
 			"discard the ddl job",
 			zap.String("namespace", p.changefeedID.Namespace),
@@ -478,6 +481,7 @@ func (p *ddlJobPullerImpl) handleJob(job *timodel.Job) (skip bool, err error) {
 			errors.Trace(err), job.Query, job.StartTS, job.StartTS)
 	}
 	p.setResolvedTs(job.BinlogInfo.FinishedTS)
+	p.schemaVersion = job.BinlogInfo.SchemaVersion
 
 	return p.checkIneligibleTableDDL(snap, job)
 }
@@ -624,7 +628,7 @@ type ddlPullerImpl struct {
 }
 
 // NewDDLPuller return a puller for DDL Event
-func NewDDLPuller(
+func NewDDLPuller(ctx context.Context,
 	up *upstream.Upstream,
 	startTs uint64,
 	changefeed model.ChangeFeedID,
@@ -635,7 +639,8 @@ func NewDDLPuller(
 	// storage can be nil only in the test
 	if up.KVStorage != nil {
 		changefeed.ID += "_owner_ddl_puller"
-		puller = NewDDLJobPuller(up, startTs, config.GetGlobalServerConfig(),
+		puller = NewDDLJobPuller(
+			ctx, up, startTs, config.GetGlobalServerConfig(),
 			changefeed, schemaStorage, filter)
 	}
 

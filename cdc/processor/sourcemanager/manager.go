@@ -35,16 +35,6 @@ import (
 
 const defaultMaxBatchSize = 256
 
-// PullerSplitUpdateMode is the mode to split update events in puller.
-type PullerSplitUpdateMode int32
-
-// PullerSplitUpdateMode constants.
-const (
-	PullerSplitUpdateModeNone    PullerSplitUpdateMode = 0
-	PullerSplitUpdateModeAtStart PullerSplitUpdateMode = 1
-	PullerSplitUpdateModeAlways  PullerSplitUpdateMode = 2
-)
-
 // SourceManager is the manager of the source engine and puller.
 type SourceManager struct {
 	ready chan struct{}
@@ -61,7 +51,7 @@ type SourceManager struct {
 	// Used to indicate whether the changefeed is in BDR mode.
 	bdrMode bool
 
-	splitUpdateMode PullerSplitUpdateMode
+	safeModeAtStart bool
 
 	enableTableMonitor bool
 	puller             *puller.MultiplexingPuller
@@ -73,11 +63,11 @@ func New(
 	up *upstream.Upstream,
 	mg entry.MounterGroup,
 	engine sorter.SortEngine,
-	splitUpdateMode PullerSplitUpdateMode,
 	bdrMode bool,
 	enableTableMonitor bool,
+	safeModeAtStart bool,
 ) *SourceManager {
-	return newSourceManager(changefeedID, up, mg, engine, splitUpdateMode, bdrMode, enableTableMonitor)
+	return newSourceManager(changefeedID, up, mg, engine, bdrMode, enableTableMonitor, safeModeAtStart)
 }
 
 // NewForTest creates a new source manager for testing.
@@ -107,9 +97,9 @@ func newSourceManager(
 	up *upstream.Upstream,
 	mg entry.MounterGroup,
 	engine sorter.SortEngine,
-	splitUpdateMode PullerSplitUpdateMode,
 	bdrMode bool,
 	enableTableMonitor bool,
+	safeModeAtStart bool,
 ) *SourceManager {
 	mgr := &SourceManager{
 		ready:              make(chan struct{}),
@@ -117,9 +107,9 @@ func newSourceManager(
 		up:                 up,
 		mg:                 mg,
 		engine:             engine,
-		splitUpdateMode:    splitUpdateMode,
 		bdrMode:            bdrMode,
 		enableTableMonitor: enableTableMonitor,
+		safeModeAtStart:    safeModeAtStart,
 	}
 
 	serverConfig := config.GetGlobalServerConfig()
@@ -174,21 +164,7 @@ func (m *SourceManager) AddTable(span tablepb.Span, tableName string, startTs mo
 	m.engine.AddTable(span, startTs)
 
 	shouldSplitKVEntry := func(raw *model.RawKVEntry) bool {
-		if raw == nil || !raw.IsUpdate() {
-			return false
-		}
-		switch m.splitUpdateMode {
-		case PullerSplitUpdateModeNone:
-			return false
-		case PullerSplitUpdateModeAlways:
-			return true
-		case PullerSplitUpdateModeAtStart:
-			return isOldUpdateKVEntry(raw, getReplicaTs)
-		default:
-			log.Panic("Unknown split update mode", zap.Int32("mode", int32(m.splitUpdateMode)))
-		}
-		log.Panic("Shouldn't reach here")
-		return false
+		return m.safeModeAtStart && isOldUpdateKVEntry(raw, getReplicaTs)
 	}
 
 	// Only nil in unit tests.

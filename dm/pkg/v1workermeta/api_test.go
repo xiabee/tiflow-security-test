@@ -19,7 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/pingcap/check"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
@@ -27,9 +27,9 @@ import (
 
 type testAPI struct{}
 
-var _ = check.Suite(&testAPI{})
+var _ = Suite(&testAPI{})
 
-func (t *testAPI) TestAPI(c *check.C) {
+func (t *testAPI) TestAPI(c *C) {
 	// nolint:dogsled
 	_, currFile, _, _ := runtime.Caller(0)
 	srcMetaPath := filepath.Join(filepath.Dir(currFile), "v106_data_for_test")
@@ -50,58 +50,58 @@ func (t *testAPI) TestAPI(c *check.C) {
 
 	// get subtasks meta.
 	meta, err := GetSubtasksMeta()
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	// verify tasks meta.
 	// - task_single:
 	//   - no shard task, Running stage.
 	// - task_shard
 	//   - shard task, Paused stage.
-	c.Assert(meta, check.HasLen, 2)
-	c.Assert(meta, check.HasKey, "task_single")
-	c.Assert(meta, check.HasKey, "task_shard")
-	c.Assert(meta["task_single"].Stage, check.Equals, pb.Stage_Running)
-	c.Assert(meta["task_shard"].Stage, check.Equals, pb.Stage_Paused)
+	c.Assert(meta, HasLen, 2)
+	c.Assert(meta, HasKey, "task_single")
+	c.Assert(meta, HasKey, "task_shard")
+	c.Assert(meta["task_single"].Stage, Equals, pb.Stage_Running)
+	c.Assert(meta["task_shard"].Stage, Equals, pb.Stage_Paused)
 
 	taskSingleCfg, err := SubTaskConfigFromV1TOML(meta["task_single"].Task)
-	c.Assert(err, check.IsNil)
-	c.Assert(taskSingleCfg.IsSharding, check.IsFalse)
-	c.Assert(taskSingleCfg.MydumperConfig.ChunkFilesize, check.Equals, "64")
+	c.Assert(err, IsNil)
+	c.Assert(taskSingleCfg.IsSharding, IsFalse)
+	c.Assert(taskSingleCfg.MydumperConfig.ChunkFilesize, Equals, "64")
 
 	taskShardCfg, err := SubTaskConfigFromV1TOML(meta["task_shard"].Task)
-	c.Assert(err, check.IsNil)
-	c.Assert(taskShardCfg.IsSharding, check.IsTrue)
-	c.Assert(taskSingleCfg.MydumperConfig.ChunkFilesize, check.Equals, "64")
+	c.Assert(err, IsNil)
+	c.Assert(taskShardCfg.IsSharding, IsTrue)
+	c.Assert(taskSingleCfg.MydumperConfig.ChunkFilesize, Equals, "64")
 
 	// try to get meta again, the same as before.
 	meta2, err := GetSubtasksMeta()
-	c.Assert(err, check.IsNil)
-	c.Assert(meta2, check.DeepEquals, meta)
+	c.Assert(err, IsNil)
+	c.Assert(meta2, DeepEquals, meta)
 
 	// remove all metadata.
-	c.Assert(RemoveSubtasksMeta(), check.IsNil)
+	c.Assert(RemoveSubtasksMeta(), IsNil)
 
 	// verify removed.
-	c.Assert(utils.IsDirExists(metaPath), check.IsFalse)
+	c.Assert(utils.IsDirExists(metaPath), IsFalse)
 
 	// try to get meta again, nothing exists.
 	meta3, err := GetSubtasksMeta()
-	c.Assert(err, check.IsNil)
-	c.Assert(meta3, check.IsNil)
+	c.Assert(err, IsNil)
+	c.Assert(meta3, IsNil)
 
 	// remove empty path is invalid.
-	c.Assert(terror.ErrInvalidV1WorkerMetaPath.Equal(RemoveSubtasksMeta()), check.IsTrue)
+	c.Assert(terror.ErrInvalidV1WorkerMetaPath.Equal(RemoveSubtasksMeta()), IsTrue)
 
 	// remove an invalid meta path.
 	metaPath = c.MkDir()
 	dbPath = filepath.Join(metaPath, "kv")
-	c.Assert(os.Mkdir(dbPath, 0o644), check.IsNil)
-	c.Assert(terror.ErrInvalidV1WorkerMetaPath.Equal(RemoveSubtasksMeta()), check.IsTrue)
+	c.Assert(os.Mkdir(dbPath, 0o644), IsNil)
+	c.Assert(terror.ErrInvalidV1WorkerMetaPath.Equal(RemoveSubtasksMeta()), IsTrue)
 }
 
-func copyDir(c *check.C, dst, src string) {
+func copyDir(c *C, dst, src string) {
 	si, err := os.Stat(src)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	if !si.IsDir() {
 		c.Fatalf("source %s is not a directory", src)
 	}
@@ -115,10 +115,10 @@ func copyDir(c *check.C, dst, src string) {
 	}
 
 	err = os.MkdirAll(dst, si.Mode())
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	entries, err := os.ReadDir(src)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	for _, entry := range entries {
 		srcPath := filepath.Join(src, entry.Name())
@@ -128,7 +128,7 @@ func copyDir(c *check.C, dst, src string) {
 			copyDir(c, dstPath, srcPath)
 		} else {
 			info, err := entry.Info()
-			c.Assert(err, check.IsNil)
+			c.Assert(err, IsNil)
 			// Skip symlinks.
 			if info.Mode()&os.ModeSymlink != 0 {
 				continue
@@ -138,20 +138,20 @@ func copyDir(c *check.C, dst, src string) {
 	}
 }
 
-func copyFile(c *check.C, dst, src string) {
+func copyFile(c *C, dst, src string) {
 	in, err := os.Open(src)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	defer in.Close()
 
 	out, err := os.Create(dst)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	defer out.Close()
 
 	_, err = io.Copy(out, in)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	si, err := os.Stat(src)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	err = os.Chmod(dst, si.Mode())
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 }

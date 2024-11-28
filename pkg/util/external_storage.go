@@ -35,8 +35,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const defaultTimeout = 5 * time.Minute
-
 // GetExternalStorageFromURI creates a new storage.ExternalStorage from a uri.
 func GetExternalStorageFromURI(
 	ctx context.Context, uri string,
@@ -44,18 +42,18 @@ func GetExternalStorageFromURI(
 	return GetExternalStorage(ctx, uri, nil, DefaultS3Retryer())
 }
 
-// GetExternalStorageWithDefaultTimeout creates a new storage.ExternalStorage from a uri
+// GetExternalStorageWithTimeout creates a new storage.ExternalStorage from a uri
 // without retry. It is the caller's responsibility to set timeout to the context.
-func GetExternalStorageWithDefaultTimeout(ctx context.Context, uri string) (storage.ExternalStorage, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+func GetExternalStorageWithTimeout(
+	ctx context.Context, uri string, timeout time.Duration,
+) (storage.ExternalStorage, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	// total retry time is [1<<7, 1<<8] = [128, 256] + 30*6 = [308, 436] seconds
-	r := NewS3Retryer(7, 1*time.Second, 2*time.Second)
-	s, err := GetExternalStorage(ctx, uri, nil, r)
+	s, err := GetExternalStorage(ctx, uri, nil, nil)
 
 	return &extStorageWithTimeout{
 		ExternalStorage: s,
-		timeout:         defaultTimeout,
+		timeout:         timeout,
 	}, err
 }
 

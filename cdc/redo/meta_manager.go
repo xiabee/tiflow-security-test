@@ -144,7 +144,7 @@ func (m *metaManager) preStart(ctx context.Context) error {
 	m.extStorage = extStorage
 
 	m.metricFlushLogDuration = common.RedoFlushLogDurationHistogram.
-		WithLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID, redo.RedoMetaFileType)
+		WithLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
 
 	err = m.preCleanupExtStorage(ctx)
 	if err != nil {
@@ -469,23 +469,17 @@ func (m *metaManager) flush(ctx context.Context, meta common.LogMeta) error {
 	return nil
 }
 
-func (m *metaManager) cleanup(logType string) {
-	common.RedoFlushLogDurationHistogram.
-		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID, logType)
-	common.RedoWriteLogDurationHistogram.
-		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID, logType)
-	common.RedoTotalRowsCountGauge.
-		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID, logType)
-	common.RedoWorkerBusyRatio.
-		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID, logType)
-}
-
 // Cleanup removes all redo logs of this manager, it is called when changefeed is removed
 // only owner should call this method.
 func (m *metaManager) Cleanup(ctx context.Context) error {
-	m.cleanup(redo.RedoMetaFileType)
-	m.cleanup(redo.RedoRowLogFileType)
-	m.cleanup(redo.RedoDDLLogFileType)
+	common.RedoWriteLogDurationHistogram.
+		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
+	common.RedoFlushLogDurationHistogram.
+		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
+	common.RedoTotalRowsCountGauge.
+		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
+	common.RedoWorkerBusyRatio.
+		DeleteLabelValues(m.changeFeedID.Namespace, m.changeFeedID.ID)
 	return m.deleteAllLogs(ctx)
 }
 

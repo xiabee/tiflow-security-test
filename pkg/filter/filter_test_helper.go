@@ -64,7 +64,8 @@ func newTestHelper(t *testing.T) *testHelper {
 // ddlToJob executes the DDL stmt and returns the DDL job
 func (s *testHelper) ddlToJob(ddl string) *timodel.Job {
 	s.tk.MustExec(ddl)
-	jobs, err := tiddl.GetLastNHistoryDDLJobs(s.getCurrentMeta(), 1)
+	reader := s.getCurrentMeta()
+	jobs, err := tiddl.GetLastNHistoryDDLJobs(reader.(*timeta.Mutator), 1)
 	require.Nil(s.t, err)
 	require.Len(s.t, jobs, 1)
 	// Set State from Synced to Done.

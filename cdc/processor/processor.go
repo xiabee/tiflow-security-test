@@ -43,7 +43,6 @@ import (
 	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"github.com/pingcap/tiflow/pkg/sink"
-	"github.com/pingcap/tiflow/pkg/sink/mysql"
 	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -387,9 +386,11 @@ func (p *processor) getStatsFromSourceManagerAndSinkManager(
 	span tablepb.Span, sinkStats sinkmanager.TableStats,
 ) tablepb.Stats {
 	pullerStats := p.sourceManager.r.GetTablePullerStats(span)
+	now := p.upstream.PDClock.CurrentTime()
 
 	stats := tablepb.Stats{
 		RegionCount: pullerStats.RegionCount,
+		CurrentTs:   oracle.ComposeTS(oracle.GetPhysical(now), 0),
 		BarrierTs:   sinkStats.BarrierTs,
 		StageCheckpoints: map[string]tablepb.Checkpoint{
 			"puller-ingress": {
@@ -597,35 +598,6 @@ func isMysqlCompatibleBackend(sinkURIStr string) (bool, error) {
 	return sink.IsMySQLCompatibleScheme(scheme), nil
 }
 
-// getPullerSplitUpdateMode returns how to split update kv entries at puller.
-//
-// If the sinkURI is not mysql compatible, it returns PullerSplitUpdateModeNone
-// which means don't split any update kv entries at puller;
-// If the sinkURI is mysql compatible, it has the following two cases:
-//  1. if the user config safe mode in sink module, it returns PullerSplitUpdateModeAlways,
-//     which means split all update kv entries at puller;
-//  2. if the user does not config safe mode in sink module, it returns PullerSplitUpdateModeAtStart,
-//     which means split update kv entries whose commitTS is older than the replicate ts of sink.
-func getPullerSplitUpdateMode(sinkURIStr string, config *config.ReplicaConfig) (sourcemanager.PullerSplitUpdateMode, error) {
-	sinkURI, err := url.Parse(sinkURIStr)
-	if err != nil {
-		return sourcemanager.PullerSplitUpdateModeNone, cerror.WrapError(cerror.ErrSinkURIInvalid, err)
-	}
-	scheme := sink.GetScheme(sinkURI)
-	if !sink.IsMySQLCompatibleScheme(scheme) {
-		return sourcemanager.PullerSplitUpdateModeNone, nil
-	}
-	// must be mysql sink
-	isSinkInSafeMode, err := mysql.IsSinkSafeMode(sinkURI, config)
-	if err != nil {
-		return sourcemanager.PullerSplitUpdateModeNone, err
-	}
-	if isSinkInSafeMode {
-		return sourcemanager.PullerSplitUpdateModeAlways, nil
-	}
-	return sourcemanager.PullerSplitUpdateModeAtStart, nil
-}
-
 // lazyInitImpl create Filter, SchemaStorage, Mounter instances at the first tick.
 func (p *processor) lazyInitImpl(_ context.Context) (err error) {
 	if p.initialized.Load() {
@@ -650,7 +622,7 @@ func (p *processor) lazyInitImpl(_ context.Context) (err error) {
 		return errors.Trace(err)
 	}
 
-	if err = p.initDDLHandler(); err != nil {
+	if err = p.initDDLHandler(ctx); err != nil {
 		return err
 	}
 	p.ddlHandler.name = "ddlHandler"
@@ -685,23 +657,19 @@ func (p *processor) lazyInitImpl(_ context.Context) (err error) {
 		return errors.Trace(err)
 	}
 
-	pullerSplitUpdateMode, err := getPullerSplitUpdateMode(p.latestInfo.SinkURI, cfConfig)
+	isMysqlBackend, err := isMysqlCompatibleBackend(p.latestInfo.SinkURI)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	p.sourceManager.r = sourcemanager.New(
 		p.changefeedID, p.upstream, p.mg.r,
-		sortEngine, pullerSplitUpdateMode,
-		util.GetOrZero(cfConfig.BDRMode),
-		util.GetOrZero(cfConfig.EnableTableMonitor))
+		sortEngine, util.GetOrZero(cfConfig.BDRMode),
+		util.GetOrZero(cfConfig.EnableTableMonitor),
+		isMysqlBackend)
 	p.sourceManager.name = "SourceManager"
 	p.sourceManager.changefeedID = p.changefeedID
 	p.sourceManager.spawn(ctx)
 
-	isMysqlBackend, err := isMysqlCompatibleBackend(p.latestInfo.SinkURI)
-	if err != nil {
-		return errors.Trace(err)
-	}
 	p.sinkManager.r = sinkmanager.New(
 		p.changefeedID, p.latestInfo.SinkURI, cfConfig, p.upstream,
 		p.ddlHandler.r.schemaStorage, p.redo.r, p.sourceManager.r, isMysqlBackend)
@@ -769,7 +737,7 @@ func (p *processor) handleErrorCh() (err error) {
 	return cerror.ErrReactorFinished
 }
 
-func (p *processor) initDDLHandler() error {
+func (p *processor) initDDLHandler(ctx context.Context) error {
 	checkpointTs := p.latestInfo.GetCheckpointTs(p.latestStatus)
 	minTableBarrierTs := p.latestStatus.MinTableBarrierTs
 	forceReplicate := p.latestInfo.Config.ForceReplicate
@@ -782,8 +750,13 @@ func (p *processor) initDDLHandler() error {
 	} else {
 		ddlStartTs = checkpointTs - 1
 	}
+
+	f, err := filter.NewFilter(p.latestInfo.Config, "")
+	if err != nil {
+		return errors.Trace(err)
+	}
 	schemaStorage, err := entry.NewSchemaStorage(p.upstream.KVStorage, ddlStartTs,
-		forceReplicate, p.changefeedID, util.RoleProcessor, p.filter)
+		forceReplicate, p.changefeedID, util.RoleProcessor, f)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -791,7 +764,7 @@ func (p *processor) initDDLHandler() error {
 	serverCfg := config.GetGlobalServerConfig()
 	changefeedID := model.DefaultChangeFeedID(p.changefeedID.ID + "_processor_ddl_puller")
 	ddlPuller := puller.NewDDLJobPuller(
-		p.upstream, ddlStartTs, serverCfg, changefeedID, schemaStorage, p.filter,
+		ctx, p.upstream, ddlStartTs, serverCfg, changefeedID, schemaStorage, p.filter,
 	)
 	p.ddlHandler.r = &ddlHandler{puller: ddlPuller, schemaStorage: schemaStorage}
 	return nil

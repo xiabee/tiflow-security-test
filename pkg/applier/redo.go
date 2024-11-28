@@ -615,7 +615,6 @@ func processEvent(
 			return nil, event, nil
 		}
 	}
-	// nolint
 	if event.IsDelete() {
 		return event, nil, nil
 	} else if event.IsInsert() {

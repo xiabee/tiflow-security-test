@@ -39,21 +39,21 @@ type Backoff struct {
 }
 
 // NewBackoff creates a new backoff instance.
-func NewBackoff(factor float64, jitter bool, minTime, maxTime time.Duration) (*Backoff, error) {
+func NewBackoff(factor float64, jitter bool, min, max time.Duration) (*Backoff, error) {
 	if factor <= 0 {
 		return nil, terror.ErrBackoffArgsNotValid.Generate("factor", factor)
 	}
-	if minTime < 0 {
-		return nil, terror.ErrBackoffArgsNotValid.Generate("min", minTime)
+	if min < 0 {
+		return nil, terror.ErrBackoffArgsNotValid.Generate("min", min)
 	}
-	if minTime < 0 || maxTime < minTime {
-		return nil, terror.ErrBackoffArgsNotValid.Generate("max", maxTime)
+	if max < 0 || max < min {
+		return nil, terror.ErrBackoffArgsNotValid.Generate("max", max)
 	}
 	return &Backoff{
 		Factor: factor,
 		Jitter: jitter,
-		Min:    minTime,
-		Max:    maxTime,
+		Min:    min,
+		Max:    max,
 	}, nil
 }
 

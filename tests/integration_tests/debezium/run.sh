@@ -35,7 +35,7 @@ curl -i -X POST \
     "database.user": "debezium",
     "database.password": "dbz",
     "database.server.id": "184054",
-    "topic.prefix": "default",
+    "topic.prefix": "dbserver1",
     "schema.history.internal.kafka.bootstrap.servers": "127.0.0.1:9092",
     "schema.history.internal.kafka.topic": "schemahistory.test",
     "transforms": "x",

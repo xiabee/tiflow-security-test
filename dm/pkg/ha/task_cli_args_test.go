@@ -14,11 +14,11 @@
 package ha
 
 import (
-	"github.com/pingcap/check"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tiflow/dm/config"
 )
 
-func (t *testForEtcd) TestTaskCliArgs(c *check.C) {
+func (t *testForEtcd) TestTaskCliArgs(c *C) {
 	defer clearTestInfoOperation(c)
 
 	task := "test-task-cli-args"
@@ -27,8 +27,8 @@ func (t *testForEtcd) TestTaskCliArgs(c *check.C) {
 
 	checkNotExist := func(source string) {
 		ret, err := GetTaskCliArgs(etcdTestCli, task, source)
-		c.Assert(err, check.IsNil)
-		c.Assert(ret, check.IsNil)
+		c.Assert(err, IsNil)
+		c.Assert(ret, IsNil)
 	}
 
 	checkNotExist(source1)
@@ -38,40 +38,40 @@ func (t *testForEtcd) TestTaskCliArgs(c *check.C) {
 		StartTime: "123",
 	}
 	err := PutTaskCliArgs(etcdTestCli, task, []string{source1}, args)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	ret, err := GetTaskCliArgs(etcdTestCli, task, source1)
-	c.Assert(err, check.IsNil)
-	c.Assert(ret, check.NotNil)
-	c.Assert(*ret, check.Equals, args)
+	c.Assert(err, IsNil)
+	c.Assert(ret, NotNil)
+	c.Assert(*ret, Equals, args)
 	checkNotExist(source2)
 
 	// put will overwrite
 	args.StartTime = "456"
 	err = PutTaskCliArgs(etcdTestCli, task, []string{source1, source2}, args)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	ret, err = GetTaskCliArgs(etcdTestCli, task, source1)
-	c.Assert(err, check.IsNil)
-	c.Assert(ret, check.NotNil)
-	c.Assert(*ret, check.Equals, args)
+	c.Assert(err, IsNil)
+	c.Assert(ret, NotNil)
+	c.Assert(*ret, Equals, args)
 	ret, err = GetTaskCliArgs(etcdTestCli, task, source2)
-	c.Assert(err, check.IsNil)
-	c.Assert(ret, check.NotNil)
-	c.Assert(*ret, check.Equals, args)
+	c.Assert(err, IsNil)
+	c.Assert(ret, NotNil)
+	c.Assert(*ret, Equals, args)
 
 	// test delete one source
 	err = DeleteTaskCliArgs(etcdTestCli, task, []string{source1})
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	checkNotExist(source1)
 	ret, err = GetTaskCliArgs(etcdTestCli, task, source2)
-	c.Assert(err, check.IsNil)
-	c.Assert(ret, check.NotNil)
-	c.Assert(*ret, check.Equals, args)
+	c.Assert(err, IsNil)
+	c.Assert(ret, NotNil)
+	c.Assert(*ret, Equals, args)
 
 	// test delete all source
 	err = DeleteAllTaskCliArgs(etcdTestCli, task)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	checkNotExist(source2)
 }

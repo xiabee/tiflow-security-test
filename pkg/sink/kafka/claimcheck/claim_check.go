@@ -31,6 +31,10 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	defaultTimeout = 5 * time.Minute
+)
+
 // ClaimCheck manage send message to the claim-check external storage.
 type ClaimCheck struct {
 	storage  storage.ExternalStorage
@@ -55,7 +59,7 @@ func New(ctx context.Context, config *config.LargeMessageHandleConfig, changefee
 		zap.String("storageURI", util.MaskSensitiveDataInURI(config.ClaimCheckStorageURI)))
 
 	start := time.Now()
-	externalStorage, err := util.GetExternalStorageWithDefaultTimeout(ctx, config.ClaimCheckStorageURI)
+	externalStorage, err := util.GetExternalStorageWithTimeout(ctx, config.ClaimCheckStorageURI, defaultTimeout)
 	if err != nil {
 		log.Error("create external storage failed",
 			zap.String("namespace", changefeedID.Namespace),

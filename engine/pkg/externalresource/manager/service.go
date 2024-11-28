@@ -153,7 +153,6 @@ func (s *Service) GetPlacementConstraint(
 		return "", false, nil
 	}
 
-	// nolint
 	record, err := s.metaclient.GetResourceByID(ctx, pkgOrm.ResourceKey{JobID: resourceKey.JobID, ID: resourceKey.ID})
 	if err != nil {
 		if pkgOrm.IsNotFoundError(err) {

@@ -35,15 +35,6 @@ func NewCmd() *cobra.Command {
 	}
 }
 
-// AddTiCDCCommandTo add all cdc subcommands to `cmd`.
-// Exported for ticdc new arch.
-func AddTiCDCCommandTo(cmd *cobra.Command) {
-	cmd.AddCommand(server.NewCmdServer())
-	cmd.AddCommand(cli.NewCmdCli())
-	cmd.AddCommand(version.NewCmdVersion())
-	cmd.AddCommand(redo.NewCmdRedo())
-}
-
 // Run runs the root command.
 func Run() {
 	cmd := NewCmd()
@@ -51,7 +42,10 @@ func Run() {
 	cmd.SetOut(os.Stdout)
 	cmd.SetErr(os.Stderr)
 
-	AddTiCDCCommandTo(cmd)
+	cmd.AddCommand(server.NewCmdServer())
+	cmd.AddCommand(cli.NewCmdCli())
+	cmd.AddCommand(version.NewCmdVersion())
+	cmd.AddCommand(redo.NewCmdRedo())
 
 	if err := cmd.Execute(); err != nil {
 		cmd.PrintErrln(err)

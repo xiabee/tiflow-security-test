@@ -18,18 +18,18 @@ import (
 	"path"
 	"testing"
 
-	"github.com/pingcap/check"
+	. "github.com/pingcap/check"
 )
 
 func TestCommon(t *testing.T) {
-	check.TestingT(t)
+	TestingT(t)
 }
 
 type testCommon struct{}
 
-var _ = check.Suite(&testCommon{})
+var _ = Suite(&testCommon{})
 
-func (t *testCommon) TestKeyAdapter(c *check.C) {
+func (t *testCommon) TestKeyAdapter(c *C) {
 	testCases := []struct {
 		keys    []string
 		adapter KeyAdapter
@@ -84,14 +84,14 @@ func (t *testCommon) TestKeyAdapter(c *check.C) {
 
 	for _, ca := range testCases {
 		encKey := ca.adapter.Encode(ca.keys...)
-		c.Assert(encKey, check.Equals, ca.want)
+		c.Assert(encKey, Equals, ca.want)
 		decKey, err := ca.adapter.Decode(encKey)
-		c.Assert(err, check.IsNil)
-		c.Assert(decKey, check.DeepEquals, ca.keys)
+		c.Assert(err, IsNil)
+		c.Assert(decKey, DeepEquals, ca.keys)
 	}
 }
 
-func (t *testCommon) TestEncodeAsPrefix(c *check.C) {
+func (t *testCommon) TestEncodeAsPrefix(c *C) {
 	testCases := []struct {
 		keys    []string
 		adapter KeyAdapter
@@ -106,22 +106,22 @@ func (t *testCommon) TestEncodeAsPrefix(c *check.C) {
 
 	for _, ca := range testCases {
 		encKey := ca.adapter.Encode(ca.keys...)
-		c.Assert(encKey, check.Equals, ca.want)
+		c.Assert(encKey, Equals, ca.want)
 		_, err := ca.adapter.Decode(encKey)
-		c.Assert(err, check.NotNil)
+		c.Assert(err, NotNil)
 	}
 }
 
-func (t *testCommon) TestIsErrNetClosing(c *check.C) {
+func (t *testCommon) TestIsErrNetClosing(c *C) {
 	server, err := net.Listen("tcp", "localhost:0")
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	err = server.Close()
-	c.Assert(IsErrNetClosing(err), check.IsFalse)
+	c.Assert(IsErrNetClosing(err), IsFalse)
 	_, err = server.Accept()
-	c.Assert(IsErrNetClosing(err), check.IsTrue)
+	c.Assert(IsErrNetClosing(err), IsTrue)
 }
 
-func (t *testCommon) TestJoinUseSlash(c *check.C) {
+func (t *testCommon) TestJoinUseSlash(c *C) {
 	// because we use "/" in Encode
-	c.Assert(path.Join("a", "b"), check.Equals, "a/b")
+	c.Assert(path.Join("a", "b"), Equals, "a/b")
 }

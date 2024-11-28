@@ -39,36 +39,6 @@ func (d *BatchEncoder) EncodeCheckpointEvent(ts uint64) (*common.Message, error)
 	return nil, nil
 }
 
-func (d *BatchEncoder) encodeKey(e *model.RowChangedEvent) ([]byte, error) {
-	keyBuf := bytes.Buffer{}
-	err := d.codec.EncodeKey(e, &keyBuf)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	// TODO: Use a streaming compression is better.
-	key, err := common.Compress(
-		d.config.ChangefeedID,
-		d.config.LargeMessageHandle.LargeMessageHandleCompression,
-		keyBuf.Bytes(),
-	)
-	return key, err
-}
-
-func (d *BatchEncoder) encodeValue(e *model.RowChangedEvent) ([]byte, error) {
-	valueBuf := bytes.Buffer{}
-	err := d.codec.EncodeValue(e, &valueBuf)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	// TODO: Use a streaming compression is better.
-	value, err := common.Compress(
-		d.config.ChangefeedID,
-		d.config.LargeMessageHandle.LargeMessageHandleCompression,
-		valueBuf.Bytes(),
-	)
-	return value, err
-}
-
 // AppendRowChangedEvent implements the RowEventEncoder interface
 func (d *BatchEncoder) AppendRowChangedEvent(
 	_ context.Context,
@@ -76,17 +46,22 @@ func (d *BatchEncoder) AppendRowChangedEvent(
 	e *model.RowChangedEvent,
 	callback func(),
 ) error {
-	var key []byte
-	var value []byte
-	var err error
-	if key, err = d.encodeKey(e); err != nil {
+	valueBuf := bytes.Buffer{}
+	err := d.codec.EncodeRowChangedEvent(e, &valueBuf)
+	if err != nil {
 		return errors.Trace(err)
 	}
-	if value, err = d.encodeValue(e); err != nil {
+	// TODO: Use a streaming compression is better.
+	value, err := common.Compress(
+		d.config.ChangefeedID,
+		d.config.LargeMessageHandle.LargeMessageHandleCompression,
+		valueBuf.Bytes(),
+	)
+	if err != nil {
 		return errors.Trace(err)
 	}
 	m := &common.Message{
-		Key:      key,
+		Key:      nil,
 		Value:    value,
 		Ts:       e.CommitTs,
 		Schema:   e.TableInfo.GetSchemaNamePtr(),

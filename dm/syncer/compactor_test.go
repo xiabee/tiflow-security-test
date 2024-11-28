@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/pingcap/check"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/util/mock"
@@ -59,7 +59,7 @@ func randString(n int) string {
 	return string(b)
 }
 
-func (s *testSyncerSuite) TestCompactJob(c *check.C) {
+func (s *testSyncerSuite) TestCompactJob(c *C) {
 	compactor := &compactor{
 		bufferSize:         10000,
 		logger:             log.L(),
@@ -76,7 +76,7 @@ func (s *testSyncerSuite) TestCompactJob(c *check.C) {
 	targetTable := &cdcmodel.TableName{Schema: "test", Table: "tb"}
 	schemaStr := "create table test.tb(id int primary key, col1 int, name varchar(24))"
 	ti, err := createTableInfo(p, se, 0, schemaStr)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	var dml *sqlmodel.RowChange
 	var dmls []*sqlmodel.RowChange
@@ -162,19 +162,19 @@ func (s *testSyncerSuite) TestCompactJob(c *check.C) {
 			}
 		}
 		c.Logf("before compact: %d, after compact: %d", noCompactNumber, compactNumber)
-		c.Assert(compactKV, check.DeepEquals, kv)
+		c.Assert(compactKV, DeepEquals, kv)
 		compactor.keyMap = make(map[string]map[string]int)
 		compactor.buffer = compactor.buffer[0:0]
 	}
 }
 
-func (s *testSyncerSuite) TestCompactorSafeMode(c *check.C) {
+func (s *testSyncerSuite) TestCompactorSafeMode(c *C) {
 	p := parser.New()
 	se := mock.NewContext()
 	sourceTable := &cdcmodel.TableName{Schema: "test", Table: "tb"}
 	schemaStr := "create table test.tb(id int primary key, col1 int, name varchar(24))"
 	ti, err := createTableInfo(p, se, 0, schemaStr)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	testCases := []struct {
 		input  []*job
@@ -282,7 +282,7 @@ func (s *testSyncerSuite) TestCompactorSafeMode(c *check.C) {
 		metricsProxies: metrics.DefaultMetricsProxies.CacheForOneTask("task", "worker", "source"),
 	}
 
-	c.Assert(failpoint.Enable("github.com/pingcap/tiflow/dm/syncer/SkipFlushCompactor", `return()`), check.IsNil)
+	c.Assert(failpoint.Enable("github.com/pingcap/tiflow/dm/syncer/SkipFlushCompactor", `return()`), IsNil)
 	//nolint:errcheck
 	defer failpoint.Disable("github.com/pingcap/tiflow/dm/syncer/SkipFlushCompactor")
 
@@ -296,13 +296,13 @@ func (s *testSyncerSuite) TestCompactorSafeMode(c *check.C) {
 		c.Assert(
 			utils.WaitSomething(10, time.Millisecond, func() bool {
 				return len(outCh) == len(tc.output)+1
-			}), check.Equals, true)
+			}), Equals, true)
 		for i := 0; i <= len(tc.output); i++ {
 			j := <-outCh
 			if i < len(tc.output) {
-				c.Assert(j.String(), check.Equals, tc.output[i].String())
+				c.Assert(j.String(), Equals, tc.output[i].String())
 			} else {
-				c.Assert(j.tp, check.Equals, flush)
+				c.Assert(j.tp, Equals, flush)
 			}
 		}
 	}

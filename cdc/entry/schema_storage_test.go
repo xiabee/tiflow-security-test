@@ -11,9 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build intest
-// +build intest
-
 package entry
 
 import (
@@ -21,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -29,7 +27,8 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	tidbkv "github.com/pingcap/tidb/pkg/kv"
 	timeta "github.com/pingcap/tidb/pkg/meta"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/meta/model"
+	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/sessionctx"
@@ -48,7 +47,7 @@ import (
 )
 
 func TestSchema(t *testing.T) {
-	dbName := timodel.NewCIStr("Test")
+	dbName := pmodel.NewCIStr("Test")
 	// db and ignoreDB info
 	dbInfo := &timodel.DBInfo{
 		ID:    1,
@@ -116,10 +115,10 @@ func TestSchema(t *testing.T) {
 
 func TestTable(t *testing.T) {
 	var jobs []*timodel.Job
-	dbName := timodel.NewCIStr("Test")
-	tbName := timodel.NewCIStr("T")
-	colName := timodel.NewCIStr("A")
-	idxName := timodel.NewCIStr("idx")
+	dbName := pmodel.NewCIStr("Test")
+	tbName := pmodel.NewCIStr("T")
+	colName := pmodel.NewCIStr("A")
+	idxName := pmodel.NewCIStr("idx")
 	// column info
 	colInfo := &timodel.ColumnInfo{
 		ID:        1,
@@ -296,10 +295,10 @@ func TestTable(t *testing.T) {
 
 func TestHandleDDL(t *testing.T) {
 	snap := schema.NewEmptySnapshot(false)
-	dbName := timodel.NewCIStr("Test")
-	colName := timodel.NewCIStr("A")
-	tbName := timodel.NewCIStr("T")
-	newTbName := timodel.NewCIStr("RT")
+	dbName := pmodel.NewCIStr("Test")
+	colName := pmodel.NewCIStr("A")
+	tbName := pmodel.NewCIStr("T")
+	newTbName := pmodel.NewCIStr("RT")
 
 	// db info
 	dbInfo := &timodel.DBInfo{
@@ -401,7 +400,7 @@ func TestHandleRenameTables(t *testing.T) {
 	for i = 1; i < 3; i++ {
 		dbInfo := &timodel.DBInfo{
 			ID:    i,
-			Name:  timodel.NewCIStr(fmt.Sprintf("db_%d", i)),
+			Name:  pmodel.NewCIStr(fmt.Sprintf("db_%d", i)),
 			State: timodel.StatePublic,
 		}
 		job := &timodel.Job{
@@ -418,7 +417,7 @@ func TestHandleRenameTables(t *testing.T) {
 	for i = 1; i < 3; i++ {
 		tblInfo := &timodel.TableInfo{
 			ID:    10 + i,
-			Name:  timodel.NewCIStr(fmt.Sprintf("table_%d", i)),
+			Name:  pmodel.NewCIStr(fmt.Sprintf("table_%d", i)),
 			State: timodel.StatePublic,
 		}
 		job := &timodel.Job{
@@ -438,12 +437,14 @@ func TestHandleRenameTables(t *testing.T) {
 	oldSchemaIDs := []int64{1, 2}
 	newSchemaIDs := []int64{2, 1}
 	oldTableIDs := []int64{11, 12}
-	newTableNames := []timodel.CIStr{timodel.NewCIStr("x"), timodel.NewCIStr("y")}
-	oldSchemaNames := []timodel.CIStr{timodel.NewCIStr("db_1"), timodel.NewCIStr("db_2")}
-	args := []interface{}{oldSchemaIDs, newSchemaIDs, newTableNames, oldTableIDs, oldSchemaNames}
+	newTableNames := []pmodel.CIStr{pmodel.NewCIStr("x"), pmodel.NewCIStr("y")}
+	oldTableNames := []pmodel.CIStr{pmodel.NewCIStr("oldx"), pmodel.NewCIStr("oldy")}
+	oldSchemaNames := []pmodel.CIStr{pmodel.NewCIStr("db_1"), pmodel.NewCIStr("db_2")}
+	args := []interface{}{oldSchemaIDs, newSchemaIDs, newTableNames, oldTableIDs, oldSchemaNames, oldTableNames}
 	rawArgs, err := json.Marshal(args)
 	require.Nil(t, err)
-	var job *timodel.Job = &timodel.Job{
+	job := &timodel.Job{
+		Version: timodel.JobVersion1,
 		Type:    timodel.ActionRenameTables,
 		RawArgs: rawArgs,
 		BinlogInfo: &timodel.HistoryInfo{
@@ -453,13 +454,13 @@ func TestHandleRenameTables(t *testing.T) {
 	job.BinlogInfo.MultipleTableInfos = append(job.BinlogInfo.MultipleTableInfos,
 		&timodel.TableInfo{
 			ID:    13,
-			Name:  timodel.NewCIStr("x"),
+			Name:  pmodel.NewCIStr("x"),
 			State: timodel.StatePublic,
 		})
 	job.BinlogInfo.MultipleTableInfos = append(job.BinlogInfo.MultipleTableInfos,
 		&timodel.TableInfo{
 			ID:    14,
-			Name:  timodel.NewCIStr("y"),
+			Name:  pmodel.NewCIStr("y"),
 			State: timodel.StatePublic,
 		})
 	testDoDDLAndCheck(t, snap, job, false)
@@ -488,8 +489,8 @@ func testDoDDLAndCheck(t *testing.T, snap *schema.Snapshot, job *timodel.Job, is
 
 func TestMultiVersionStorage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	dbName := timodel.NewCIStr("Test")
-	tbName := timodel.NewCIStr("T1")
+	dbName := pmodel.NewCIStr("Test")
+	tbName := pmodel.NewCIStr("T1")
 	// db and ignoreDB info
 	dbInfo := &timodel.DBInfo{
 		ID:    11,
@@ -528,7 +529,7 @@ func TestMultiVersionStorage(t *testing.T) {
 
 	jobs = append(jobs, job)
 
-	tbName = timodel.NewCIStr("T2")
+	tbName = pmodel.NewCIStr("T2")
 	// table info
 	tblInfo = &timodel.TableInfo{
 		ID:    13,
@@ -676,7 +677,7 @@ func TestCreateSnapFromMeta(t *testing.T) {
 	require.Nil(t, err)
 	defer store.Close() //nolint:errcheck
 
-	session.SetSchemaLease(0)
+	session.SetSchemaLease(time.Second)
 	session.DisableStats4Test()
 	domain, err := session.BootstrapSession(store)
 	require.Nil(t, err)
@@ -692,10 +693,9 @@ func TestCreateSnapFromMeta(t *testing.T) {
 	ver, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
 	meta := kv.GetSnapshotMeta(store, ver.Ver)
-	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta, ver.Ver, false, f)
+	snap, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ver.Ver, false, f)
 	require.Nil(t, err)
 	_, ok := snap.TableByName("test", "simple_test1")
 	require.True(t, ok)
@@ -712,7 +712,7 @@ func TestExplicitTables(t *testing.T) {
 	require.Nil(t, err)
 	defer store.Close() //nolint:errcheck
 
-	session.SetSchemaLease(0)
+	session.SetSchemaLease(time.Second)
 	session.DisableStats4Test()
 	domain, err := session.BootstrapSession(store)
 	require.Nil(t, err)
@@ -730,16 +730,14 @@ func TestExplicitTables(t *testing.T) {
 	ver2, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
 	meta1 := kv.GetSnapshotMeta(store, ver1.Ver)
-	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap1, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta1, ver1.Ver, true /* forceReplicate */, f)
+	snap1, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta1, ver1.Ver, true /* forceReplicate */, f)
 	require.Nil(t, err)
 	meta2 := kv.GetSnapshotMeta(store, ver2.Ver)
+	snap2, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta2, ver2.Ver, false /* forceReplicate */, f)
 	require.Nil(t, err)
-	snap2, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta2, ver2.Ver, false /* forceReplicate */, f)
-	require.Nil(t, err)
-	snap3, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta2, ver2.Ver, true /* forceReplicate */, f)
+	snap3, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta2, ver2.Ver, true /* forceReplicate */, f)
 	require.Nil(t, err)
 
 	// we don't need to count system tables since TiCDC
@@ -865,7 +863,7 @@ func TestSchemaStorage(t *testing.T) {
 		ticonfig.UpdateGlobal(func(conf *ticonfig.Config) {
 			conf.AlterPrimaryKey = true
 		})
-		session.SetSchemaLease(0)
+		session.SetSchemaLease(time.Second)
 		session.DisableStats4Test()
 		domain, err := session.BootstrapSession(store)
 		require.Nil(t, err)
@@ -884,17 +882,16 @@ func TestSchemaStorage(t *testing.T) {
 		require.Nil(t, err)
 
 		schemaStorage, err := NewSchemaStorage(nil, 0, false, model.DefaultChangeFeedID("dummy"), util.RoleTester, f)
-		require.Nil(t, err)
+		require.NoError(t, err)
 		for _, job := range jobs {
 			err := schemaStorage.HandleDDLJob(job)
-			require.Nil(t, err)
+			require.NoError(t, err)
 		}
 
 		for _, job := range jobs {
 			ts := job.BinlogInfo.FinishedTS
 			meta := kv.GetSnapshotMeta(store, ts)
-			require.Nil(t, err)
-			snapFromMeta, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta, ts, false, f)
+			snapFromMeta, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ts, false, f)
 			require.Nil(t, err)
 			snapFromSchemaStore, err := schemaStorage.GetSnapshot(ctx, ts)
 			require.Nil(t, err)
@@ -926,7 +923,7 @@ func getAllHistoryDDLJob(storage tidbkv.Storage, f filter.Filter) ([]*timodel.Jo
 		return nil, errors.Trace(err)
 	}
 	defer txn.Rollback() //nolint:errcheck
-	txnMeta := timeta.NewMeta(txn)
+	txnMeta := timeta.NewReader(txn)
 
 	jobs, err := ddl.GetAllHistoryDDLJobs(txnMeta)
 	res := make([]*timodel.Job, 0)
@@ -959,7 +956,7 @@ func TestHandleKey(t *testing.T) {
 	require.Nil(t, err)
 	defer store.Close() //nolint:errcheck
 
-	session.SetSchemaLease(0)
+	session.SetSchemaLease(time.Second)
 	session.DisableStats4Test()
 	domain, err := session.BootstrapSession(store)
 	require.Nil(t, err)
@@ -974,10 +971,9 @@ func TestHandleKey(t *testing.T) {
 	ver, err := store.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(t, err)
 	meta := kv.GetSnapshotMeta(store, ver.Ver)
-	require.Nil(t, err)
 	f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 	require.Nil(t, err)
-	snap, err := schema.NewSnapshotFromMeta(model.ChangeFeedID{}, meta, ver.Ver, false, f)
+	snap, err := schema.NewSnapshotFromMeta(model.DefaultChangeFeedID("test"), meta, ver.Ver, false, f)
 	require.Nil(t, err)
 	tb1, ok := snap.TableByName("test", "simple_test1")
 	require.True(t, ok)

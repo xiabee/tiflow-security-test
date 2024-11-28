@@ -16,7 +16,7 @@ package filter
 import (
 	"testing"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -34,6 +34,7 @@ func TestShouldUseDefaultRules(t *testing.T) {
 	require.False(t, filter.ShouldIgnoreTable("metric_schema", "query_duration"))
 	require.False(t, filter.ShouldIgnoreTable("sns", "user"))
 	require.True(t, filter.ShouldIgnoreTable("tidb_cdc", "repl_mark_a_a"))
+	require.True(t, filter.ShouldIgnoreTable("lightning_task_info", "conflict_records"))
 }
 
 func TestShouldUseCustomRules(t *testing.T) {
@@ -142,7 +143,12 @@ func TestShouldIgnoreDMLEvent(t *testing.T) {
 		require.Nil(t, err)
 		for _, tc := range ftc.cases {
 			dml := &model.RowChangedEvent{
-				Table:   &model.TableName{Table: tc.table, Schema: tc.schema},
+				TableInfo: &model.TableInfo{
+					TableName: model.TableName{
+						Schema: tc.schema,
+						Table:  tc.table,
+					},
+				},
 				StartTs: tc.ts,
 			}
 			ignoreDML, err := filter.ShouldIgnoreDMLEvent(dml, model.RowChangedDatums{}, nil)
@@ -366,13 +372,14 @@ func TestShouldDiscardDDL(t *testing.T) {
 }
 
 func TestIsAllowedDDL(t *testing.T) {
+	require.Len(t, ddlWhiteListMap, 37)
 	type testCase struct {
 		timodel.ActionType
 		allowed bool
 	}
-	testCases := make([]testCase, 0, len(allowDDLList))
-	for _, action := range allowDDLList {
-		testCases = append(testCases, testCase{action, true})
+	testCases := make([]testCase, 0, len(ddlWhiteListMap))
+	for ddlType := range ddlWhiteListMap {
+		testCases = append(testCases, testCase{ddlType, true})
 	}
 	testCases = append(testCases, testCase{timodel.ActionAddForeignKey, false})
 	testCases = append(testCases, testCase{timodel.ActionDropForeignKey, false})

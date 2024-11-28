@@ -18,9 +18,7 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/rowcodec"
+	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
@@ -29,21 +27,28 @@ import (
 )
 
 func TestCanalBatchEncoder(t *testing.T) {
-	t.Parallel()
-	s := defaultCanalBatchTester
-	for _, cs := range s.rowCases {
-		encoder := newBatchEncoder(common.NewConfig(config.ProtocolCanal))
-		for _, row := range cs {
-			err := encoder.AppendRowChangedEvent(context.Background(), "", row, nil)
-			require.Nil(t, err)
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	sql := `create table test.t(a varchar(10) primary key)`
+	_ = helper.DDL2Event(sql)
+
+	event1 := helper.DML2Event(`insert into test.t values("aa")`, "test", "t")
+	event2 := helper.DML2Event(`insert into test.t values("bb")`, "test", "t")
+
+	rowCases := [][]*model.RowChangedEvent{
+		{event1},
+		{event1, event2},
+	}
+
+	ctx := context.Background()
+	encoder := newBatchEncoder(common.NewConfig(config.ProtocolCanal))
+	for _, cs := range rowCases {
+		for _, event := range cs {
+			err := encoder.AppendRowChangedEvent(ctx, "", event, nil)
+			require.NoError(t, err)
 		}
 		res := encoder.Build()
-
-		if len(cs) == 0 {
-			require.Nil(t, res)
-			continue
-		}
-
 		require.Len(t, res, 1)
 		require.Nil(t, res[0].Key)
 		require.Equal(t, len(cs), res[0].GetRowsCount())
@@ -58,46 +63,46 @@ func TestCanalBatchEncoder(t *testing.T) {
 		require.Equal(t, len(cs), len(messages.GetMessages()))
 	}
 
-	for _, cs := range s.ddlCases {
+	createTableA := helper.DDL2Event(`create table test.a(a varchar(10) primary key)`)
+	createTableB := helper.DDL2Event(`create table test.b(a varchar(10) primary key)`)
+
+	ddlCases := [][]*model.DDLEvent{
+		{createTableA},
+		{createTableA, createTableB},
+	}
+	for _, cs := range ddlCases {
 		encoder := newBatchEncoder(common.NewConfig(config.ProtocolCanal))
 		for _, ddl := range cs {
 			msg, err := encoder.EncodeDDLEvent(ddl)
-			require.Nil(t, err)
+			require.NoError(t, err)
 			require.NotNil(t, msg)
 			require.Nil(t, msg.Key)
 
 			packet := &canal.Packet{}
 			err = proto.Unmarshal(msg.Value, packet)
-			require.Nil(t, err)
+			require.NoError(t, err)
 			require.Equal(t, canal.PacketType_MESSAGES, packet.GetType())
 			messages := &canal.Messages{}
 			err = proto.Unmarshal(packet.GetBody(), messages)
-			require.Nil(t, err)
+			require.NoError(t, err)
 			require.Equal(t, 1, len(messages.GetMessages()))
-			require.Nil(t, err)
+			require.NoError(t, err)
 		}
 	}
 }
 
 func TestCanalAppendRowChangedEventWithCallback(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	sql := `create table test.t(a varchar(10) primary key)`
+	_ = helper.DDL2Event(sql)
+
+	row := helper.DML2Event(`insert into test.t values("aa")`, "test", "t")
 	encoder := newBatchEncoder(common.NewConfig(config.ProtocolCanal))
 	require.NotNil(t, encoder)
 
 	count := 0
-
-	row := &model.RowChangedEvent{
-		CommitTs: 1,
-		Table:    &model.TableName{Schema: "a", Table: "b"},
-		Columns: []*model.Column{{
-			Name:  "col1",
-			Type:  mysql.TypeVarchar,
-			Value: []byte("aa"),
-		}},
-		ColInfos: []rowcodec.ColInfo{{
-			ID: 1,
-			Ft: types.NewFieldType(mysql.TypeVarchar),
-		}},
-	}
 
 	tests := []struct {
 		row      *model.RowChangedEvent

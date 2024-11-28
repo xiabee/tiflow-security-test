@@ -18,8 +18,8 @@ import (
 	"database/sql"
 	"testing"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/compression"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -27,6 +27,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/sink/codec"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
 	"github.com/pingcap/tiflow/pkg/sink/codec/internal"
+	"github.com/pingcap/tiflow/pkg/sink/codec/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,148 +40,22 @@ func TestBuildOpenProtocolBatchEncoder(t *testing.T) {
 	require.NotNil(t, encoder.config)
 }
 
-var (
-	testEvent = &model.RowChangedEvent{
-		CommitTs: 1,
-		Table:    &model.TableName{Schema: "a", Table: "b"},
-		Columns: []*model.Column{
-			{
-				Name:  "col1",
-				Type:  mysql.TypeVarchar,
-				Value: []byte("aa"),
-				Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-			},
-			{
-				Name:  "col2",
-				Type:  mysql.TypeVarchar,
-				Value: []byte("bb"),
-			},
-		},
-	}
-	largeTestEvent = &model.RowChangedEvent{
-		CommitTs: 1,
-		Table:    &model.TableName{Schema: "a", Table: "b"},
-		Columns: []*model.Column{
-			{
-				Name:  "col1",
-				Type:  mysql.TypeVarchar,
-				Value: []byte("12345678910"),
-				Flag:  model.HandleKeyFlag,
-			},
-			{
-				Name:  "col2",
-				Type:  mysql.TypeVarchar,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col3",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col4",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col5",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col6",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col7",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col8",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col9",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col10",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col11",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col12",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col13",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col14",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-			{
-				Name:  "col15",
-				Type:  mysql.TypeBlob,
-				Value: []byte("12345678910"),
-			},
-		},
-	}
-
-	testCaseDDL = &model.DDLEvent{
-		CommitTs: 417318403368288260,
-		TableInfo: &model.TableInfo{
-			TableName: model.TableName{
-				Schema: "cdc", Table: "person",
-			},
-		},
-		Query: "create table person(id int, name varchar(32), tiny tinyint unsigned, comment text, primary key(id))",
-		Type:  timodel.ActionCreateTable,
-	}
-	updateEvent = &model.RowChangedEvent{
-		CommitTs: 1,
-		Table:    &model.TableName{Schema: "a", Table: "b"},
-		Columns: []*model.Column{
-			{
-				Name:  "col1",
-				Type:  mysql.TypeVarchar,
-				Value: []byte("aa"),
-				Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
-			},
-			{
-				Name:  "col2",
-				Type:  mysql.TypeVarchar,
-				Value: []byte("bb"),
-			},
-		},
-	}
-)
-
 func TestMaxMessageBytes(t *testing.T) {
-	t.Parallel()
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	_ = helper.DDL2Event(`create table test.t(a varchar(10) primary key, b varchar(10))`)
+	event := helper.DML2Event(`insert into test.t values ("aa", "bb")`, "test", "t")
 
 	ctx := context.Background()
 	topic := ""
 	// just can hold it.
-	a := 173
+	a := 188
 	codecConfig := common.NewConfig(config.ProtocolOpen).WithMaxMessageBytes(a)
 	builder, err := NewBatchEncoderBuilder(ctx, codecConfig)
 	require.NoError(t, err)
 	encoder := builder.Build()
-	err = encoder.AppendRowChangedEvent(ctx, topic, testEvent, nil)
+	err = encoder.AppendRowChangedEvent(ctx, topic, event, nil)
 	require.NoError(t, err)
 
 	// cannot hold a single message
@@ -188,7 +63,7 @@ func TestMaxMessageBytes(t *testing.T) {
 	builder, err = NewBatchEncoderBuilder(ctx, codecConfig)
 	require.NoError(t, err)
 	encoder = builder.Build()
-	err = encoder.AppendRowChangedEvent(ctx, topic, testEvent, nil)
+	err = encoder.AppendRowChangedEvent(ctx, topic, event, nil)
 	require.ErrorIs(t, err, cerror.ErrMessageTooLarge)
 
 	// make sure each batch's `Length` not greater than `max-message-bytes`
@@ -197,7 +72,7 @@ func TestMaxMessageBytes(t *testing.T) {
 	require.NoError(t, err)
 	encoder = builder.Build()
 	for i := 0; i < 10000; i++ {
-		err := encoder.AppendRowChangedEvent(ctx, topic, testEvent, nil)
+		err := encoder.AppendRowChangedEvent(ctx, topic, event, nil)
 		require.NoError(t, err)
 	}
 
@@ -208,7 +83,11 @@ func TestMaxMessageBytes(t *testing.T) {
 }
 
 func TestMaxBatchSize(t *testing.T) {
-	t.Parallel()
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	_ = helper.DDL2Event(`create table test.t(a varchar(10) primary key, b varchar(10))`)
+	event := helper.DML2Event(`insert into test.t values ("aa", "bb")`, "test", "t")
 
 	ctx := context.Background()
 	codecConfig := common.NewConfig(config.ProtocolOpen).WithMaxMessageBytes(1048576)
@@ -218,7 +97,7 @@ func TestMaxBatchSize(t *testing.T) {
 	encoder := builder.Build()
 
 	for i := 0; i < 10000; i++ {
-		err := encoder.AppendRowChangedEvent(ctx, "", testEvent, nil)
+		err := encoder.AppendRowChangedEvent(ctx, "", event, nil)
 		require.NoError(t, err)
 	}
 
@@ -250,7 +129,11 @@ func TestMaxBatchSize(t *testing.T) {
 }
 
 func TestOpenProtocolAppendRowChangedEventWithCallback(t *testing.T) {
-	t.Parallel()
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	_ = helper.DDL2Event(`create table test.t(a varchar(10) primary key, b varchar(10))`)
+	event := helper.DML2Event(`insert into test.t values ("aa", "bb")`, "test", "t")
 
 	cfg := common.NewConfig(config.ProtocolOpen)
 	// Set the max batch size to 2, so that we can test the callback.
@@ -266,31 +149,31 @@ func TestOpenProtocolAppendRowChangedEventWithCallback(t *testing.T) {
 		callback func()
 	}{
 		{
-			row: testEvent,
+			row: event,
 			callback: func() {
 				count += 1
 			},
 		},
 		{
-			row: testEvent,
+			row: event,
 			callback: func() {
 				count += 2
 			},
 		},
 		{
-			row: testEvent,
+			row: event,
 			callback: func() {
 				count += 3
 			},
 		},
 		{
-			row: testEvent,
+			row: event,
 			callback: func() {
 				count += 4
 			},
 		},
 		{
-			row: testEvent,
+			row: event,
 			callback: func() {
 				count += 5
 			},
@@ -321,10 +204,9 @@ func TestOpenProtocolAppendRowChangedEventWithCallback(t *testing.T) {
 func TestOpenProtocolBatchCodec(t *testing.T) {
 	codecConfig := common.NewConfig(config.ProtocolOpen).WithMaxMessageBytes(8192)
 	codecConfig.MaxBatchSize = 64
-	tester := internal.NewDefaultBatchTester()
 	builder, err := NewBatchEncoderBuilder(context.Background(), codecConfig)
 	require.NoError(t, err)
-	tester.TestBatchCodec(t, builder,
+	internal.TestBatchCodec(t, builder,
 		func(key []byte, value []byte) (codec.RowEventDecoder, error) {
 			decoder, err := NewBatchDecoder(context.Background(), codecConfig, nil)
 			require.NoError(t, err)
@@ -334,7 +216,11 @@ func TestOpenProtocolBatchCodec(t *testing.T) {
 }
 
 func TestEncodeDecodeE2E(t *testing.T) {
-	t.Parallel()
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	_ = helper.DDL2Event(`create table test.t(a varchar(10) primary key, b varchar(10))`)
+	event := helper.DML2Event(`insert into test.t values ("aa", "bb")`, "test", "t")
 
 	ctx := context.Background()
 	topic := "test"
@@ -345,7 +231,7 @@ func TestEncodeDecodeE2E(t *testing.T) {
 	require.NoError(t, err)
 	encoder := builder.Build()
 
-	err = encoder.AppendRowChangedEvent(ctx, topic, testEvent, func() {})
+	err = encoder.AppendRowChangedEvent(ctx, topic, event, func() {})
 	require.NoError(t, err)
 
 	message := encoder.Build()[0]
@@ -364,18 +250,24 @@ func TestEncodeDecodeE2E(t *testing.T) {
 	decoded, err := decoder.NextRowChangedEvent()
 	require.NoError(t, err)
 
-	obtainedColumns := make(map[string]*model.Column)
-	for _, col := range decoded.Columns {
-		obtainedColumns[col.Name] = col
+	obtainedColumns := make(map[string]*model.ColumnData, len(decoded.Columns))
+	for _, column := range decoded.Columns {
+		colName := decoded.TableInfo.ForceGetColumnName(column.ColumnID)
+		obtainedColumns[colName] = column
 	}
-
-	for _, col := range testEvent.Columns {
-		require.Contains(t, obtainedColumns, col.Name)
+	for _, col := range event.Columns {
+		colName := event.TableInfo.ForceGetColumnName(col.ColumnID)
+		decoded, ok := obtainedColumns[colName]
+		require.True(t, ok)
+		require.EqualValues(t, col.Value, decoded.Value)
 	}
 }
 
 func TestE2EDDLCompression(t *testing.T) {
-	t.Parallel()
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	ddlEvent := helper.DDL2Event(`create table test.person(id int, name varchar(32), tiny tinyint unsigned, comment text, primary key(id))`)
 
 	ctx := context.Background()
 
@@ -387,7 +279,7 @@ func TestE2EDDLCompression(t *testing.T) {
 	encoder := builder.Build()
 
 	// encode DDL event
-	message, err := encoder.EncodeDDLEvent(testCaseDDL)
+	message, err := encoder.EncodeDDLEvent(ddlEvent)
 	require.NoError(t, err)
 
 	decoder, err := NewBatchDecoder(ctx, codecConfig, nil)
@@ -404,10 +296,10 @@ func TestE2EDDLCompression(t *testing.T) {
 	decodedDDL, err := decoder.NextDDLEvent()
 	require.NoError(t, err)
 
-	require.Equal(t, decodedDDL.Query, testCaseDDL.Query)
-	require.Equal(t, decodedDDL.CommitTs, testCaseDDL.CommitTs)
-	require.Equal(t, decodedDDL.TableInfo.TableName.Schema, testCaseDDL.TableInfo.TableName.Schema)
-	require.Equal(t, decodedDDL.TableInfo.TableName.Table, testCaseDDL.TableInfo.TableName.Table)
+	require.Equal(t, decodedDDL.Query, ddlEvent.Query)
+	require.Equal(t, decodedDDL.CommitTs, ddlEvent.CommitTs)
+	require.Equal(t, decodedDDL.TableInfo.TableName.Schema, ddlEvent.TableInfo.TableName.Schema)
+	require.Equal(t, decodedDDL.TableInfo.TableName.Table, ddlEvent.TableInfo.TableName.Table)
 
 	// encode checkpoint event
 	waterMark := uint64(2333)
@@ -428,7 +320,7 @@ func TestE2EDDLCompression(t *testing.T) {
 }
 
 func TestE2EHandleKeyOnlyEvent(t *testing.T) {
-	t.Parallel()
+	_, insertEvent, _, _ := utils.NewLargeEvent4Test(t, config.GetDefaultReplicaConfig())
 
 	codecConfig := common.NewConfig(config.ProtocolOpen)
 	codecConfig.LargeMessageHandle.LargeMessageHandleOption = config.LargeMessageHandleOptionHandleKeyOnly
@@ -442,7 +334,7 @@ func TestE2EHandleKeyOnlyEvent(t *testing.T) {
 	encoder := builder.Build()
 
 	topic := "test"
-	err = encoder.AppendRowChangedEvent(ctx, topic, largeTestEvent, nil)
+	err = encoder.AppendRowChangedEvent(ctx, topic, insertEvent, nil)
 	require.NoError(t, err)
 
 	message := encoder.Build()[0]
@@ -461,26 +353,28 @@ func TestE2EHandleKeyOnlyEvent(t *testing.T) {
 	nextEvent := decoder.(*BatchDecoder).nextEvent
 	require.NotNil(t, nextEvent)
 
-	obtainedColumns := make(map[string]*model.Column)
+	obtainedColumns := make(map[string]*model.ColumnData, len(nextEvent.Columns))
 	for _, col := range nextEvent.Columns {
-		obtainedColumns[col.Name] = col
-		require.True(t, col.Flag.IsHandleKey())
+		colName := nextEvent.TableInfo.ForceGetColumnName(col.ColumnID)
+		obtainedColumns[colName] = col
+		require.True(t, nextEvent.TableInfo.ForceGetColumnFlagType(col.ColumnID).IsHandleKey())
 	}
 
-	for _, col := range largeTestEvent.Columns {
-		if col.Flag.IsHandleKey() {
-			require.Contains(t, obtainedColumns, col.Name)
+	for _, col := range insertEvent.Columns {
+		colName := insertEvent.TableInfo.ForceGetColumnName(col.ColumnID)
+		if insertEvent.TableInfo.ForceGetColumnFlagType(col.ColumnID).IsHandleKey() {
+			require.Contains(t, obtainedColumns, colName)
 		}
 	}
 }
 
 func TestE2EClaimCheckMessage(t *testing.T) {
-	t.Parallel()
+	_, insertEvent, _, _ := utils.NewLargeEvent4Test(t, config.GetDefaultReplicaConfig())
 
 	ctx := context.Background()
 	topic := ""
 
-	a := 244
+	a := 263
 	codecConfig := common.NewConfig(config.ProtocolOpen).WithMaxMessageBytes(a)
 	codecConfig.LargeMessageHandle.LargeMessageHandleOption = config.LargeMessageHandleOptionClaimCheck
 	codecConfig.LargeMessageHandle.LargeMessageHandleCompression = compression.LZ4
@@ -490,11 +384,11 @@ func TestE2EClaimCheckMessage(t *testing.T) {
 	require.NoError(t, err)
 	encoder := builder.Build()
 
-	err = encoder.AppendRowChangedEvent(ctx, topic, testEvent, func() {})
+	err = encoder.AppendRowChangedEvent(ctx, topic, insertEvent, func() {})
 	require.NoError(t, err)
 
 	// cannot hold this message, it's encoded as the claim check location message.
-	err = encoder.AppendRowChangedEvent(ctx, topic, largeTestEvent, func() {})
+	err = encoder.AppendRowChangedEvent(ctx, topic, insertEvent, func() {})
 	require.NoError(t, err)
 
 	messages := encoder.Build()
@@ -514,23 +408,36 @@ func TestE2EClaimCheckMessage(t *testing.T) {
 	decodedLargeEvent, err := decoder.NextRowChangedEvent()
 	require.NoError(t, err)
 
-	require.Equal(t, largeTestEvent.CommitTs, decodedLargeEvent.CommitTs)
-	require.Equal(t, largeTestEvent.Table, decodedLargeEvent.Table)
+	require.Equal(t, insertEvent.CommitTs, decodedLargeEvent.CommitTs)
+	require.Equal(t, insertEvent.TableInfo.GetTableName(), decodedLargeEvent.TableInfo.GetTableName())
 
-	decodedColumns := make(map[string]*model.Column, len(decodedLargeEvent.Columns))
+	decodedColumns := make(map[string]*model.ColumnData, len(decodedLargeEvent.Columns))
 	for _, column := range decodedLargeEvent.Columns {
-		decodedColumns[column.Name] = column
+		colName := decodedLargeEvent.TableInfo.ForceGetColumnName(column.ColumnID)
+		decodedColumns[colName] = column
 	}
 
-	for _, column := range largeTestEvent.Columns {
-		decodedColumn, ok := decodedColumns[column.Name]
+	for _, column := range insertEvent.Columns {
+		colName := insertEvent.TableInfo.ForceGetColumnName(column.ColumnID)
+		decodedColumn, ok := decodedColumns[colName]
 		require.True(t, ok)
-		require.Equal(t, column.Type, decodedColumn.Type)
-		require.Equal(t, column.Value, decodedColumn.Value)
+		switch v := column.Value.(type) {
+		case types.VectorFloat32:
+			require.Equal(t, v.String(), decodedColumn.Value, colName)
+		default:
+			require.Equal(t, v, decodedColumn.Value, colName)
+		}
 	}
 }
 
 func TestOutputOldValueFalse(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+
+	_ = helper.DDL2Event(`create table test.t(a varchar(10) primary key, b varchar(10))`)
+	event := helper.DML2Event(`insert into test.t values ("aa", "bb")`, "test", "t")
+	event.PreColumns = event.Columns
+
 	ctx := context.Background()
 	topic := "test"
 
@@ -540,7 +447,7 @@ func TestOutputOldValueFalse(t *testing.T) {
 	require.NoError(t, err)
 	encoder := builder.Build()
 
-	err = encoder.AppendRowChangedEvent(ctx, topic, updateEvent, func() {})
+	err = encoder.AppendRowChangedEvent(ctx, topic, event, func() {})
 	require.NoError(t, err)
 
 	message := encoder.Build()[0]
@@ -559,4 +466,36 @@ func TestOutputOldValueFalse(t *testing.T) {
 	decoded, err := decoder.NextRowChangedEvent()
 	require.NoError(t, err)
 	require.Nil(t, decoded.PreColumns)
+}
+
+func TestNoHandleKeys(t *testing.T) {
+	replicaConfig := config.GetDefaultReplicaConfig()
+	replicaConfig.ForceReplicate = true
+	helper := entry.NewSchemaTestHelperWithReplicaConfig(t, replicaConfig)
+	defer helper.Close()
+
+	// insert
+	_ = helper.DDL2Event(`create table test.t(a varchar(10), b varchar(10))`)
+	event := helper.DML2Event(`insert into test.t values ("aa", "bb")`, "test", "t")
+	codecConfig := common.NewConfig(config.ProtocolOpen)
+	codecConfig.OpenOutputOldValue = false
+	key, value, err := rowChangeToMsg(event, codecConfig, true)
+	require.Error(t, err)
+	require.Nil(t, value)
+	require.Nil(t, key)
+
+	// update
+	event.PreColumns = event.Columns
+	key, value, err = rowChangeToMsg(event, codecConfig, true)
+	require.Error(t, err)
+	require.Nil(t, value)
+	require.Nil(t, key)
+
+	// delete
+	event.PreColumns = event.Columns
+	event.Columns = nil
+	key, value, err = rowChangeToMsg(event, codecConfig, true)
+	require.Error(t, err)
+	require.Nil(t, value)
+	require.Nil(t, key)
 }

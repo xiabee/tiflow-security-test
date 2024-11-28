@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/processor/memquota"
@@ -260,7 +260,6 @@ func (ra *RedoApplier) resetQuota(rowSize uint64) error {
 	} else if ra.pendingQuota < 64*1024 {
 		ra.pendingQuota = 64 * 1024
 	}
-	log.Info("reset quota", zap.Uint64("rowSize", rowSize), zap.Uint64("newQuota", ra.pendingQuota))
 	return ra.memQuota.BlockAcquire(ra.pendingQuota - oldQuota)
 }
 
@@ -311,7 +310,7 @@ func (ra *RedoApplier) applyRow(
 	}
 	ra.pendingQuota -= rowSize
 
-	tableID := row.Table.TableID
+	tableID := row.GetTableID()
 	if _, ok := ra.tableSinks[tableID]; !ok {
 		tableSink := ra.sinkFactory.CreateTableSink(
 			model.DefaultChangeFeedID(applierChangefeed),
@@ -556,7 +555,7 @@ func (t *tempTxnInsertEventStorage) readFromFile() (*model.RowChangedEvent, erro
 	if err != nil {
 		return nil, errors.WrapError(errors.ErrUnmarshalFailed, err)
 	}
-	return redoLog.RedoRow.Row, nil
+	return redoLog.RedoRow.Row.ToRowChangedEvent(), nil
 }
 
 func (t *tempTxnInsertEventStorage) readNextEvent() (*model.RowChangedEvent, error) {
@@ -616,6 +615,7 @@ func processEvent(
 			return nil, event, nil
 		}
 	}
+	// nolint
 	if event.IsDelete() {
 		return event, nil, nil
 	} else if event.IsInsert() {

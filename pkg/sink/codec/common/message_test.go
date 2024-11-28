@@ -16,7 +16,8 @@ package common
 import (
 	"testing"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/meta/model"
+	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/types"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -26,34 +27,44 @@ import (
 
 func TestCreate(t *testing.T) {
 	t.Parallel()
-	rowEvent := &model.RowChangedEvent{
-		Table: &model.TableName{
-			Schema: "test",
-			Table:  "t1",
+	tableInfo := model.BuildTableInfo("test", "t1", []*model.Column{
+		{
+			Name: "a",
+			Flag: model.HandleKeyFlag | model.PrimaryKeyFlag,
+		}, {
+			Name: "b",
+			Flag: 0,
 		},
-		PreColumns: []*model.Column{
+	}, [][]int{{0}})
+	rowEvent := &model.RowChangedEvent{
+		TableInfo: tableInfo,
+		PreColumns: model.Columns2ColumnDatas([]*model.Column{
 			{
 				Name:  "a",
 				Value: 1,
-				Flag:  model.HandleKeyFlag | model.PrimaryKeyFlag,
 			}, {
 				Name:  "b",
 				Value: 2,
-				Flag:  0,
 			},
-		},
+		}, tableInfo),
 		StartTs:  1234,
 		CommitTs: 5678,
 	}
 
-	msg := NewMsg(config.ProtocolOpen, []byte("key1"), []byte("value1"), rowEvent.CommitTs, model.MessageTypeRow, &rowEvent.Table.Schema, &rowEvent.Table.Table)
+	msg := NewMsg(config.ProtocolOpen,
+		[]byte("key1"),
+		[]byte("value1"),
+		rowEvent.CommitTs,
+		model.MessageTypeRow,
+		&rowEvent.TableInfo.TableName.Schema,
+		&rowEvent.TableInfo.TableName.Table)
 
 	require.Equal(t, []byte("key1"), msg.Key)
 	require.Equal(t, []byte("value1"), msg.Value)
 	require.Equal(t, rowEvent.CommitTs, msg.Ts)
 	require.Equal(t, model.MessageTypeRow, msg.Type)
-	require.Equal(t, rowEvent.Table.Schema, *msg.Schema)
-	require.Equal(t, rowEvent.Table.Table, *msg.Table)
+	require.Equal(t, rowEvent.TableInfo.GetSchemaName(), *msg.Schema)
+	require.Equal(t, rowEvent.TableInfo.GetTableName(), *msg.Table)
 	require.Equal(t, config.ProtocolOpen, msg.Protocol)
 
 	ft := types.NewFieldType(0)
@@ -68,10 +79,10 @@ func TestCreate(t *testing.T) {
 		BinlogInfo: &timodel.HistoryInfo{
 			TableInfo: &timodel.TableInfo{
 				ID:   49,
-				Name: timodel.CIStr{O: "t1"},
+				Name: pmodel.CIStr{O: "t1"},
 				Columns: []*timodel.ColumnInfo{
-					{ID: 1, Name: timodel.CIStr{O: "id"}, FieldType: *ft, State: timodel.StatePublic},
-					{ID: 2, Name: timodel.CIStr{O: "a"}, FieldType: types.FieldType{}, State: timodel.StatePublic},
+					{ID: 1, Name: pmodel.CIStr{O: "id"}, FieldType: *ft, State: timodel.StatePublic},
+					{ID: 2, Name: pmodel.CIStr{O: "a"}, FieldType: types.FieldType{}, State: timodel.StatePublic},
 				},
 			},
 			FinishedTS: 420536581196873729,
@@ -85,15 +96,15 @@ func TestCreate(t *testing.T) {
 		},
 		TableInfo: &timodel.TableInfo{
 			ID:   49,
-			Name: timodel.CIStr{O: "t1"},
+			Name: pmodel.CIStr{O: "t1"},
 			Columns: []*timodel.ColumnInfo{
-				{ID: 1, Name: timodel.CIStr{O: "id"}, FieldType: *ft, State: timodel.StatePublic},
+				{ID: 1, Name: pmodel.CIStr{O: "id"}, FieldType: *ft, State: timodel.StatePublic},
 			},
 		},
 	}
-	tableInfo := model.WrapTableInfo(job.SchemaID, job.SchemaName, job.BinlogInfo.FinishedTS, job.BinlogInfo.TableInfo)
+	tableInfo2 := model.WrapTableInfo(job.SchemaID, job.SchemaName, job.BinlogInfo.FinishedTS, job.BinlogInfo.TableInfo)
 	ddlEvent := &model.DDLEvent{}
-	ddlEvent.FromJob(job, preTableInfo, tableInfo)
+	ddlEvent.FromJob(job, preTableInfo, tableInfo2)
 
 	msg = NewDDLMsg(config.ProtocolMaxwell, nil, []byte("value1"), ddlEvent)
 	require.Nil(t, msg.Key)

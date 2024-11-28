@@ -144,9 +144,9 @@ func newFileWorkerGroup(
 		},
 		flushCh: make(chan *fileCache),
 		metricWriteBytes: common.RedoWriteBytesGauge.
-			WithLabelValues(cfg.ChangeFeedID.Namespace, cfg.ChangeFeedID.ID),
+			WithLabelValues(cfg.ChangeFeedID.Namespace, cfg.ChangeFeedID.ID, cfg.LogType),
 		metricFlushAllDuration: common.RedoFlushAllDurationHistogram.
-			WithLabelValues(cfg.ChangeFeedID.Namespace, cfg.ChangeFeedID.ID),
+			WithLabelValues(cfg.ChangeFeedID.Namespace, cfg.ChangeFeedID.ID, cfg.LogType),
 	}
 }
 
@@ -179,9 +179,9 @@ func (f *fileWorkerGroup) Run(
 
 func (f *fileWorkerGroup) close() {
 	common.RedoFlushAllDurationHistogram.
-		DeleteLabelValues(f.cfg.ChangeFeedID.Namespace, f.cfg.ChangeFeedID.ID)
+		DeleteLabelValues(f.cfg.ChangeFeedID.Namespace, f.cfg.ChangeFeedID.ID, f.cfg.LogType)
 	common.RedoWriteBytesGauge.
-		DeleteLabelValues(f.cfg.ChangeFeedID.Namespace, f.cfg.ChangeFeedID.ID)
+		DeleteLabelValues(f.cfg.ChangeFeedID.Namespace, f.cfg.ChangeFeedID.ID, f.cfg.LogType)
 }
 
 func (f *fileWorkerGroup) bgFlushFileCache(egCtx context.Context) error {
@@ -191,6 +191,7 @@ func (f *fileWorkerGroup) bgFlushFileCache(egCtx context.Context) error {
 			return errors.Trace(egCtx.Err())
 		case file := <-f.flushCh:
 			start := time.Now()
+
 			if err := file.writer.Close(); err != nil {
 				return errors.Trace(err)
 			}
@@ -235,7 +236,8 @@ func (f *fileWorkerGroup) bgWriteLogs(
 			return errors.Trace(egCtx.Err())
 		case event := <-inputCh:
 			if event == nil {
-				log.Panic("inputCh of redo file worker is closed unexpectedly")
+				log.Error("inputCh of redo file worker is closed unexpectedly")
+				return errors.ErrUnexpected.FastGenByArgs("inputCh of redo file worker is closed unexpectedly")
 			}
 
 			if event.data != nil {

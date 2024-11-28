@@ -72,8 +72,8 @@ func genTxnKeys(txn *model.SingleTableTxn) []uint64 {
 func genRowKeys(row *model.RowChangedEvent) [][]byte {
 	var keys [][]byte
 	if len(row.Columns) != 0 {
-		for iIdx, idxCol := range row.IndexColumns {
-			key := genKeyList(row.Columns, iIdx, idxCol, row.Table.TableID)
+		for iIdx, idxCol := range row.TableInfo.IndexColumnsOffset {
+			key := genKeyList(row.Columns, row.TableInfo, iIdx, idxCol, row.GetTableID())
 			if len(key) == 0 {
 				continue
 			}
@@ -81,8 +81,8 @@ func genRowKeys(row *model.RowChangedEvent) [][]byte {
 		}
 	}
 	if len(row.PreColumns) != 0 {
-		for iIdx, idxCol := range row.IndexColumns {
-			key := genKeyList(row.PreColumns, iIdx, idxCol, row.Table.TableID)
+		for iIdx, idxCol := range row.TableInfo.IndexColumnsOffset {
+			key := genKeyList(row.PreColumns, row.TableInfo, iIdx, idxCol, row.GetTableID())
 			if len(key) == 0 {
 				continue
 			}
@@ -92,28 +92,28 @@ func genRowKeys(row *model.RowChangedEvent) [][]byte {
 	if len(keys) == 0 {
 		// use table ID as key if no key generated (no PK/UK),
 		// no concurrence for rows in the same table.
-		log.Debug("Use table id as the key", zap.Int64("tableID", row.Table.TableID))
+		log.Debug("Use table id as the key", zap.Int64("tableID", row.GetTableID()))
 		tableKey := make([]byte, 8)
-		binary.BigEndian.PutUint64(tableKey, uint64(row.Table.TableID))
+		binary.BigEndian.PutUint64(tableKey, uint64(row.GetTableID()))
 		keys = [][]byte{tableKey}
 	}
 	return keys
 }
 
-func genKeyList(
-	columns []*model.Column, iIdx int, colIdx []int, tableID int64,
-) []byte {
+func genKeyList(columns []*model.ColumnData, tb *model.TableInfo, iIdx int, colIdx []int, tableID int64) []byte {
 	var key []byte
 	for _, i := range colIdx {
+		col := model.GetColumnDataX(columns[i], tb)
+
 		// if a column value is null, we can ignore this index
 		// If the index contain generated column, we can't use this key to detect conflict with other DML,
 		// Because such as insert can't specify the generated value.
-		if columns[i] == nil || columns[i].Value == nil || columns[i].Flag.IsGeneratedColumn() {
+		if col.ColumnData == nil || col.Value == nil || col.GetFlag().IsGeneratedColumn() {
 			return nil
 		}
 
-		val := model.ColumnValueString(columns[i].Value)
-		if columnNeeds2LowerCase(columns[i].Type, columns[i].Collation) {
+		val := model.ColumnValueString(col.Value)
+		if columnNeeds2LowerCase(col.GetType(), col.GetCollation()) {
 			val = strings.ToLower(val)
 		}
 

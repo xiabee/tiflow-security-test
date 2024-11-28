@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/goccy/go-json"
 	"github.com/pingcap/errors"
@@ -29,6 +30,7 @@ import (
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec"
 	"github.com/pingcap/tiflow/pkg/sink/codec/common"
+	"github.com/pingcap/tiflow/pkg/sink/codec/utils"
 	"github.com/pingcap/tiflow/pkg/util"
 	"go.uber.org/zap"
 	"golang.org/x/text/encoding"
@@ -58,7 +60,7 @@ func NewBatchDecoder(
 	)
 	if codecConfig.LargeMessageHandle.EnableClaimCheck() {
 		storageURI := codecConfig.LargeMessageHandle.ClaimCheckStorageURI
-		externalStorage, err = util.GetExternalStorageFromURI(ctx, storageURI)
+		externalStorage, err = util.GetExternalStorage(ctx, storageURI, nil, util.NewS3Retryer(10, 10*time.Second, 10*time.Second))
 		if err != nil {
 			return nil, cerror.WrapError(cerror.ErrKafkaInvalidConfig, err)
 		}
@@ -132,7 +134,6 @@ func (b *batchDecoder) HasNext() (model.MessageType, bool, error) {
 		return model.MessageTypeUnknown, false, err
 	}
 	b.msg = msg
-
 	return b.msg.messageType(), true, nil
 }
 
@@ -142,12 +143,16 @@ func (b *batchDecoder) assembleClaimCheckRowChangedEvent(ctx context.Context, cl
 	if err != nil {
 		return nil, err
 	}
-	claimCheckM, err := common.UnmarshalClaimCheckMessage(data)
-	if err != nil {
-		return nil, err
+
+	if !b.config.LargeMessageHandle.ClaimCheckRawValue {
+		claimCheckM, err := common.UnmarshalClaimCheckMessage(data)
+		if err != nil {
+			return nil, err
+		}
+		data = claimCheckM.Value
 	}
 
-	value, err := common.Decompress(b.config.LargeMessageHandle.LargeMessageHandleCompression, claimCheckM.Value)
+	value, err := common.Decompress(b.config.LargeMessageHandle.LargeMessageHandleCompression, data)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +178,7 @@ func (b *batchDecoder) buildData(holder *common.ColumnsHolder) (map[string]inter
 
 		var value string
 		rawValue := holder.Values[i].([]uint8)
-		if isBinaryMySQLType(mysqlType) {
+		if utils.IsBinaryMySQLType(mysqlType) {
 			rawValue, err := b.bytesDecoder.Bytes(rawValue)
 			if err != nil {
 				return nil, nil, errors.Trace(err)
@@ -220,11 +225,9 @@ func (b *batchDecoder) assembleHandleKeyOnlyRowChangedEvent(
 			CommitTs: commitTs,
 		},
 	}
-
 	switch eventType {
 	case "INSERT":
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, handleKeyData)
-
 		data, mysqlType, err := b.buildData(holder)
 		if err != nil {
 			return nil, err
@@ -233,7 +236,6 @@ func (b *batchDecoder) assembleHandleKeyOnlyRowChangedEvent(
 		result.Data = []map[string]interface{}{data}
 	case "UPDATE":
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs, schema, table, handleKeyData)
-
 		data, mysqlType, err := b.buildData(holder)
 		if err != nil {
 			return nil, err
@@ -249,7 +251,6 @@ func (b *batchDecoder) assembleHandleKeyOnlyRowChangedEvent(
 		result.Old = []map[string]interface{}{old}
 	case "DELETE":
 		holder := common.MustSnapshotQuery(ctx, b.upstreamTiDB, commitTs-1, schema, table, handleKeyData)
-
 		data, mysqlType, err := b.buildData(holder)
 		if err != nil {
 			return nil, err

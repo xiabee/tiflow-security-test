@@ -53,6 +53,10 @@ function run() {
 	cp $cur/conf/source1.yaml $WORK_DIR/master/v1-sources/source1.yaml
 	cp $cur/conf/source2.yaml $WORK_DIR/master/v1-sources/source2.yaml
 
+	# prepare key file for dm-master.
+	mkdir -p $WORK_DIR/master
+	cp $cur/conf/key.txt $WORK_DIR/master/
+
 	# start DM worker and master
 	run_dm_master $WORK_DIR/master $MASTER_PORT $cur/conf/dm-master.toml
 	check_rpc_alive $cur/../bin/check_master_online 127.0.0.1:$MASTER_PORT
@@ -84,7 +88,7 @@ function run() {
 	run_sql "show create table \`dm_meta\`.\`test_syncer_checkpoint\`" $TIDB_PORT $TIDB_PASSWORD
 	check_contains "\`exit_safe_binlog_name\` varchar(128) DEFAULT ''"
 	# different TiDB will output DEFAULT 0 or DEFAULT '0'
-	check_contains "\`exit_safe_binlog_pos\` int(10) unsigned DEFAULT "
+	check_contains "\`exit_safe_binlog_pos\` int"
 	check_contains "\`exit_safe_binlog_gtid\` text DEFAULT NULL"
 
 	run_sql_file $cur/data/db1.increment.sql $MYSQL_HOST1 $MYSQL_PORT1 $MYSQL_PASSWORD1

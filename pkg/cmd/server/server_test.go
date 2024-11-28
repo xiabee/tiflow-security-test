@@ -183,12 +183,12 @@ func TestParseCfg(t *testing.T) {
 			// We expect the default configuration here.
 			Messages: &config.MessagesConfig{
 				ClientMaxBatchInterval:       config.TomlDuration(time.Millisecond * 10),
-				ClientMaxBatchSize:           8 * 1024 * 1024,
-				ClientMaxBatchCount:          128,
+				ClientMaxBatchSize:           64 * 1024 * 1024,
+				ClientMaxBatchCount:          1024,
 				ClientRetryRateLimit:         1.0,
 				ServerMaxPendingMessageCount: 102400,
 				ServerAckInterval:            config.TomlDuration(time.Millisecond * 100),
-				ServerWorkerPoolSize:         4,
+				ServerWorkerPoolSize:         8,
 				MaxRecvMsgSize:               256 * 1024 * 1024,
 				KeepAliveTimeout:             config.TomlDuration(time.Second * 10),
 				KeepAliveTime:                config.TomlDuration(time.Second * 30),
@@ -200,13 +200,16 @@ func TestParseCfg(t *testing.T) {
 				CheckBalanceInterval: 60000000000,
 				AddTableBatchSize:    50,
 			},
+			CDCV2: &config.CDCV2{
+				Enable:          false,
+				MetaStoreConfig: config.MetaStoreConfiguration{},
+			},
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
 			},
 		},
-		ClusterID:           "default",
-		MaxMemoryPercentage: config.DisableMemoryLimit,
+		ClusterID: "default",
 	}, o.serverConfig)
 }
 
@@ -344,13 +347,16 @@ check-balance-interval = "10s"
 				CheckBalanceInterval: config.TomlDuration(10 * time.Second),
 				AddTableBatchSize:    50,
 			},
+			CDCV2: &config.CDCV2{
+				Enable:          false,
+				MetaStoreConfig: config.MetaStoreConfiguration{},
+			},
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
 			},
 		},
-		ClusterID:           "default",
-		MaxMemoryPercentage: config.DisableMemoryLimit,
+		ClusterID: "default",
 	}, o.serverConfig)
 }
 
@@ -463,12 +469,12 @@ cert-allowed-cn = ["dd","ee"]
 			// We expect the default configuration here.
 			Messages: &config.MessagesConfig{
 				ClientMaxBatchInterval:       config.TomlDuration(time.Millisecond * 10),
-				ClientMaxBatchSize:           8 * 1024 * 1024,
-				ClientMaxBatchCount:          128,
+				ClientMaxBatchSize:           64 * 1024 * 1024,
+				ClientMaxBatchCount:          1024,
 				ClientRetryRateLimit:         1.0,
 				ServerMaxPendingMessageCount: 102400,
 				ServerAckInterval:            config.TomlDuration(time.Millisecond * 100),
-				ServerWorkerPoolSize:         4,
+				ServerWorkerPoolSize:         8,
 				MaxRecvMsgSize:               256 * 1024 * 1024,
 				KeepAliveTimeout:             config.TomlDuration(time.Second * 10),
 				KeepAliveTime:                config.TomlDuration(time.Second * 30),
@@ -480,13 +486,16 @@ cert-allowed-cn = ["dd","ee"]
 				CheckBalanceInterval: 60000000000,
 				AddTableBatchSize:    50,
 			},
+			CDCV2: &config.CDCV2{
+				Enable:          false,
+				MetaStoreConfig: config.MetaStoreConfiguration{},
+			},
 			Puller: &config.PullerConfig{
 				EnableResolvedTsStuckDetection: false,
 				ResolvedTsStuckInterval:        config.TomlDuration(5 * time.Minute),
 			},
 		},
-		ClusterID:           "default",
-		MaxMemoryPercentage: config.DisableMemoryLimit,
+		ClusterID: "default",
 	}, o.serverConfig)
 }
 
@@ -525,12 +534,12 @@ unknown3 = 3
 		// We expect the default configuration here.
 		Messages: &config.MessagesConfig{
 			ClientMaxBatchInterval:       config.TomlDuration(time.Millisecond * 10),
-			ClientMaxBatchSize:           8 * 1024 * 1024,
-			ClientMaxBatchCount:          128,
+			ClientMaxBatchSize:           64 * 1024 * 1024,
+			ClientMaxBatchCount:          1024,
 			ClientRetryRateLimit:         1.0,
 			ServerMaxPendingMessageCount: 102400,
 			ServerAckInterval:            config.TomlDuration(time.Millisecond * 100),
-			ServerWorkerPoolSize:         4,
+			ServerWorkerPoolSize:         8,
 			MaxRecvMsgSize:               256 * 1024 * 1024,
 			KeepAliveTimeout:             config.TomlDuration(time.Second * 10),
 			KeepAliveTime:                config.TomlDuration(time.Second * 30),
@@ -541,6 +550,10 @@ unknown3 = 3
 			MaxTaskConcurrency:   10,
 			CheckBalanceInterval: 60000000000,
 			AddTableBatchSize:    50,
+		},
+		CDCV2: &config.CDCV2{
+			Enable:          false,
+			MetaStoreConfig: config.MetaStoreConfiguration{},
 		},
 		Puller: &config.PullerConfig{
 			EnableResolvedTsStuckDetection: false,

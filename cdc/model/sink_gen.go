@@ -185,6 +185,306 @@ func (z *Column) Msgsize() (s int) {
 }
 
 // DecodeMsg implements msgp.Decodable
+func (z *ColumnData) DecodeMsg(dc *msgp.Reader) (err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, err = dc.ReadMapHeader()
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, err = dc.ReadMapKeyPtr()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "column_id":
+			z.ColumnID, err = dc.ReadInt64()
+			if err != nil {
+				err = msgp.WrapError(err, "ColumnID")
+				return
+			}
+		default:
+			err = dc.Skip()
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z ColumnData) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 1
+	// write "column_id"
+	err = en.Append(0x81, 0xa9, 0x63, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x5f, 0x69, 0x64)
+	if err != nil {
+		return
+	}
+	err = en.WriteInt64(z.ColumnID)
+	if err != nil {
+		err = msgp.WrapError(err, "ColumnID")
+		return
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z ColumnData) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	// map header, size 1
+	// string "column_id"
+	o = append(o, 0x81, 0xa9, 0x63, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x5f, 0x69, 0x64)
+	o = msgp.AppendInt64(o, z.ColumnID)
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *ColumnData) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, bts, err = msgp.ReadMapKeyZC(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "column_id":
+			z.ColumnID, bts, err = msgp.ReadInt64Bytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "ColumnID")
+				return
+			}
+		default:
+			bts, err = msgp.Skip(bts)
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z ColumnData) Msgsize() (s int) {
+	s = 1 + 10 + msgp.Int64Size
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
+func (z *ColumnDataX) DecodeMsg(dc *msgp.Reader) (err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, err = dc.ReadMapHeader()
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, err = dc.ReadMapKeyPtr()
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "ColumnData":
+			if dc.IsNil() {
+				err = dc.ReadNil()
+				if err != nil {
+					err = msgp.WrapError(err, "ColumnData")
+					return
+				}
+				z.ColumnData = nil
+			} else {
+				if z.ColumnData == nil {
+					z.ColumnData = new(ColumnData)
+				}
+				var zb0002 uint32
+				zb0002, err = dc.ReadMapHeader()
+				if err != nil {
+					err = msgp.WrapError(err, "ColumnData")
+					return
+				}
+				for zb0002 > 0 {
+					zb0002--
+					field, err = dc.ReadMapKeyPtr()
+					if err != nil {
+						err = msgp.WrapError(err, "ColumnData")
+						return
+					}
+					switch msgp.UnsafeString(field) {
+					case "column_id":
+						z.ColumnData.ColumnID, err = dc.ReadInt64()
+						if err != nil {
+							err = msgp.WrapError(err, "ColumnData", "ColumnID")
+							return
+						}
+					default:
+						err = dc.Skip()
+						if err != nil {
+							err = msgp.WrapError(err, "ColumnData")
+							return
+						}
+					}
+				}
+			}
+		default:
+			err = dc.Skip()
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	return
+}
+
+// EncodeMsg implements msgp.Encodable
+func (z *ColumnDataX) EncodeMsg(en *msgp.Writer) (err error) {
+	// map header, size 1
+	// write "ColumnData"
+	err = en.Append(0x81, 0xaa, 0x43, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x44, 0x61, 0x74, 0x61)
+	if err != nil {
+		return
+	}
+	if z.ColumnData == nil {
+		err = en.WriteNil()
+		if err != nil {
+			return
+		}
+	} else {
+		// map header, size 1
+		// write "column_id"
+		err = en.Append(0x81, 0xa9, 0x63, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x5f, 0x69, 0x64)
+		if err != nil {
+			return
+		}
+		err = en.WriteInt64(z.ColumnData.ColumnID)
+		if err != nil {
+			err = msgp.WrapError(err, "ColumnData", "ColumnID")
+			return
+		}
+	}
+	return
+}
+
+// MarshalMsg implements msgp.Marshaler
+func (z *ColumnDataX) MarshalMsg(b []byte) (o []byte, err error) {
+	o = msgp.Require(b, z.Msgsize())
+	// map header, size 1
+	// string "ColumnData"
+	o = append(o, 0x81, 0xaa, 0x43, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x44, 0x61, 0x74, 0x61)
+	if z.ColumnData == nil {
+		o = msgp.AppendNil(o)
+	} else {
+		// map header, size 1
+		// string "column_id"
+		o = append(o, 0x81, 0xa9, 0x63, 0x6f, 0x6c, 0x75, 0x6d, 0x6e, 0x5f, 0x69, 0x64)
+		o = msgp.AppendInt64(o, z.ColumnData.ColumnID)
+	}
+	return
+}
+
+// UnmarshalMsg implements msgp.Unmarshaler
+func (z *ColumnDataX) UnmarshalMsg(bts []byte) (o []byte, err error) {
+	var field []byte
+	_ = field
+	var zb0001 uint32
+	zb0001, bts, err = msgp.ReadMapHeaderBytes(bts)
+	if err != nil {
+		err = msgp.WrapError(err)
+		return
+	}
+	for zb0001 > 0 {
+		zb0001--
+		field, bts, err = msgp.ReadMapKeyZC(bts)
+		if err != nil {
+			err = msgp.WrapError(err)
+			return
+		}
+		switch msgp.UnsafeString(field) {
+		case "ColumnData":
+			if msgp.IsNil(bts) {
+				bts, err = msgp.ReadNilBytes(bts)
+				if err != nil {
+					return
+				}
+				z.ColumnData = nil
+			} else {
+				if z.ColumnData == nil {
+					z.ColumnData = new(ColumnData)
+				}
+				var zb0002 uint32
+				zb0002, bts, err = msgp.ReadMapHeaderBytes(bts)
+				if err != nil {
+					err = msgp.WrapError(err, "ColumnData")
+					return
+				}
+				for zb0002 > 0 {
+					zb0002--
+					field, bts, err = msgp.ReadMapKeyZC(bts)
+					if err != nil {
+						err = msgp.WrapError(err, "ColumnData")
+						return
+					}
+					switch msgp.UnsafeString(field) {
+					case "column_id":
+						z.ColumnData.ColumnID, bts, err = msgp.ReadInt64Bytes(bts)
+						if err != nil {
+							err = msgp.WrapError(err, "ColumnData", "ColumnID")
+							return
+						}
+					default:
+						bts, err = msgp.Skip(bts)
+						if err != nil {
+							err = msgp.WrapError(err, "ColumnData")
+							return
+						}
+					}
+				}
+			}
+		default:
+			bts, err = msgp.Skip(bts)
+			if err != nil {
+				err = msgp.WrapError(err)
+				return
+			}
+		}
+	}
+	o = bts
+	return
+}
+
+// Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
+func (z *ColumnDataX) Msgsize() (s int) {
+	s = 1 + 11
+	if z.ColumnData == nil {
+		s += msgp.NilSize
+	} else {
+		s += 1 + 10 + msgp.Int64Size
+	}
+	return
+}
+
+// DecodeMsg implements msgp.Decodable
 func (z *DDLEvent) DecodeMsg(dc *msgp.Reader) (err error) {
 	var field []byte
 	_ = field
@@ -1097,7 +1397,7 @@ func (z *RedoRowChangedEvent) DecodeMsg(dc *msgp.Reader) (err error) {
 				z.Row = nil
 			} else {
 				if z.Row == nil {
-					z.Row = new(RowChangedEvent)
+					z.Row = new(RowChangedEventInRedoLog)
 				}
 				err = z.Row.DecodeMsg(dc)
 				if err != nil {
@@ -1416,7 +1716,7 @@ func (z *RedoRowChangedEvent) UnmarshalMsg(bts []byte) (o []byte, err error) {
 				z.Row = nil
 			} else {
 				if z.Row == nil {
-					z.Row = new(RowChangedEvent)
+					z.Row = new(RowChangedEventInRedoLog)
 				}
 				bts, err = z.Row.UnmarshalMsg(bts)
 				if err != nil {
@@ -1564,7 +1864,7 @@ func (z *RedoRowChangedEvent) Msgsize() (s int) {
 }
 
 // DecodeMsg implements msgp.Decodable
-func (z *RowChangedEvent) DecodeMsg(dc *msgp.Reader) (err error) {
+func (z *RowChangedEventInRedoLog) DecodeMsg(dc *msgp.Reader) (err error) {
 	var field []byte
 	_ = field
 	var zb0001 uint32
@@ -1717,7 +2017,7 @@ func (z *RowChangedEvent) DecodeMsg(dc *msgp.Reader) (err error) {
 }
 
 // EncodeMsg implements msgp.Encodable
-func (z *RowChangedEvent) EncodeMsg(en *msgp.Writer) (err error) {
+func (z *RowChangedEventInRedoLog) EncodeMsg(en *msgp.Writer) (err error) {
 	// map header, size 6
 	// write "start-ts"
 	err = en.Append(0x86, 0xa8, 0x73, 0x74, 0x61, 0x72, 0x74, 0x2d, 0x74, 0x73)
@@ -1832,7 +2132,7 @@ func (z *RowChangedEvent) EncodeMsg(en *msgp.Writer) (err error) {
 }
 
 // MarshalMsg implements msgp.Marshaler
-func (z *RowChangedEvent) MarshalMsg(b []byte) (o []byte, err error) {
+func (z *RowChangedEventInRedoLog) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
 	// map header, size 6
 	// string "start-ts"
@@ -1893,7 +2193,7 @@ func (z *RowChangedEvent) MarshalMsg(b []byte) (o []byte, err error) {
 }
 
 // UnmarshalMsg implements msgp.Unmarshaler
-func (z *RowChangedEvent) UnmarshalMsg(bts []byte) (o []byte, err error) {
+func (z *RowChangedEventInRedoLog) UnmarshalMsg(bts []byte) (o []byte, err error) {
 	var field []byte
 	_ = field
 	var zb0001 uint32
@@ -2044,7 +2344,7 @@ func (z *RowChangedEvent) UnmarshalMsg(bts []byte) (o []byte, err error) {
 }
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
-func (z *RowChangedEvent) Msgsize() (s int) {
+func (z *RowChangedEventInRedoLog) Msgsize() (s int) {
 	s = 1 + 9 + msgp.Uint64Size + 10 + msgp.Uint64Size + 6
 	if z.Table == nil {
 		s += msgp.NilSize

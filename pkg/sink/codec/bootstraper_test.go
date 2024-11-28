@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
@@ -48,7 +48,8 @@ func getMockTableStatus(tableName string,
 		TotalPartition: totalPartition,
 	}
 	row := &model.RowChangedEvent{
-		TableInfo: tableInfo,
+		PhysicalTableID: tableID,
+		TableInfo:       tableInfo,
 	}
 	tb := newTableStatistic(key, row)
 	return key, row, tb
@@ -191,7 +192,8 @@ func TestUpdateTableStatistic(t *testing.T) {
 	);`
 	tableInfo1 := helper.DDL2Event(sql).TableInfo
 	row1 := &model.RowChangedEvent{
-		TableInfo: tableInfo1,
+		PhysicalTableID: tableInfo1.ID,
+		TableInfo:       tableInfo1,
 	}
 	tableStatistic := newTableStatistic(model.TopicPartitionKey{}, row1)
 
@@ -203,7 +205,8 @@ func TestUpdateTableStatistic(t *testing.T) {
 	sql = `alter table test.t1 add column address varchar(255) not null;`
 	tableInfo2 := helper.DDL2Event(sql).TableInfo
 	row2 := &model.RowChangedEvent{
-		TableInfo: tableInfo2,
+		PhysicalTableID: tableInfo2.ID,
+		TableInfo:       tableInfo2,
 	}
 	tableStatistic.update(row2, 1)
 	require.Equal(t, tableInfo2, tableStatistic.tableInfo.Load().(*model.TableInfo))
@@ -212,7 +215,8 @@ func TestUpdateTableStatistic(t *testing.T) {
 	sql = `alter table test.t1 rename to test.t2;`
 	tableInfo3 := helper.DDL2Event(sql).TableInfo
 	row3 := &model.RowChangedEvent{
-		TableInfo: tableInfo3,
+		PhysicalTableID: tableInfo3.ID,
+		TableInfo:       tableInfo3,
 	}
 	tableStatistic.update(row3, 1)
 	require.Equal(t, tableInfo3, tableStatistic.tableInfo.Load().(*model.TableInfo))

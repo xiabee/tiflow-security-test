@@ -16,8 +16,9 @@ package maxwell
 import (
 	"encoding/json"
 
-	model2 "github.com/pingcap/tidb/pkg/parser/model"
+	model2 "github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tiflow/cdc/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/sink/codec/internal"
@@ -45,57 +46,69 @@ func (m *maxwellMessage) encode() ([]byte, error) {
 
 func rowChangeToMaxwellMsg(e *model.RowChangedEvent, onlyHandleKeyColumns bool) (*internal.MessageKey, *maxwellMessage) {
 	var partition *int64
-	if e.Table.IsPartition {
-		partition = &e.Table.TableID
+	if e.TableInfo.IsPartitionTable() {
+		tableID := e.GetTableID()
+		partition = &tableID
 	}
 	key := &internal.MessageKey{
 		Ts:        e.CommitTs,
-		Schema:    e.Table.Schema,
-		Table:     e.Table.Table,
+		Schema:    e.TableInfo.GetSchemaName(),
+		Table:     e.TableInfo.GetTableName(),
 		Partition: partition,
 		Type:      model.MessageTypeRow,
 	}
 	value := &maxwellMessage{
 		Ts:       0,
-		Database: e.Table.Schema,
-		Table:    e.Table.Table,
+		Database: e.TableInfo.GetSchemaName(),
+		Table:    e.TableInfo.GetTableName(),
 		Data:     make(map[string]interface{}),
 		Old:      make(map[string]interface{}),
 	}
 	physicalTime := oracle.GetTimeFromTS(e.CommitTs)
 	value.Ts = physicalTime.Unix()
+	tableInfo := e.TableInfo
 	if e.IsDelete() {
 		value.Type = "delete"
 		for _, v := range e.PreColumns {
-			if onlyHandleKeyColumns && !v.Flag.IsHandleKey() {
+			colFlag := tableInfo.ForceGetColumnFlagType(v.ColumnID)
+			if onlyHandleKeyColumns && !colFlag.IsHandleKey() {
 				continue
 			}
-			switch v.Type {
+			colInfo := tableInfo.ForceGetColumnInfo(v.ColumnID)
+			colName := tableInfo.ForceGetColumnName(v.ColumnID)
+			switch colInfo.GetType() {
 			case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob:
 				if v.Value == nil {
-					value.Old[v.Name] = nil
-				} else if v.Flag.IsBinary() {
-					value.Old[v.Name] = v.Value
+					value.Old[colName] = nil
+				} else if colFlag.IsBinary() {
+					value.Old[colName] = v.Value
 				} else {
-					value.Old[v.Name] = string(v.Value.([]byte))
+					value.Old[colName] = string(v.Value.([]byte))
 				}
+			case mysql.TypeTiDBVectorFloat32:
+				value.Old[colName] = v.Value.(types.VectorFloat32).String()
 			default:
-				value.Old[v.Name] = v.Value
+				value.Old[colName] = v.Value
 			}
 		}
 	} else {
 		for _, v := range e.Columns {
-			switch v.Type {
+			colFlag := tableInfo.ForceGetColumnFlagType(v.ColumnID)
+			colInfo := tableInfo.ForceGetColumnInfo(v.ColumnID)
+			colName := tableInfo.ForceGetColumnName(v.ColumnID)
+			switch colInfo.GetType() {
 			case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob:
 				if v.Value == nil {
-					value.Data[v.Name] = nil
-				} else if v.Flag.IsBinary() {
-					value.Data[v.Name] = v.Value
+					value.Data[colName] = nil
+				} else if colFlag.IsBinary() {
+					value.Data[colName] = v.Value
 				} else {
-					value.Data[v.Name] = string(v.Value.([]byte))
+					value.Data[colName] = string(v.Value.([]byte))
 				}
+			case mysql.TypeTiDBVectorFloat32:
+				value.Data[colName] = v.Value.(types.VectorFloat32).String()
 			default:
-				value.Data[v.Name] = v.Value
+				value.Data[colName] = v.Value
 			}
 		}
 		if e.PreColumns == nil {
@@ -103,24 +116,32 @@ func rowChangeToMaxwellMsg(e *model.RowChangedEvent, onlyHandleKeyColumns bool) 
 		} else {
 			value.Type = "update"
 			for _, v := range e.PreColumns {
-				switch v.Type {
+				colFlag := tableInfo.ForceGetColumnFlagType(v.ColumnID)
+				colInfo := tableInfo.ForceGetColumnInfo(v.ColumnID)
+				colName := tableInfo.ForceGetColumnName(v.ColumnID)
+				switch colInfo.GetType() {
 				case mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob:
 					if v.Value == nil {
-						if value.Data[v.Name] != nil {
-							value.Old[v.Name] = nil
+						if value.Data[colName] != nil {
+							value.Old[colName] = nil
 						}
-					} else if v.Flag.IsBinary() {
-						if value.Data[v.Name] != v.Value {
-							value.Old[v.Name] = v.Value
+					} else if colFlag.IsBinary() {
+						if value.Data[colName] != v.Value {
+							value.Old[colName] = v.Value
 						}
 					} else {
-						if value.Data[v.Name] != string(v.Value.([]byte)) {
-							value.Old[v.Name] = string(v.Value.([]byte))
+						if value.Data[colName] != string(v.Value.([]byte)) {
+							value.Old[colName] = string(v.Value.([]byte))
 						}
 					}
+				case mysql.TypeTiDBVectorFloat32:
+					val := v.Value.(types.VectorFloat32).String()
+					if value.Old[colName] != val {
+						value.Old[colName] = val
+					}
 				default:
-					if value.Data[v.Name] != v.Value {
-						value.Old[v.Name] = v.Value
+					if value.Data[colName] != v.Value {
+						value.Old[colName] = v.Value
 					}
 				}
 			}
@@ -271,6 +292,8 @@ func columnToMaxwellType(columnType byte) (string, error) {
 		return "float", nil
 	case mysql.TypeNewDecimal:
 		return "decimal", nil
+	case mysql.TypeTiDBVectorFloat32:
+		return "string", nil
 	default:
 		return "", cerror.ErrMaxwellInvalidData.GenWithStack("unsupported column type - %v", columnType)
 	}

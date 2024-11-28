@@ -19,12 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	dmysql "github.com/go-sql-driver/mysql"
+	timodel "github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	pmysql "github.com/pingcap/tiflow/pkg/sink/mysql"
@@ -32,22 +32,16 @@ import (
 )
 
 func TestWaitAsynExecDone(t *testing.T) {
-	var dbIndex int32 = 0
-	GetDBConnImpl = func(ctx context.Context, dsnStr string) (*sql.DB, error) {
-		defer func() {
-			atomic.AddInt32(&dbIndex, 1)
-		}()
-		if atomic.LoadInt32(&dbIndex) == 0 {
-			// test db
-			db, err := pmysql.MockTestDB(true)
-			require.Nil(t, err)
-			return db, nil
-		}
-		// normal db
+	dbConnFactory := pmysql.NewDBConnectionFactoryForTest()
+	dbConnFactory.SetStandardConnectionFactory(func(ctx context.Context, dsnStr string) (*sql.DB, error) {
 		db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 		require.Nil(t, err)
 		mock.ExpectQuery("select tidb_version()").
 			WillReturnRows(sqlmock.NewRows([]string{"tidb_version()"}).AddRow("5.7.25-TiDB-v4.0.0-beta-191-ga1b3e3b"))
+		mock.ExpectQuery("select tidb_version()").WillReturnError(&dmysql.MySQLError{
+			Number:  1305,
+			Message: "FUNCTION test.tidb_version does not exist",
+		})
 
 		// Case 1: there is a running add index job
 		mock.ExpectQuery(fmt.Sprintf(checkRunningAddIndexSQL, "test", "sbtest0")).WillReturnRows(
@@ -72,7 +66,8 @@ func TestWaitAsynExecDone(t *testing.T) {
 
 		mock.ExpectClose()
 		return db, nil
-	}
+	})
+	GetDBConnImpl = dbConnFactory
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -117,22 +112,16 @@ func TestWaitAsynExecDone(t *testing.T) {
 
 func TestAsyncExecAddIndex(t *testing.T) {
 	ddlExecutionTime := time.Second * 15
-	var dbIndex int32 = 0
-	GetDBConnImpl = func(ctx context.Context, dsnStr string) (*sql.DB, error) {
-		defer func() {
-			atomic.AddInt32(&dbIndex, 1)
-		}()
-		if atomic.LoadInt32(&dbIndex) == 0 {
-			// test db
-			db, err := pmysql.MockTestDB(true)
-			require.Nil(t, err)
-			return db, nil
-		}
-		// normal db
+	dbConnFactory := pmysql.NewDBConnectionFactoryForTest()
+	dbConnFactory.SetStandardConnectionFactory(func(ctx context.Context, dsnStr string) (*sql.DB, error) {
 		db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
 		require.Nil(t, err)
 		mock.ExpectQuery("select tidb_version()").
 			WillReturnRows(sqlmock.NewRows([]string{"tidb_version()"}).AddRow("5.7.25-TiDB-v4.0.0-beta-191-ga1b3e3b"))
+		mock.ExpectQuery("select tidb_version()").WillReturnError(&dmysql.MySQLError{
+			Number:  1305,
+			Message: "FUNCTION test.tidb_version does not exist",
+		})
 		mock.ExpectBegin()
 		mock.ExpectExec("USE `test`;").
 			WillReturnResult(sqlmock.NewResult(1, 1))
@@ -142,14 +131,16 @@ func TestAsyncExecAddIndex(t *testing.T) {
 		mock.ExpectCommit()
 		mock.ExpectClose()
 		return db, nil
-	}
+	})
+	GetDBConnImpl = dbConnFactory
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	changefeed := "test-changefeed"
 	sinkURI, err := url.Parse("mysql://127.0.0.1:4000")
 	require.Nil(t, err)
 	rc := config.GetDefaultReplicaConfig()
-	sink, err := NewDDLSink(ctx, model.DefaultChangeFeedID("test"), sinkURI, rc)
+	sink, err := NewDDLSink(ctx, model.DefaultChangeFeedID(changefeed), sinkURI, rc)
 
 	require.Nil(t, err)
 

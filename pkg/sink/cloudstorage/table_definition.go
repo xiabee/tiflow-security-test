@@ -19,11 +19,11 @@ import (
 	"strings"
 
 	"github.com/pingcap/log"
+	timodel "github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/charset"
-	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/types"
-	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/hash"
@@ -77,7 +77,7 @@ func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo, outputColumnID bool
 	if mysql.HasNotNullFlag(col.GetFlag()) {
 		t.Nullable = "false"
 	}
-	t.Default = entry.GetDDLDefaultDefinition(col)
+	t.Default = model.GetColumnDefaultValue(col)
 
 	switch col.GetType() {
 	case mysql.TypeTimestamp, mysql.TypeDatetime, mysql.TypeDuration:
@@ -102,7 +102,7 @@ func (t *TableCol) FromTiColumnInfo(col *timodel.ColumnInfo, outputColumnID bool
 }
 
 // ToTiColumnInfo converts from TableCol to TiDB ColumnInfo.
-func (t *TableCol) ToTiColumnInfo() (*timodel.ColumnInfo, error) {
+func (t *TableCol) ToTiColumnInfo(colID int64) (*timodel.ColumnInfo, error) {
 	col := new(timodel.ColumnInfo)
 
 	if t.ID != "" {
@@ -113,7 +113,8 @@ func (t *TableCol) ToTiColumnInfo() (*timodel.ColumnInfo, error) {
 		}
 	}
 
-	col.Name = timodel.NewCIStr(t.Name)
+	col.ID = colID
+	col.Name = pmodel.NewCIStr(t.Name)
 	tp := types.StrToType(strings.ToLower(strings.TrimSuffix(t.Tp, " UNSIGNED")))
 	col.FieldType = *types.NewFieldType(tp)
 	if strings.Contains(t.Tp, "UNSIGNED") {
@@ -250,22 +251,23 @@ func (t *TableDefinition) FromTableInfo(
 
 // ToTableInfo converts from TableDefinition to DDLEvent.
 func (t *TableDefinition) ToTableInfo() (*model.TableInfo, error) {
-	info := &model.TableInfo{
-		TableName: model.TableName{
-			Schema: t.Schema,
-			Table:  t.Table,
-		},
-		TableInfo: &timodel.TableInfo{
-			Name: timodel.NewCIStr(t.Table),
-		},
+	tidbTableInfo := &timodel.TableInfo{
+		Name: pmodel.NewCIStr(t.Table),
 	}
+	nextMockID := int64(100) // 100 is an arbitrary number
 	for _, col := range t.Columns {
-		tiCol, err := col.ToTiColumnInfo()
+		tiCol, err := col.ToTiColumnInfo(nextMockID)
 		if err != nil {
 			return nil, err
 		}
-		info.Columns = append(info.Columns, tiCol)
+		if mysql.HasPriKeyFlag(tiCol.GetFlag()) {
+			// use PKIsHandle to make sure that the primary keys can be detected by `WrapTableInfo`
+			tidbTableInfo.PKIsHandle = true
+		}
+		tidbTableInfo.Columns = append(tidbTableInfo.Columns, tiCol)
+		nextMockID += 1
 	}
+	info := model.WrapTableInfo(100, t.Schema, 100, tidbTableInfo)
 
 	return info, nil
 }

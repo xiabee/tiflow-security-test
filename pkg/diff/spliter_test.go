@@ -17,12 +17,12 @@ import (
 	"fmt"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	. "github.com/pingcap/check"
+	"github.com/pingcap/check"
 	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
+	"github.com/pingcap/tidb/pkg/util/dbutil/dbutiltest"
 )
 
-var _ = Suite(&testSpliterSuite{})
+var _ = check.Suite(&testSpliterSuite{})
 
 type testSpliterSuite struct{}
 
@@ -31,9 +31,9 @@ type chunkResult struct {
 	args     []string
 }
 
-func (s *testSpliterSuite) TestSplitRangeByRandom(c *C) {
+func (s *testSpliterSuite) TestSplitRangeByRandom(c *check.C) {
 	db, mock, err := sqlmock.New()
-	c.Assert(err, IsNil)
+	c.Assert(err, check.IsNil)
 
 	testCases := []struct {
 		createTableSQL string
@@ -114,27 +114,27 @@ func (s *testSpliterSuite) TestSplitRangeByRandom(c *C) {
 	}
 
 	for i, testCase := range testCases {
-		tableInfo, err := dbutil.GetTableInfoBySQL(testCase.createTableSQL, parser.New())
-		c.Assert(err, IsNil)
+		tableInfo, err := dbutiltest.GetTableInfoBySQL(testCase.createTableSQL, parser.New())
+		c.Assert(err, check.IsNil)
 
 		splitCols, err := getSplitFields(tableInfo, nil)
-		c.Assert(err, IsNil)
+		c.Assert(err, check.IsNil)
 		createFakeResultForRandomSplit(mock, 0, testCase.randomValues)
 
 		chunks, err := splitRangeByRandom(db, testCase.originChunk, testCase.splitCount, "test", "test", splitCols, "", "")
-		c.Assert(err, IsNil)
+		c.Assert(err, check.IsNil)
 		for j, chunk := range chunks {
 			chunkStr, args := chunk.toString("")
 			c.Log(i, j, chunkStr, args)
-			c.Assert(chunkStr, Equals, testCase.expectResult[j].chunkStr)
-			c.Assert(args, DeepEquals, testCase.expectResult[j].args)
+			c.Assert(chunkStr, check.Equals, testCase.expectResult[j].chunkStr)
+			c.Assert(args, check.DeepEquals, testCase.expectResult[j].args)
 		}
 	}
 }
 
-func (s *testSpliterSuite) TestRandomSpliter(c *C) {
+func (s *testSpliterSuite) TestRandomSpliter(c *check.C) {
 	db, mock, err := sqlmock.New()
-	c.Assert(err, IsNil)
+	c.Assert(err, check.IsNil)
 
 	testCases := []struct {
 		createTableSQL string
@@ -201,8 +201,8 @@ func (s *testSpliterSuite) TestRandomSpliter(c *C) {
 	}
 
 	for i, testCase := range testCases {
-		tableInfo, err := dbutil.GetTableInfoBySQL(testCase.createTableSQL, parser.New())
-		c.Assert(err, IsNil)
+		tableInfo, err := dbutiltest.GetTableInfoBySQL(testCase.createTableSQL, parser.New())
+		c.Assert(err, check.IsNil)
 
 		tableInstance := &TableInstance{
 			Conn:   db,
@@ -212,19 +212,19 @@ func (s *testSpliterSuite) TestRandomSpliter(c *C) {
 		}
 
 		splitCols, err := getSplitFields(tableInfo, nil)
-		c.Assert(err, IsNil)
+		c.Assert(err, check.IsNil)
 
 		createFakeResultForRandomSplit(mock, testCase.count, testCase.randomValues)
 
 		rSpliter := new(randomSpliter)
 		chunks, err := rSpliter.split(tableInstance, splitCols, 2, "TRUE", "")
-		c.Assert(err, IsNil)
+		c.Assert(err, check.IsNil)
 
 		for j, chunk := range chunks {
 			chunkStr, args := chunk.toString("")
 			c.Log(i, j, chunkStr, args)
-			c.Assert(chunkStr, Equals, testCase.expectResult[j].chunkStr)
-			c.Assert(args, DeepEquals, testCase.expectResult[j].args)
+			c.Assert(chunkStr, check.Equals, testCase.expectResult[j].chunkStr)
+			c.Assert(args, check.DeepEquals, testCase.expectResult[j].args)
 		}
 	}
 }
@@ -246,13 +246,13 @@ func createFakeResultForRandomSplit(mock sqlmock.Sqlmock, count int, randomValue
 	}
 }
 
-func (s *testSpliterSuite) TestBucketSpliter(c *C) {
+func (s *testSpliterSuite) TestBucketSpliter(c *check.C) {
 	db, mock, err := sqlmock.New()
-	c.Assert(err, IsNil)
+	c.Assert(err, check.IsNil)
 
 	createTableSQL := "create table `test`.`test`(`a` int, `b` varchar(10), `c` float, `d` datetime, primary key(`a`, `b`))"
-	tableInfo, err := dbutil.GetTableInfoBySQL(createTableSQL, parser.New())
-	c.Assert(err, IsNil)
+	tableInfo, err := dbutiltest.GetTableInfoBySQL(createTableSQL, parser.New())
+	c.Assert(err, check.IsNil)
 
 	testCases := []struct {
 		chunkSize     int
@@ -426,12 +426,12 @@ func (s *testSpliterSuite) TestBucketSpliter(c *C) {
 		createFakeResultForBucketSplit(mock, testCase.aRandomValues, testCase.bRandomValues)
 		bSpliter := new(bucketSpliter)
 		chunks, err := bSpliter.split(tableInstance, testCase.chunkSize, "TRUE", "")
-		c.Assert(err, IsNil)
+		c.Assert(err, check.IsNil)
 		for j, chunk := range chunks {
 			chunkStr, args := chunk.toString("")
 			c.Log(i, j, chunkStr, args)
-			c.Assert(chunkStr, Equals, testCase.expectResult[j].chunkStr)
-			c.Assert(args, DeepEquals, testCase.expectResult[j].args)
+			c.Assert(chunkStr, check.Equals, testCase.expectResult[j].chunkStr)
+			c.Assert(args, check.DeepEquals, testCase.expectResult[j].args)
 		}
 	}
 }
@@ -449,15 +449,9 @@ func createFakeResultForBucketSplit(mock sqlmock.Sqlmock, aRandomValues, bRandom
 		+---------+------------+-------------+----------+-----------+-------+---------+-------------+-------------+
 	*/
 
-	rows := []string{
-		"Db_name", "Table_name", "Column_name", "Is_index", "Bucket_id",
-		"Count", "Repeats", "Lower_Bound", "Upper_Bound",
-	}
-	statsRows := sqlmock.NewRows(rows)
+	statsRows := sqlmock.NewRows([]string{"Db_name", "Table_name", "Column_name", "Is_index", "Bucket_id", "Count", "Repeats", "Lower_Bound", "Upper_Bound"})
 	for i := 0; i < 5; i++ {
-		statsRows.AddRow("test", "test", "PRIMARY", 1, (i+1)*64, (i+1)*64, 1,
-			fmt.Sprintf("(%d, %d)", i*64, i*12),
-			fmt.Sprintf("(%d, %d)", (i+1)*64-1, (i+1)*12-1))
+		statsRows.AddRow("test", "test", "PRIMARY", 1, (i+1)*64, (i+1)*64, 1, fmt.Sprintf("(%d, %d)", i*64, i*12), fmt.Sprintf("(%d, %d)", (i+1)*64-1, (i+1)*12-1))
 	}
 	mock.ExpectQuery("SHOW STATS_BUCKETS").WillReturnRows(statsRows)
 

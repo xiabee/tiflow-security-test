@@ -394,7 +394,7 @@ func (jm *JobMaster) preCheck(ctx context.Context, cfg *config.JobCfg) error {
 		return errors.New("job id is too long, max length is 38")
 	}
 
-	if err := master.AdjustTargetDB(ctx, cfg.TargetDB); err != nil {
+	if err := master.AdjustTargetDBSessionCfg(ctx, cfg.TargetDB); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -434,6 +434,7 @@ func (jm *JobMaster) status(ctx context.Context, code frameModel.WorkerState) (f
 	status := frameModel.WorkerStatus{
 		State: code,
 	}
+	// nolint
 	if jobStatus, err := jm.QueryJobStatus(ctx, nil); err != nil {
 		return status, err
 	} else if bs, err := json.Marshal(jobStatus); err != nil {

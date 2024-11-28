@@ -21,6 +21,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tiflow/dm/pb"
+	"github.com/pingcap/tiflow/dm/pkg/encrypt"
 	"github.com/pingcap/tiflow/dm/pkg/ha"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -29,6 +30,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
+
+const retryTimes = 5
 
 // GetJoinURLs gets the endpoints from the join address.
 func GetJoinURLs(addrs string) []string {
@@ -62,41 +65,51 @@ func (s *Server) JoinMaster(endpoints []string) error {
 	}
 
 	var errorStr string
-	for _, endpoint := range endpoints {
-		ctx1, cancel1 := context.WithTimeout(ctx, 3*time.Second)
-		//nolint:staticcheck
-		conn, err := grpc.DialContext(
-			ctx1,
-			utils.UnwrapScheme(endpoint),
-			grpc.WithBlock(),
-			grpcTLS,
-			grpc.WithBackoffMaxDelay(3*time.Second),
-		)
-		cancel1()
-		if err != nil {
-			if conn != nil {
-				conn.Close()
+	// retry to connect master
+	for i := 0; i < retryTimes; i++ {
+		for _, endpoint := range endpoints {
+			ctx1, cancel1 := context.WithTimeout(ctx, 3*time.Second)
+			//nolint:staticcheck
+			conn, err := grpc.DialContext(
+				ctx1,
+				utils.UnwrapScheme(endpoint),
+				grpc.WithBlock(),
+				grpcTLS,
+				grpc.WithBackoffMaxDelay(3*time.Second),
+			)
+			cancel1()
+			if err != nil {
+				if conn != nil {
+					conn.Close()
+				}
+				log.L().Error("fail to dial dm-master", zap.String("endpoint", endpoint), zap.Error(err))
+				errorStr = err.Error()
+				continue
 			}
-			log.L().Error("fail to dial dm-master", zap.String("endpoint", endpoint), zap.Error(err))
-			errorStr = err.Error()
-			continue
+			client := pb.NewMasterClient(conn)
+			ctx1, cancel1 = context.WithTimeout(ctx, 3*time.Second)
+			resp, err := client.RegisterWorker(ctx1, req)
+			cancel1()
+			conn.Close()
+			if err != nil {
+				log.L().Error("fail to register worker", zap.String("endpoint", endpoint), zap.Error(err))
+				errorStr = err.Error()
+				continue
+			}
+			if !resp.GetResult() {
+				log.L().Error("fail to register worker", zap.String("endpoint", endpoint), zap.String("error", resp.Msg))
+				errorStr = resp.Msg
+				continue
+			}
+
+			// worker do calls decrypt, but the password is decrypted already,
+			// but in case we need it later, init it.
+			encrypt.InitCipher(resp.GetSecretKey())
+
+			return nil
 		}
-		client := pb.NewMasterClient(conn)
-		ctx1, cancel1 = context.WithTimeout(ctx, 3*time.Second)
-		resp, err := client.RegisterWorker(ctx1, req)
-		cancel1()
-		conn.Close()
-		if err != nil {
-			log.L().Error("fail to register worker", zap.String("endpoint", endpoint), zap.Error(err))
-			errorStr = err.Error()
-			continue
-		}
-		if !resp.GetResult() {
-			log.L().Error("fail to register worker", zap.String("endpoint", endpoint), zap.String("error", resp.Msg))
-			errorStr = resp.Msg
-			continue
-		}
-		return nil
+		log.L().Warn("retry to connect master", zap.Int("retry", i+1), zap.Int("total", retryTimes))
+		time.Sleep(retryConnectSleepTime)
 	}
 	return terror.ErrWorkerFailConnectMaster.Generate(endpoints, errorStr)
 }

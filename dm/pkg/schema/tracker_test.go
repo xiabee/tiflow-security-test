@@ -22,14 +22,13 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/meta/metabuild"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/util/filter"
-	timock "github.com/pingcap/tidb/pkg/util/mock"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/util/filter"
+	timock "github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
@@ -567,7 +566,7 @@ func mockBaseConn(t *testing.T) (*dbconn.DBConn, sqlmock.Sqlmock) {
 	})
 	c, err := db.Conn(context.Background())
 	require.NoError(t, err)
-	baseConn := conn.NewBaseConnForTest(c, nil)
+	baseConn := conn.NewBaseConn(c, nil)
 	dbConn := dbconn.NewDBConn(&config.SubTaskConfig{}, baseConn)
 	return dbConn, mock
 }
@@ -736,7 +735,7 @@ func TestVarchar20000(t *testing.T) {
 	p := parser.New()
 	node, err := p.ParseOneStmt("create table t(c varchar(20000)) charset=utf8", "", "")
 	require.NoError(t, err)
-	oriTi, err := ddl.BuildTableInfoFromAST(metabuild.NewContext(), node.(*ast.CreateTableStmt))
+	oriTi, err := ddl.BuildTableInfoFromAST(node.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 
 	// tracker and sqlmock
@@ -765,7 +764,7 @@ func TestPlacementRule(t *testing.T) {
 	p := parser.New()
 	node, err := p.ParseOneStmt("create table t(c int) charset=utf8mb4", "", "")
 	require.NoError(t, err)
-	oriTi, err := ddl.BuildTableInfoFromAST(metabuild.NewContext(), node.(*ast.CreateTableStmt))
+	oriTi, err := ddl.BuildTableInfoFromAST(node.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 
 	dbConn, mock := mockBaseConn(t)
@@ -835,13 +834,4 @@ func TestNeedRestrictedSQLExecutor(t *testing.T) {
 
 	err = tracker.Exec(ctx, "testdb", parseSQL(t, p, `alter table testdb.t modify column a int not null;`))
 	require.NoError(t, err)
-}
-
-func TestMustNotUseMockStore(t *testing.T) {
-	ctx := context.Background()
-	tracker, err := NewTestTracker(ctx, "test-tracker", nil, dlog.L())
-	require.NoError(t, err)
-	defer tracker.Close()
-
-	require.Nil(t, tracker.se.GetStore(), "see https://github.com/pingcap/tiflow/issues/5334")
 }

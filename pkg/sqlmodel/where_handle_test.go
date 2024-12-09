@@ -16,10 +16,9 @@ package sqlmodel
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/meta/metabuild"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,7 +35,7 @@ CREATE TABLE t (
 	p := parser.New()
 	node, err := p.ParseOneStmt(createSQL, "", "")
 	require.NoError(t, err)
-	ti, err := ddl.BuildTableInfoFromAST(metabuild.NewContext(), node.(*ast.CreateTableStmt))
+	ti, err := ddl.BuildTableInfoFromAST(node.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 	require.Len(t, ti.Indices, 1)
 	idx := ti.Indices[0]
@@ -60,7 +59,7 @@ CREATE TABLE t (
 )`
 	node, err = p.ParseOneStmt(targetCreateSQL, "", "")
 	require.NoError(t, err)
-	targetTI, err := ddl.BuildTableInfoFromAST(metabuild.NewContext(), node.(*ast.CreateTableStmt))
+	targetTI, err := ddl.BuildTableInfoFromAST(node.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 	require.Len(t, targetTI.Indices, 2)
 	targetIdx := targetTI.Indices[0]
@@ -97,7 +96,7 @@ CREATE TABLE t (
 )`
 	node, err = p.ParseOneStmt(targetCreateSQL, "", "")
 	require.NoError(t, err)
-	targetTI, err = ddl.BuildTableInfoFromAST(metabuild.NewContext(), node.(*ast.CreateTableStmt))
+	targetTI, err = ddl.BuildTableInfoFromAST(node.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 	// PKIsHandle has no entry in Indices
 	require.Len(t, targetTI.Indices, 0)
@@ -115,7 +114,7 @@ CREATE TABLE t (
 )`
 	node, err = p.ParseOneStmt(targetCreateSQL, "", "")
 	require.NoError(t, err)
-	targetTI, err = ddl.BuildTableInfoFromAST(metabuild.NewContext(), node.(*ast.CreateTableStmt))
+	targetTI, err = ddl.BuildTableInfoFromAST(node.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 	// PKIsHandle has no entry in Indices
 	require.Len(t, targetTI.Indices, 0)
@@ -135,7 +134,7 @@ CREATE TABLE t (
 )`
 	node, err = p.ParseOneStmt(targetCreateSQL, "", "")
 	require.NoError(t, err)
-	targetTI, err = ddl.BuildTableInfoFromAST(metabuild.NewContext(), node.(*ast.CreateTableStmt))
+	targetTI, err = ddl.BuildTableInfoFromAST(node.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 
 	handle = GetWhereHandle(ti, targetTI)
@@ -162,7 +161,7 @@ CREATE TABLE t (
 	p := parser.New()
 	node, err := p.ParseOneStmt(createSQL, "", "")
 	require.NoError(t, err)
-	ti, err := ddl.BuildTableInfoFromAST(metabuild.NewContext(), node.(*ast.CreateTableStmt))
+	ti, err := ddl.BuildTableInfoFromAST(node.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 	require.Len(t, ti.Indices, 4)
 
@@ -198,7 +197,7 @@ CREATE TABLE t (
 	p := parser.New()
 	node, err := p.ParseOneStmt(createSQL, "", "")
 	require.NoError(t, err)
-	ti, err := ddl.BuildTableInfoFromAST(metabuild.NewContext(), node.(*ast.CreateTableStmt))
+	ti, err := ddl.BuildTableInfoFromAST(node.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 
 	handle := GetWhereHandle(ti, ti)

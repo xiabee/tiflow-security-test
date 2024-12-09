@@ -18,10 +18,10 @@ import (
 	"strconv"
 	"strings"
 
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/tablecodec"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"go.uber.org/zap"
@@ -163,11 +163,6 @@ func (r *RowChange) getCausalityString(values []interface{}) []string {
 	ret := make([]string, 0, len(pkAndUks))
 
 	for _, indexCols := range pkAndUks {
-		// TODO: should not support multi value index and generate the value
-		// TODO: also fix https://github.com/pingcap/tiflow/issues/3286#issuecomment-971264282
-		if indexCols.MVIndex {
-			continue
-		}
 		cols, vals := getColsAndValuesOfIdx(r.sourceTableInfo.Columns, indexCols, values)
 		// handle prefix index
 		truncVals := truncateIndexValues(r.tiSessionCtx, r.sourceTableInfo, indexCols, cols, vals)

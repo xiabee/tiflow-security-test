@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/pingcap/tiflow/cdc/model"
 )
 
 // Load TableState with THREAD-SAFE
@@ -41,14 +43,40 @@ func (s *TableState) CompareAndSwap(old, new TableState) bool {
 	return atomic.CompareAndSwapInt32((*int32)(s), oldx, newx)
 }
 
-// TableID is the ID of the table
-type TableID = int64
+// TablePipeline is a pipeline which capture the change log from tikv in a table
+type TablePipeline interface {
+	// ID returns the ID of source table and mark table
+	ID() (tableID int64)
+	// Name returns the quoted schema and table name
+	Name() string
+	// ResolvedTs returns the resolved ts in this table pipeline
+	ResolvedTs() model.Ts
+	// CheckpointTs returns the checkpoint ts in this table pipeline
+	CheckpointTs() model.Ts
+	// UpdateBarrierTs updates the barrier ts in this table pipeline
+	UpdateBarrierTs(ts model.Ts)
+	// AsyncStop tells the pipeline to stop, and returns true is the pipeline is already stopped.
+	AsyncStop() bool
 
-// Ts is the timestamp with a logical count
-type Ts = uint64
+	// Start the sink consume data from the given `ts`
+	Start(ts model.Ts)
 
-// Key is a custom type for bytes encoded in memcomparable format.
-// Key is read-only, must not be mutated.
+	// Stats returns statistic for a table.
+	Stats() Stats
+	// State returns the state of this table pipeline
+	State() TableState
+	// Cancel stops this table pipeline immediately and destroy all resources created by this table pipeline
+	Cancel()
+	// Wait waits for table pipeline destroyed
+	Wait()
+	// MemoryConsumption return the memory consumption in bytes
+	MemoryConsumption() uint64
+
+	// RemainEvents return the amount of kv events remain in sorter.
+	RemainEvents() int64
+}
+
+// Key is a custom type for bytes in proto.
 type Key []byte
 
 var (
@@ -72,30 +100,30 @@ func (k Key) MarshalJSON() ([]byte, error) {
 }
 
 var (
-	_ encoding.TextMarshaler = &Span{}
+	_ encoding.TextMarshaler = Span{}
 	_ encoding.TextMarshaler = (*Span)(nil)
 )
 
 // MarshalText implements encoding.TextMarshaler (used in proto.CompactTextString).
 // It is helpful to format span in log.
-func (s *Span) MarshalText() ([]byte, error) {
+func (s Span) MarshalText() ([]byte, error) {
 	return []byte(s.String()), nil
 }
 
 func (s *Span) String() string {
-	length := len("{tableID:, startKey:, endKey:}")
+	length := len("{table_id:,start_key:,end_key:}")
 	length += 8 // for TableID
 	length += len(s.StartKey) + len(s.EndKey)
-	var b strings.Builder
+	b := strings.Builder{}
 	b.Grow(length)
-	b.Write([]byte("{tableID:"))
+	b.Write([]byte("{table_id:"))
 	b.Write([]byte(strconv.Itoa(int(s.TableID))))
 	if len(s.StartKey) > 0 {
-		b.Write([]byte(", startKey:"))
+		b.Write([]byte(",start_key:"))
 		b.Write([]byte(s.StartKey.String()))
 	}
 	if len(s.EndKey) > 0 {
-		b.Write([]byte(", endKey:"))
+		b.Write([]byte(",end_key:"))
 		b.Write([]byte(s.EndKey.String()))
 	}
 	b.Write([]byte("}"))

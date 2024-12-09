@@ -147,12 +147,11 @@ func BenchmarkCoordinatorHeartbeatResponse(b *testing.B) {
 			tableID := int64(10000 + i)
 			currentTables = append(currentTables, tableID)
 			captureID := fmt.Sprint(i % captureCount)
-			span := tablepb.Span{TableID: tableID}
 			rep, err := replication.NewReplicationSet(
-				span, 0, map[string]*tablepb.TableStatus{
+				tableID, 0, map[string]*tablepb.TableStatus{
 					captureID: {
-						Span:  tablepb.Span{TableID: tableID},
-						State: tablepb.TableStateReplicating,
+						TableID: tableID,
+						State:   tablepb.TableStateReplicating,
 					},
 				}, model.ChangeFeedID{})
 			if err != nil {
@@ -171,8 +170,8 @@ func BenchmarkCoordinatorHeartbeatResponse(b *testing.B) {
 			heartbeatResp[captureID].HeartbeatResponse.Tables = append(
 				heartbeatResp[captureID].HeartbeatResponse.Tables,
 				tablepb.TableStatus{
-					Span:  tablepb.Span{TableID: tableID},
-					State: tablepb.TableStateReplicating,
+					TableID: tableID,
+					State:   tablepb.TableStateReplicating,
 				})
 		}
 		recvMsgs := make([]*schedulepb.Message, 0, len(heartbeatResp))

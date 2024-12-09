@@ -14,8 +14,8 @@
 package schema
 
 import (
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/model"
 )
 
 type currentDBSetter struct {
@@ -36,7 +36,7 @@ func (c currentDBSetter) Enter(n ast.Node) (node ast.Node, skipChildren bool) {
 			if spec.Tp == ast.AlterTableAddConstraint && spec.Constraint.Refer != nil {
 				table := spec.Constraint.Refer.Table
 				if table.Schema.L == "" && v.Table.Schema.L != "" {
-					table.Schema = pmodel.NewCIStr(v.Table.Schema.L)
+					table.Schema = model.NewCIStr(v.Table.Schema.L)
 				}
 			}
 		}
@@ -50,7 +50,7 @@ func (c currentDBSetter) Leave(n ast.Node) (node ast.Node, ok bool) {
 		return n, true
 	}
 	if v.Schema.O == "" {
-		v.Schema = pmodel.NewCIStr(c.currentDB)
+		v.Schema = model.NewCIStr(c.currentDB)
 	}
 	return n, true
 }

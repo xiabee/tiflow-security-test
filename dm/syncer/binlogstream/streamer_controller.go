@@ -29,7 +29,6 @@ import (
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/binlog/reader"
-	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
@@ -260,7 +259,7 @@ func (c *StreamerController) resetReplicationSyncer(tctx *tcontext.Context, loca
 			t.reader.Close()
 		case *localBinlogReader:
 			// check the uuid before close
-			ctx, cancel := context.WithTimeout(tctx.Ctx, conn.DefaultDBTimeout)
+			ctx, cancel := context.WithTimeout(tctx.Ctx, utils.DefaultDBTimeout)
 			defer cancel()
 			uuidSameWithUpstream, err = c.checkUUIDSameWithUpstream(ctx, location.Position, t.reader.GetSubDirs())
 			if err != nil {
@@ -418,7 +417,7 @@ LOOP:
 			}
 		}
 
-		// For events whose LogPos is 0, it will not trigger event modification, we directly return.
+		// fake rotate. binlog recorder should handle it
 		if c.lastEventFromUpstream.Header.LogPos == 0 {
 			event = c.lastEventFromUpstream
 			c.lastEventFromUpstream = nil
@@ -587,7 +586,7 @@ func (c *StreamerController) checkUUIDSameWithUpstream(ctx context.Context, pos 
 	}
 	uuid := utils.GetUUIDBySuffix(uuids, uuidSuffix)
 
-	upstreamUUID, err := conn.GetServerUUID(tcontext.NewContext(ctx, log.L()), c.fromDB.BaseDB, c.syncCfg.Flavor)
+	upstreamUUID, err := utils.GetServerUUID(ctx, c.fromDB.BaseDB.DB, c.syncCfg.Flavor)
 	if err != nil {
 		return false, terror.Annotate(err, "streamer controller check upstream uuid failed")
 	}
@@ -611,7 +610,7 @@ func (c *StreamerController) CanRetry(err error) bool {
 }
 
 func (c *StreamerController) updateServerID(tctx *tcontext.Context) error {
-	randomServerID, err := conn.GetRandomServerID(tctx, c.fromDB.BaseDB)
+	randomServerID, err := utils.GetRandomServerID(tctx.Context(), c.fromDB.BaseDB.DB)
 	if err != nil {
 		// should never happened unless the master has too many slave
 		return terror.Annotate(err, "fail to get random server id for streamer controller")

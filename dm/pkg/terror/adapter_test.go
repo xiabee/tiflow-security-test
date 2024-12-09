@@ -16,16 +16,13 @@ package terror
 import (
 	"database/sql/driver"
 	"fmt"
-	"testing"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/pingcap/check"
 	"github.com/pingcap/errors"
-	"github.com/stretchr/testify/require"
 )
 
-func TestDBAdapter(t *testing.T) {
-	t.Parallel()
-
+func (t *testTErrorSuite) TestDBAdapter(c *check.C) {
 	defaultErr := ErrDBDriverError
 	testCases := []struct {
 		err    error
@@ -40,17 +37,17 @@ func TestDBAdapter(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		err := DBErrorAdapt(tc.err, ScopeNotSet, defaultErr)
+		err := DBErrorAdapt(tc.err, defaultErr)
 		if tc.expect == nil {
-			require.NoError(t, err)
+			c.Assert(err, check.IsNil)
 		} else {
-			require.True(t, tc.expect.Equal(err))
+			c.Assert(tc.expect.Equal(err), check.IsTrue)
 			if err != tc.err {
 				exp := tc.expect
 				obj, ok := err.(*Error)
-				require.True(t, ok)
-				require.Equal(t, tc.expect.message, obj.getMsg())
-				require.Equal(t, fmt.Sprintf(errBaseFormat+", Message: %s, RawCause: %s, Workaround: %s", exp.code, exp.class, exp.scope, exp.level, exp.message, tc.err.Error(), exp.workaround), obj.Error())
+				c.Assert(ok, check.IsTrue)
+				c.Assert(obj.getMsg(), check.Equals, tc.expect.message)
+				c.Assert(obj.Error(), check.Equals, fmt.Sprintf(errBaseFormat+", Message: %s, RawCause: %s, Workaround: %s", exp.code, exp.class, exp.scope, exp.level, exp.message, tc.err.Error(), exp.workaround))
 			}
 		}
 	}

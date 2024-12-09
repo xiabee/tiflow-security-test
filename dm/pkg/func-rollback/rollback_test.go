@@ -17,11 +17,18 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestRollback(t *testing.T) {
-	t.Parallel()
+var _ = Suite(&testRollbackSuite{})
+
+func TestSuite(t *testing.T) {
+	TestingT(t)
+}
+
+type testRollbackSuite struct{}
+
+func (t *testRollbackSuite) TestRollback(c *C) {
 	var (
 		h        = NewRollbackHolder("test")
 		total    = 5
@@ -41,5 +48,5 @@ func TestRollback(t *testing.T) {
 		h.Add(FuncRollback{Name: fmt.Sprintf("test-%d", i), Fn: rf})
 	}
 	h.RollbackReverseOrder()
-	require.Equal(t, expected, obtained)
+	c.Assert(obtained, DeepEquals, expected)
 }

@@ -16,6 +16,7 @@ package config
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"math"
@@ -27,14 +28,11 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/pingcap/tiflow/dm/config/dbconfig"
-	"github.com/pingcap/tiflow/dm/pkg/conn"
-	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
+	bf "github.com/pingcap/tidb-tools/pkg/binlog-filter"
 	"github.com/pingcap/tiflow/dm/pkg/gtid"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
-	bf "github.com/pingcap/tiflow/pkg/binlog-filter"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
 )
@@ -45,7 +43,7 @@ const (
 	defaultRelayDir     = "relay-dir"
 )
 
-var getAllServerIDFunc = conn.GetAllServerID
+var getAllServerIDFunc = utils.GetAllServerID
 
 // SampleSourceConfig is sample config file of source.
 // The embed source.yaml is a copy of dm/master/source.yaml, because embed
@@ -82,11 +80,11 @@ type SourceConfig struct {
 	// relay synchronous starting point (if specified)
 	RelayBinLogName string `yaml:"relay-binlog-name" toml:"relay-binlog-name" json:"relay-binlog-name"`
 	RelayBinlogGTID string `yaml:"relay-binlog-gtid" toml:"relay-binlog-gtid" json:"relay-binlog-gtid"`
-	// only use when the source is bound to a worker, do not marsh it
+	// only use when worker bound source, do not marsh it
 	UUIDSuffix int `yaml:"-" toml:"-" json:"-"`
 
-	SourceID string            `yaml:"source-id" toml:"source-id" json:"source-id"`
-	From     dbconfig.DBConfig `yaml:"from" toml:"from" json:"from"`
+	SourceID string   `yaml:"source-id" toml:"source-id" json:"source-id"`
+	From     DBConfig `yaml:"from" toml:"from" json:"from"`
 
 	// config items for purger
 	Purge PurgeConfig `yaml:"purge" toml:"purge" json:"purge"`
@@ -158,28 +156,20 @@ func (c *SourceConfig) Yaml() (string, error) {
 	return string(b), nil
 }
 
-// FromToml parses flag definitions from the argument list.
+// Parse parses flag definitions from the argument list.
 // accept toml content for legacy use (mainly used by etcd).
-func (c *SourceConfig) FromToml(content string) error {
+func (c *SourceConfig) Parse(content string) error {
 	// Parse first to get config file.
 	metaData, err := toml.Decode(content, c)
-	if err != nil {
-		return terror.ErrWorkerDecodeConfigFromFile.Delegate(err)
+	err2 := c.check(&metaData, err)
+	if err2 != nil {
+		return err2
 	}
-	undecoded := metaData.Undecoded()
-	if len(undecoded) > 0 {
-		var undecodedItems []string
-		for _, item := range undecoded {
-			undecodedItems = append(undecodedItems, item.String())
-		}
-		return terror.ErrWorkerUndecodedItemFromFile.Generate(strings.Join(undecodedItems, ","))
-	}
-	c.adjust()
 	return c.Verify()
 }
 
-// SourceCfgFromYaml parses flag definitions from the argument list, content should be yaml format.
-func SourceCfgFromYaml(content string) (*SourceConfig, error) {
+// ParseYaml parses flag definitions from the argument list, content should be yaml format.
+func ParseYaml(content string) (*SourceConfig, error) {
 	c := newSourceConfig()
 	if err := yaml.UnmarshalStrict([]byte(content), c); err != nil {
 		return nil, terror.ErrConfigYamlTransform.Delegate(err, "decode source config")
@@ -188,9 +178,9 @@ func SourceCfgFromYaml(content string) (*SourceConfig, error) {
 	return c, nil
 }
 
-// SourceCfgFromYamlAndVerify does SourceCfgFromYaml and Verify.
-func SourceCfgFromYamlAndVerify(content string) (*SourceConfig, error) {
-	c, err := SourceCfgFromYaml(content)
+// ParseYamlAndVerify does ParseYaml and Verify.
+func ParseYamlAndVerify(content string) (*SourceConfig, error) {
+	c, err := ParseYaml(content)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +239,8 @@ func (c *SourceConfig) Verify() error {
 		}
 	}
 
+	c.DecryptPassword()
+
 	_, err = bf.NewBinlogEvent(c.CaseSensitive, c.Filters)
 	if err != nil {
 		return terror.ErrConfigBinlogEventFilter.Delegate(err)
@@ -261,8 +253,8 @@ func (c *SourceConfig) Verify() error {
 	return nil
 }
 
-// GetDecryptedClone returns a decrypted config replica in config.
-func (c *SourceConfig) GetDecryptedClone() *SourceConfig {
+// DecryptPassword returns a decrypted config replica in config.
+func (c *SourceConfig) DecryptPassword() *SourceConfig {
 	clone := c.Clone()
 	var pswdFrom string
 	if len(clone.From.Password) > 0 {
@@ -273,21 +265,21 @@ func (c *SourceConfig) GetDecryptedClone() *SourceConfig {
 }
 
 // GenerateDBConfig creates DBConfig for DB.
-func (c *SourceConfig) GenerateDBConfig() *dbconfig.DBConfig {
+func (c *SourceConfig) GenerateDBConfig() *DBConfig {
 	// decrypt password
-	clone := c.GetDecryptedClone()
+	clone := c.DecryptPassword()
 	from := &clone.From
-	from.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(conn.DefaultDBTimeout.String())
+	from.RawDBCfg = DefaultRawDBConfig().SetReadTimeout(utils.DefaultDBTimeout.String())
 	return from
 }
 
 // Adjust flavor and server-id of SourceConfig.
-func (c *SourceConfig) Adjust(ctx context.Context, db *conn.BaseDB) (err error) {
+func (c *SourceConfig) Adjust(ctx context.Context, db *sql.DB) (err error) {
 	c.From.Adjust()
 	c.Checker.Adjust()
 
 	// use one timeout for all following DB operations.
-	ctx2, cancel := context.WithTimeout(ctx, conn.DefaultDBTimeout)
+	ctx2, cancel := context.WithTimeout(ctx, utils.DefaultDBTimeout)
 	defer cancel()
 	if c.Flavor == "" || c.ServerID == 0 {
 		err = c.AdjustFlavor(ctx2, db)
@@ -303,7 +295,7 @@ func (c *SourceConfig) Adjust(ctx context.Context, db *conn.BaseDB) (err error) 
 
 	// MariaDB automatically enabled gtid after 10.0.2, refer to https://mariadb.com/kb/en/gtid/#using-global-transaction-ids
 	if c.EnableGTID && c.Flavor != mysql.MariaDBFlavor {
-		val, err := conn.GetGTIDMode(tcontext.NewContext(ctx2, log.L()), db)
+		val, err := utils.GetGTIDMode(ctx2, db)
 		if err != nil {
 			return err
 		}
@@ -323,8 +315,8 @@ func (c *SourceConfig) Adjust(ctx context.Context, db *conn.BaseDB) (err error) 
 }
 
 // AdjustCaseSensitive adjust CaseSensitive from DB.
-func (c *SourceConfig) AdjustCaseSensitive(ctx context.Context, db *conn.BaseDB) (err error) {
-	caseSensitive, err2 := conn.GetDBCaseSensitive(ctx, db)
+func (c *SourceConfig) AdjustCaseSensitive(ctx context.Context, db *sql.DB) (err error) {
+	caseSensitive, err2 := utils.GetDBCaseSensitive(ctx, db)
 	if err2 != nil {
 		return err2
 	}
@@ -333,7 +325,7 @@ func (c *SourceConfig) AdjustCaseSensitive(ctx context.Context, db *conn.BaseDB)
 }
 
 // AdjustFlavor adjust Flavor from DB.
-func (c *SourceConfig) AdjustFlavor(ctx context.Context, db *conn.BaseDB) (err error) {
+func (c *SourceConfig) AdjustFlavor(ctx context.Context, db *sql.DB) (err error) {
 	if c.Flavor != "" {
 		switch c.Flavor {
 		case mysql.MariaDBFlavor, mysql.MySQLFlavor:
@@ -343,7 +335,7 @@ func (c *SourceConfig) AdjustFlavor(ctx context.Context, db *conn.BaseDB) (err e
 		}
 	}
 
-	c.Flavor, err = conn.GetFlavor(ctx, db)
+	c.Flavor, err = utils.GetFlavor(ctx, db)
 	if ctx.Err() != nil {
 		err = terror.Annotatef(err, "fail to get flavor info %v", ctx.Err())
 	}
@@ -351,12 +343,12 @@ func (c *SourceConfig) AdjustFlavor(ctx context.Context, db *conn.BaseDB) (err e
 }
 
 // AdjustServerID adjust server id from DB.
-func (c *SourceConfig) AdjustServerID(ctx context.Context, db *conn.BaseDB) error {
+func (c *SourceConfig) AdjustServerID(ctx context.Context, db *sql.DB) error {
 	if c.ServerID != 0 {
 		return nil
 	}
 
-	serverIDs, err := getAllServerIDFunc(tcontext.NewContext(ctx, log.L()), db)
+	serverIDs, err := getAllServerIDFunc(ctx, db)
 	if ctx.Err() != nil {
 		err = terror.Annotatef(err, "fail to get server-id info %v", ctx.Err())
 	}
@@ -386,15 +378,35 @@ func LoadFromFile(path string) (*SourceConfig, error) {
 	if err != nil {
 		return nil, terror.ErrConfigReadCfgFromFile.Delegate(err, path)
 	}
-	return SourceCfgFromYaml(string(content))
+	return ParseYaml(string(content))
+}
+
+func (c *SourceConfig) check(metaData *toml.MetaData, err error) error {
+	if err != nil {
+		return terror.ErrWorkerDecodeConfigFromFile.Delegate(err)
+	}
+	undecoded := metaData.Undecoded()
+	if len(undecoded) > 0 && err == nil {
+		var undecodedItems []string
+		for _, item := range undecoded {
+			undecodedItems = append(undecodedItems, item.String())
+		}
+		return terror.ErrWorkerUndecodedItemFromFile.Generate(strings.Join(undecodedItems, ","))
+	}
+	c.adjust()
+	return nil
 }
 
 // YamlForDowngrade returns YAML format represents of config for downgrade.
 func (c *SourceConfig) YamlForDowngrade() (string, error) {
 	s := NewSourceConfigForDowngrade(c)
 
-	// try to encrypt password
-	s.From.Password = utils.EncryptOrPlaintext(utils.DecryptOrPlaintext(c.From.Password))
+	// encrypt password
+	cipher, err := utils.Encrypt(utils.DecryptOrPlaintext(c.From.Password))
+	if err != nil {
+		return "", err
+	}
+	s.From.Password = cipher
 	s.omitDefaultVals()
 	return s.Yaml()
 }
@@ -413,7 +425,7 @@ type SourceConfigForDowngrade struct {
 	RelayBinlogGTID string                 `yaml:"relay-binlog-gtid"`
 	UUIDSuffix      int                    `yaml:"-"`
 	SourceID        string                 `yaml:"source-id"`
-	From            dbconfig.DBConfig      `yaml:"from"`
+	From            DBConfig               `yaml:"from"`
 	Purge           PurgeConfig            `yaml:"purge"`
 	Checker         CheckerConfig          `yaml:"checker"`
 	ServerID        uint32                 `yaml:"server-id"`

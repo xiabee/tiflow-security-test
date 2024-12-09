@@ -12,6 +12,7 @@
 // limitations under the License.
 
 //go:build !windows && !freebsd
+// +build !windows,!freebsd
 
 package utils
 

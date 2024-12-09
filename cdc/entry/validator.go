@@ -15,7 +15,7 @@ package entry
 
 import (
 	"github.com/pingcap/errors"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
+	tidbkv "github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tiflow/cdc/entry/schema"
 	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
@@ -33,10 +33,11 @@ func VerifyTables(
 	eligibleTables []model.TableName,
 	err error,
 ) {
-	meta := kv.GetSnapshotMeta(storage, startTs)
-	snap, err := schema.NewSnapshotFromMeta(
-		model.ChangeFeedID4Test("api", "verifyTable"),
-		meta, startTs, false /* explicitTables */, f)
+	meta, err := kv.GetSnapshotMeta(storage, startTs)
+	if err != nil {
+		return nil, nil, nil, errors.Trace(err)
+	}
+	snap, err := schema.NewSingleSnapshotFromMeta(meta, startTs, false /* explicitTables */, f)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}

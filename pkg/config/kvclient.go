@@ -13,23 +13,12 @@
 
 package config
 
-import (
-	"time"
-
-	"github.com/pingcap/tiflow/pkg/errors"
-)
+import "github.com/pingcap/tiflow/pkg/errors"
 
 // KVClientConfig represents config for kv client
 type KVClientConfig struct {
-	EnableMultiplexing bool `toml:"enable-multiplexing" json:"enable-multiplexing"`
 	// how many workers will be used for a single region worker
-	WorkerConcurrent uint `toml:"worker-concurrent" json:"worker-concurrent"`
-	// how many grpc streams will be established to every TiKV node
-	GrpcStreamConcurrent uint `toml:"grpc-stream-concurrent" json:"grpc-stream-concurrent"`
-	// Advance table ResolvedTs interval.
-	AdvanceIntervalInMs uint `toml:"advance-interval-in-ms" json:"advance-interval-in-ms"`
-	// how many goroutines to maintain frontiers.
-	FrontierConcurrent uint `toml:"frontier-concurrent" json:"frontier-concurrent"`
+	WorkerConcurrent int `toml:"worker-concurrent" json:"worker-concurrent"`
 	// background workerpool size, the workrpool is shared by all goroutines in cdc server
 	WorkerPoolSize int `toml:"worker-pool-size" json:"worker-pool-size"`
 	// region incremental scan limit for one table in a single store
@@ -38,24 +27,12 @@ type KVClientConfig struct {
 	RegionRetryDuration TomlDuration `toml:"region-retry-duration" json:"region-retry-duration"`
 }
 
-// NewDefaultKVClientConfig return the default kv client configuration
-func NewDefaultKVClientConfig() *KVClientConfig {
-	return &KVClientConfig{
-		EnableMultiplexing:   true,
-		WorkerConcurrent:     8,
-		GrpcStreamConcurrent: 1,
-		AdvanceIntervalInMs:  300,
-		FrontierConcurrent:   8,
-		WorkerPoolSize:       0, // 0 will use NumCPU() * 2
-		RegionScanLimit:      40,
-		// The default TiKV region election timeout is [10s, 20s],
-		// Use 1 minute to cover region leader missing.
-		RegionRetryDuration: TomlDuration(time.Minute),
-	}
-}
-
 // ValidateAndAdjust validates and adjusts the kv client configuration
 func (c *KVClientConfig) ValidateAndAdjust() error {
+	if c.WorkerConcurrent <= 0 {
+		return errors.ErrInvalidServerOption.GenWithStackByArgs(
+			"region-scan-limit should be at least 1")
+	}
 	if c.RegionScanLimit <= 0 {
 		return errors.ErrInvalidServerOption.GenWithStackByArgs(
 			"region-scan-limit should be at least 1")

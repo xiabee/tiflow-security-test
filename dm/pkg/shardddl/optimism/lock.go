@@ -15,17 +15,16 @@ package optimism
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
-	"github.com/pingcap/tidb/pkg/util/schemacmp"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/util/schemacmp"
 	"github.com/pingcap/tiflow/dm/master/metrics"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	"github.com/pingcap/tiflow/dm/pkg/cputil"
@@ -33,6 +32,7 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+	"golang.org/x/net/context"
 )
 
 // DropColumnStage represents whether drop column done for a sharding table.
@@ -135,7 +135,7 @@ func (l *Lock) FetchTableInfos(task, source, schema, table string) (*model.Table
 		return nil, terror.ErrMasterOptimisticDownstreamMetaNotFound.Generate(task)
 	}
 
-	db, err := conn.GetDownstreamDB(l.downstreamMeta.dbConfig)
+	db, err := conn.DefaultDBProvider.Apply(l.downstreamMeta.dbConfig)
 	if err != nil {
 		return nil, err
 	}

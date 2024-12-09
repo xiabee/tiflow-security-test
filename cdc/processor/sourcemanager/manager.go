@@ -14,22 +14,19 @@
 package sourcemanager
 
 import (
-	"context"
+	"sync"
 	"time"
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/entry"
-	"github.com/pingcap/tiflow/cdc/kv"
-	"github.com/pingcap/tiflow/cdc/kv/sharedconn"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/processor/memquota"
-	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/sorter"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine"
+	pullerwrapper "github.com/pingcap/tiflow/cdc/processor/sourcemanager/puller"
 	"github.com/pingcap/tiflow/cdc/puller"
-	"github.com/pingcap/tiflow/pkg/config"
-	"github.com/pingcap/tiflow/pkg/txnutil"
+	cdccontext "github.com/pingcap/tiflow/pkg/context"
+	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/upstream"
-	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
 )
 
@@ -37,8 +34,6 @@ const defaultMaxBatchSize = 256
 
 // SourceManager is the manager of the source engine and puller.
 type SourceManager struct {
-	ready chan struct{}
-
 	// changefeedID is the changefeed ID.
 	// We use it to create the puller and log.
 	changefeedID model.ChangeFeedID
@@ -47,14 +42,15 @@ type SourceManager struct {
 	// mg is the mounter group for mount the raw kv entry.
 	mg entry.MounterGroup
 	// engine is the source engine.
-	engine sorter.SortEngine
+	engine engine.SortEngine
+	// pullers is the puller wrapper map.
+	pullers sync.Map
+	// Used to report the error to the processor.
+	errChan chan error
 	// Used to indicate whether the changefeed is in BDR mode.
 	bdrMode bool
 
 	safeModeAtStart bool
-
-	enableTableMonitor bool
-	puller             *puller.MultiplexingPuller
 }
 
 // New creates a new source manager.
@@ -62,29 +58,19 @@ func New(
 	changefeedID model.ChangeFeedID,
 	up *upstream.Upstream,
 	mg entry.MounterGroup,
-	engine sorter.SortEngine,
+	engine engine.SortEngine,
+	errChan chan error,
 	bdrMode bool,
-	enableTableMonitor bool,
 	safeModeAtStart bool,
 ) *SourceManager {
-	return newSourceManager(changefeedID, up, mg, engine, bdrMode, enableTableMonitor, safeModeAtStart)
-}
-
-// NewForTest creates a new source manager for testing.
-func NewForTest(
-	changefeedID model.ChangeFeedID,
-	up *upstream.Upstream,
-	mg entry.MounterGroup,
-	engine sorter.SortEngine,
-	bdrMode bool,
-) *SourceManager {
 	return &SourceManager{
-		ready:        make(chan struct{}),
-		changefeedID: changefeedID,
-		up:           up,
-		mg:           mg,
-		engine:       engine,
-		bdrMode:      bdrMode,
+		changefeedID:    changefeedID,
+		up:              up,
+		mg:              mg,
+		engine:          engine,
+		errChan:         errChan,
+		bdrMode:         bdrMode,
+		safeModeAtStart: safeModeAtStart,
 	}
 }
 
@@ -92,167 +78,83 @@ func isOldUpdateKVEntry(raw *model.RawKVEntry, getReplicaTs func() model.Ts) boo
 	return raw != nil && raw.IsUpdate() && raw.CRTs < getReplicaTs()
 }
 
-func newSourceManager(
-	changefeedID model.ChangeFeedID,
-	up *upstream.Upstream,
-	mg entry.MounterGroup,
-	engine sorter.SortEngine,
-	bdrMode bool,
-	enableTableMonitor bool,
-	safeModeAtStart bool,
-) *SourceManager {
-	mgr := &SourceManager{
-		ready:              make(chan struct{}),
-		changefeedID:       changefeedID,
-		up:                 up,
-		mg:                 mg,
-		engine:             engine,
-		bdrMode:            bdrMode,
-		enableTableMonitor: enableTableMonitor,
-		safeModeAtStart:    safeModeAtStart,
-	}
-
-	serverConfig := config.GetGlobalServerConfig()
-	grpcPool := sharedconn.NewConnAndClientPool(mgr.up.SecurityConfig, kv.GetGlobalGrpcMetrics())
-	client := kv.NewSharedClient(
-		mgr.changefeedID, serverConfig, mgr.bdrMode,
-		mgr.up.PDClient, grpcPool, mgr.up.RegionCache, mgr.up.PDClock,
-		txnutil.NewLockerResolver(mgr.up.KVStorage.(tikv.Storage), mgr.changefeedID),
-	)
-
-	// consume add raw kv entry to the engine.
-	// It will be called by the puller when new raw kv entry is received.
-	consume := func(ctx context.Context, raw *model.RawKVEntry, spans []tablepb.Span, shouldSplitKVEntry model.ShouldSplitKVEntry) error {
-		if len(spans) > 1 {
-			log.Panic("DML puller subscribes multiple spans",
-				zap.String("namespace", mgr.changefeedID.Namespace),
-				zap.String("changefeed", mgr.changefeedID.ID))
-		}
-		if raw != nil {
-			if shouldSplitKVEntry(raw) {
-				deleteKVEntry, insertKVEntry, err := model.SplitUpdateKVEntry(raw)
-				if err != nil {
-					return err
-				}
-				deleteEvent := model.NewPolymorphicEvent(deleteKVEntry)
-				insertEvent := model.NewPolymorphicEvent(insertKVEntry)
-				mgr.engine.Add(spans[0], deleteEvent, insertEvent)
-			} else {
-				pEvent := model.NewPolymorphicEvent(raw)
-				mgr.engine.Add(spans[0], pEvent)
-			}
-		}
-		return nil
-	}
-	slots, hasher := mgr.engine.SlotsAndHasher()
-
-	mgr.puller = puller.NewMultiplexingPuller(
-		mgr.changefeedID,
-		client,
-		up.PDClock,
-		consume,
-		slots,
-		hasher,
-		int(serverConfig.KVClient.FrontierConcurrent))
-
-	return mgr
-}
-
 // AddTable adds a table to the source manager. Start puller and register table to the engine.
-func (m *SourceManager) AddTable(span tablepb.Span, tableName string, startTs model.Ts, getReplicaTs func() model.Ts) {
+func (m *SourceManager) AddTable(ctx cdccontext.Context, tableID model.TableID, tableName string, startTs model.Ts, getReplicaTs func() model.Ts) {
 	// Add table to the engine first, so that the engine can receive the events from the puller.
-	m.engine.AddTable(span, startTs)
-
+	m.engine.AddTable(tableID)
 	shouldSplitKVEntry := func(raw *model.RawKVEntry) bool {
 		return m.safeModeAtStart && isOldUpdateKVEntry(raw, getReplicaTs)
 	}
-
-	// Only nil in unit tests.
-	if m.puller != nil {
-		m.puller.Subscribe([]tablepb.Span{span}, startTs, tableName, shouldSplitKVEntry)
-	}
+	p := pullerwrapper.NewPullerWrapper(m.changefeedID, tableID, tableName, startTs, m.bdrMode, shouldSplitKVEntry)
+	p.Start(ctx, m.up, m.engine, m.errChan)
+	m.pullers.Store(tableID, p)
 }
 
 // RemoveTable removes a table from the source manager. Stop puller and unregister table from the engine.
-func (m *SourceManager) RemoveTable(span tablepb.Span) {
-	m.puller.Unsubscribe([]tablepb.Span{span})
-	m.engine.RemoveTable(span)
+func (m *SourceManager) RemoveTable(tableID model.TableID) {
+	if wrapper, ok := m.pullers.Load(tableID); ok {
+		wrapper.(*pullerwrapper.Wrapper).Close()
+		m.pullers.Delete(tableID)
+	}
+	m.engine.RemoveTable(tableID)
 }
 
 // OnResolve just wrap the engine's OnResolve method.
-func (m *SourceManager) OnResolve(action func(tablepb.Span, model.Ts)) {
+func (m *SourceManager) OnResolve(action func(model.TableID, model.Ts)) {
 	m.engine.OnResolve(action)
 }
 
 // FetchByTable just wrap the engine's FetchByTable method.
 func (m *SourceManager) FetchByTable(
-	span tablepb.Span, lowerBound, upperBound sorter.Position,
+	tableID model.TableID, lowerBound, upperBound engine.Position,
 	quota *memquota.MemQuota,
-) *sorter.MountedEventIter {
-	iter := m.engine.FetchByTable(span, lowerBound, upperBound)
-	return sorter.NewMountedEventIter(m.changefeedID, iter, m.mg, defaultMaxBatchSize, quota)
+) *engine.MountedEventIter {
+	iter := m.engine.FetchByTable(tableID, lowerBound, upperBound)
+	return engine.NewMountedEventIter(m.changefeedID, iter, m.mg, defaultMaxBatchSize, quota)
 }
 
 // CleanByTable just wrap the engine's CleanByTable method.
-func (m *SourceManager) CleanByTable(span tablepb.Span, upperBound sorter.Position) error {
-	return m.engine.CleanByTable(span, upperBound)
+func (m *SourceManager) CleanByTable(tableID model.TableID, upperBound engine.Position) error {
+	return m.engine.CleanByTable(tableID, upperBound)
 }
 
 // GetTablePullerStats returns the puller stats of the table.
-func (m *SourceManager) GetTablePullerStats(span tablepb.Span) puller.Stats {
-	return m.puller.Stats(span)
+func (m *SourceManager) GetTablePullerStats(tableID model.TableID) puller.Stats {
+	p, ok := m.pullers.Load(tableID)
+	if !ok {
+		log.Panic("Table puller not found when getting table puller stats",
+			zap.String("namespace", m.changefeedID.Namespace),
+			zap.String("changefeed", m.changefeedID.ID),
+			zap.Int64("tableID", tableID))
+	}
+	return p.(*pullerwrapper.Wrapper).GetStats()
 }
 
 // GetTableSorterStats returns the sorter stats of the table.
-func (m *SourceManager) GetTableSorterStats(span tablepb.Span) sorter.TableStats {
-	return m.engine.GetStatsByTable(span)
-}
-
-// Run implements util.Runnable.
-func (m *SourceManager) Run(ctx context.Context, _ ...chan<- error) error {
-	close(m.ready)
-	// Only nil in unit tests.
-	if m.puller == nil {
-		return nil
-	}
-	return m.puller.Run(ctx)
-}
-
-// WaitForReady implements util.Runnable.
-func (m *SourceManager) WaitForReady(ctx context.Context) {
-	select {
-	case <-ctx.Done():
-	case <-m.ready:
-	}
+func (m *SourceManager) GetTableSorterStats(tableID model.TableID) engine.TableStats {
+	return m.engine.GetStatsByTable(tableID)
 }
 
 // Close closes the source manager. Stop all pullers and close the engine.
-// It also implements util.Runnable.
-func (m *SourceManager) Close() {
+func (m *SourceManager) Close() error {
 	log.Info("Closing source manager",
 		zap.String("namespace", m.changefeedID.Namespace),
 		zap.String("changefeed", m.changefeedID.ID))
-
 	start := time.Now()
-
+	m.pullers.Range(func(key, value interface{}) bool {
+		value.(*pullerwrapper.Wrapper).Close()
+		return true
+	})
 	log.Info("All pullers have been closed",
 		zap.String("namespace", m.changefeedID.Namespace),
 		zap.String("changefeed", m.changefeedID.ID),
 		zap.Duration("cost", time.Since(start)))
-
 	if err := m.engine.Close(); err != nil {
-		log.Panic("Fail to close sort engine",
-			zap.String("namespace", m.changefeedID.Namespace),
-			zap.String("changefeed", m.changefeedID.ID),
-			zap.Error(err))
+		return cerrors.Trace(err)
 	}
 	log.Info("Closed source manager",
 		zap.String("namespace", m.changefeedID.Namespace),
 		zap.String("changefeed", m.changefeedID.ID),
 		zap.Duration("cost", time.Since(start)))
-}
-
-// Add adds events to the engine. It is used for testing.
-func (m *SourceManager) Add(span tablepb.Span, events ...*model.PolymorphicEvent) {
-	m.engine.Add(span, events...)
+	return nil
 }

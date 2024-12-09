@@ -14,6 +14,9 @@
 package cli
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/spf13/cobra"
@@ -36,8 +39,14 @@ func (o *unsafeCommonOptions) confirmMetaDelete(cmd *cobra.Command) error {
 	}
 
 	cmd.Printf("Confirm that you know what this command will do and use it at your own risk [Y/N]\n")
-	confirmed := readYOrN(cmd)
-	if !confirmed {
+
+	var yOrN string
+	_, err := fmt.Scan(&yOrN)
+	if err != nil {
+		return err
+	}
+
+	if strings.ToLower(strings.TrimSpace(yOrN)) != "y" {
 		return errors.NewNoStackError("abort meta command")
 	}
 

@@ -15,10 +15,9 @@ package sqlmodel
 
 import (
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/types"
 )
 
 // WhereHandle is used to generate a WHERE clause in SQL.
@@ -103,7 +102,7 @@ func getPKIsHandleIdx(ti *model.TableInfo) *model.IndexInfo {
 			Unique:  true,
 			Primary: true,
 			State:   model.StatePublic,
-			Tp:      pmodel.IndexTypeBtree,
+			Tp:      model.IndexTypeBtree,
 			Columns: []*model.IndexColumn{{
 				Name:   pk.Name,
 				Offset: pk.Offset,

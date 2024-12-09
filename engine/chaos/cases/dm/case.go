@@ -23,16 +23,15 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
-	"github.com/pingcap/tiflow/dm/pkg/conn"
+	"github.com/pingcap/tidb-tools/pkg/diff"
+	"github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tidb/util/dbutil"
 	sqlconfig "github.com/pingcap/tiflow/dm/simulator/config"
 	"github.com/pingcap/tiflow/dm/simulator/mcp"
 	sqlgen "github.com/pingcap/tiflow/dm/simulator/sqlgen"
 	pb "github.com/pingcap/tiflow/engine/enginepb"
 	"github.com/pingcap/tiflow/engine/jobmaster/dm/config"
 	"github.com/pingcap/tiflow/engine/test/e2e"
-	"github.com/pingcap/tiflow/pkg/diff"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/retry"
 	"go.uber.org/zap"
@@ -90,13 +89,13 @@ func NewCase(ctx context.Context, addr string, name string, cfgPath string) (*Ca
 		result:     make([]int, 3),
 	}
 	for _, upstream := range jobCfg.Upstreams {
-		source, err := newDBConn(ctx, conn.UpstreamDBConfig(upstream.DBCfg), name)
+		source, err := newDBConn(ctx, upstream.DBCfg, name)
 		if err != nil {
 			return nil, err
 		}
 		c.sources = append(c.sources, source)
 	}
-	target, err := newDBConn(ctx, conn.DownstreamDBConfig(jobCfg.TargetDB), name)
+	target, err := newDBConn(ctx, jobCfg.TargetDB, name)
 	if err != nil {
 		return nil, err
 	}

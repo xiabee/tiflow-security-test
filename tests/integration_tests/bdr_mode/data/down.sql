@@ -1,5 +1,3 @@
-admin set bdr role secondary;
-
 use `bdr_mode`;
 
 begin;

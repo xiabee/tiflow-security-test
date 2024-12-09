@@ -1,6 +1,6 @@
 # TiDB Data Migration Platform
 
-[**TiDB Data Migration (DM)**](https://docs.pingcap.com/tidb/stable/dm-overview) is an integrated data migration task management platform that supports full data migration and incremental data replication from MySQL or MariaDB to [TiDB](https://docs.pingcap.com/tidb/stable). It helps reduce the operations cost and simplify the troubleshooting process.
+[**TiDB Data Migration (DM)**](https://docs.pingcap.com/tidb-data-migration/stable) is an integrated data migration task management platform that supports full data migration and incremental data replication from MySQL/MariaDB into [TiDB](https://docs.pingcap.com/tidb/stable). It helps reduce the operations cost and simplify the troubleshooting process.
 
 ## Architecture
 
@@ -8,10 +8,10 @@
 
 ## Documentation
 
-- [English](https://docs.pingcap.com/tidb/stable/dm-overview)
-- [简体中文](https://docs.pingcap.com/zh/tidb/stable/dm-overview)
+- [Detailed documentation](https://docs.pingcap.com/tidb-data-migration/stable/)
+- [简体中文文档](https://docs.pingcap.com/zh/tidb-data-migration/stable/)
 
-## Build
+## Building
 
 To check the code style and build binaries, you can simply run:
 
@@ -19,7 +19,7 @@ To check the code style and build binaries, you can simply run:
 make build
 ```
 
-Note that DM supports building with the Go version `Go >= 1.23`. For unit test preparation, see [Running/Unit Test](dm/tests/README.md#Unit-Test).
+Note that DM supports building with Go version `Go >= 1.19`, and unit test preparation can be found in [Running/Unit Test](dm/tests/README.md#Unit-Test)
 
 If you only want to build binaries, you can run:
 
@@ -31,45 +31,45 @@ make dm-master  # build DM-master
 make dmctl      # build dmctl
 ```
 
-After DM is built successfully, you can find binaries in the `bin` directory.
+When DM is built successfully, you can find binaries in the `bin` directory.
 
 ## Run tests
 
 Run all tests, including unit tests and integration tests:
 
-See [Tests README](dm/tests/README.md) for a more detailed guide.
+See [Tests README](dm/tests/README.md) for a more detailed guidance.
 
 ```bash
 make test
 ```
 
-## Install
+## Installing
 
-See [DM Quick Start Guide](https://docs.pingcap.com/tidb/stable/quick-start-with-dm) and [Deploy a DM Cluster Using TiUP](https://docs.pingcap.com/tidb/stable/deploy-a-dm-cluster-using-tiup).
+See the "Deploy" section in [our doc](https://docs.pingcap.com/tidb-data-migration/)
 
-## Configuration file
+## Config File
 
-See [DM Configuration File Overview](https://docs.pingcap.com/tidb/stable/dm-config-overview).
+See the "Configuration" section in [our doc](https://docs.pingcap.com/tidb-data-migration/stable/config-overview)
 
 ## Roadmap
 
-See [Roadmap](dm/roadmap.md).
+Read the [Roadmap](dm/roadmap.md).
 
 ## Contributing
 
-We welcome and greatly appreciate contributions. See [CONTRIBUTING.md](dm/CONTRIBUTING.md)
+Contributions are welcomed and greatly appreciated. See [CONTRIBUTING.md](dm/CONTRIBUTING.md)
 for details on submitting patches and the contribution workflow.
 
-If you have any questions, let's discuss them on the [TiDB Internals forum](https://internals.tidb.io/).
+Any questions? Let's discuss on [TiDB Internals forum](https://internals.tidb.io/).
 
 ## More resources
 
 - TiDB blog
 
   - [English](https://pingcap.com/blog/)
-  - [简体中文](https://cn.pingcap.com/blog/)
+  - [简体中文](https://pingcap.com/blog-cn/)
 
 - TiDB case studies
 
-  - [English](https://www.pingcap.com/customers/)
-  - [简体中文](https://cn.pingcap.com/case/)
+  - [English](https://pingcap.com/case-studies/)
+  - [简体中文](https://pingcap.com/cases-cn/)

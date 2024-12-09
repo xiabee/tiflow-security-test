@@ -24,7 +24,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,7 +40,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/security"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/utils/tempurl"
+	"github.com/tikv/pd/pkg/tempurl"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 	"golang.org/x/sync/errgroup"
@@ -191,7 +190,7 @@ func TestServerTLSWithoutCommonName(t *testing.T) {
 	cp.EtcdClient = etcdClient
 	server.capture = cp
 	require.Nil(t, err)
-	err = server.startStatusHTTP(server.tcpServer.HTTP1Listener())
+	err = server.startStatusHTTP(context.TODO(), server.tcpServer.HTTP1Listener())
 	require.Nil(t, err)
 	defer func() {
 		require.Nil(t, server.statusServer.Close())
@@ -278,14 +277,14 @@ func TestServerTLSWithCommonNameAndRotate(t *testing.T) {
 	cp.EtcdClient = etcdClient
 	server.capture = cp
 	require.Nil(t, err)
-	err = server.startStatusHTTP(server.tcpServer.HTTP1Listener())
+	err = server.startStatusHTTP(context.TODO(), server.tcpServer.HTTP1Listener())
 	require.Nil(t, err)
 	defer func() {
 		require.Nil(t, server.statusServer.Close())
 	}()
 
 	statusURL := fmt.Sprintf("https://%s/api/v1/status", addr)
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	var wg sync.WaitGroup
@@ -318,11 +317,7 @@ func TestServerTLSWithCommonNameAndRotate(t *testing.T) {
 		return nil
 	}, retry.WithMaxTries(retryTime), retry.WithBackoffBaseDelay(50),
 		retry.WithIsRetryableErr(cerrors.IsRetryableError))
-	require.True(t,
-		strings.Contains(err.Error(), "remote error: tls: bad certificate") ||
-			strings.Contains(err.Error(), "remote error: tls: certificate required"),
-		"bad err: %s", err.Error(),
-	)
+	require.ErrorContains(t, err, "remote error: tls: bad certificate")
 
 	testTlSClient := func(securityCfg *security.Credential) error {
 		return retry.Do(ctx, func() error {

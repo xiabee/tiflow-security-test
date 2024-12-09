@@ -15,14 +15,15 @@ package parser
 
 import (
 	"bytes"
+	"strings"
 
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/format"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
-	_ "github.com/pingcap/tidb/pkg/types/parser_driver" // for import parser driver
-	"github.com/pingcap/tidb/pkg/util/filter"
-	"github.com/pingcap/tiflow/dm/pkg/conn"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/charset"
+	"github.com/pingcap/tidb/parser/format"
+	"github.com/pingcap/tidb/parser/model"
+	_ "github.com/pingcap/tidb/types/parser_driver" // for import parser driver
+	"github.com/pingcap/tidb/util/filter"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
@@ -34,6 +35,22 @@ const (
 	// https://github.com/pingcap/parser/pull/1021
 	SingleRenameTableNameNum = 2
 )
+
+func init() {
+	c := &charset.Charset{
+		Name:             charset.CharsetGBK,
+		DefaultCollation: "gbk_chinese_ci",
+		Collations:       make(map[string]*charset.Collation),
+		Desc:             "Chinese Internal Code Specification",
+		Maxlen:           2,
+	}
+	charset.AddCharset(c)
+	for _, coll := range charset.GetCollations() {
+		if strings.EqualFold(coll.CharsetName, c.Name) {
+			charset.AddCollation(coll)
+		}
+	}
+}
 
 // Parse wraps parser.Parse(), makes `parser` suitable for dm.
 func Parse(p *parser.Parser, sql, charset, collation string) (stmt []ast.StmtNode, err error) {
@@ -48,7 +65,7 @@ func Parse(p *parser.Parser, sql, charset, collation string) (stmt []ast.StmtNod
 // ref: https://github.com/pingcap/tidb/blob/09feccb529be2830944e11f5fed474020f50370f/server/sql_info_fetcher.go#L46
 type tableNameExtractor struct {
 	curDB  string
-	flavor conn.LowerCaseTableNamesFlavor
+	flavor utils.LowerCaseTableNamesFlavor
 	names  []*filter.Table
 }
 
@@ -58,7 +75,7 @@ func (tne *tableNameExtractor) Enter(in ast.Node) (ast.Node, bool) {
 	}
 	if t, ok := in.(*ast.TableName); ok {
 		var tb *filter.Table
-		if tne.flavor == conn.LCTableNamesSensitive {
+		if tne.flavor == utils.LCTableNamesSensitive {
 			tb = &filter.Table{Schema: t.Schema.O, Name: t.Name.O}
 		} else {
 			tb = &filter.Table{Schema: t.Schema.L, Name: t.Name.L}
@@ -82,7 +99,7 @@ func (tne *tableNameExtractor) Leave(in ast.Node) (ast.Node, bool) {
 // specifically, for `create table like` DDL, result contains [sourceTable, sourceRefTable]
 // for rename table ddl, result contains [old1, new1, old2, new2, old3, new3, ...] because of TiDB parser
 // for other DDL, order of tableName is the node visit order.
-func FetchDDLTables(schema string, stmt ast.StmtNode, flavor conn.LowerCaseTableNamesFlavor) ([]*filter.Table, error) {
+func FetchDDLTables(schema string, stmt ast.StmtNode, flavor utils.LowerCaseTableNamesFlavor) ([]*filter.Table, error) {
 	switch stmt.(type) {
 	case ast.DDLNode:
 	default:
@@ -128,8 +145,8 @@ func (v *tableRenameVisitor) Enter(in ast.Node) (ast.Node, bool) {
 			v.hasErr = true
 			return in, true
 		}
-		t.Schema = pmodel.NewCIStr(v.targetNames[v.i].Schema)
-		t.Name = pmodel.NewCIStr(v.targetNames[v.i].Name)
+		t.Schema = model.NewCIStr(v.targetNames[v.i].Schema)
+		t.Name = model.NewCIStr(v.targetNames[v.i].Name)
 		v.i++
 		return in, true
 	}
@@ -155,11 +172,11 @@ func RenameDDLTable(stmt ast.StmtNode, targetTables []*filter.Table) (string, er
 
 	switch v := stmt.(type) {
 	case *ast.AlterDatabaseStmt:
-		v.Name = pmodel.NewCIStr(targetTables[0].Schema)
+		v.Name = model.NewCIStr(targetTables[0].Schema)
 	case *ast.CreateDatabaseStmt:
-		v.Name = pmodel.NewCIStr(targetTables[0].Schema)
+		v.Name = model.NewCIStr(targetTables[0].Schema)
 	case *ast.DropDatabaseStmt:
-		v.Name = pmodel.NewCIStr(targetTables[0].Schema)
+		v.Name = model.NewCIStr(targetTables[0].Schema)
 	default:
 		visitor := &tableRenameVisitor{
 			targetNames: targetTables,
@@ -188,7 +205,7 @@ func RenameDDLTable(stmt ast.StmtNode, targetTables []*filter.Table) (string, er
 // if fail to restore, it would not restore the value of `stmt` (it changes it's values if `stmt` is one of  DropTableStmt, RenameTableStmt, AlterTableStmt).
 func SplitDDL(stmt ast.StmtNode, schema string) (sqls []string, err error) {
 	var (
-		schemaName = pmodel.NewCIStr(schema) // fill schema name
+		schemaName = model.NewCIStr(schema) // fill schema name
 		bf         = new(bytes.Buffer)
 		ctx        = &format.RestoreCtx{
 			Flags: format.DefaultRestoreFlags | format.RestoreTiDBSpecialComment | format.RestoreStringWithoutDefaultCharset,
@@ -197,9 +214,6 @@ func SplitDDL(stmt ast.StmtNode, schema string) (sqls []string, err error) {
 	)
 
 	switch v := stmt.(type) {
-	case *ast.CreateSequenceStmt:
-	case *ast.AlterSequenceStmt:
-	case *ast.DropSequenceStmt:
 	case *ast.AlterDatabaseStmt:
 		if v.AlterDefaultDatabase {
 			v.AlterDefaultDatabase = false
@@ -352,10 +366,6 @@ func genTableName(schema string, table string) *filter.Table {
 
 // CheckIsDDL checks input SQL whether is a valid DDL statement.
 func CheckIsDDL(sql string, p *parser.Parser) bool {
-	// fast path for begin/comit
-	if sql == "BEGIN" || sql == "COMMIT" {
-		return false
-	}
 	sql = utils.TrimCtrlChars(sql)
 
 	if utils.IsBuildInSkipDDL(sql) {

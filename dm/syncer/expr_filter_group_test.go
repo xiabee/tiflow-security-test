@@ -17,18 +17,14 @@ import (
 	"context"
 	"testing"
 
-	"github.com/pingcap/errors"
-	ddl2 "github.com/pingcap/tidb/pkg/ddl"
-	context2 "github.com/pingcap/tidb/pkg/expression/exprctx"
-	"github.com/pingcap/tidb/pkg/meta/metabuild"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/util/filter"
+	ddl2 "github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/util/filter"
 	"github.com/pingcap/tiflow/dm/config"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/schema"
 	"github.com/pingcap/tiflow/dm/pkg/utils"
-	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -124,8 +120,8 @@ create table t (
 		require.Len(t, exprs, 1)
 		expr := exprs[0]
 
-		ca.skippedRow = util.Must(adjustValueFromBinlogData(ca.skippedRow, ti))
-		ca.passedRow = util.Must(adjustValueFromBinlogData(ca.passedRow, ti))
+		ca.skippedRow = extractValueFromData(ca.skippedRow, ti.Columns, ti)
+		ca.passedRow = extractValueFromData(ca.passedRow, ti.Columns, ti)
 
 		skip, err := SkipDMLByExpression(sessCtx, ca.skippedRow, expr, ti.Columns)
 		require.NoError(t, err)
@@ -388,8 +384,8 @@ create table t (
 		require.Len(t, exprs, 1)
 		expr := exprs[0]
 
-		ca.skippedRow = util.Must(adjustValueFromBinlogData(ca.skippedRow, ti))
-		ca.passedRow = util.Must(adjustValueFromBinlogData(ca.passedRow, ti))
+		ca.skippedRow = extractValueFromData(ca.skippedRow, ti.Columns, ti)
+		ca.passedRow = extractValueFromData(ca.passedRow, ti.Columns, ti)
 
 		skip, err := SkipDMLByExpression(sessCtx, ca.skippedRow, expr, ti.Columns)
 		require.NoError(t, err)
@@ -442,7 +438,7 @@ create table t (
 	require.NoError(t, err)
 	require.Len(t, exprs, 1)
 	expr := exprs[0]
-	require.Equal(t, "0", expr.StringWithCtx(context2.EmptyParamValues, errors.RedactLogDisable))
+	require.Equal(t, "0", expr.String())
 
 	// skip nothing
 	skip, err := SkipDMLByExpression(sessCtx, []interface{}{0}, expr, ti.Columns)
@@ -495,7 +491,7 @@ create table t (
 
 	stmt, err := parseSQL(tableStr)
 	require.NoError(t, err)
-	tableInfo, err := ddl2.BuildTableInfoFromAST(metabuild.NewContext(), stmt.(*ast.CreateTableStmt))
+	tableInfo, err := ddl2.BuildTableInfoFromAST(stmt.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 
 	for i, c := range cases {

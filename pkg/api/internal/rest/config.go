@@ -18,7 +18,6 @@ import (
 	"path"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tiflow/cdc/api"
 	cerrors "github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/httputil"
 	"github.com/pingcap/tiflow/pkg/security"
@@ -30,25 +29,10 @@ type Config struct {
 	Host string
 	// APIPath is a sub-path that points to an API root.
 	APIPath string
-	// Credential holds the security Credential used for generating tls config.
+	// Credential holds the security Credential used for generating tls config
 	Credential *security.Credential
-	// authentication holds the basic authentication information used for the REST client.
-	authentication BasicAuth
 	// API verion
 	Version string
-	// Extra query parameters
-	Values url.Values
-}
-
-// parseAuthentication parses the authentication information from the config and
-// removes the user and password from the values.
-func (c *Config) parseAuthentication() {
-	c.authentication = BasicAuth{
-		User:     c.Values.Get(api.APIOpVarTiCDCUser),
-		Password: c.Values.Get(api.APIOpVarTiCDCPassword),
-	}
-	c.Values.Del(api.APIOpVarTiCDCUser)
-	c.Values.Del(api.APIOpVarTiCDCPassword)
 }
 
 // defaultServerURLFromConfig is used to build base URL and api path.
@@ -85,7 +69,6 @@ func CDCRESTClientFromConfig(config *Config) (*CDCRESTClient, error) {
 		return nil, errors.New("APIPath is required when initializing a CDCRESTClient")
 	}
 
-	config.parseAuthentication()
 	httpClient, err := httputil.NewClient(config.Credential)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -96,7 +79,7 @@ func CDCRESTClientFromConfig(config *Config) (*CDCRESTClient, error) {
 		return nil, errors.Trace(err)
 	}
 
-	restClient, err := NewCDCRESTClient(baseURL, versionedAPIPath, httpClient, config.authentication, config.Values)
+	restClient, err := NewCDCRESTClient(baseURL, versionedAPIPath, httpClient)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

@@ -18,8 +18,7 @@ import (
 	"fmt"
 
 	"github.com/pingcap/errors"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tiflow/cdc/processor/tablepb"
+	timodel "github.com/pingcap/tidb/parser/model"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
 )
 
@@ -74,6 +73,7 @@ type DDLJobEntry struct {
 	Job    *timodel.Job
 	OpType OpType
 	CRTs   uint64
+	Err    error
 }
 
 // TaskPosition records the process information of a capture
@@ -247,10 +247,13 @@ func (ts *TaskStatus) Clone() *TaskStatus {
 }
 
 // TableID is the ID of the table
-type TableID = tablepb.TableID
+type TableID = int64
+
+// SchemaID is the ID of the schema
+type SchemaID = int64
 
 // Ts is the timestamp with a logical count
-type Ts = tablepb.Ts
+type Ts = uint64
 
 // ProcessorsInfos maps from capture IDs to TaskStatus
 type ProcessorsInfos map[CaptureID]*TaskStatus
@@ -297,4 +300,46 @@ func (status *ChangeFeedStatus) Unmarshal(data []byte) error {
 type ProcInfoSnap struct {
 	CfID      ChangeFeedID `json:"changefeed-id"`
 	CaptureID string       `json:"capture-id"`
+}
+
+// TableSet maintains a set of TableID.
+type TableSet struct {
+	memo map[TableID]struct{}
+}
+
+// NewTableSet creates a TableSet.
+func NewTableSet() *TableSet {
+	return &TableSet{
+		memo: make(map[TableID]struct{}),
+	}
+}
+
+// Add adds a tableID to TableSet.
+func (s *TableSet) Add(tableID TableID) {
+	s.memo[tableID] = struct{}{}
+}
+
+// Remove removes a tableID from a TableSet.
+func (s *TableSet) Remove(tableID TableID) {
+	delete(s.memo, tableID)
+}
+
+// Keys returns a collection of TableID.
+func (s *TableSet) Keys() []TableID {
+	result := make([]TableID, 0, len(s.memo))
+	for k := range s.memo {
+		result = append(result, k)
+	}
+	return result
+}
+
+// Contain checks whether a TableID is in TableSet.
+func (s *TableSet) Contain(tableID TableID) bool {
+	_, ok := s.memo[tableID]
+	return ok
+}
+
+// Size returns the size of TableSet.
+func (s *TableSet) Size() int {
+	return len(s.memo)
 }

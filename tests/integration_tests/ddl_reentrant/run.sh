@@ -12,7 +12,7 @@ SINK_TYPE=$1
 ddls=("create database ddl_reentrant" false 'CREATE DATABASE `ddl_reentrant`'
 	"create table ddl_reentrant.t3 (a int primary key, b int) partition by range(a) (partition p0 values less than (1000), partition p1 values less than (2000))" false 'CREATE TABLE `ddl_reentrant`.`t3` (`a` INT PRIMARY KEY,`b` INT) PARTITION BY RANGE (`a`) (PARTITION `p0` VALUES LESS THAN (1000),PARTITION `p1` VALUES LESS THAN (2000))'
 	"create table ddl_reentrant.t4 (a int primary key, b int)" false 'CREATE TABLE `ddl_reentrant`.`t4` (`a` INT PRIMARY KEY,`b` INT)'
-	"alter table ddl_reentrant.t3 exchange partition p0 with table ddl_reentrant.t4 without validation" true 'ALTER TABLE `ddl_reentrant`.`t3` EXCHANGE PARTITION `p0` WITH TABLE `ddl_reentrant`.`t4` WITHOUT VALIDATION'
+	"alter table ddl_reentrant.t3 exchange partition p0 with table ddl_reentrant.t4" true 'ALTER TABLE `ddl_reentrant`.`t3` EXCHANGE PARTITION `p0` WITH TABLE `ddl_reentrant`.`t4`'
 )
 
 function complete_ddls() {
@@ -101,8 +101,8 @@ function ddl_test() {
 }
 
 function run() {
-	# No need to test kafka and storage sink.
-	if [ "$SINK_TYPE" != "mysql" ]; then
+	# don't test kafka in this case
+	if [ "$SINK_TYPE" == "kafka" ]; then
 		return
 	fi
 

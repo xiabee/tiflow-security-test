@@ -28,6 +28,5 @@ ssl-key = ""
 ssl-ca-base64 = ""
 ssl-key-base64 = ""
 ssl-cert-base64 = ""
-secret-key-path = "/tmp/dm_test/dmctl_basic/master/key.txt"
 
 [experimental]

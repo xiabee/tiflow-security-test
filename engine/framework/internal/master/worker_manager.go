@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/engine/framework/config"
 	"github.com/pingcap/tiflow/engine/framework/metadata"
 	frameModel "github.com/pingcap/tiflow/engine/framework/model"
@@ -61,7 +62,6 @@ type WorkerManager struct {
 	// allWorkersReady is **closed** when a heartbeat has been received
 	// from all workers recorded in meta.
 	allWorkersReady chan struct{}
-	logger          *zap.Logger
 
 	clock clock.Clock
 
@@ -154,7 +154,7 @@ func (m *WorkerManager) InitAfterRecover(ctx context.Context) (retErr error) {
 	if m.state != workerManagerLoadingMeta {
 		// InitAfterRecover should only be called if
 		// NewWorkerManager has been called with isInit as false.
-		m.logger.Panic("Unreachable", zap.String("master-id", m.masterID))
+		log.Panic("Unreachable", zap.String("master-id", m.masterID))
 	}
 
 	// Unlock here because loading meta involves I/O, which can be long.
@@ -195,7 +195,7 @@ func (m *WorkerManager) InitAfterRecover(ctx context.Context) (retErr error) {
 	case <-ctx.Done():
 		return errors.Trace(ctx.Err())
 	case <-m.allWorkersReady:
-		m.logger.Info("All workers have sent heartbeats after master failover. Resuming right now.",
+		log.Info("All workers have sent heartbeats after master failover. Resuming right now.",
 			zap.Duration("duration", m.clock.Since(startTime)))
 	case <-timer.C:
 		// Wait for the worker timeout to expire
@@ -228,7 +228,7 @@ func (m *WorkerManager) HandleHeartbeat(msg *frameModel.HeartbeatPingMessage, fr
 
 	entry, exists := m.workerEntries[msg.FromWorkerID]
 	if !exists {
-		m.logger.Info("Message from stale worker dropped",
+		log.Info("Message from stale worker dropped",
 			zap.String("master-id", m.masterID),
 			zap.Any("message", msg),
 			zap.String("from-node", fromNode))
@@ -253,7 +253,7 @@ func (m *WorkerManager) HandleHeartbeat(msg *frameModel.HeartbeatPingMessage, fr
 			return
 		}
 
-		m.logger.Info("Worker discovered", zap.String("master-id", m.masterID),
+		log.Info("Worker discovered", zap.String("master-id", m.masterID),
 			zap.Any("worker-entry", entry))
 		entry.MarkAsOnline(model.ExecutorID(fromNode), m.nextExpireTime())
 
@@ -266,7 +266,7 @@ func (m *WorkerManager) HandleHeartbeat(msg *frameModel.HeartbeatPingMessage, fr
 		}
 		if allReady {
 			close(m.allWorkersReady)
-			m.logger.Info("All workers have sent heartbeats, sending signal to resume the master",
+			log.Info("All workers have sent heartbeats, sending signal to resume the master",
 				zap.String("master-id", m.masterID))
 		}
 	} else {
@@ -351,7 +351,7 @@ func (m *WorkerManager) BeforeStartingWorker(
 	defer m.mu.Unlock()
 
 	if _, exists := m.workerEntries[workerID]; exists {
-		m.logger.Panic("worker already exists", zap.String("worker-id", workerID))
+		log.Panic("worker already exists", zap.String("worker-id", workerID))
 	}
 
 	m.workerEntries[workerID] = newWorkerEntry(
@@ -407,7 +407,7 @@ func (m *WorkerManager) OnWorkerStatusUpdateMessage(msg *statusutil.WorkerStatus
 
 	entry, exists := m.workerEntries[msg.Worker]
 	if !exists {
-		m.logger.Info("WorkerStatusMessage dropped for unknown worker",
+		log.Info("WorkerStatusMessage dropped for unknown worker",
 			zap.String("master-id", m.masterID),
 			zap.Any("message", msg))
 		return
@@ -469,12 +469,6 @@ func (m *WorkerManager) IsInitialized() bool {
 	defer m.mu.Unlock()
 
 	return m.state == workerManagerReady
-}
-
-// WithLogger passes a logger.
-func (m *WorkerManager) WithLogger(logger *zap.Logger) *WorkerManager {
-	m.logger = logger
-	return m
 }
 
 func (m *WorkerManager) checkWorkerEntriesOnce() error {
@@ -547,7 +541,7 @@ func (m *WorkerManager) runBackgroundChecker() error {
 	for {
 		select {
 		case <-m.closeCh:
-			m.logger.Info("timeout checker exited", zap.String("master-id", m.masterID))
+			log.Info("timeout checker exited", zap.String("master-id", m.masterID))
 			return nil
 		case <-ticker.C:
 			if err := m.checkWorkerEntriesOnce(); err != nil {
@@ -568,14 +562,14 @@ func (m *WorkerManager) checkMasterEpochMatch(msgEpoch frameModel.Epoch) (ok boo
 		// we shouldn't be running.
 		// TODO We need to do some chaos testing to determining whether and how to
 		// handle this situation.
-		m.logger.Panic("We are a stale master still running",
+		log.Panic("We are a stale master still running",
 			zap.String("master-id", m.masterID),
 			zap.Int64("msg-epoch", msgEpoch),
 			zap.Int64("own-epoch", m.epoch))
 	}
 
 	if msgEpoch < m.epoch {
-		m.logger.Info("Message from smaller epoch dropped",
+		log.Info("Message from smaller epoch dropped",
 			zap.String("master-id", m.masterID),
 			zap.Int64("msg-epoch", msgEpoch),
 			zap.Int64("own-epoch", m.epoch))
@@ -586,14 +580,14 @@ func (m *WorkerManager) checkMasterEpochMatch(msgEpoch frameModel.Epoch) (ok boo
 
 func (m *WorkerManager) checkWorkerEpochMatch(curEpoch, msgEpoch frameModel.Epoch) bool {
 	if msgEpoch > curEpoch {
-		m.logger.Panic("We are a stale master still running",
+		log.Panic("We are a stale master still running",
 			zap.String("master-id", m.masterID), zap.Int64("own-epoch", m.epoch),
 			zap.Int64("own-worker-epoch", curEpoch),
 			zap.Int64("msg-worker-epoch", msgEpoch),
 		)
 	}
 	if msgEpoch < curEpoch {
-		m.logger.Info("Message from small worker epoch dropped",
+		log.Info("Message from small worker epoch dropped",
 			zap.String("master-id", m.masterID),
 			zap.Int64("own-worker-epoch", curEpoch),
 			zap.Int64("msg-worker-epoch", msgEpoch),
@@ -631,7 +625,7 @@ func (m *WorkerManager) removeTombstoneEntry(id frameModel.WorkerID) {
 	}
 
 	if !entry.IsTombstone() {
-		m.logger.Panic("Unreachable: not a tombstone", zap.Stringer("entry", entry))
+		log.Panic("Unreachable: not a tombstone", zap.Stringer("entry", entry))
 	}
 
 	delete(m.workerEntries, id)

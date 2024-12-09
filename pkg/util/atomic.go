@@ -13,19 +13,11 @@
 
 package util
 
-type numbers interface {
-	int | int8 | int16 | int32 | int64 | uint | uint8 | uint16 | uint32 | uint64 | uintptr | float32 | float64
-}
-
-type genericAtomic[T numbers] interface {
-	Load() T
-	Store(T)
-	CompareAndSwap(old, new T) bool
-}
+import "sync/atomic"
 
 // CompareAndIncrease updates the target if the new value is larger than or equal to the old value.
 // It returns false if the new value is smaller than the old value.
-func CompareAndIncrease[T numbers](target genericAtomic[T], new T) bool {
+func CompareAndIncrease(target *atomic.Uint64, new uint64) bool {
 	for {
 		old := target.Load()
 		if new < old {
@@ -39,7 +31,7 @@ func CompareAndIncrease[T numbers](target genericAtomic[T], new T) bool {
 
 // CompareAndMonotonicIncrease updates the target if the new value is larger than the old value.
 // It returns false if the new value is smaller than or equal to the old value.
-func CompareAndMonotonicIncrease[T numbers](target genericAtomic[T], new T) bool {
+func CompareAndMonotonicIncrease(target *atomic.Uint64, new uint64) bool {
 	for {
 		old := target.Load()
 		if new <= old {
@@ -53,6 +45,6 @@ func CompareAndMonotonicIncrease[T numbers](target genericAtomic[T], new T) bool
 
 // MustCompareAndMonotonicIncrease updates the target if the new value is larger than the old value. It do nothing
 // if the new value is smaller than or equal to the old value.
-func MustCompareAndMonotonicIncrease[T numbers](target genericAtomic[T], new T) {
+func MustCompareAndMonotonicIncrease(target *atomic.Uint64, new uint64) {
 	_ = CompareAndMonotonicIncrease(target, new)
 }

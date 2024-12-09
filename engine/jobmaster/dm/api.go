@@ -46,23 +46,6 @@ type JobStatus struct {
 	FinishedUnitStatus map[string][]*metadata.FinishedTaskStatus `json:"finished_unit_status,omitempty"`
 }
 
-// ShardTable represents create table statements of a source table.
-type ShardTable struct {
-	Current string
-	Next    string
-}
-
-// DDLLock represents ddl lock of a target table.
-type DDLLock struct {
-	// source table -> [current table, pending table(conflict table)]
-	ShardTables map[metadata.SourceTable]ShardTable
-}
-
-// ShowDDLLocksResponse represents response of show ddl locks.
-type ShowDDLLocksResponse struct {
-	Locks map[metadata.TargetTable]DDLLock
-}
-
 // QueryJobStatus is the api of query job status.
 func (jm *JobMaster) QueryJobStatus(ctx context.Context, tasks []string) (*JobStatus, error) {
 	jobState, err := jm.metadata.JobStore().Get(ctx)
@@ -95,12 +78,6 @@ func (jm *JobMaster) QueryJobStatus(ctx context.Context, tasks []string) (*JobSt
 		existUnitState bool
 	)
 
-	// need to get unit state here, so we calculate duration
-	state, err := jm.metadata.UnitStateStore().Get(ctx)
-	if err != nil && errors.Cause(err) != metadata.ErrStateNotFound {
-		return nil, err
-	}
-	unitState, existUnitState = state.(*metadata.UnitState)
 	for _, task := range tasks {
 		taskID := task
 		wg.Add(1)
@@ -156,7 +133,7 @@ func (jm *JobMaster) QueryJobStatus(ctx context.Context, tasks []string) (*JobSt
 
 	// should be done after we get current task-status, since some unit status might be missing if
 	// current unit finish between we get finished unit status and get current task-status
-	state, err = jm.metadata.UnitStateStore().Get(ctx)
+	state, err := jm.metadata.UnitStateStore().Get(ctx)
 	if err != nil && errors.Cause(err) != metadata.ErrStateNotFound {
 		return nil, err
 	}
@@ -192,7 +169,17 @@ func (jm *JobMaster) operateTask(ctx context.Context, op dmpkg.OperateType, cfg 
 
 // GetJobCfg gets job config.
 func (jm *JobMaster) GetJobCfg(ctx context.Context) (*config.JobCfg, error) {
-	return jm.metadata.JobStore().GetJobCfg(ctx)
+	state, err := jm.metadata.JobStore().Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	job := state.(*metadata.Job)
+
+	taskCfgs := make([]*config.TaskCfg, 0, len(job.Tasks))
+	for _, task := range job.Tasks {
+		taskCfgs = append(taskCfgs, task.Cfg)
+	}
+	return config.FromTaskCfgs(taskCfgs), nil
 }
 
 // UpdateJobCfg updates job config.
@@ -309,9 +296,4 @@ func (jm *JobMaster) BinlogSchemaTask(ctx context.Context, taskID string, req *d
 		return &dmpkg.CommonTaskResponse{ErrorMsg: err.Error()}
 	}
 	return resp.(*dmpkg.CommonTaskResponse)
-}
-
-// ShowDDLLocks implements the api of show ddl locks request.
-func (jm *JobMaster) ShowDDLLocks(ctx context.Context) ShowDDLLocksResponse {
-	return jm.ddlCoordinator.ShowDDLLocks(ctx)
 }

@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/stretchr/testify/require"
 )
@@ -30,7 +29,7 @@ func TestConfigApply(t *testing.T) {
 	expected.FlushInterval = 10 * time.Second
 	expected.FileSize = 16 * 1024 * 1024
 	expected.FileIndexWidth = config.DefaultFileIndexWidth
-	expected.DateSeparator = config.DateSeparatorDay.String()
+	expected.DateSeparator = config.DateSeparatorNone.String()
 	expected.EnablePartitionSeparator = true
 	expected.FlushConcurrency = 1
 	uri := "s3://bucket/prefix?worker-count=32&flush-interval=10s&file-size=16777216&protocol=csv"
@@ -38,6 +37,7 @@ func TestConfigApply(t *testing.T) {
 	require.Nil(t, err)
 
 	replicaConfig := config.GetDefaultReplicaConfig()
+	replicaConfig.Sink.DateSeparator = config.DateSeparatorNone.String()
 	err = replicaConfig.ValidateAndAdjust(sinkURI)
 	require.NoError(t, err)
 	cfg := NewConfig()
@@ -128,40 +128,4 @@ func TestVerifySinkURIParams(t *testing.T) {
 			require.Regexp(t, tc.expectedErr, err)
 		}
 	}
-}
-
-func TestMergeConfig(t *testing.T) {
-	uri := "s3://bucket/prefix"
-	sinkURI, err := url.Parse(uri)
-	require.NoError(t, err)
-	replicaConfig := config.GetDefaultReplicaConfig()
-	replicaConfig.Sink.CloudStorageConfig = &config.CloudStorageConfig{
-		WorkerCount:    aws.Int(12),
-		FileSize:       aws.Int(1485760),
-		FlushInterval:  aws.String("1m2s"),
-		OutputColumnID: aws.Bool(false),
-	}
-	c := NewConfig()
-	err = c.Apply(context.TODO(), sinkURI, replicaConfig)
-	require.NoError(t, err)
-	require.Equal(t, 12, c.WorkerCount)
-	require.Equal(t, 1485760, c.FileSize)
-	require.Equal(t, "1m2s", c.FlushInterval.String())
-
-	// test override
-	uri = "s3://bucket/prefix?worker-count=64&flush-interval=2m2s&file-size=33554432"
-	sinkURI, err = url.Parse(uri)
-	require.NoError(t, err)
-	replicaConfig.Sink.CloudStorageConfig = &config.CloudStorageConfig{
-		WorkerCount:    aws.Int(12),
-		FileSize:       aws.Int(10485760),
-		FlushInterval:  aws.String("1m2s"),
-		OutputColumnID: aws.Bool(false),
-	}
-	c = NewConfig()
-	err = c.Apply(context.TODO(), sinkURI, replicaConfig)
-	require.NoError(t, err)
-	require.Equal(t, 64, c.WorkerCount)
-	require.Equal(t, 33554432, c.FileSize)
-	require.Equal(t, "2m2s", c.FlushInterval.String())
 }

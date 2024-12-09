@@ -27,12 +27,11 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	tmysql "github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/util/dbutil"
-	"github.com/pingcap/tidb/pkg/util/filter"
+	"github.com/pingcap/tidb/parser/model"
+	tmysql "github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/util/filter"
 	"github.com/pingcap/tiflow/dm/config"
-	"github.com/pingcap/tiflow/dm/config/dbconfig"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
@@ -44,6 +43,7 @@ import (
 	"github.com/pingcap/tiflow/dm/pkg/schema"
 	"github.com/pingcap/tiflow/dm/pkg/storage"
 	"github.com/pingcap/tiflow/dm/pkg/terror"
+	"github.com/pingcap/tiflow/dm/pkg/utils"
 	"github.com/pingcap/tiflow/dm/syncer/dbconn"
 	"github.com/pingcap/tiflow/dm/syncer/metrics"
 	"github.com/uber-go/atomic"
@@ -481,8 +481,8 @@ func (cp *RemoteCheckPoint) Init(tctx *tcontext.Context) (err error) {
 	}()
 
 	checkPointDB := cp.cfg.To
-	checkPointDB.RawDBCfg = dbconfig.DefaultRawDBConfig().SetReadTimeout(maxCheckPointTimeout)
-	db, dbConns, err = dbconn.CreateConns(tctx, cp.cfg, conn.DownstreamDBConfig(&checkPointDB), 1, cp.cfg.IOTotalBytes, cp.cfg.UUID)
+	checkPointDB.RawDBCfg = config.DefaultRawDBConfig().SetReadTimeout(maxCheckPointTimeout)
+	db, dbConns, err = dbconn.CreateConns(tctx, cp.cfg, &checkPointDB, 1)
 	if err != nil {
 		return
 	}
@@ -675,7 +675,7 @@ func (cp *RemoteCheckPoint) IsOlderThanTablePoint(table *filter.Table, location 
 	}
 	oldLocation := point.MySQLLocation()
 	// if we update enable-gtid = false to true, we need to compare binlog position instead of GTID before we save table point
-	cmpGTID := cp.cfg.EnableGTID && !(gtid.CheckGTIDSetEmpty(oldLocation.GetGTID()) && binlog.ComparePosition(oldLocation.Position, binlog.MinPosition) > 0)
+	cmpGTID := cp.cfg.EnableGTID && !(oldLocation.GTIDSetStr() == "" && binlog.ComparePosition(oldLocation.Position, binlog.MinPosition) > 0)
 	cp.logCtx.L().Debug("compare table location whether is newer", zap.Stringer("location", location), zap.Stringer("old location", oldLocation), zap.Bool("cmpGTID", cmpGTID))
 
 	return binlog.CompareLocation(location, oldLocation, cmpGTID) <= 0
@@ -852,7 +852,7 @@ func (cp *RemoteCheckPoint) FlushPointsWithTableInfos(tctx *tcontext.Context, ta
 			points = append(points, point)
 		}
 		// use a new context apart from syncer, to make sure when syncer call `cancel` checkpoint could update
-		tctx2, cancel := tctx.WithContext(context.Background()).WithTimeout(conn.DefaultDBTimeout)
+		tctx2, cancel := tctx.WithContext(context.Background()).WithTimeout(utils.DefaultDBTimeout)
 		defer cancel()
 		_, err := cp.dbConn.ExecuteSQL(tctx2, cp.metricProxies, sqls, args...)
 		if err != nil {
@@ -1064,7 +1064,7 @@ func (cp *RemoteCheckPoint) Load(tctx *tcontext.Context) error {
 	for rows.Next() {
 		err := rows.Scan(&cpSchema, &cpTable, &binlogName, &binlogPos, &binlogGTIDSet, &exitSafeBinlogName, &exitSafeBinlogPos, &exitSafeBinlogGTIDSet, &tiBytes, &isGlobal)
 		if err != nil {
-			return terror.DBErrorAdapt(err, cp.dbConn.Scope(), terror.ErrDBDriverError)
+			return terror.WithScope(terror.DBErrorAdapt(err, terror.ErrDBDriverError), terror.ScopeDownstream)
 		}
 
 		gset, err := gtid.ParserGTID(cp.cfg.Flavor, binlogGTIDSet.String) // default to "".
@@ -1132,7 +1132,7 @@ func (cp *RemoteCheckPoint) Load(tctx *tcontext.Context) error {
 		mSchema[cpTable] = newBinlogPoint(location, location, ti, ti, cp.cfg.EnableGTID)
 	}
 
-	return terror.DBErrorAdapt(rows.Err(), cp.dbConn.Scope(), terror.ErrDBDriverError)
+	return terror.WithScope(terror.DBErrorAdapt(rows.Err(), terror.ErrDBDriverError), terror.ScopeDownstream)
 }
 
 // LoadIntoSchemaTracker loads table infos of all points into schema tracker.
@@ -1208,7 +1208,7 @@ func (cp *RemoteCheckPoint) LoadMeta(ctx context.Context) error {
 		err             error
 	)
 	switch cp.cfg.Mode {
-	case config.ModeAll, config.ModeLoadSync:
+	case config.ModeAll:
 		// NOTE: syncer must continue the syncing follow loader's tail, so we parse mydumper's output
 		// refine when master / slave switching added and checkpoint mechanism refactored
 		location, safeModeExitLoc, err = cp.parseMetaData(ctx)
@@ -1302,7 +1302,7 @@ func (cp *RemoteCheckPoint) genUpdateSQL(cpSchema, cpTable string, location binl
 func (cp *RemoteCheckPoint) parseMetaData(ctx context.Context) (*binlog.Location, *binlog.Location, error) {
 	// `metadata` is mydumper's output meta file name
 	filename := "metadata"
-	loc, loc2, err := dumpling.ParseMetaData(ctx, cp.cfg.LoaderConfig.Dir, filename, cp.cfg.ExtStorage)
+	loc, loc2, err := dumpling.ParseMetaData(ctx, cp.cfg.LoaderConfig.Dir, filename, cp.cfg.Flavor, cp.cfg.ExtStorage)
 	if err != nil {
 		toPrint, err2 := storage.ReadFile(ctx, cp.cfg.LoaderConfig.Dir, filename, nil)
 		if err2 != nil {

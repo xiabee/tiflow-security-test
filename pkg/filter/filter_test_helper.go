@@ -15,17 +15,16 @@ package filter
 
 import (
 	"testing"
-	"time"
 
-	ticonfig "github.com/pingcap/tidb/pkg/config"
-	tiddl "github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/kv"
-	timeta "github.com/pingcap/tidb/pkg/meta"
-	timodel "github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/store/mockstore"
-	"github.com/pingcap/tidb/pkg/testkit"
+	ticonfig "github.com/pingcap/tidb/config"
+	tiddl "github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/kv"
+	timeta "github.com/pingcap/tidb/meta"
+	timodel "github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/store/mockstore"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
@@ -47,7 +46,7 @@ func newTestHelper(t *testing.T) *testHelper {
 	ticonfig.UpdateGlobal(func(conf *ticonfig.Config) {
 		conf.AlterPrimaryKey = true
 	})
-	session.SetSchemaLease(time.Second)
+	session.SetSchemaLease(0)
 	session.DisableStats4Test()
 	domain, err := session.BootstrapSession(store)
 	require.Nil(t, err)
@@ -64,14 +63,9 @@ func newTestHelper(t *testing.T) *testHelper {
 // ddlToJob executes the DDL stmt and returns the DDL job
 func (s *testHelper) ddlToJob(ddl string) *timodel.Job {
 	s.tk.MustExec(ddl)
-	reader := s.getCurrentMeta()
-	jobs, err := tiddl.GetLastNHistoryDDLJobs(reader.(*timeta.Mutator), 1)
+	jobs, err := tiddl.GetLastNHistoryDDLJobs(s.getCurrentMeta(), 1)
 	require.Nil(s.t, err)
 	require.Len(s.t, jobs, 1)
-	// Set State from Synced to Done.
-	// Because jobs are put to history queue after TiDB alter its state from
-	// Done to Synced.
-	jobs[0].State = timodel.JobStateDone
 	return jobs[0]
 }
 
@@ -89,10 +83,10 @@ func (s *testHelper) getTk() *testkit.TestKit {
 }
 
 // getCurrentMeta return the current meta snapshot
-func (s *testHelper) getCurrentMeta() timeta.Reader {
+func (s *testHelper) getCurrentMeta() *timeta.Meta {
 	ver, err := s.storage.CurrentVersion(oracle.GlobalTxnScope)
 	require.Nil(s.t, err)
-	return timeta.NewReader(s.storage.GetSnapshot(ver))
+	return timeta.NewSnapshotMeta(s.storage.GetSnapshot(ver))
 }
 
 // close closes the helper

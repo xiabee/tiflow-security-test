@@ -23,11 +23,11 @@ import (
 	gmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
-	"github.com/pingcap/tidb/pkg/util/filter"
+	"github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
+	"github.com/pingcap/tidb/util/filter"
 	cdcmodel "github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/dm/config"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
@@ -467,7 +467,7 @@ func TestValidatorWorkerGetTargetRows(t *testing.T) {
 
 		worker := &validateWorker{
 			ctx: context.Background(),
-			db:  conn.NewBaseDBForTest(db, func() {}),
+			db:  conn.NewBaseDB(db, func() {}),
 			L:   log.L(),
 		}
 		targetRows, err2 := worker.getTargetRows(cond)
@@ -499,7 +499,7 @@ func TestValidatorWorkerGetTargetRows(t *testing.T) {
 	}
 	worker := &validateWorker{
 		ctx: context.Background(),
-		db:  conn.NewBaseDBForTest(db, func() {}),
+		db:  conn.NewBaseDB(db, func() {}),
 		L:   log.L(),
 	}
 

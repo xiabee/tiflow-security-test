@@ -24,13 +24,11 @@ var defaultOpts = []goleak.Option{
 	goleak.IgnoreTopFunction("go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop"),
 	goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
 	goleak.IgnoreTopFunction("github.com/golang/glog.(*loggingT).flushDaemon"),
-	goleak.IgnoreTopFunction("github.com/golang/glog.(*fileSink).flushDaemon"),
-
 	// library used by sarama, ref: https://github.com/rcrowley/go-metrics/pull/266
 	goleak.IgnoreTopFunction("github.com/rcrowley/go-metrics.(*meterArbiter).tick"),
 	// Because we close the sarama producer asynchronously, so we have to ignore these funcs.
-	goleak.IgnoreTopFunction("github.com/IBM/sarama.(*client).backgroundMetadataUpdater"),
-	goleak.IgnoreTopFunction("github.com/IBM/sarama.(*Broker).responseReceiver"),
+	goleak.IgnoreTopFunction("github.com/Shopify/sarama.(*client).backgroundMetadataUpdater"),
+	goleak.IgnoreTopFunction("github.com/Shopify/sarama.(*Broker).responseReceiver"),
 	goleak.IgnoreTopFunction("github.com/lestrrat-go/httprc.runFetchWorker"),
 }
 

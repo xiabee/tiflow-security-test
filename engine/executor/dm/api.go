@@ -42,12 +42,10 @@ func (w *dmWorker) QueryStatus(ctx context.Context, req *dmpkg.QueryStatusReques
 		return &dmpkg.QueryStatusResponse{ErrorMsg: err.Error()}
 	}
 	return &dmpkg.QueryStatusResponse{
-		Unit:             w.workerType,
-		Stage:            stage,
-		Result:           dmpkg.NewProcessResultFromPB(result),
-		Status:           buf.Bytes(),
-		IoTotalBytes:     w.cfg.IOTotalBytes.Load(),
-		DumpIoTotalBytes: w.cfg.DumpIOTotalBytes.Load(),
+		Unit:   w.workerType,
+		Stage:  stage,
+		Result: dmpkg.NewProcessResultFromPB(result),
+		Status: buf.Bytes(),
 	}
 }
 

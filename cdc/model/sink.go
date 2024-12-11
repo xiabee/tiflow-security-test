@@ -23,10 +23,11 @@ import (
 	"unsafe"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/util/rowcodec"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tiflow/pkg/errors"
+	"github.com/pingcap/tiflow/pkg/integrity"
 	"github.com/pingcap/tiflow/pkg/quotes"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/pingcap/tiflow/pkg/util"
@@ -63,6 +64,10 @@ const (
 	// BinaryFlag means the column charset is binary
 	BinaryFlag ColumnFlagType = 1 << ColumnFlagType(iota)
 	// HandleKeyFlag means the column is selected as the handle key
+	// The handleKey is chosen by the following rules in the order:
+	// 1. if the table has primary key, it's the handle key.
+	// 2. If the table has not null unique key, it's the handle key.
+	// 3. If the table has no primary key and no not null unique key, it has no handleKey.
 	HandleKeyFlag
 	// GeneratedColumnFlag means the column is a generated column
 	GeneratedColumnFlag
@@ -260,9 +265,9 @@ const (
 // more info https://github.com/tinylib/msgp/issues/158, https://github.com/tinylib/msgp/issues/149
 // so define a RedoColumn, RedoDDLEvent instead of using the Column, DDLEvent
 type RedoLog struct {
-	RedoRow *RedoRowChangedEvent `msg:"row"`
-	RedoDDL *RedoDDLEvent        `msg:"ddl"`
-	Type    RedoLogType          `msg:"type"`
+	RedoRow RedoRowChangedEvent `msg:"row"`
+	RedoDDL RedoDDLEvent        `msg:"ddl"`
+	Type    RedoLogType         `msg:"type"`
 }
 
 // GetCommitTs returns the commit ts of the redo log.
@@ -286,23 +291,8 @@ func (r *RedoLog) TrySplitAndSortUpdateEvent(_ string, _ bool) error {
 // RedoRowChangedEvent represents the DML event used in RedoLog
 type RedoRowChangedEvent struct {
 	Row        *RowChangedEvent `msg:"row"`
-	PreColumns []*RedoColumn    `msg:"pre-columns"`
-	Columns    []*RedoColumn    `msg:"columns"`
-}
-
-// IsDelete returns true if the row is a delete event
-func (r *RedoRowChangedEvent) IsDelete() bool {
-	return len(r.PreColumns) != 0 && len(r.Columns) == 0
-}
-
-// IsInsert returns true if the row is an insert event
-func (r *RedoRowChangedEvent) IsInsert() bool {
-	return len(r.PreColumns) == 0 && len(r.Columns) != 0
-}
-
-// IsUpdate returns true if the row is an update event
-func (r *RedoRowChangedEvent) IsUpdate() bool {
-	return len(r.PreColumns) != 0 && len(r.Columns) != 0
+	Columns    []RedoColumn     `msg:"columns"`
+	PreColumns []RedoColumn     `msg:"pre-columns"`
 }
 
 // RedoDDLEvent represents DDL event used in redo log persistent
@@ -313,13 +303,19 @@ type RedoDDLEvent struct {
 }
 
 // ToRedoLog converts row changed event to redo log
-func (row *RowChangedEvent) ToRedoLog() *RedoLog {
-	return &RedoLog{RedoRow: RowToRedo(row), Type: RedoLogTypeRow}
+func (r *RowChangedEvent) ToRedoLog() *RedoLog {
+	return &RedoLog{
+		RedoRow: RedoRowChangedEvent{Row: r},
+		Type:    RedoLogTypeRow,
+	}
 }
 
 // ToRedoLog converts ddl event to redo log
-func (ddl *DDLEvent) ToRedoLog() *RedoLog {
-	return &RedoLog{RedoDDL: DDLToRedo(ddl), Type: RedoLogTypeDDL}
+func (d *DDLEvent) ToRedoLog() *RedoLog {
+	return &RedoLog{
+		RedoDDL: RedoDDLEvent{DDL: d},
+		Type:    RedoLogTypeDDL,
+	}
 }
 
 // RowChangedEvent represents a row changed event
@@ -345,9 +341,13 @@ type RowChangedEvent struct {
 	// So be careful when using the TableInfo.
 	TableInfo *TableInfo `json:"-" msg:"-"`
 
-	Columns      []*Column `json:"columns" msg:"-"`
-	PreColumns   []*Column `json:"pre-columns" msg:"-"`
+	Columns      []*Column `json:"columns" msg:"columns"`
+	PreColumns   []*Column `json:"pre-columns" msg:"pre-columns"`
 	IndexColumns [][]int   `json:"-" msg:"index-columns"`
+
+	// Checksum for the event, only not nil if the upstream TiDB enable the row level checksum
+	// and TiCDC set the integrity check level to the correctness.
+	Checksum *integrity.Checksum `json:"-" msg:"-"`
 
 	// ApproximateDataSize is the approximate size of protobuf binary
 	// representation of this event.
@@ -431,9 +431,9 @@ func (r *RowChangedEvent) PrimaryKeyColumnNames() []string {
 	return result
 }
 
-// PrimaryKeyColumns returns the column(s) corresponding to the handle key(s)
-func (r *RowChangedEvent) PrimaryKeyColumns() []*Column {
-	pkeyCols := make([]*Column, 0)
+// GetHandleKeyColumnValues returns all handle key's column values
+func (r *RowChangedEvent) GetHandleKeyColumnValues() []string {
+	var result []string
 
 	var cols []*Column
 	if r.IsDelete() {
@@ -442,35 +442,13 @@ func (r *RowChangedEvent) PrimaryKeyColumns() []*Column {
 		cols = r.Columns
 	}
 
-	for _, col := range cols {
-		if col != nil && (col.Flag.IsPrimaryKey()) {
-			pkeyCols = append(pkeyCols, col)
-		}
-	}
-
-	// It is okay not to have primary keys, so the empty array is an acceptable result
-	return pkeyCols
-}
-
-// HandleKeyColumns returns the column(s) corresponding to the handle key(s)
-func (r *RowChangedEvent) HandleKeyColumns() []*Column {
-	pkeyCols := make([]*Column, 0)
-
-	var cols []*Column
-	if r.IsDelete() {
-		cols = r.PreColumns
-	} else {
-		cols = r.Columns
-	}
-
+	result = make([]string, 0)
 	for _, col := range cols {
 		if col != nil && col.Flag.IsHandleKey() {
-			pkeyCols = append(pkeyCols, col)
+			result = append(result, ColumnValueString(col.Value))
 		}
 	}
-
-	// It is okay not to have handle keys, so the empty array is an acceptable result
-	return pkeyCols
+	return result
 }
 
 // HandleKeyColInfos returns the column(s) and colInfo(s) corresponding to the handle key(s)
@@ -548,7 +526,7 @@ type Column struct {
 	Charset   string         `json:"charset" msg:"charset"`
 	Collation string         `json:"collation" msg:"collation"`
 	Flag      ColumnFlagType `json:"flag" msg:"-"`
-	Value     interface{}    `json:"value" msg:"value"`
+	Value     interface{}    `json:"value" msg:"-"`
 	Default   interface{}    `json:"default" msg:"-"`
 
 	// ApproximateBytes is approximate bytes consumed by the column.
@@ -557,8 +535,11 @@ type Column struct {
 
 // RedoColumn stores Column change
 type RedoColumn struct {
-	Column *Column `msg:"column"`
-	Flag   uint64  `msg:"flag"`
+	// Fields from Column and can't be marshaled directly in Column.
+	Value interface{} `msg:"column"`
+	// msgp transforms empty byte slice into nil, PTAL msgp#247.
+	ValueIsEmptyBytes bool   `msg:"value-is-empty-bytes"`
+	Flag              uint64 `msg:"flag"`
 }
 
 // BuildTiDBTableInfo builds a TiDB TableInfo from given information.
@@ -720,6 +701,7 @@ type DDLEvent struct {
 	Done         atomic.Bool      `msg:"-"`
 	Charset      string           `msg:"-"`
 	Collate      string           `msg:"-"`
+	IsBootstrap  bool             `msg:"-"`
 }
 
 // FromJob fills the values with DDLEvent from DDL job
@@ -778,6 +760,19 @@ func (d *DDLEvent) FromJobWithArgs(
 		}
 	default:
 		d.Query = job.Query
+	}
+}
+
+// NewBootstrapDDLEvent returns a bootstrap DDL event.
+// We set Bootstrap DDL event's startTs and commitTs to 0.
+// Because it is generated by the TiCDC, not from the upstream TiDB.
+// And they ere useless for a bootstrap DDL event.
+func NewBootstrapDDLEvent(tableInfo *TableInfo) *DDLEvent {
+	return &DDLEvent{
+		StartTs:     0,
+		CommitTs:    0,
+		TableInfo:   tableInfo,
+		IsBootstrap: true,
 	}
 }
 
@@ -913,13 +908,20 @@ func SplitUpdateEvent(
 	// so it won't have an impact and no more full deep copy wastes memory.
 	deleteEvent := *updateEvent
 	deleteEvent.Columns = nil
+	if deleteEvent.Checksum != nil {
+		deleteEvent.Checksum.Current = 0
+	}
 
 	insertEvent := *updateEvent
 	// NOTICE: clean up pre cols for insert event.
 	insertEvent.PreColumns = nil
+	if insertEvent.Checksum != nil {
+		insertEvent.Checksum.Previous = 0
+	}
 
 	log.Debug("split update event", zap.Uint64("startTs", updateEvent.StartTs),
 		zap.Uint64("commitTs", updateEvent.CommitTs),
+		zap.Any("table", updateEvent.TableInfo),
 		zap.Any("preCols", updateEvent.PreColumns),
 		zap.Any("cols", updateEvent.Columns))
 
@@ -941,4 +943,12 @@ func (t *SingleTableTxn) Append(row *RowChangedEvent) {
 // ToWaitFlush indicates whether to wait flushing after the txn is processed or not.
 func (t *SingleTableTxn) ToWaitFlush() bool {
 	return t.FinishWg != nil
+}
+
+// TopicPartitionKey contains the topic and partition key of the message.
+type TopicPartitionKey struct {
+	Topic          string
+	Partition      int32
+	PartitionKey   string
+	TotalPartition int32
 }

@@ -11,6 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build intest
+// +build intest
+
 package puller
 
 import (
@@ -25,11 +28,10 @@ import (
 	"github.com/benbjohnson/clock"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/codec"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tiflow/cdc/entry"
-	"github.com/pingcap/tiflow/cdc/kv"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/pkg/config"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
@@ -75,10 +77,6 @@ func (m *mockPuller) Run(ctx context.Context) error {
 	}
 }
 
-func (m *mockPuller) GetResolvedTs() uint64 {
-	return atomic.LoadUint64(&m.resolvedTs)
-}
-
 func (m *mockPuller) Output() <-chan *model.RawKVEntry {
 	return m.outCh
 }
@@ -121,24 +119,22 @@ func newMockDDLJobPuller(
 	needSchemaStorage bool,
 ) (DDLJobPuller, *entry.SchemaTestHelper) {
 	res := &ddlJobPullerImpl{
-		puller: puller,
 		outputCh: make(
 			chan *model.DDLJobEntry,
 			defaultPullerOutputChanSize),
-		metricDiscardedDDLCounter: discardedDDLCounter.
-			WithLabelValues("ddl", "test"),
 	}
+	res.multiplexing = false
+	res.puller.Puller = puller
+
 	var helper *entry.SchemaTestHelper
 	if needSchemaStorage {
 		helper = entry.NewSchemaTestHelper(t)
 		kvStorage := helper.Storage()
 		ts := helper.GetCurrentMeta().StartTS
-		meta, err := kv.GetSnapshotMeta(kvStorage, ts)
-		require.Nil(t, err)
 		f, err := filter.NewFilter(config.GetDefaultReplicaConfig(), "")
 		require.Nil(t, err)
 		schemaStorage, err := entry.NewSchemaStorage(
-			meta,
+			kvStorage,
 			ts,
 			false,
 			model.DefaultChangeFeedID("test"),

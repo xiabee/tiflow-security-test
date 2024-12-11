@@ -78,10 +78,7 @@ func (g *CreatorVersionGate) ChangefeedAcceptUnknownProtocols() bool {
 	return creatorVersion.LessThan(changefeedAcceptUnknownProtocolsVersion)
 }
 
-var (
-	changefeedAcceptProtocolInMysqlSinURI    = *semver.New("6.1.1")
-	changefeedAdjustEnableOldValueByProtocol = *semver.New("7.2.0")
-)
+var changefeedAcceptProtocolInMysqlSinURI = *semver.New("6.1.1")
 
 // ChangefeedAcceptProtocolInMysqlSinURI determines whether to accept
 // protocol in mysql sink uri or configure based on the creator's version.
@@ -96,13 +93,13 @@ func (g *CreatorVersionGate) ChangefeedAcceptProtocolInMysqlSinURI() bool {
 	return creatorVersion.LessThan(changefeedAcceptProtocolInMysqlSinURI)
 }
 
-// ChangefeedAdjustEnableOldValueByProtocol determines whether to adjust
-// the `enable-old-value` configuration by the using encoding protocol.
-func (g *CreatorVersionGate) ChangefeedAdjustEnableOldValueByProtocol() bool {
+// ChangefeedInheritSchedulerConfigFromV66 determines whether to inherit
+// changefeed scheduler config created by v6.6.0.
+func (g *CreatorVersionGate) ChangefeedInheritSchedulerConfigFromV66() bool {
 	if g.version == "" {
-		return true
+		return false
 	}
 
 	creatorVersion := semver.New(SanitizeVersion(g.version))
-	return creatorVersion.LessThan(changefeedAdjustEnableOldValueByProtocol)
+	return creatorVersion.Major == 6 && creatorVersion.Minor == 6
 }

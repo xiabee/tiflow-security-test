@@ -122,12 +122,6 @@ func (c ChangefeedCommonInfo) MarshalJSON() ([]byte, error) {
 	if c.FeedState == StateNormal {
 		c.RunningError = nil
 	}
-	if c.FeedState == StateUnInitialized {
-		c.FeedState = StateNormal
-	}
-	if c.FeedState == StatePending {
-		c.FeedState = StateWarning
-	}
 	return json.Marshal(struct {
 		Alias
 	}{
@@ -204,8 +198,8 @@ type ProcessorDetail struct {
 type CaptureTaskStatus struct {
 	CaptureID string `json:"capture_id"`
 	// Table list, containing tables that processor should process
-	Tables    []int64                     `json:"table_ids"`
-	Operation map[TableID]*TableOperation `json:"table_operations"`
+	Tables    []int64                     `json:"table_ids,omitempty"`
+	Operation map[TableID]*TableOperation `json:"table_operations,omitempty"`
 }
 
 // Capture holds common information of a capture in cdc
@@ -224,4 +218,10 @@ type DrainCaptureRequest struct {
 // DrainCaptureResp is response for manual `DrainCapture`
 type DrainCaptureResp struct {
 	CurrentTableCount int `json:"current_table_count"`
+}
+
+// MoveTableReq is the request for `MoveTable`
+type MoveTableReq struct {
+	CaptureID string `json:"capture_id"`
+	TableID   int64  `json:"table_id"`
 }

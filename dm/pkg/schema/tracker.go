@@ -21,23 +21,24 @@ import (
 	"sync"
 
 	"github.com/pingcap/errors"
-	tidbConfig "github.com/pingcap/tidb/config"
-	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/ddl/schematracker"
-	"github.com/pingcap/tidb/executor"
-	"github.com/pingcap/tidb/infoschema"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/meta/autoid"
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/filter"
-	"github.com/pingcap/tidb/util/mock"
-	"github.com/pingcap/tidb/util/sqlexec"
+	tidbConfig "github.com/pingcap/tidb/pkg/config"
+	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/ddl/schematracker"
+	"github.com/pingcap/tidb/pkg/executor"
+	"github.com/pingcap/tidb/pkg/infoschema"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/meta/autoid"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/filter"
+	"github.com/pingcap/tidb/pkg/util/mock"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	fr "github.com/pingcap/tiflow/dm/pkg/func-rollback"
 	"github.com/pingcap/tiflow/dm/pkg/log"
@@ -167,7 +168,7 @@ func NewTestTracker(
 	logger log.Logger,
 ) (*Tracker, error) {
 	tr := NewTracker()
-	err := tr.Init(ctx, task, int(utils.LCTableNamesSensitive), downstreamConn, logger)
+	err := tr.Init(ctx, task, int(conn.LCTableNamesSensitive), downstreamConn, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +236,7 @@ func (tr *Tracker) GetCreateTable(ctx context.Context, table *filter.Table) (str
 	if err != nil {
 		return "", err
 	}
-	return utils.CreateTableSQLToOneRow(result.String()), nil
+	return conn.CreateTableSQLToOneRow(result.String()), nil
 }
 
 // AllSchemas returns all schemas visible to the tracker (excluding system tables).
@@ -473,7 +474,6 @@ func (dt *downstreamTracker) getTableInfoByCreateStmt(tctx *tcontext.Context, ta
 
 	// suppress ErrTooLongKey
 	strictSQLModeBackup := dt.se.GetSessionVars().StrictSQLMode
-	dt.se.GetSessionVars().StrictSQLMode = false
 	// support drop PK
 	enableClusteredIndexBackup := dt.se.GetSessionVars().EnableClusteredIndex
 	dt.se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOff
@@ -497,7 +497,7 @@ func (dt *downstreamTracker) initDownStreamSQLModeAndParser(tctx *tcontext.Conte
 	if err != nil {
 		return dmterror.ErrSchemaTrackerCannotSetDownstreamSQLMode.Delegate(err, mysql.DefaultSQLMode)
 	}
-	stmtParser, err := utils.GetParserFromSQLModeStr(mysql.DefaultSQLMode)
+	stmtParser, err := conn.GetParserFromSQLModeStr(mysql.DefaultSQLMode)
 	if err != nil {
 		return dmterror.ErrSchemaTrackerCannotInitDownstreamParser.Delegate(err, mysql.DefaultSQLMode)
 	}

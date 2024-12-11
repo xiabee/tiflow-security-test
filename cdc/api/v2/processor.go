@@ -30,11 +30,13 @@ import (
 // @Success 200 {object} ProcessorDetail
 // @Failure 500,400 {object} model.HTTPError
 // @Param   changefeed_id   path    string  true  "changefeed ID"
+// @Param   namespace      query string false "default"
 // @Param   capture_id   path    string  true  "capture ID"
 // @Router	/api/v2/processors/{changefeed_id}/{capture_id} [get]
 func (h *OpenAPIV2) getProcessor(c *gin.Context) {
 	ctx := c.Request.Context()
-	changefeedID := model.DefaultChangeFeedID(c.Param(apiOpVarChangefeedID))
+	namespace := getNamespaceValueWithDefault(c)
+	changefeedID := model.ChangeFeedID{Namespace: namespace, ID: c.Param(apiOpVarChangefeedID)}
 	if err := model.ValidateChangefeedID(changefeedID.ID); err != nil {
 		_ = c.Error(
 			cerror.ErrAPIInvalidParam.GenWithStack(
@@ -128,7 +130,12 @@ func (h *OpenAPIV2) getProcessor(c *gin.Context) {
 // @Router	/api/v2/processors [get]
 func (h *OpenAPIV2) listProcessors(c *gin.Context) {
 	ctx := c.Request.Context()
-	infos, err := h.capture.StatusProvider().GetProcessors(ctx)
+	controller, err := h.capture.GetController()
+	if err != nil {
+		_ = c.Error(err)
+		return
+	}
+	infos, err := controller.GetProcessors(ctx)
 	if err != nil {
 		_ = c.Error(err)
 		return

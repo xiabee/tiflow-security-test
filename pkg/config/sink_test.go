@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,15 +89,24 @@ func TestValidateTxnAtomicity(t *testing.T) {
 				"&protocol=open-protocol",
 			expectedErr: "invalid level atomicity is not supported by kafka scheme",
 		},
+		{
+			sinkURI: "pulsar://127.0.0.1:6550?transaction-atomicity=invalid" +
+				"&protocol=open-protocol",
+			expectedErr: "invalid level atomicity is not supported by pulsar scheme",
+		},
+		{
+			sinkURI:        "pulsar://127.0.0.1:6550/test?protocol=canal-json",
+			shouldSplitTxn: true,
+		},
 	}
 
 	for _, tc := range testCases {
-		cfg := SinkConfig{AdvanceTimeoutInSec: DefaultAdvanceTimeoutInSec}
+		cfg := SinkConfig{}
 		parsedSinkURI, err := url.Parse(tc.sinkURI)
 		require.Nil(t, err)
 		if tc.expectedErr == "" {
 			require.Nil(t, cfg.validateAndAdjust(parsedSinkURI))
-			require.Equal(t, tc.shouldSplitTxn, cfg.TxnAtomicity.ShouldSplitTxn())
+			require.Equal(t, tc.shouldSplitTxn, util.GetOrZero(cfg.TxnAtomicity).ShouldSplitTxn())
 		} else {
 			require.Regexp(t, tc.expectedErr, cfg.validateAndAdjust(parsedSinkURI))
 		}
@@ -112,7 +122,7 @@ func TestValidateProtocol(t *testing.T) {
 	}{
 		{
 			sinkConfig: &SinkConfig{
-				Protocol: "default",
+				Protocol: util.AddressOf("default"),
 			},
 			sinkURI: "kafka://127.0.0.1:9092?protocol=whatever",
 			result:  "whatever",
@@ -124,17 +134,31 @@ func TestValidateProtocol(t *testing.T) {
 		},
 		{
 			sinkConfig: &SinkConfig{
-				Protocol: "default",
+				Protocol: util.AddressOf("default"),
 			},
 			sinkURI: "kafka://127.0.0.1:9092",
 			result:  "default",
+		},
+		{
+			sinkConfig: &SinkConfig{
+				Protocol: util.AddressOf("default"),
+			},
+			sinkURI: "pulsar://127.0.0.1:6650",
+			result:  "default",
+		},
+		{
+			sinkConfig: &SinkConfig{
+				Protocol: util.AddressOf("canal-json"),
+			},
+			sinkURI: "pulsar://127.0.0.1:6650/test?protocol=canal-json",
+			result:  "canal-json",
 		},
 	}
 	for _, c := range testCases {
 		parsedSinkURI, err := url.Parse(c.sinkURI)
 		require.Nil(t, err)
 		c.sinkConfig.validateAndAdjustSinkURI(parsedSinkURI)
-		require.Equal(t, c.result, c.sinkConfig.Protocol)
+		require.Equal(t, c.result, util.GetOrZero(c.sinkConfig.Protocol))
 	}
 }
 
@@ -151,8 +175,8 @@ func TestApplyParameterBySinkURI(t *testing.T) {
 		// test only config file
 		{
 			sinkConfig: &SinkConfig{
-				Protocol:     "default",
-				TxnAtomicity: noneTxnAtomicity,
+				Protocol:     util.AddressOf("default"),
+				TxnAtomicity: util.AddressOf(noneTxnAtomicity),
 			},
 			sinkURI:              "kafka://127.0.0.1:9092",
 			expectedProtocol:     "default",
@@ -168,8 +192,8 @@ func TestApplyParameterBySinkURI(t *testing.T) {
 		// test conflict scenarios
 		{
 			sinkConfig: &SinkConfig{
-				Protocol:     "default",
-				TxnAtomicity: tableTxnAtomicity,
+				Protocol:     util.AddressOf("default"),
+				TxnAtomicity: util.AddressOf(tableTxnAtomicity),
 			},
 			sinkURI:              kafkaURI,
 			expectedProtocol:     "whatever",
@@ -178,8 +202,8 @@ func TestApplyParameterBySinkURI(t *testing.T) {
 		},
 		{
 			sinkConfig: &SinkConfig{
-				Protocol:     "default",
-				TxnAtomicity: unknownTxnAtomicity,
+				Protocol:     util.AddressOf("default"),
+				TxnAtomicity: util.AddressOf(unknownTxnAtomicity),
 			},
 			sinkURI:              kafkaURI,
 			expectedProtocol:     "whatever",
@@ -192,8 +216,8 @@ func TestApplyParameterBySinkURI(t *testing.T) {
 		require.Nil(t, err)
 		err = tc.sinkConfig.applyParameterBySinkURI(parsedSinkURI)
 
-		require.Equal(t, tc.expectedProtocol, tc.sinkConfig.Protocol)
-		require.Equal(t, tc.expectedTxnAtomicity, tc.sinkConfig.TxnAtomicity)
+		require.Equal(t, util.AddressOf(tc.expectedProtocol), tc.sinkConfig.Protocol)
+		require.Equal(t, util.AddressOf(tc.expectedTxnAtomicity), tc.sinkConfig.TxnAtomicity)
 		if tc.expectedErr == "" {
 			require.NoError(t, err)
 		} else {
@@ -209,53 +233,53 @@ func TestCheckCompatibilityWithSinkURI(t *testing.T) {
 		oldSinkConfig        *SinkConfig
 		newsinkURI           string
 		expectedErr          string
-		expectedProtocol     string
-		expectedTxnAtomicity AtomicityLevel
+		expectedProtocol     *string
+		expectedTxnAtomicity *AtomicityLevel
 	}{
 		// test no update
 		{
 			newSinkConfig:        &SinkConfig{},
 			oldSinkConfig:        &SinkConfig{},
 			newsinkURI:           "kafka://",
-			expectedProtocol:     "",
-			expectedTxnAtomicity: unknownTxnAtomicity,
+			expectedProtocol:     nil,
+			expectedTxnAtomicity: nil,
 		},
 		// test update config return err
 		{
 			newSinkConfig: &SinkConfig{
-				TxnAtomicity: tableTxnAtomicity,
+				TxnAtomicity: util.AddressOf(tableTxnAtomicity),
 			},
 			oldSinkConfig: &SinkConfig{
-				TxnAtomicity: noneTxnAtomicity,
+				TxnAtomicity: util.AddressOf(noneTxnAtomicity),
 			},
 			newsinkURI:           "kafka://127.0.0.1:9092?transaction-atomicity=none",
 			expectedErr:          "incompatible configuration in sink uri",
-			expectedProtocol:     "",
-			expectedTxnAtomicity: noneTxnAtomicity,
+			expectedProtocol:     nil,
+			expectedTxnAtomicity: util.AddressOf(noneTxnAtomicity),
 		},
 		// test update compatible config
 		{
 			newSinkConfig: &SinkConfig{
-				Protocol: "canal",
+				Protocol: util.AddressOf("canal"),
 			},
 			oldSinkConfig: &SinkConfig{
-				TxnAtomicity: noneTxnAtomicity,
+				TxnAtomicity: util.AddressOf(noneTxnAtomicity),
 			},
 			newsinkURI:           "kafka://127.0.0.1:9092?transaction-atomicity=none",
-			expectedProtocol:     "canal",
-			expectedTxnAtomicity: noneTxnAtomicity,
+			expectedProtocol:     util.AddressOf("canal"),
+			expectedTxnAtomicity: util.AddressOf(noneTxnAtomicity),
 		},
 		// test update sinkuri
 		{
 			newSinkConfig: &SinkConfig{
-				TxnAtomicity: noneTxnAtomicity,
+				TxnAtomicity: util.AddressOf(noneTxnAtomicity),
 			},
 			oldSinkConfig: &SinkConfig{
-				TxnAtomicity: noneTxnAtomicity,
+				TxnAtomicity: util.AddressOf(noneTxnAtomicity),
 			},
 			newsinkURI:           "kafka://127.0.0.1:9092?transaction-atomicity=table",
-			expectedProtocol:     "",
-			expectedTxnAtomicity: tableTxnAtomicity,
+			expectedProtocol:     nil,
+			expectedTxnAtomicity: util.AddressOf(tableTxnAtomicity),
 		},
 	}
 	for _, tc := range testCases {
@@ -326,6 +350,14 @@ func TestValidateAndAdjustCSVConfig(t *testing.T) {
 			wantErr: "csv config delimiter contains line break characters",
 		},
 		{
+			name: "delimiter contains more than one character",
+			config: &CSVConfig{
+				Quote:     "'",
+				Delimiter: "\r\t",
+			},
+			wantErr: "csv config delimiter contains more than one character",
+		},
+		{
 			name: "delimiter and quote are same",
 			config: &CSVConfig{
 				Quote:     "'",
@@ -367,14 +399,40 @@ func TestValidateAndAdjustStorageConfig(t *testing.T) {
 	s := GetDefaultReplicaConfig()
 	err = s.ValidateAndAdjust(sinkURI)
 	require.NoError(t, err)
-	require.Equal(t, DefaultFileIndexWidth, s.Sink.FileIndexWidth)
+	require.Equal(t, DefaultFileIndexWidth, util.GetOrZero(s.Sink.FileIndexWidth))
 
 	err = s.ValidateAndAdjust(sinkURI)
 	require.NoError(t, err)
-	require.Equal(t, DefaultFileIndexWidth, s.Sink.FileIndexWidth)
+	require.Equal(t, DefaultFileIndexWidth, util.GetOrZero(s.Sink.FileIndexWidth))
 
-	s.Sink.FileIndexWidth = 16
+	s.Sink.FileIndexWidth = util.AddressOf(16)
 	err = s.ValidateAndAdjust(sinkURI)
 	require.NoError(t, err)
-	require.Equal(t, 16, s.Sink.FileIndexWidth)
+	require.Equal(t, 16, util.GetOrZero(s.Sink.FileIndexWidth))
+}
+
+func TestShouldSendBootstrapMsg(t *testing.T) {
+	t.Parallel()
+	sinkConfig := GetDefaultReplicaConfig().Sink
+	require.False(t, sinkConfig.ShouldSendBootstrapMsg())
+
+	protocol := "simple"
+	sinkConfig.Protocol = &protocol
+	require.True(t, sinkConfig.ShouldSendBootstrapMsg())
+
+	count := int32(0)
+	sinkConfig.SendBootstrapInMsgCount = &count
+	require.False(t, sinkConfig.ShouldSendBootstrapMsg())
+}
+
+func TestShouldSendAllBootstrapAtStart(t *testing.T) {
+	t.Parallel()
+	sinkConfig := GetDefaultReplicaConfig().Sink
+	protocol := "simple"
+	sinkConfig.Protocol = &protocol
+	require.False(t, sinkConfig.ShouldSendAllBootstrapAtStart())
+
+	should := true
+	sinkConfig.SendAllBootstrapAtStart = &should
+	require.True(t, sinkConfig.ShouldSendAllBootstrapAtStart())
 }

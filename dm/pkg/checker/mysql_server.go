@@ -18,9 +18,9 @@ import (
 	"database/sql"
 	"fmt"
 
-	toolsutils "github.com/pingcap/tidb-tools/pkg/utils"
-	"github.com/pingcap/tidb/util/dbutil"
-	"github.com/pingcap/tiflow/dm/pkg/utils"
+	"github.com/pingcap/tidb/pkg/util/dbutil"
+	"github.com/pingcap/tiflow/dm/pkg/conn"
+	"github.com/pingcap/tiflow/pkg/errors"
 )
 
 // MySQLVersionChecker checks mysql/mariadb/rds,... version.
@@ -73,7 +73,7 @@ func (pc *MySQLVersionChecker) Check(ctx context.Context) *Result {
 
 func (pc *MySQLVersionChecker) checkVersion(value string, result *Result) *Error {
 	needVersion := SupportedVersion["mysql"]
-	if utils.IsMariaDB(value) {
+	if conn.IsMariaDB(value) {
 		err := NewWarn("Migrating from MariaDB is still experimental.")
 		err.Instruction = "It is recommended that you upgrade MariaDB to 10.1.2 or a later version."
 		return err
@@ -135,7 +135,7 @@ func (pc *MySQLServerIDChecker) Check(ctx context.Context) *Result {
 
 	serverID, err := dbutil.ShowServerID(ctx, pc.db)
 	if err != nil {
-		if toolsutils.OriginError(err) != sql.ErrNoRows {
+		if errors.OriginError(err) != sql.ErrNoRows {
 			markCheckError(result, err)
 			return result
 		}

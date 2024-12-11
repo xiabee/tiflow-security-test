@@ -71,10 +71,14 @@ We recommend that you provide docker with at least 6+ cores and 8G+ memory. Of c
 
 > **Warning:**
 > These scripts and files may not work under the arm architecture,
-> and we have not tested against it.
-> Also, we currently use the PingCAP intranet address in our download scripts,
-> so if you do not have access to the PingCAP intranet you will not be able to use these scripts.
-> We will try to resolve these issues as soon as possible.
+> and we have not tested against it. We will try to resolve it as soon as possible.
+>
+> The script is designed to download necessary binaries from the PingCAP 
+> intranet by default, requiring access to the PingCAP intranet. However, 
+> if you want to download the community version, you can specify it through 
+> the `COMMUNITY` environment variable. For instance, you can use the following 
+> command as an example:
+> `BRANCH=master COMMUNITY=true VERSION=v7.0.0 START_AT="clustered_index" make kafka_docker_integration_test_with_build`
 
 1. If you want to run kafka tests,
    run `START_AT="clustered_index" make kafka_docker_integration_test_with_build`
@@ -120,5 +124,11 @@ Some useful tips:
 
 ## Writing new tests
 
-New integration tests can be written as shell scripts in `tests/integration_tests/TEST_NAME/run.sh`. The script should
+1. New integration tests can be written as shell scripts in `tests/integration_tests/TEST_NAME/run.sh`. The script should
 exit with a nonzero error code on failure.
+
+2. Add TEST_NAME to existing group in [run_group.sh](./run_group.sh), or add a new group for it.
+
+3. If you add a new group, the name of the new group must be added to CI.
+   * [cdc-integration-kafka-test](https://github.com/PingCAP-QE/ci/blob/main/pipelines/pingcap/tiflow/latest/pod-pull_cdc_integration_kafka_test.yaml)
+   * [cdc-integration-mysql-test](https://github.com/PingCAP-QE/ci/blob/main/pipelines/pingcap/tiflow/latest/pull_cdc_integration_test.groovy)

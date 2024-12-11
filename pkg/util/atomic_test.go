@@ -26,7 +26,7 @@ import (
 func TestMustCompareAndIncrease(t *testing.T) {
 	t.Parallel()
 
-	var target atomic.Uint64
+	var target atomic.Int64
 	target.Store(10)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -39,7 +39,7 @@ func TestMustCompareAndIncrease(t *testing.T) {
 				return
 			default:
 				delta := rand.Int63n(100)
-				v := target.Load() + uint64(delta)
+				v := target.Load() + delta
 				MustCompareAndMonotonicIncrease(&target, v)
 				require.GreaterOrEqual(t, target.Load(), v)
 			}
@@ -80,27 +80,27 @@ func TestMustCompareAndIncrease(t *testing.T) {
 func TestCompareAndIncrease(t *testing.T) {
 	t.Parallel()
 
-	var target atomic.Uint64
+	var target atomic.Int64
 	target.Store(10)
 	require.True(t, CompareAndIncrease(&target, 10))
-	require.Equal(t, uint64(10), target.Load())
+	require.Equal(t, int64(10), target.Load())
 
 	require.True(t, CompareAndIncrease(&target, 20))
-	require.Equal(t, uint64(20), target.Load())
+	require.Equal(t, int64(20), target.Load())
 	require.False(t, CompareAndIncrease(&target, 19))
-	require.Equal(t, uint64(20), target.Load())
+	require.Equal(t, int64(20), target.Load())
 }
 
 func TestCompareAndMonotonicIncrease(t *testing.T) {
 	t.Parallel()
 
-	var target atomic.Uint64
+	var target atomic.Int64
 	target.Store(10)
 	require.False(t, CompareAndMonotonicIncrease(&target, 10))
-	require.Equal(t, uint64(10), target.Load())
+	require.Equal(t, int64(10), target.Load())
 
 	require.True(t, CompareAndMonotonicIncrease(&target, 11))
-	require.Equal(t, uint64(11), target.Load())
+	require.Equal(t, int64(11), target.Load())
 	require.False(t, CompareAndMonotonicIncrease(&target, 10))
-	require.Equal(t, uint64(11), target.Load())
+	require.Equal(t, int64(11), target.Load())
 }

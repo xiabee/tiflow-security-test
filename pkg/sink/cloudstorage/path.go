@@ -183,7 +183,7 @@ func (f *FilePathGenerator) CheckOrWriteSchema(
 	}
 
 	var def TableDefinition
-	def.FromTableInfo(tableInfo, table.TableInfoVersion)
+	def.FromTableInfo(tableInfo, table.TableInfoVersion, f.config.OutputColumnID)
 	if !def.IsTableSchema() {
 		// only check schema for table
 		log.Error("invalid table schema",
@@ -385,7 +385,7 @@ func (f *FilePathGenerator) getNextFileIdxFromIndexFile(
 	}
 
 	if lastFileExists {
-		fileReader, err := f.storage.Open(ctx, lastFilePath)
+		fileReader, err := f.storage.Open(ctx, lastFilePath, nil)
 		if err != nil {
 			return 0, err
 		}

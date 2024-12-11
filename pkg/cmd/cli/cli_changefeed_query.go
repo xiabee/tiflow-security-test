@@ -19,7 +19,6 @@ import (
 	"github.com/pingcap/errors"
 	v2 "github.com/pingcap/tiflow/cdc/api/v2"
 	"github.com/pingcap/tiflow/cdc/model"
-	apiv1client "github.com/pingcap/tiflow/pkg/api/v1"
 	apiv2client "github.com/pingcap/tiflow/pkg/api/v2"
 	"github.com/pingcap/tiflow/pkg/cmd/factory"
 	"github.com/pingcap/tiflow/pkg/cmd/util"
@@ -42,18 +41,18 @@ type cfMeta struct {
 	CheckpointTime model.JSONTime            `json:"checkpoint_time"`
 	Engine         model.SortEngine          `json:"sort_engine,omitempty"`
 	FeedState      model.FeedState           `json:"state"`
-	RunningError   *model.RunningError       `json:"error"`
-	ErrorHis       []int64                   `json:"error_history"`
+	RunningError   *v2.RunningError          `json:"error,omitempty"`
+	ErrorHis       []int64                   `json:"error_history,omitempty"`
 	CreatorVersion string                    `json:"creator_version"`
 	TaskStatus     []model.CaptureTaskStatus `json:"task_status,omitempty"`
 }
 
 // queryChangefeedOptions defines flags for the `cli changefeed query` command.
 type queryChangefeedOptions struct {
-	apiClient    apiv1client.APIV1Interface
 	apiClientV2  apiv2client.APIV2Interface
 	changefeedID string
 	simplified   bool
+	namespace    string
 }
 
 // newQueryChangefeedOptions creates new options for the `cli changefeed query` command.
@@ -64,6 +63,7 @@ func newQueryChangefeedOptions() *queryChangefeedOptions {
 // addFlags receives a *cobra.Command reference and binds
 // flags related to template printing to it.
 func (o *queryChangefeedOptions) addFlags(cmd *cobra.Command) {
+	cmd.PersistentFlags().StringVarP(&o.namespace, "namespace", "n", "default", "Replication task (changefeed) Namespace")
 	cmd.PersistentFlags().BoolVarP(&o.simplified, "simple", "s", false, "Output simplified replication status")
 	cmd.PersistentFlags().StringVarP(&o.changefeedID, "changefeed-id", "c", "", "Replication task (changefeed) ID")
 	_ = cmd.MarkPersistentFlagRequired("changefeed-id")
@@ -71,11 +71,6 @@ func (o *queryChangefeedOptions) addFlags(cmd *cobra.Command) {
 
 // complete adapts from the command line args to the data and client required.
 func (o *queryChangefeedOptions) complete(f factory.Factory) error {
-	clientV1, err := f.APIV1Client()
-	if err != nil {
-		return err
-	}
-	o.apiClient = clientV1
 	clientV2, err := f.APIV2Client()
 	if err != nil {
 		return err
@@ -88,11 +83,11 @@ func (o *queryChangefeedOptions) complete(f factory.Factory) error {
 func (o *queryChangefeedOptions) run(cmd *cobra.Command) error {
 	ctx := context.Background()
 	if o.simplified {
-		infos, err := o.apiClient.Changefeeds().List(ctx, "all")
+		infos, err := o.apiClientV2.Changefeeds().List(ctx, o.namespace, "all")
 		if err != nil {
 			return errors.Trace(err)
 		}
-		for _, info := range *infos {
+		for _, info := range infos {
 			if info.ID == o.changefeedID {
 				return util.JSONPrint(cmd, info)
 			}
@@ -100,12 +95,7 @@ func (o *queryChangefeedOptions) run(cmd *cobra.Command) error {
 		return cerror.ErrChangeFeedNotExists.GenWithStackByArgs(o.changefeedID)
 	}
 
-	detail, err := o.apiClient.Changefeeds().Get(ctx, o.changefeedID)
-	if err != nil && cerror.ErrChangeFeedNotExists.NotEqual(err) {
-		return err
-	}
-
-	info, err := o.apiClientV2.Changefeeds().GetInfo(ctx, o.changefeedID)
+	detail, err := o.apiClientV2.Changefeeds().Get(ctx, o.namespace, o.changefeedID)
 	if err != nil && cerror.ErrChangeFeedNotExists.NotEqual(err) {
 		return err
 	}
@@ -114,17 +104,15 @@ func (o *queryChangefeedOptions) run(cmd *cobra.Command) error {
 		Namespace:      detail.Namespace,
 		ID:             detail.ID,
 		SinkURI:        detail.SinkURI,
-		Config:         info.Config,
-		CreateTime:     detail.CreateTime,
+		Config:         detail.Config,
+		CreateTime:     model.JSONTime(detail.CreateTime),
 		StartTs:        detail.StartTs,
 		ResolvedTs:     detail.ResolvedTs,
 		TargetTs:       detail.TargetTs,
-		CheckpointTSO:  detail.CheckpointTSO,
+		CheckpointTSO:  detail.CheckpointTs,
 		CheckpointTime: detail.CheckpointTime,
-		Engine:         detail.Engine,
-		FeedState:      detail.FeedState,
-		RunningError:   detail.RunningError,
-		ErrorHis:       detail.ErrorHis,
+		FeedState:      detail.State,
+		RunningError:   detail.Error,
 		CreatorVersion: detail.CreatorVersion,
 		TaskStatus:     detail.TaskStatus,
 	}

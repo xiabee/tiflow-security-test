@@ -18,7 +18,6 @@ import (
 	"math"
 	"net/url"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -81,6 +80,8 @@ const (
 type FeedState string
 
 // All FeedStates
+// Only `StateNormal` and `StatePending` changefeed is running,
+// others are stopped.
 const (
 	StateNormal   FeedState = "normal"
 	StatePending  FeedState = "pending"
@@ -323,7 +324,14 @@ func (info *ChangeFeedInfo) VerifyAndComplete() {
 	if info.Config.Consistent == nil {
 		info.Config.Consistent = defaultConfig.Consistent
 	}
-	if info.Config.ChangefeedErrorStuckDuration == 0 {
+	if info.Config.Scheduler == nil {
+		info.Config.Scheduler = defaultConfig.Scheduler
+	}
+
+	if info.Config.Integrity == nil {
+		info.Config.Integrity = defaultConfig.Integrity
+	}
+	if info.Config.ChangefeedErrorStuckDuration == nil {
 		info.Config.ChangefeedErrorStuckDuration = defaultConfig.ChangefeedErrorStuckDuration
 	}
 	if info.Config.SQLMode == "" {
@@ -332,6 +340,79 @@ func (info *ChangeFeedInfo) VerifyAndComplete() {
 	if info.Config.SyncedStatus == nil {
 		info.Config.SyncedStatus = defaultConfig.SyncedStatus
 	}
+	info.RmUnusedFields()
+}
+
+// RmUnusedFields removes unnecessary fields based on the downstream type and
+// the protocol. Since we utilize a common changefeed configuration template,
+// certain fields may not be utilized for certain protocols.
+func (info *ChangeFeedInfo) RmUnusedFields() {
+	uri, err := url.Parse(info.SinkURI)
+	if err != nil {
+		log.Warn(
+			"failed to parse the sink uri",
+			zap.Error(err),
+			zap.Any("sinkUri", info.SinkURI),
+		)
+		return
+	}
+	// blackhole is for testing purpose, no need to remove fields
+	if sink.IsBlackHoleScheme(uri.Scheme) {
+		return
+	}
+	if !sink.IsMQScheme(uri.Scheme) {
+		info.rmMQOnlyFields()
+	} else {
+		// remove schema registry for MQ downstream with
+		// protocol other than avro
+		if util.GetOrZero(info.Config.Sink.Protocol) != config.ProtocolAvro.String() {
+			info.Config.Sink.SchemaRegistry = nil
+		}
+	}
+
+	if !sink.IsStorageScheme(uri.Scheme) {
+		info.rmStorageOnlyFields()
+	}
+
+	if !sink.IsMySQLCompatibleScheme(uri.Scheme) {
+		info.rmDBOnlyFields()
+	} else {
+		// remove fields only being used by MQ and Storage downstream
+		info.Config.Sink.Protocol = nil
+		info.Config.Sink.Terminator = nil
+	}
+}
+
+func (info *ChangeFeedInfo) rmMQOnlyFields() {
+	log.Info("since the downstream is not a MQ, remove MQ only fields",
+		zap.String("namespace", info.Namespace),
+		zap.String("changefeed", info.ID))
+	info.Config.Sink.DispatchRules = nil
+	info.Config.Sink.SchemaRegistry = nil
+	info.Config.Sink.EncoderConcurrency = nil
+	info.Config.Sink.EnableKafkaSinkV2 = nil
+	info.Config.Sink.OnlyOutputUpdatedColumns = nil
+	info.Config.Sink.DeleteOnlyOutputHandleKeyColumns = nil
+	info.Config.Sink.ContentCompatible = nil
+	info.Config.Sink.KafkaConfig = nil
+}
+
+func (info *ChangeFeedInfo) rmStorageOnlyFields() {
+	info.Config.Sink.CSVConfig = nil
+	info.Config.Sink.DateSeparator = nil
+	info.Config.Sink.EnablePartitionSeparator = nil
+	info.Config.Sink.FileIndexWidth = nil
+	info.Config.Sink.CloudStorageConfig = nil
+}
+
+func (info *ChangeFeedInfo) rmDBOnlyFields() {
+	info.Config.EnableSyncPoint = nil
+	info.Config.BDRMode = nil
+	info.Config.SyncPointInterval = nil
+	info.Config.SyncPointRetention = nil
+	info.Config.Consistent = nil
+	info.Config.Sink.SafeMode = nil
+	info.Config.Sink.MySQLConfig = nil
 }
 
 // FixIncompatible fixes incompatible changefeed meta info.
@@ -361,18 +442,16 @@ func (info *ChangeFeedInfo) FixIncompatible() {
 		log.Info("Fix incompatible memory quota completed", zap.String("changefeed", info.String()))
 	}
 
-	if creatorVersionGate.ChangefeedAdjustEnableOldValueByProtocol() {
-		log.Info("Start fixing incompatible enable old value", zap.String("changefeed", info.String()),
-			zap.Bool("enableOldValue", info.Config.EnableOldValue))
-		info.fixEnableOldValue()
-		log.Info("Fix incompatible enable old value completed", zap.String("changefeed", info.String()),
-			zap.Bool("enableOldValue", info.Config.EnableOldValue))
-	}
-	if info.Config.ChangefeedErrorStuckDuration == 0 {
-		log.Info("Start fixing incompatible changefeed error stuck duration", zap.String("changefeed", info.String()))
+	if info.Config.ChangefeedErrorStuckDuration == nil {
+		log.Info("Start fixing incompatible error stuck duration", zap.String("changefeed", info.String()))
 		info.Config.ChangefeedErrorStuckDuration = config.GetDefaultReplicaConfig().ChangefeedErrorStuckDuration
-		log.Info("Fix incompatible changefeed error stuck duration completed", zap.String("changefeed", info.String()))
+		log.Info("Fix incompatible error stuck duration completed", zap.String("changefeed", info.String()))
 	}
+
+	log.Info("Start fixing incompatible scheduler", zap.String("changefeed", info.String()))
+	inheritV66 := creatorVersionGate.ChangefeedInheritSchedulerConfigFromV66()
+	info.fixScheduler(inheritV66)
+	log.Info("Fix incompatible scheduler completed", zap.String("changefeed", info.String()))
 }
 
 // fixState attempts to fix state loss from upgrading the old owner to the new owner.
@@ -431,7 +510,7 @@ func (info *ChangeFeedInfo) fixMySQLSinkProtocol() {
 
 	query := uri.Query()
 	protocolStr := query.Get(config.ProtocolKey)
-	if protocolStr != "" || info.Config.Sink.Protocol != "" {
+	if protocolStr != "" || info.Config.Sink.Protocol != nil {
 		maskedSinkURI, _ := util.MaskSinkURI(info.SinkURI)
 		log.Warn("sink URI or sink config contains protocol, but scheme is not mq",
 			zap.String("sinkURI", maskedSinkURI),
@@ -441,18 +520,6 @@ func (info *ChangeFeedInfo) fixMySQLSinkProtocol() {
 		query.Del(config.ProtocolKey)
 		info.updateSinkURIAndConfigProtocol(uri, "", query)
 	}
-}
-
-func (info *ChangeFeedInfo) fixEnableOldValue() {
-	uri, err := url.Parse(info.SinkURI)
-	if err != nil {
-		// this is impossible to happen, since the changefeed registered successfully.
-		log.Warn("parse sink URI failed", zap.Error(err))
-		return
-	}
-	scheme := strings.ToLower(uri.Scheme)
-	protocol := uri.Query().Get(config.ProtocolKey)
-	info.Config.AdjustEnableOldValue(scheme, protocol)
 }
 
 func (info *ChangeFeedInfo) fixMQSinkProtocol() {
@@ -486,11 +553,11 @@ func (info *ChangeFeedInfo) fixMQSinkProtocol() {
 		return
 	}
 
-	if needsFix(info.Config.Sink.Protocol) {
+	if needsFix(util.GetOrZero(info.Config.Sink.Protocol)) {
 		log.Info("handle incompatible protocol from sink config",
-			zap.String("oldProtocol", info.Config.Sink.Protocol),
+			zap.String("oldProtocol", util.GetOrZero(info.Config.Sink.Protocol)),
 			zap.String("fixedProtocol", openProtocol))
-		info.Config.Sink.Protocol = openProtocol
+		info.Config.Sink.Protocol = util.AddressOf(openProtocol)
 	}
 }
 
@@ -504,11 +571,7 @@ func (info *ChangeFeedInfo) updateSinkURIAndConfigProtocol(uri *url.URL, newProt
 	uri.RawQuery = newRawQuery
 	fixedSinkURI := uri.String()
 	info.SinkURI = fixedSinkURI
-	info.Config.Sink.Protocol = newProtocol
-}
-
-func (info *ChangeFeedInfo) fixMemoryQuota() {
-	info.Config.FixMemoryQuota()
+	info.Config.Sink.Protocol = util.AddressOf(newProtocol)
 }
 
 // DownstreamType returns the type of the downstream.
@@ -529,24 +592,12 @@ func (info *ChangeFeedInfo) DownstreamType() (DownstreamType, error) {
 	return Unknown, nil
 }
 
-// Barrier is a barrier for changefeed.
-type Barrier struct {
-	GlobalBarrierTs   Ts             `json:"global-barrier-ts"`
-	TableBarrier      []TableBarrier `json:"table-barrier"`
-	MinTableBarrierTs Ts             `json:"min-table-barrier-ts"`
+func (info *ChangeFeedInfo) fixMemoryQuota() {
+	info.Config.FixMemoryQuota()
 }
 
-// TableBarrier is a barrier for a table.
-type TableBarrier struct {
-	ID        TableID `json:"id"`
-	BarrierTs Ts      `json:"barrier-ts"`
-}
-
-// NewBarrier creates a Barrier.
-func NewBarrier(ts Ts) *Barrier {
-	return &Barrier{
-		GlobalBarrierTs: ts,
-	}
+func (info *ChangeFeedInfo) fixScheduler(inheritV66 bool) {
+	info.Config.FixScheduler(inheritV66)
 }
 
 // DownstreamType is the type of downstream.
@@ -580,10 +631,6 @@ func (t DownstreamType) String() string {
 type ChangeFeedStatusForAPI struct {
 	ResolvedTs   uint64 `json:"resolved-ts"`
 	CheckpointTs uint64 `json:"checkpoint-ts"`
-	// minTableBarrierTs is the minimum commitTs of all DDL events and is only
-	// used to check whether there is a pending DDL job at the checkpointTs when
-	// initializing the changefeed.
-	MinTableBarrierTs uint64 `json:"min-table-barrier-ts"`
 }
 
 // ChangeFeedSyncedStatusForAPI uses to transfer the synced status of changefeed for API.

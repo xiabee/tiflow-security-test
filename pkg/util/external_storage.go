@@ -16,13 +16,14 @@ package util
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	gcsStorage "cloud.google.com/go/storage"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/aws/request"
@@ -34,6 +35,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const defaultTimeout = 5 * time.Minute
+
 // GetExternalStorageFromURI creates a new storage.ExternalStorage from a uri.
 func GetExternalStorageFromURI(
 	ctx context.Context, uri string,
@@ -41,18 +44,18 @@ func GetExternalStorageFromURI(
 	return GetExternalStorage(ctx, uri, nil, DefaultS3Retryer())
 }
 
-// GetExternalStorageWithTimeout creates a new storage.ExternalStorage from a uri
+// GetExternalStorageWithDefaultTimeout creates a new storage.ExternalStorage from a uri
 // without retry. It is the caller's responsibility to set timeout to the context.
-func GetExternalStorageWithTimeout(
-	ctx context.Context, uri string, timeout time.Duration,
-) (storage.ExternalStorage, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+func GetExternalStorageWithDefaultTimeout(ctx context.Context, uri string) (storage.ExternalStorage, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
-	s, err := GetExternalStorage(ctx, uri, nil, nil)
+	// total retry time is [1<<7, 1<<8] = [128, 256] + 30*6 = [308, 436] seconds
+	r := NewS3Retryer(7, 1*time.Second, 2*time.Second)
+	s, err := GetExternalStorage(ctx, uri, nil, r)
 
 	return &extStorageWithTimeout{
 		ExternalStorage: s,
-		timeout:         timeout,
+		timeout:         defaultTimeout,
 	}, err
 }
 
@@ -139,6 +142,17 @@ func DefaultS3Retryer() request.Retryer {
 	}
 }
 
+// NewS3Retryer creates a new s3 retryer.
+func NewS3Retryer(maxRetries int, minRetryDelay, minThrottleDelay time.Duration) request.Retryer {
+	return retryerWithLog{
+		DefaultRetryer: client.DefaultRetryer{
+			NumMaxRetries:    maxRetries,
+			MinRetryDelay:    minRetryDelay,
+			MinThrottleDelay: minThrottleDelay,
+		},
+	}
+}
+
 type extStorageWithTimeout struct {
 	storage.ExternalStorage
 	timeout time.Duration
@@ -175,11 +189,11 @@ func (s *extStorageWithTimeout) DeleteFile(ctx context.Context, name string) err
 
 // Open a Reader by file path. path is relative path to storage base path
 func (s *extStorageWithTimeout) Open(
-	ctx context.Context, path string,
+	ctx context.Context, path string, _ *storage.ReaderOption,
 ) (storage.ExternalFileReader, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	return s.ExternalStorage.Open(ctx, path)
+	return s.ExternalStorage.Open(ctx, path, nil)
 }
 
 // WalkDir traverse all the files in a dir.
@@ -234,9 +248,9 @@ func IsNotExistInExtStorage(err error) bool {
 		return true
 	}
 
-	var errResp *azblob.StorageError
-	if internalErr, ok := err.(*azblob.InternalError); ok && internalErr.As(&errResp) {
-		if errResp.ErrorCode == azblob.StorageErrorCodeBlobNotFound {
+	var respErr *azcore.ResponseError
+	if errors.As(err, &respErr) {
+		if respErr.StatusCode == http.StatusNotFound {
 			return true
 		}
 	}
@@ -287,12 +301,10 @@ func DeleteFilesInExtStorage(
 		files := toRemoveFiles[:batch]
 		eg.Go(func() error {
 			defer func() { <-limit }()
-			for _, file := range files {
-				err := extStorage.DeleteFile(egCtx, file)
-				if err != nil && !IsNotExistInExtStorage(err) {
-					// if fail then retry, may end up with notExit err, ignore the error
-					return errors.ErrExternalStorageAPI.Wrap(err)
-				}
+			err := extStorage.DeleteFiles(egCtx, files)
+			if err != nil && !IsNotExistInExtStorage(err) {
+				// if fail then retry, may end up with notExit err, ignore the error
+				return errors.ErrExternalStorageAPI.Wrap(err)
 			}
 			return nil
 		})

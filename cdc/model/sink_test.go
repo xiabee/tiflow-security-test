@@ -17,9 +17,10 @@ import (
 	"sort"
 	"testing"
 
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/types"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tiflow/pkg/integrity"
 	"github.com/pingcap/tiflow/pkg/sink"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,65 +106,7 @@ func TestRowChangedEventFuncs(t *testing.T) {
 			},
 		},
 	}
-	expectedKeyCols := []*Column{
-		{
-			Name:  "a",
-			Value: 1,
-			Flag:  HandleKeyFlag | PrimaryKeyFlag,
-		},
-	}
 	require.True(t, deleteRow.IsDelete())
-	require.Equal(t, expectedKeyCols, deleteRow.PrimaryKeyColumns())
-	require.Equal(t, expectedKeyCols, deleteRow.HandleKeyColumns())
-
-	insertRow := &RowChangedEvent{
-		Table: &TableName{
-			Schema: "test",
-			Table:  "t1",
-		},
-		Columns: []*Column{
-			{
-				Name:  "a",
-				Value: 1,
-				Flag:  HandleKeyFlag,
-			}, {
-				Name:  "b",
-				Value: 2,
-				Flag:  0,
-			},
-		},
-	}
-	expectedPrimaryKeyCols := []*Column{}
-	expectedHandleKeyCols := []*Column{
-		{
-			Name:  "a",
-			Value: 1,
-			Flag:  HandleKeyFlag,
-		},
-	}
-	require.False(t, insertRow.IsDelete())
-	require.Equal(t, expectedPrimaryKeyCols, insertRow.PrimaryKeyColumns())
-	require.Equal(t, expectedHandleKeyCols, insertRow.HandleKeyColumns())
-
-	forceReplicaRow := &RowChangedEvent{
-		Table: &TableName{
-			Schema: "test",
-			Table:  "t1",
-		},
-		Columns: []*Column{
-			{
-				Name:  "a",
-				Value: 1,
-				Flag:  0,
-			}, {
-				Name:  "b",
-				Value: 2,
-				Flag:  0,
-			},
-		},
-	}
-	require.Empty(t, forceReplicaRow.PrimaryKeyColumns())
-	require.Empty(t, forceReplicaRow.HandleKeyColumns())
 }
 
 func TestColumnValueString(t *testing.T) {
@@ -503,7 +446,7 @@ func TestTrySplitAndSortUpdateEventEmpty(t *testing.T) {
 	require.Equal(t, 0, len(result))
 }
 
-func TestTrySplitAndSortUpdateEvent(t *testing.T) {
+func TestTxnTrySplitAndSortUpdateEvent(t *testing.T) {
 	t.Parallel()
 
 	// Update handle key.
@@ -534,17 +477,24 @@ func TestTrySplitAndSortUpdateEvent(t *testing.T) {
 
 	events := []*RowChangedEvent{
 		{
-			TableInfo:  &TableInfo{},
 			CommitTs:   1,
 			Columns:    columns,
 			PreColumns: preColumns,
+			Checksum: &integrity.Checksum{
+				Current:   1,
+				Previous:  2,
+				Corrupted: false,
+				Version:   0,
+			},
 		},
 	}
 	result, err := trySplitAndSortUpdateEvent(events)
 	require.NoError(t, err)
 	require.Equal(t, 2, len(result))
 	require.True(t, result[0].IsDelete())
+	require.Zero(t, result[0].Checksum.Current)
 	require.True(t, result[1].IsInsert())
+	require.Zero(t, result[1].Checksum.Previous)
 
 	// Update unique key.
 	columns = []*Column{
@@ -574,7 +524,6 @@ func TestTrySplitAndSortUpdateEvent(t *testing.T) {
 
 	events = []*RowChangedEvent{
 		{
-			TableInfo:  &TableInfo{},
 			CommitTs:   1,
 			Columns:    columns,
 			PreColumns: preColumns,
@@ -615,7 +564,6 @@ func TestTrySplitAndSortUpdateEvent(t *testing.T) {
 
 	events = []*RowChangedEvent{
 		{
-			TableInfo:  &TableInfo{},
 			CommitTs:   1,
 			Columns:    columns,
 			PreColumns: preColumns,
@@ -627,12 +575,6 @@ func TestTrySplitAndSortUpdateEvent(t *testing.T) {
 }
 
 var ukUpdatedEvent = &RowChangedEvent{
-	TableInfo: &TableInfo{
-		TableName: TableName{
-			Schema: "test",
-			Table:  "t1",
-		},
-	},
 	PreColumns: []*Column{
 		{
 			Name:  "col1",

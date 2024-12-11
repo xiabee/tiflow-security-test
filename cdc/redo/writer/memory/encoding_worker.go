@@ -22,6 +22,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/redo"
@@ -70,7 +71,7 @@ func (e *polymorphicRedoEvent) encode() (err error) {
 	redoLog := e.event.ToRedoLog()
 	e.commitTs = redoLog.GetCommitTs()
 
-	rawData, err := redoLog.MarshalMsg(nil)
+	rawData, err := codec.MarshalRedoLog(redoLog, nil)
 	if err != nil {
 		return err
 	}
@@ -130,7 +131,7 @@ func (e *encodingWorkerGroup) Run(ctx context.Context) (err error) {
 			zap.String("namespace", e.changefeed.Namespace),
 			zap.String("changefeed", e.changefeed.ID),
 			zap.Error(err))
-		if err != nil && errors.Cause(err) != context.Canceled {
+		if err != nil {
 			e.closed <- err
 		}
 		close(e.closed)

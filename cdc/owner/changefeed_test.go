@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	timodel "github.com/pingcap/tidb/parser/model"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/entry"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/puller"
@@ -35,10 +35,11 @@ import (
 	"github.com/pingcap/tiflow/pkg/etcd"
 	"github.com/pingcap/tiflow/pkg/filter"
 	"github.com/pingcap/tiflow/pkg/orchestrator"
-	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/redo"
+	"github.com/pingcap/tiflow/pkg/sink/observer"
 	"github.com/pingcap/tiflow/pkg/txnutil/gc"
 	"github.com/pingcap/tiflow/pkg/upstream"
+	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 )
@@ -88,7 +89,7 @@ type mockDDLSink struct {
 	// whether to record the DDL history, only for rename table
 	recordDDLHistory bool
 	// a slice of DDL history, only for rename table
-	ddlHistory []string
+	ddlHistory []*model.DDLEvent
 	mu         struct {
 		sync.Mutex
 		checkpointTs  model.Ts
@@ -96,6 +97,8 @@ type mockDDLSink struct {
 	}
 	syncPoint    model.Ts
 	syncPointHis []model.Ts
+
+	bootstrapError bool
 
 	wg sync.WaitGroup
 }
@@ -116,7 +119,7 @@ func (m *mockDDLSink) emitDDLEvent(ctx context.Context, ddl *model.DDLEvent) (bo
 		}
 	}()
 	if m.recordDDLHistory {
-		m.ddlHistory = append(m.ddlHistory, ddl.Query)
+		m.ddlHistory = append(m.ddlHistory, ddl)
 	} else {
 		m.ddlHistory = nil
 	}
@@ -145,12 +148,18 @@ func (m *mockDDLSink) getCheckpointTsAndTableNames() (uint64, []*model.TableInfo
 	return m.mu.checkpointTs, m.mu.currentTables
 }
 
-func (m *mockDDLSink) close(ctx context.Context) error {
+func (m *mockDDLSink) close(_ context.Context) error {
 	m.wg.Wait()
 	return nil
 }
 
-func (m *mockDDLSink) Barrier(ctx context.Context) error {
+func (m *mockDDLSink) emitBootstrap(_ context.Context, bootstrap *model.DDLEvent) error {
+	if m.bootstrapError {
+		return errors.New("emit bootstrap error")
+	}
+	if m.recordDDLHistory {
+		m.ddlHistory = append(m.ddlHistory, bootstrap)
+	}
 	return nil
 }
 
@@ -188,8 +197,24 @@ func (m *mockScheduler) DrainCapture(target model.CaptureID) (int, error) {
 // Close closes the scheduler and releases resources.
 func (m *mockScheduler) Close(ctx context.Context) {}
 
-func createChangefeed4Test(ctx cdcContext.Context, t *testing.T,
-) (
+func newMockDDLSink(_ model.ChangeFeedID, _ *model.ChangeFeedInfo, _ func(error), _ func(error)) DDLSink {
+	return &mockDDLSink{
+		resetDDLDone:     true,
+		recordDDLHistory: false,
+	}
+}
+
+func newMockDDLSinkWithBootstrapError(_ model.ChangeFeedID, _ *model.ChangeFeedInfo, _ func(error), _ func(error)) DDLSink {
+	return &mockDDLSink{
+		resetDDLDone:     true,
+		recordDDLHistory: false,
+		bootstrapError:   true,
+	}
+}
+
+func createChangefeed4Test(ctx cdcContext.Context,
+	newMockDDLSink func(model.ChangeFeedID, *model.ChangeFeedInfo, func(error), func(error)) DDLSink,
+	t *testing.T) (
 	*changefeed, map[model.CaptureID]*model.CaptureInfo, *orchestrator.ReactorStateTester,
 ) {
 	up := upstream.NewUpstream4Test(&gc.MockPDClient{
@@ -220,18 +245,24 @@ func createChangefeed4Test(ctx cdcContext.Context, t *testing.T,
 			return &mockDDLPuller{resolvedTs: startTs - 1, schemaStorage: schemaStorage}, nil
 		},
 		// new ddl ddlSink
-		func(_ model.ChangeFeedID, _ *model.ChangeFeedInfo, _ func(error), _ func(error)) DDLSink {
-			return &mockDDLSink{
-				resetDDLDone:     true,
-				recordDDLHistory: false,
-			}
-		},
+		newMockDDLSink,
 		// new scheduler
 		func(
-			ctx cdcContext.Context, pdClock pdutil.Clock, epoch uint64, redoMetaManager credo.MetaManager,
+			ctx cdcContext.Context, up *upstream.Upstream, epoch uint64,
+			cfg *config.SchedulerConfig, redoMetaManager credo.MetaManager,
 		) (scheduler.Scheduler, error) {
 			return &mockScheduler{}, nil
-		})
+		},
+		// new downstream observer
+		func(
+			ctx context.Context, id model.ChangeFeedID,
+			sinkURIStr string, replCfg *config.ReplicaConfig,
+			opts ...observer.NewObserverOption,
+		) (observer.Observer, error) {
+			return observer.NewDummyObserver(), nil
+		},
+	)
+
 	cf.upstream = up
 
 	tester.MustUpdate(fmt.Sprintf("%s/capture/%s",
@@ -244,7 +275,7 @@ func createChangefeed4Test(ctx cdcContext.Context, t *testing.T,
 
 func TestPreCheck(t *testing.T) {
 	ctx := cdcContext.NewBackendContext4Test(true)
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSink, t)
 	cf.Tick(ctx, captures)
 	tester.MustApplyPatches()
 	require.NotNil(t, cf.state.Status)
@@ -264,7 +295,7 @@ func TestPreCheck(t *testing.T) {
 
 func TestInitialize(t *testing.T) {
 	ctx := cdcContext.NewBackendContext4Test(true)
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSink, t)
 	defer cf.Close(ctx)
 	// pre check
 	cf.Tick(ctx, captures)
@@ -279,7 +310,7 @@ func TestInitialize(t *testing.T) {
 
 func TestChangefeedHandleError(t *testing.T) {
 	ctx := cdcContext.NewBackendContext4Test(true)
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSink, t)
 	defer cf.Close(ctx)
 	// pre check
 	cf.Tick(ctx, captures)
@@ -297,6 +328,36 @@ func TestChangefeedHandleError(t *testing.T) {
 	require.Equal(t, cf.state.Info.Error.Message, "fake error")
 }
 
+func TestTrySendBootstrapMeetError(t *testing.T) {
+	helper := entry.NewSchemaTestHelper(t)
+	defer helper.Close()
+	_ = helper.DDL2Event("create table test.t(id int primary key, b int)")
+
+	ctx := cdcContext.NewContext4Test(context.Background(), true)
+	cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSinkWithBootstrapError, t)
+	cf.upstream.KVStorage = helper.Storage()
+	defer cf.Close(ctx)
+
+	// pre check
+	cf.Tick(ctx, captures)
+	tester.MustApplyPatches()
+
+	// initialize
+	cf.state.Info.Config.Sink.Protocol = util.AddressOf("simple")
+	cf.state.Info.Config.Sink.SendAllBootstrapAtStart = util.AddressOf(true)
+	cf.Tick(ctx, captures)
+	tester.MustApplyPatches()
+
+	require.Eventually(t, func() bool {
+		cf.Tick(ctx, captures)
+		tester.MustApplyPatches()
+		if cf.state.Info.Error != nil {
+			return cf.state.Info.State == model.StatePending
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond)
+}
+
 func TestExecDDL(t *testing.T) {
 	helper := entry.NewSchemaTestHelper(t)
 	defer helper.Close()
@@ -309,7 +370,7 @@ func TestExecDDL(t *testing.T) {
 	ctx := cdcContext.NewContext4Test(context.Background(), true)
 	ctx.ChangefeedVars().Info.StartTs = startTs
 
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSink, t)
 	cf.upstream.KVStorage = helper.Storage()
 	defer cf.Close(ctx)
 	tickThreeTime := func() {
@@ -391,7 +452,7 @@ func TestEmitCheckpointTs(t *testing.T) {
 	ctx := cdcContext.NewContext4Test(context.Background(), true)
 	ctx.ChangefeedVars().Info.StartTs = startTs
 
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSink, t)
 	cf.upstream.KVStorage = helper.Storage()
 
 	defer cf.Close(ctx)
@@ -447,9 +508,11 @@ func TestEmitCheckpointTs(t *testing.T) {
 
 func TestSyncPoint(t *testing.T) {
 	ctx := cdcContext.NewBackendContext4Test(true)
-	ctx.ChangefeedVars().Info.Config.EnableSyncPoint = true
-	ctx.ChangefeedVars().Info.Config.SyncPointInterval = 1 * time.Second
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	ctx.ChangefeedVars().Info.Config.EnableSyncPoint = util.AddressOf(true)
+	ctx.ChangefeedVars().Info.Config.SyncPointInterval = util.AddressOf(1 * time.Second)
+	// SyncPoint option is only available for MySQL compatible database.
+	ctx.ChangefeedVars().Info.SinkURI = "mysql://"
+	cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSink, t)
 	defer cf.Close(ctx)
 
 	// pre check
@@ -479,7 +542,7 @@ func TestSyncPoint(t *testing.T) {
 func TestFinished(t *testing.T) {
 	ctx := cdcContext.NewBackendContext4Test(true)
 	ctx.ChangefeedVars().Info.TargetTs = ctx.ChangefeedVars().Info.StartTs + 1000
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSink, t)
 	defer cf.Close(ctx)
 
 	// pre check
@@ -508,6 +571,7 @@ func TestRemoveChangefeed(t *testing.T) {
 	ctx := cdcContext.NewContext4Test(baseCtx, true)
 	info := ctx.ChangefeedVars().Info
 	dir := t.TempDir()
+	info.SinkURI = "mysql://"
 	info.Config.Consistent = &config.ConsistentConfig{
 		Level:                 "eventual",
 		Storage:               filepath.Join("nfs://", dir),
@@ -529,6 +593,9 @@ func TestRemovePausedChangefeed(t *testing.T) {
 	info := ctx.ChangefeedVars().Info
 	info.State = model.StateStopped
 	dir := t.TempDir()
+	// Field `Consistent` is valid only when the downstream
+	// is MySQL compatible  Database
+	info.SinkURI = "mysql://"
 	info.Config.Consistent = &config.ConsistentConfig{
 		Level:             "eventual",
 		Storage:           filepath.Join("nfs://", dir),
@@ -548,7 +615,7 @@ func testChangefeedReleaseResource(
 	redoLogDir string,
 	expectedInitialized bool,
 ) {
-	cf, captures, tester := createChangefeed4Test(ctx, t)
+	cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSink, t)
 
 	// pre check
 	cf.Tick(ctx, captures)
@@ -557,7 +624,7 @@ func testChangefeedReleaseResource(
 	// initialize
 	cf.Tick(ctx, captures)
 	tester.MustApplyPatches()
-	require.Equal(t, cf.initialized, expectedInitialized)
+	require.Equal(t, cf.initialized.Load(), expectedInitialized)
 
 	// remove changefeed from state manager by admin job
 	cf.feedStateManager.PushAdminJob(&model.AdminJob{
@@ -585,11 +652,12 @@ func TestBarrierAdvance(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		ctx := cdcContext.NewBackendContext4Test(true)
 		if i == 1 {
-			ctx.ChangefeedVars().Info.Config.EnableSyncPoint = true
-			ctx.ChangefeedVars().Info.Config.SyncPointInterval = 100 * time.Second
+			ctx.ChangefeedVars().Info.Config.EnableSyncPoint = util.AddressOf(true)
+			ctx.ChangefeedVars().Info.Config.SyncPointInterval = util.AddressOf(100 * time.Second)
 		}
+		ctx.ChangefeedVars().Info.SinkURI = "mysql://"
 
-		cf, captures, tester := createChangefeed4Test(ctx, t)
+		cf, captures, tester := createChangefeed4Test(ctx, newMockDDLSink, t)
 		defer cf.Close(ctx)
 
 		// The changefeed load the info from etcd.
@@ -597,7 +665,6 @@ func TestBarrierAdvance(t *testing.T) {
 			CheckpointTs:      cf.state.Info.StartTs,
 			MinTableBarrierTs: cf.state.Info.StartTs + 5,
 		}
-
 		// Do the preflightCheck and initialize the changefeed.
 		cf.Tick(ctx, captures)
 		tester.MustApplyPatches()
@@ -605,13 +672,16 @@ func TestBarrierAdvance(t *testing.T) {
 			cf.ddlManager.ddlResolvedTs += 10
 		}
 		_, barrier, err := cf.ddlManager.tick(ctx, cf.state.Status.CheckpointTs, nil)
+
 		require.Nil(t, err)
 
 		err = cf.handleBarrier(ctx, barrier)
 		require.Nil(t, err)
+
 		if i == 0 {
 			require.Equal(t, cf.state.Info.StartTs, barrier.GlobalBarrierTs)
 		}
+
 		// sync-point is enabled, sync point barrier is ticked
 		if i == 1 {
 			require.Equal(t, cf.state.Info.StartTs+10, barrier.GlobalBarrierTs)
@@ -631,9 +701,12 @@ func TestBarrierAdvance(t *testing.T) {
 			_, barrier, err = cf.ddlManager.tick(ctx, cf.state.Status.CheckpointTs+10, nil)
 			require.Nil(t, err)
 			err = cf.handleBarrier(ctx, barrier)
-			nextSyncPointTs := oracle.
-				GoTimeToTS(oracle.GetTimeFromTS(cf.state.Status.CheckpointTs + 10).
-					Add(ctx.ChangefeedVars().Info.Config.SyncPointInterval))
+
+			nextSyncPointTs := oracle.GoTimeToTS(
+				oracle.GetTimeFromTS(cf.state.Status.CheckpointTs + 10).
+					Add(util.GetOrZero(ctx.ChangefeedVars().Info.Config.SyncPointInterval)),
+			)
+
 			require.Nil(t, err)
 			require.Equal(t, nextSyncPointTs, barrier.GlobalBarrierTs)
 			require.Less(t, cf.state.Status.CheckpointTs+10, barrier.GlobalBarrierTs)

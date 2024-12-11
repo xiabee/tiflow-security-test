@@ -22,6 +22,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/processor/tablepb"
 	"github.com/pingcap/tiflow/cdc/redo/common"
 	"github.com/pingcap/tiflow/cdc/redo/writer"
 	"github.com/pingcap/tiflow/cdc/redo/writer/factory"
@@ -29,6 +30,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/redo"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -40,9 +42,10 @@ var (
 )
 
 type redoManager interface {
+	util.Runnable
+
 	// Enabled returns whether the manager is enabled
 	Enabled() bool
-	Run(ctx context.Context) error
 }
 
 // DDLManager defines an interface that is used to manage ddl logs in owner.
@@ -66,51 +69,51 @@ func NewDDLManager(
 	cfg *config.ConsistentConfig, ddlStartTs model.Ts,
 ) *ddlManager {
 	m := newLogManager(changefeedID, cfg, redo.RedoDDLLogFileType)
-	tableID := int64(0)
-	m.AddTable(tableID, ddlStartTs)
+	span := spanz.TableIDToComparableSpan(0)
+	m.AddTable(span, ddlStartTs)
 	return &ddlManager{
 		logManager: m,
-		// The current fakeTableID is meaningless, find a meaningful id in the future.
-		fakeTableID: tableID,
+		// The current fakeSpan is meaningless, find a meaningful span in the future.
+		fakeSpan: span,
 	}
 }
 
 type ddlManager struct {
 	*logManager
-	fakeTableID model.TableID
+	fakeSpan tablepb.Span
 }
 
 func (m *ddlManager) EmitDDLEvent(ctx context.Context, ddl *model.DDLEvent) error {
-	return m.logManager.emitRedoEvents(ctx, m.fakeTableID, nil, ddl)
+	return m.logManager.emitRedoEvents(ctx, m.fakeSpan, nil, ddl)
 }
 
 func (m *ddlManager) UpdateResolvedTs(ctx context.Context, resolvedTs uint64) error {
-	return m.logManager.UpdateResolvedTs(ctx, m.fakeTableID, resolvedTs)
+	return m.logManager.UpdateResolvedTs(ctx, m.fakeSpan, resolvedTs)
 }
 
 func (m *ddlManager) GetResolvedTs() model.Ts {
-	return m.logManager.GetResolvedTs(m.fakeTableID)
+	return m.logManager.GetResolvedTs(m.fakeSpan)
 }
 
 // DMLManager defines an interface that is used to manage dml logs in processor.
 type DMLManager interface {
 	redoManager
-	AddTable(tableID model.TableID, startTs uint64)
-	StartTable(tableID model.TableID, startTs uint64)
-	RemoveTable(tableID model.TableID)
-	UpdateResolvedTs(ctx context.Context, tableID model.TableID, resolvedTs uint64) error
-	GetResolvedTs(tableID model.TableID) model.Ts
+	AddTable(span tablepb.Span, startTs uint64)
+	StartTable(span tablepb.Span, startTs uint64)
+	RemoveTable(span tablepb.Span)
+	UpdateResolvedTs(ctx context.Context, span tablepb.Span, resolvedTs uint64) error
+	GetResolvedTs(span tablepb.Span) model.Ts
 	EmitRowChangedEvents(
 		ctx context.Context,
-		tableID model.TableID,
+		span tablepb.Span,
 		releaseRowsMemory func(),
 		rows ...*model.RowChangedEvent,
 	) error
 }
 
 // NewDMLManager creates a new dml Manager.
-func NewDMLManager(
-	changefeedID model.ChangeFeedID, cfg *config.ConsistentConfig,
+func NewDMLManager(changefeedID model.ChangeFeedID,
+	cfg *config.ConsistentConfig,
 ) *dmlManager {
 	return &dmlManager{
 		logManager: newLogManager(changefeedID, cfg, redo.RedoRowLogFileType),
@@ -131,7 +134,7 @@ type dmlManager struct {
 // EmitRowChangedEvents emits row changed events to the redo log.
 func (m *dmlManager) EmitRowChangedEvents(
 	ctx context.Context,
-	tableID model.TableID,
+	span tablepb.Span,
 	releaseRowsMemory func(),
 	rows ...*model.RowChangedEvent,
 ) error {
@@ -139,11 +142,11 @@ func (m *dmlManager) EmitRowChangedEvents(
 	for _, row := range rows {
 		events = append(events, row)
 	}
-	return m.logManager.emitRedoEvents(ctx, tableID, releaseRowsMemory, events...)
+	return m.logManager.emitRedoEvents(ctx, span, releaseRowsMemory, events...)
 }
 
 type cacheEvents struct {
-	tableID         model.TableID
+	span            tablepb.Span
 	events          []writer.RedoEvent
 	resolvedTs      model.Ts
 	isResolvedEvent bool
@@ -192,10 +195,10 @@ type logManager struct {
 	closed    int32
 
 	// rtsMap stores flushed and unflushed resolved timestamps for all tables.
-	// it's just like map[tableID]*statefulRts.
+	// it's just like map[span]*statefulRts.
 	// For a given statefulRts, unflushed is updated in routine bgUpdateLog,
 	// and flushed is updated in flushLog.
-	rtsMap sync.Map
+	rtsMap spanz.SyncMap
 
 	flushing         int64
 	lastFlushTime    time.Time
@@ -208,7 +211,8 @@ type logManager struct {
 }
 
 func newLogManager(
-	changefeedID model.ChangeFeedID, cfg *config.ConsistentConfig, logType string,
+	changefeedID model.ChangeFeedID,
+	cfg *config.ConsistentConfig, logType string,
 ) *logManager {
 	// return a disabled Manager if no consistent config or normal consistent level
 	if cfg == nil || !redo.IsConsistentEnabled(cfg.Level) {
@@ -224,7 +228,8 @@ func newLogManager(
 			ChangeFeedID:      changefeedID,
 			MaxLogSizeInBytes: cfg.MaxLogSize * redo.Megabyte,
 		},
-		logBuffer: chann.NewDrainableChann[cacheEvents](),
+		logBuffer: chann.NewAutoDrainChann[cacheEvents](),
+		rtsMap:    spanz.SyncMap{},
 		metricWriteLogDuration: common.RedoWriteLogDurationHistogram.
 			WithLabelValues(changefeedID.Namespace, changefeedID.ID),
 		metricFlushLogDuration: common.RedoFlushLogDurationHistogram.
@@ -237,7 +242,7 @@ func newLogManager(
 }
 
 // Run implements pkg/util.Runnable.
-func (m *logManager) Run(ctx context.Context) error {
+func (m *logManager) Run(ctx context.Context, _ ...chan<- error) error {
 	failpoint.Inject("ChangefeedNewRedoManagerError", func() {
 		failpoint.Return(errors.New("changefeed new redo manager injected error"))
 	})
@@ -278,6 +283,12 @@ func (m *logManager) getFlushDuration() time.Duration {
 	return time.Duration(flushIntervalInMs) * time.Millisecond
 }
 
+// WaitForReady implements pkg/util.Runnable.
+func (m *logManager) WaitForReady(_ context.Context) {}
+
+// Close implements pkg/util.Runnable.
+func (m *logManager) Close() {}
+
 // Enabled returns whether this log manager is enabled
 func (m *logManager) Enabled() bool {
 	return m.enabled
@@ -288,7 +299,7 @@ func (m *logManager) Enabled() bool {
 // to redo logs and sends to log writer.
 func (m *logManager) emitRedoEvents(
 	ctx context.Context,
-	tableID model.TableID,
+	span tablepb.Span,
 	releaseRowsMemory func(),
 	events ...writer.RedoEvent,
 ) error {
@@ -297,7 +308,7 @@ func (m *logManager) emitRedoEvents(
 		case <-ctx.Done():
 			return errors.Trace(ctx.Err())
 		case m.logBuffer.In() <- cacheEvents{
-			tableID:         tableID,
+			span:            span,
 			events:          events,
 			releaseMemory:   releaseRowsMemory,
 			isResolvedEvent: false,
@@ -309,12 +320,12 @@ func (m *logManager) emitRedoEvents(
 
 // StartTable starts a table, which means the table is ready to emit redo events.
 // Note that this function should only be called once when adding a new table to processor.
-func (m *logManager) StartTable(tableID model.TableID, resolvedTs uint64) {
+func (m *logManager) StartTable(span tablepb.Span, resolvedTs uint64) {
 	// advance unflushed resolved ts
-	m.onResolvedTsMsg(tableID, resolvedTs)
+	m.onResolvedTsMsg(span, resolvedTs)
 
 	// advance flushed resolved ts
-	if value, loaded := m.rtsMap.Load(tableID); loaded {
+	if value, loaded := m.rtsMap.Load(span); loaded {
 		value.(*statefulRts).checkAndSetFlushed(resolvedTs)
 	}
 }
@@ -322,7 +333,7 @@ func (m *logManager) StartTable(tableID model.TableID, resolvedTs uint64) {
 // UpdateResolvedTs asynchronously updates resolved ts of a single table.
 func (m *logManager) UpdateResolvedTs(
 	ctx context.Context,
-	tableID model.TableID,
+	span tablepb.Span,
 	resolvedTs uint64,
 ) error {
 	return m.withLock(func(m *logManager) error {
@@ -330,7 +341,7 @@ func (m *logManager) UpdateResolvedTs(
 		case <-ctx.Done():
 			return errors.Trace(ctx.Err())
 		case m.logBuffer.In() <- cacheEvents{
-			tableID:         tableID,
+			span:            span,
 			resolvedTs:      resolvedTs,
 			isResolvedEvent: true,
 		}:
@@ -340,67 +351,67 @@ func (m *logManager) UpdateResolvedTs(
 }
 
 // GetResolvedTs returns the resolved ts of a table
-func (m *logManager) GetResolvedTs(tableID model.TableID) model.Ts {
-	if value, ok := m.rtsMap.Load(tableID); ok {
+func (m *logManager) GetResolvedTs(span tablepb.Span) model.Ts {
+	if value, ok := m.rtsMap.Load(span); ok {
 		return value.(*statefulRts).getFlushed()
 	}
 	panic("GetResolvedTs is called on an invalid table")
 }
 
 // AddTable adds a new table in redo log manager
-func (m *logManager) AddTable(tableID model.TableID, startTs uint64) {
+func (m *logManager) AddTable(span tablepb.Span, startTs uint64) {
 	rts := newStatefulRts(startTs)
-	_, loaded := m.rtsMap.LoadOrStore(tableID, &rts)
+	_, loaded := m.rtsMap.LoadOrStore(span, &rts)
 	if loaded {
 		log.Warn("add duplicated table in redo log manager",
 			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
 			zap.String("changefeed", m.cfg.ChangeFeedID.ID),
-			zap.Int64("tableID", tableID))
+			zap.Stringer("span", &span))
 		return
 	}
 }
 
 // RemoveTable removes a table from redo log manager
-func (m *logManager) RemoveTable(tableID model.TableID) {
-	if _, ok := m.rtsMap.LoadAndDelete(tableID); !ok {
+func (m *logManager) RemoveTable(span tablepb.Span) {
+	if _, ok := m.rtsMap.LoadAndDelete(span); !ok {
 		log.Warn("remove a table not maintained in redo log manager",
 			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
 			zap.String("changefeed", m.cfg.ChangeFeedID.ID),
-			zap.Int64("tableID", tableID))
+			zap.Stringer("span", &span))
 		return
 	}
 }
 
-func (m *logManager) prepareForFlush() (tableRtsMap map[model.TableID]model.Ts) {
-	tableRtsMap = make(map[model.TableID]model.Ts)
-	m.rtsMap.Range(func(key interface{}, value interface{}) bool {
-		tableID := key.(model.TableID)
+func (m *logManager) prepareForFlush() *spanz.HashMap[model.Ts] {
+	tableRtsMap := spanz.NewHashMap[model.Ts]()
+	m.rtsMap.Range(func(span tablepb.Span, value interface{}) bool {
 		rts := value.(*statefulRts)
 		unflushed := rts.getUnflushed()
 		flushed := rts.getFlushed()
 		if unflushed > flushed {
 			flushed = unflushed
 		}
-		tableRtsMap[tableID] = flushed
+		tableRtsMap.ReplaceOrInsert(span, flushed)
 		return true
 	})
 	return tableRtsMap
 }
 
-func (m *logManager) postFlush(tableRtsMap map[model.TableID]model.Ts) {
-	for tableID, flushed := range tableRtsMap {
-		if value, loaded := m.rtsMap.Load(tableID); loaded {
+func (m *logManager) postFlush(tableRtsMap *spanz.HashMap[model.Ts]) {
+	tableRtsMap.Range(func(span tablepb.Span, flushed uint64) bool {
+		if value, loaded := m.rtsMap.Load(span); loaded {
 			changed := value.(*statefulRts).checkAndSetFlushed(flushed)
 			if !changed {
 				log.Debug("flush redo with regressed resolved ts",
 					zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
 					zap.String("changefeed", m.cfg.ChangeFeedID.ID),
-					zap.Int64("tableID", tableID),
+					zap.Stringer("span", &span),
 					zap.Uint64("flushed", flushed),
 					zap.Uint64("current", value.(*statefulRts).getFlushed()))
 			}
 		}
-	}
+		return true
+	})
 }
 
 func (m *logManager) flushLog(
@@ -434,6 +445,7 @@ func (m *logManager) flushLog(
 		log.Debug("Flush redo log",
 			zap.String("namespace", m.cfg.ChangeFeedID.Namespace),
 			zap.String("changefeed", m.cfg.ChangeFeedID.ID),
+			zap.String("logType", m.cfg.LogType),
 			zap.Any("tableRtsMap", tableRtsMap))
 		err := m.withLock(func(m *logManager) error {
 			return m.writer.FlushLog(ctx)
@@ -459,7 +471,7 @@ func (m *logManager) handleEvent(
 	}()
 
 	if e.isResolvedEvent {
-		m.onResolvedTsMsg(e.tableID, e.resolvedTs)
+		m.onResolvedTsMsg(e.span, e.resolvedTs)
 	} else {
 		if e.releaseMemory != nil {
 			m.releaseMemoryCbs = append(m.releaseMemoryCbs, e.releaseMemory)
@@ -483,9 +495,9 @@ func (m *logManager) handleEvent(
 	return nil
 }
 
-func (m *logManager) onResolvedTsMsg(tableID model.TableID, resolvedTs model.Ts) {
+func (m *logManager) onResolvedTsMsg(span tablepb.Span, resolvedTs model.Ts) {
 	// It's possible that the table is removed while redo log is still in writing.
-	if value, loaded := m.rtsMap.Load(tableID); loaded {
+	if value, loaded := m.rtsMap.Load(span); loaded {
 		value.(*statefulRts).checkAndSetUnflushed(resolvedTs)
 	}
 }

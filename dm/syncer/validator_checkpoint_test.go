@@ -24,9 +24,9 @@ import (
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/util/filter"
-	regexprrouter "github.com/pingcap/tidb/util/regexpr-router"
-	router "github.com/pingcap/tidb/util/table-router"
+	"github.com/pingcap/tidb/pkg/util/filter"
+	regexprrouter "github.com/pingcap/tidb/pkg/util/regexpr-router"
+	router "github.com/pingcap/tidb/pkg/util/table-router"
 	"github.com/pingcap/tiflow/dm/pb"
 	"github.com/pingcap/tiflow/dm/pkg/binlog"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
@@ -90,7 +90,7 @@ func TestValidatorCheckpointPersist(t *testing.T) {
 		mock.NewRows([]string{"Table", "Create Table"}).AddRow(tableName, createTableSQL))
 	dbConn, err := db.Conn(context.Background())
 	require.NoError(t, err)
-	syncerObj.downstreamTrackConn = dbconn.NewDBConn(cfg, conn.NewBaseConn(dbConn, &retry.FiniteRetryStrategy{}))
+	syncerObj.downstreamTrackConn = dbconn.NewDBConn(cfg, conn.NewBaseConnForTest(dbConn, &retry.FiniteRetryStrategy{}))
 	syncerObj.schemaTracker, err = schema.NewTestTracker(context.Background(), cfg.Name, syncerObj.downstreamTrackConn, log.L())
 	defer syncerObj.schemaTracker.Close()
 	require.NoError(t, err)
@@ -138,10 +138,10 @@ func TestValidatorCheckpointPersist(t *testing.T) {
 	dbMock.ExpectExec("INSERT INTO .*_validator_pending_change.*VALUES \\(\\?, \\?, \\?, \\?, \\?, \\?\\)").
 		WillReturnResult(driver.ResultNoRows)
 	dbMock.ExpectExec("INSERT INTO .*_validator_checkpoint.*ON DUPLICATE.*").
-		WillReturnError(errors.New("Error 1366 failed on persist checkpoint"))
+		WillReturnError(errors.New("Error 1406 failed on persist checkpoint"))
 	require.Nil(t, validator.flushedLoc)
 	err2 := validator.persistCheckpointAndData(*validator.location)
-	require.EqualError(t, err2, "Error 1366 failed on persist checkpoint")
+	require.EqualError(t, err2, "Error 1406 failed on persist checkpoint")
 	require.Equal(t, int64(100), validator.persistHelper.revision)
 	require.Len(t, validator.workers[0].errorRows, 1)
 	require.Nil(t, validator.flushedLoc)
@@ -157,7 +157,7 @@ func TestValidatorCheckpointPersist(t *testing.T) {
 	dbMock.ExpectExec("INSERT INTO .*_validator_checkpoint.*ON DUPLICATE.*").
 		WillReturnResult(driver.ResultNoRows)
 	dbMock.ExpectExec("DELETE FROM .*_validator_pending_change.*WHERE source = \\? and revision != \\?").
-		WillReturnError(errors.New("Error 1366 failed on delete pending change"))
+		WillReturnError(errors.New("Error 1406 failed on delete pending change"))
 	err2 = validator.persistCheckpointAndData(*validator.location)
 	require.NoError(t, err2)
 	require.Equal(t, int64(101), validator.persistHelper.revision)

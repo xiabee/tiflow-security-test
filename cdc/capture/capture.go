@@ -25,12 +25,11 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tiflow/cdc/controller"
 	"github.com/pingcap/tiflow/cdc/model"
 	"github.com/pingcap/tiflow/cdc/owner"
 	"github.com/pingcap/tiflow/cdc/processor"
-	"github.com/pingcap/tiflow/cdc/processor/pipeline/system"
 	"github.com/pingcap/tiflow/cdc/processor/sourcemanager/engine/factory"
-	ssystem "github.com/pingcap/tiflow/cdc/sorter/db/system"
 	"github.com/pingcap/tiflow/pkg/config"
 	cdcContext "github.com/pingcap/tiflow/pkg/context"
 	cerror "github.com/pingcap/tiflow/pkg/errors"
@@ -41,6 +40,7 @@ import (
 	"github.com/pingcap/tiflow/pkg/upstream"
 	"github.com/pingcap/tiflow/pkg/util"
 	"github.com/pingcap/tiflow/pkg/version"
+	"github.com/pingcap/tiflow/pkg/workerpool"
 	pd "github.com/tikv/pd/client"
 	"go.etcd.io/etcd/client/v3/concurrency"
 	"go.etcd.io/etcd/server/v3/mvcc"
@@ -49,19 +49,24 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const cleanMetaDuration = 10 * time.Second
+const (
+	cleanMetaDuration = 10 * time.Second
+	// changefeedAsyncInitWorkerCount is the size of the worker pool for changefeed initialization processing.
+	changefeedAsyncInitWorkerCount = 8
+)
 
 // Capture represents a Capture server, it monitors the changefeed
 // information in etcd and schedules Task on it.
 type Capture interface {
 	Run(ctx context.Context) error
-	AsyncClose()
+	Close()
 	Drain() <-chan struct{}
 	Liveness() model.Liveness
 
 	GetOwner() (owner.Owner, error)
-	GetOwnerCaptureInfo(ctx context.Context) (*model.CaptureInfo, error)
-	IsOwner() bool
+	GetController() (controller.Controller, error)
+	GetControllerCaptureInfo(ctx context.Context) (*model.CaptureInfo, error)
+	IsController() bool
 
 	Info() (model.CaptureInfo, error)
 	StatusProvider() owner.StatusProvider
@@ -86,21 +91,19 @@ type captureImpl struct {
 	pdEndpoints     []string
 	ownerMu         sync.Mutex
 	owner           owner.Owner
+	controller      controller.Controller
 	upstreamManager *upstream.Manager
 
 	// session keeps alive between the capture and etcd
 	session  *concurrency.Session
 	election election
 
-	EtcdClient       etcd.CDCEtcdClient
-	tableActorSystem *system.System
+	EtcdClient etcd.CDCEtcdClient
 
-	// useSortEngine indicates whether to use the new pull based sort engine or
-	// the old push based sorter system. the latter will be removed after all sorter
-	// have been transformed into pull based sort engine.
-	useSortEngine     bool
-	sorterSystem      *ssystem.System
 	sortEngineFactory *factory.SortEngineFactory
+
+	// ChangefeedThreadPool is the thread pool for changefeed initialization
+	ChangefeedThreadPool workerpool.AsyncPool
 
 	// MessageServer is the receiver of the messages from the other nodes.
 	// It should be recreated each time the capture is restarted.
@@ -124,17 +127,17 @@ type captureImpl struct {
 		captureInfo *model.CaptureInfo,
 		upstreamManager *upstream.Manager,
 		liveness *model.Liveness,
+		cfg *config.SchedulerConfig,
 	) processor.Manager
-	newOwner func(upstreamManager *upstream.Manager) owner.Owner
+	newOwner      func(upstreamManager *upstream.Manager, cfg *config.SchedulerConfig) owner.Owner
+	newController func(upstreamManager *upstream.Manager, captureInfo *model.CaptureInfo, client etcd.CDCEtcdClient) controller.Controller
 }
 
 // NewCapture returns a new Capture instance
 func NewCapture(pdEndpoints []string,
 	etcdClient etcd.CDCEtcdClient,
 	grpcService *p2p.ServerWrapper,
-	tableActorSystem *system.System,
 	sortEngineMangerFactory *factory.SortEngineFactory,
-	sorterSystem *ssystem.System,
 	pdClient pd.Client,
 ) Capture {
 	conf := config.GetGlobalServerConfig()
@@ -145,13 +148,11 @@ func NewCapture(pdEndpoints []string,
 		grpcService:         grpcService,
 		cancel:              func() {},
 		pdEndpoints:         pdEndpoints,
-		tableActorSystem:    tableActorSystem,
 		newProcessorManager: processor.NewManager,
 		newOwner:            owner.NewOwner,
+		newController:       controller.NewController,
 		info:                &model.CaptureInfo{},
-		useSortEngine:       sortEngineMangerFactory != nil,
 		sortEngineFactory:   sortEngineMangerFactory,
-		sorterSystem:        sorterSystem,
 		migrator:            migrate.NewMigrator(etcdClient, pdEndpoints, conf),
 		pdClient:            pdClient,
 	}
@@ -168,6 +169,24 @@ func NewCapture4Test(o owner.Owner) *captureImpl {
 		migrator: &migrate.NoOpMigrator{},
 		config:   config.GetGlobalServerConfig(),
 	}
+	res.owner = o
+	return res
+}
+
+// NewCaptureWithController4Test returns a new Capture instance for test.
+func NewCaptureWithController4Test(o owner.Owner,
+	manager controller.Controller,
+) *captureImpl {
+	res := &captureImpl{
+		info: &model.CaptureInfo{
+			ID:            "capture-for-test",
+			AdvertiseAddr: "127.0.0.1",
+			Version:       "test",
+		},
+		migrator: &migrate.NoOpMigrator{},
+		config:   config.GetGlobalServerConfig(),
+	}
+	res.controller = manager
 	res.owner = o
 	return res
 }
@@ -224,7 +243,8 @@ func (c *captureImpl) reset(ctx context.Context) error {
 		return errors.Trace(err)
 	}
 
-	c.processorManager = c.newProcessorManager(c.info, c.upstreamManager, &c.liveness)
+	c.processorManager = c.newProcessorManager(
+		c.info, c.upstreamManager, &c.liveness, c.config.Debug.Scheduler)
 	if c.session != nil {
 		// It can't be handled even after it fails, so we ignore it.
 		_ = c.session.Close()
@@ -236,7 +256,6 @@ func (c *captureImpl) reset(ctx context.Context) error {
 
 	if c.MessageRouter != nil {
 		c.MessageRouter.Close()
-		c.MessageRouter.Wait()
 		c.MessageRouter = nil
 	}
 	messageServerConfig := c.config.Debug.Messages.ToMessageServerConfig()
@@ -251,8 +270,8 @@ func (c *captureImpl) reset(ctx context.Context) error {
 	advertiseAddr := c.config.AdvertiseAddr
 	messageClientConfig.AdvertisedAddr = advertiseAddr
 
-	c.MessageRouter = p2p.NewMessageRouter(c.info.ID, c.config.Security, messageClientConfig)
-
+	c.MessageRouter = p2p.NewMessageRouterWithLocalClient(c.info.ID, c.config.Security, messageClientConfig)
+	c.ChangefeedThreadPool = workerpool.NewDefaultAsyncPool(changefeedAsyncInitWorkerCount)
 	log.Info("capture initialized", zap.Any("capture", c.info))
 	return nil
 }
@@ -323,7 +342,7 @@ func (c *captureImpl) run(stdCtx context.Context) error {
 	}()
 
 	defer func() {
-		c.AsyncClose()
+		c.Close()
 		c.grpcService.Reset(nil)
 	}()
 
@@ -331,13 +350,12 @@ func (c *captureImpl) run(stdCtx context.Context) error {
 	stdCtx, cancel := context.WithCancel(stdCtx)
 
 	ctx := cdcContext.NewContext(stdCtx, &cdcContext.GlobalVars{
-		CaptureInfo:       c.info,
-		EtcdClient:        c.EtcdClient,
-		TableActorSystem:  c.tableActorSystem,
-		MessageServer:     c.MessageServer,
-		MessageRouter:     c.MessageRouter,
-		SorterSystem:      c.sorterSystem,
-		SortEngineFactory: c.sortEngineFactory,
+		CaptureInfo:          c.info,
+		EtcdClient:           c.EtcdClient,
+		MessageServer:        c.MessageServer,
+		MessageRouter:        c.MessageRouter,
+		SortEngineFactory:    c.sortEngineFactory,
+		ChangefeedThreadPool: c.ChangefeedThreadPool,
 	})
 	g.Go(func() error {
 		// when the campaignOwner returns an error, it means that the owner throws
@@ -361,7 +379,7 @@ func (c *captureImpl) run(stdCtx context.Context) error {
 				cancel()
 			}
 			if c.processorManager != nil {
-				c.processorManager.AsyncClose()
+				c.processorManager.Close()
 			}
 			log.Info("processor manager closed", zap.String("captureID", c.info.ID))
 		}()
@@ -386,9 +404,17 @@ func (c *captureImpl) run(stdCtx context.Context) error {
 	})
 
 	g.Go(func() error {
-		return c.MessageServer.Run(ctx)
+		return c.MessageServer.Run(ctx, c.MessageRouter.GetLocalChannel())
 	})
 
+	poolCtx, cancelPool := context.WithCancel(stdCtx)
+	defer func() {
+		cancelPool()
+		log.Info("workerpool exited", zap.Error(err))
+	}()
+	g.Go(func() error {
+		return c.ChangefeedThreadPool.Run(poolCtx)
+	})
 	return errors.Trace(g.Wait())
 }
 
@@ -471,14 +497,16 @@ func (c *captureImpl) campaignOwner(ctx cdcContext.Context) error {
 		globalVars := *ctx.GlobalVars()
 		newGlobalVars := &globalVars
 		newGlobalVars.OwnerRevision = ownerRev
-		ownerCtx := cdcContext.NewContext(ctx, newGlobalVars)
 
 		log.Info("campaign owner successfully",
 			zap.String("captureID", c.info.ID),
 			zap.Int64("ownerRev", ownerRev))
 
-		owner := c.newOwner(c.upstreamManager)
+		controller := c.newController(c.upstreamManager, c.info, c.EtcdClient)
+
+		owner := c.newOwner(c.upstreamManager, c.config.Debug.Scheduler)
 		c.setOwner(owner)
+		c.setController(controller)
 
 		globalState := orchestrator.NewGlobalState(c.EtcdClient.GetClusterID(), c.config.CaptureSessionTTL)
 
@@ -498,8 +526,26 @@ func (c *captureImpl) campaignOwner(ctx cdcContext.Context) error {
 			}
 		})
 
-		err = c.runEtcdWorker(ownerCtx, owner, globalState, ownerFlushInterval, util.RoleOwner.String())
+		g, ctx := errgroup.WithContext(ctx)
+		ownerCtx := cdcContext.NewContext(ctx, newGlobalVars)
+		g.Go(func() error {
+			return c.runEtcdWorker(ownerCtx, owner,
+				orchestrator.NewGlobalState(c.EtcdClient.GetClusterID(), c.config.CaptureSessionTTL),
+				ownerFlushInterval, util.RoleOwner.String())
+		})
+		g.Go(func() error {
+			er := c.runEtcdWorker(ownerCtx, controller,
+				globalState,
+				// todo: do not use owner flush interval
+				ownerFlushInterval, util.RoleController.String())
+			// controller has exited, stop owner.
+			c.owner.AsyncStop()
+			return er
+		})
+		err = g.Wait()
 		c.owner.AsyncStop()
+		c.controller.AsyncStop()
+		c.setController(nil)
 		c.setOwner(nil)
 
 		if !cerror.ErrNotOwner.Equal(err) {
@@ -578,6 +624,12 @@ func (c *captureImpl) setOwner(owner owner.Owner) {
 	c.owner = owner
 }
 
+func (c *captureImpl) setController(controller controller.Controller) {
+	c.ownerMu.Lock()
+	defer c.ownerMu.Unlock()
+	c.controller = controller
+}
+
 // GetOwner returns owner if it is the owner.
 func (c *captureImpl) GetOwner() (owner.Owner, error) {
 	c.ownerMu.Lock()
@@ -586,6 +638,16 @@ func (c *captureImpl) GetOwner() (owner.Owner, error) {
 		return nil, cerror.ErrNotOwner.GenWithStackByArgs()
 	}
 	return c.owner, nil
+}
+
+// GetController returns `controller.Controller` if not nil
+func (c *captureImpl) GetController() (controller.Controller, error) {
+	c.ownerMu.Lock()
+	defer c.ownerMu.Unlock()
+	if c.owner == nil {
+		return nil, cerror.ErrNotOwner.GenWithStackByArgs()
+	}
+	return c.controller, nil
 }
 
 // campaign to be an owner.
@@ -621,9 +683,10 @@ func (c *captureImpl) register(ctx context.Context) error {
 	return nil
 }
 
-// AsyncClose closes the capture by deregister it from etcd
+// Close closes the capture by deregister it from etcd,
+// it also closes the owner and processorManager
 // Note: this function should be reentrant
-func (c *captureImpl) AsyncClose() {
+func (c *captureImpl) Close() {
 	defer c.cancel()
 	// Safety: Here we mainly want to stop the owner
 	// and ignore it if the owner does not exist or is not set.
@@ -639,7 +702,6 @@ func (c *captureImpl) AsyncClose() {
 	c.grpcService.Reset(nil)
 	if c.MessageRouter != nil {
 		c.MessageRouter.Close()
-		c.MessageRouter.Wait()
 		c.MessageRouter = nil
 	}
 	log.Info("message router closed", zap.String("captureID", c.info.ID))
@@ -707,15 +769,15 @@ func (c *captureImpl) WriteDebugInfo(ctx context.Context, w io.Writer) {
 	wait(doneM)
 }
 
-// IsOwner returns whether the capture is an owner
-func (c *captureImpl) IsOwner() bool {
+// IsController returns whether the capture is a controller
+func (c *captureImpl) IsController() bool {
 	c.ownerMu.Lock()
 	defer c.ownerMu.Unlock()
-	return c.owner != nil
+	return c.controller != nil
 }
 
-// GetOwnerCaptureInfo return the owner capture info of current TiCDC cluster
-func (c *captureImpl) GetOwnerCaptureInfo(ctx context.Context) (*model.CaptureInfo, error) {
+// GetControllerCaptureInfo return the controller capture info of current TiCDC cluster
+func (c *captureImpl) GetControllerCaptureInfo(ctx context.Context) (*model.CaptureInfo, error) {
 	_, captureInfos, err := c.EtcdClient.GetCaptures(ctx)
 	if err != nil {
 		return nil, err

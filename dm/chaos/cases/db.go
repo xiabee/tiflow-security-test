@@ -21,13 +21,12 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/errno"
-	"github.com/pingcap/tidb/util/dbutil"
+	"github.com/pingcap/tidb/pkg/errno"
+	"github.com/pingcap/tidb/pkg/util/dbutil"
 	"github.com/pingcap/tiflow/dm/pkg/conn"
 	tcontext "github.com/pingcap/tiflow/dm/pkg/context"
 	"github.com/pingcap/tiflow/dm/pkg/log"
 	"github.com/pingcap/tiflow/dm/pkg/retry"
-	"go.uber.org/zap"
 )
 
 // dbConn holds a connection to a database and supports to reset the connection.
@@ -48,10 +47,7 @@ func createDBConn(ctx context.Context, db *conn.BaseDB, currDB string) (*dbConn,
 		baseConn: c,
 		currDB:   currDB,
 		resetFunc: func(ctx context.Context, baseConn *conn.BaseConn) (*conn.BaseConn, error) {
-			err2 := db.CloseBaseConn(baseConn)
-			if err2 != nil {
-				log.L().Warn("fail to close connection", zap.Error(err2))
-			}
+			db.ForceCloseConnWithoutErr(baseConn)
 			return db.GetBaseConn(ctx)
 		},
 	}, nil

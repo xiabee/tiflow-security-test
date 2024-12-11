@@ -21,21 +21,21 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	timodel "github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tiflow/cdc/contextutil"
+	timodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tiflow/cdc/model"
+	"github.com/pingcap/tiflow/cdc/model/codec"
 	"github.com/pingcap/tiflow/cdc/processor/memquota"
 	"github.com/pingcap/tiflow/cdc/redo/reader"
-	"github.com/pingcap/tiflow/cdc/sinkv2/ddlsink"
-	ddlfactory "github.com/pingcap/tiflow/cdc/sinkv2/ddlsink/factory"
-	dmlfactory "github.com/pingcap/tiflow/cdc/sinkv2/eventsink/factory"
-	"github.com/pingcap/tiflow/cdc/sinkv2/tablesink"
+	"github.com/pingcap/tiflow/cdc/sink/ddlsink"
+	ddlfactory "github.com/pingcap/tiflow/cdc/sink/ddlsink/factory"
+	dmlfactory "github.com/pingcap/tiflow/cdc/sink/dmlsink/factory"
+	"github.com/pingcap/tiflow/cdc/sink/tablesink"
 	"github.com/pingcap/tiflow/pkg/config"
 	"github.com/pingcap/tiflow/pkg/errors"
 	"github.com/pingcap/tiflow/pkg/pdutil"
 	"github.com/pingcap/tiflow/pkg/redo"
 	"github.com/pingcap/tiflow/pkg/sink/mysql"
-	"github.com/pingcap/tiflow/pkg/util"
+	"github.com/pingcap/tiflow/pkg/spanz"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -69,7 +69,7 @@ type RedoApplier struct {
 	rd             reader.RedoLogReader
 	updateSplitter *updateEventSplitter
 
-	ddlSink         ddlsink.DDLEventSink
+	ddlSink         ddlsink.Sink
 	appliedDDLCount uint64
 
 	memQuota     *memquota.MemQuota
@@ -84,6 +84,10 @@ type RedoApplier struct {
 	appliedLogCount    uint64
 
 	errCh chan error
+
+	// changefeedID is used to identify the changefeed that this applier belongs to.
+	// not used for now.
+	changefeedID model.ChangeFeedID
 }
 
 // NewRedoApplier creates a new RedoApplier instance
@@ -125,11 +129,11 @@ func (ra *RedoApplier) catchError(ctx context.Context) error {
 
 func (ra *RedoApplier) initSink(ctx context.Context) (err error) {
 	replicaConfig := config.GetDefaultReplicaConfig()
-	ra.sinkFactory, err = dmlfactory.New(ctx, ra.cfg.SinkURI, replicaConfig, ra.errCh, nil)
+	ra.sinkFactory, err = dmlfactory.New(ctx, ra.changefeedID, ra.cfg.SinkURI, replicaConfig, ra.errCh, nil)
 	if err != nil {
 		return err
 	}
-	ra.ddlSink, err = ddlfactory.New(ctx, ra.cfg.SinkURI, replicaConfig)
+	ra.ddlSink, err = ddlfactory.New(ctx, ra.changefeedID, ra.cfg.SinkURI, replicaConfig)
 	if err != nil {
 		return err
 	}
@@ -149,7 +153,7 @@ func (ra *RedoApplier) bgReleaseQuota(ctx context.Context) error {
 		case <-ticker.C:
 			for tableID, tableSink := range ra.tableSinks {
 				checkpointTs := tableSink.GetCheckpointTs()
-				ra.memQuota.Release(tableID, checkpointTs)
+				ra.memQuota.Release(spanz.TableIDToComparableSpan(tableID), checkpointTs)
 			}
 		}
 	}
@@ -239,7 +243,7 @@ func (ra *RedoApplier) resetQuota(rowSize uint64) error {
 		if err := ra.tableSinks[tableID].UpdateResolvedTs(tableRecord.ResolvedTs); err != nil {
 			return err
 		}
-		ra.memQuota.Record(tableID,
+		ra.memQuota.Record(spanz.TableIDToComparableSpan(tableID),
 			tableRecord.ResolvedTs, tableRecord.Size)
 
 		// reset new record
@@ -256,6 +260,7 @@ func (ra *RedoApplier) resetQuota(rowSize uint64) error {
 	} else if ra.pendingQuota < 64*1024 {
 		ra.pendingQuota = 64 * 1024
 	}
+	log.Info("reset quota", zap.Uint64("rowSize", rowSize), zap.Uint64("newQuota", ra.pendingQuota))
 	return ra.memQuota.BlockAcquire(ra.pendingQuota - oldQuota)
 }
 
@@ -284,7 +289,6 @@ func (ra *RedoApplier) applyDDL(
 	// Wait all tables to flush data before applying DDL.
 	// TODO: only block tables that are affected by this DDL.
 	for tableID := range ra.tableSinks {
-		log.Info("applyDDL")
 		if err := ra.waitTableFlush(ctx, tableID, ddl.CommitTs); err != nil {
 			return err
 		}
@@ -311,7 +315,7 @@ func (ra *RedoApplier) applyRow(
 	if _, ok := ra.tableSinks[tableID]; !ok {
 		tableSink := ra.sinkFactory.CreateTableSink(
 			model.DefaultChangeFeedID(applierChangefeed),
-			tableID,
+			spanz.TableIDToComparableSpan(tableID),
 			checkpointTs,
 			pdutil.NewClock4Test(),
 			prometheus.NewCounter(prometheus.CounterOpts{}),
@@ -382,7 +386,7 @@ func (ra *RedoApplier) waitTableFlush(
 	if err := ra.tableSinks[tableID].UpdateResolvedTs(tableRecord.ResolvedTs); err != nil {
 		return err
 	}
-	ra.memQuota.Record(tableID,
+	ra.memQuota.Record(spanz.TableIDToComparableSpan(tableID),
 		tableRecord.ResolvedTs, tableRecord.Size)
 
 	// Make sure all events are flushed to downstream.
@@ -510,7 +514,7 @@ func (t *tempTxnInsertEventStorage) writeEventsToFile(events ...*model.RowChange
 	}
 	for _, event := range events {
 		redoLog := event.ToRedoLog()
-		data, err := redoLog.MarshalMsg(nil)
+		data, err := codec.MarshalRedoLog(redoLog, nil)
 		if err != nil {
 			return errors.WrapError(errors.ErrMarshalFailed, err)
 		}
@@ -548,12 +552,11 @@ func (t *tempTxnInsertEventStorage) readFromFile() (*model.RowChangedEvent, erro
 		return nil, errors.New("read size not equal to expected size")
 	}
 	t.eventSizes = t.eventSizes[1:]
-	redoLog := new(model.RedoLog)
-	_, err = redoLog.UnmarshalMsg(data)
+	redoLog, _, err := codec.UnmarshalRedoLog(data)
 	if err != nil {
 		return nil, errors.WrapError(errors.ErrUnmarshalFailed, err)
 	}
-	return model.LogToRow(redoLog.RedoRow), nil
+	return redoLog.RedoRow.Row, nil
 }
 
 func (t *tempTxnInsertEventStorage) readNextEvent() (*model.RowChangedEvent, error) {
@@ -720,7 +723,6 @@ func (ra *RedoApplier) ReadMeta(ctx context.Context) (checkpointTs uint64, resol
 // Apply applies redo log to given target
 func (ra *RedoApplier) Apply(egCtx context.Context) (err error) {
 	eg, egCtx := errgroup.WithContext(egCtx)
-	egCtx = contextutil.PutRoleInCtx(egCtx, util.RoleRedoLogApplier)
 
 	if ra.rd, err = createRedoReader(egCtx, ra.cfg); err != nil {
 		return err
